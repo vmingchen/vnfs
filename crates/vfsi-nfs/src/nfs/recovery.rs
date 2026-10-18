@@ -205,7 +205,7 @@ impl NfsVecFs {
     pub(super) fn needs_recovery(error: &VfError) -> bool {
         error.is_transport()
             || matches!(
-                error.err_no(),
+                error.raw_code(),
                 nfsstat4_NFS4ERR_EXPIRED
                     | nfsstat4_NFS4ERR_GRACE
                     | nfsstat4_NFS4ERR_STALE_CLIENTID
@@ -353,7 +353,7 @@ impl NfsVecFs {
                 }
                 Err(error) => {
                     let identity_changed =
-                        !error.is_transport() && error.err_no() == libc::ESTALE as u32;
+                        !error.is_transport() && error.raw_code() == libc::ESTALE as u32;
                     last = Some(error);
                     // A different object at the old pathname is permanent,
                     // not a server restart/grace condition to back off over.

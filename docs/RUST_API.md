@@ -39,7 +39,7 @@ Connect directly to the destination NFS server/export to access a referred tree.
 
 ### Application traits
 
-`vfsi-core::api` owns `Vfsi`, `VfsiExt`, `OpenFd`, and their portable
+`vfsi-core::api` owns `Vfsi`, `VfsiExt`, `FileHandle`, and their portable
 requests, results, options, and traversal helpers. It depends on no backend,
 RPC library, or async runtime. `vnfs` re-exports these same types; its concrete
 NFS and mounted clients implement the core contract. `vfsi-sync` implements
@@ -174,7 +174,7 @@ operations without constructing `VfAttrs` or calling backend traits directly.
 fields such as size, permissions, allocated blocks, device ID, full mode,
 and named-attribute presence as `Option`, so missing values are not confused
 with zero. Use `attrs_with_options` with
-`AttrsOptions::with_follow_symlinks(false)` for a no-follow query, and `vlistdirs`
+`AttrsOptions::with_follow_final_symlink(false)` for a no-follow query, and `vlistdirs`
 to visit pages for several directory operands, with
 `ListDirOptions::with_recursive(true)` for bounded recursive trees. Use the
 `VfsiExt::read_dirs_with_options` collector only when retained listings are
@@ -214,7 +214,7 @@ from their [generation and metageneration metadata](https://docs.cloud.google.co
 
 #### Open instances, operands, and routing
 
-Application code imports `OpenFd` and `Target` from `vnfs::files`, `DirHandle`
+Application code imports `FileHandle` and `Target` from `vnfs::files`, `DirHandle`
 from `vnfs::directory`, and concrete owned wrappers from the selected backend
 module, such as `vnfs::nfs::NfsFile`. Native operands and protocol records
 belong to backend implementation layers. Their inclusion in this reference
@@ -222,7 +222,7 @@ does not make them the preferred application API.
 
 | vNFS type | Role and ownership | Linux equivalent | GCS equivalent / analogy | NFSv4 equivalent |
 |---|---|---|---|---|
-| `OpenFd`; `vfsi_sync::OpenFile<F>`; wrappers such as `NfsFile`, `PosixFile`, `UringFile`, `AutoFile` | Portable owned-open contract, generic implementation, and application wrappers. Own cleanup of one open instance. | An owning wrapper around an fd referencing an open file description (`struct file`). | Client-side reader/writer state; no general POSIX-style server OPEN descriptor. | Client-owned open resource backed by a filehandle and OPEN state. |
+| `FileHandle`; `vfsi_sync::OpenFile<F>`; wrappers such as `NfsFile`, `PosixFile`, `UringFile`, `AutoFile` | Portable owned-open contract, generic implementation, and application wrappers. Own cleanup of one open instance. | An owning wrapper around an fd referencing an open file description (`struct file`). | Client-side reader/writer state; no general POSIX-style server OPEN descriptor. | Client-owned open resource backed by a filehandle and OPEN state. |
 | `Fd` (`vfsi_core`) | Backend-assigned numeric file descriptor, represented as a C `int`. Scoped to its owning backend; the number does not own cleanup. | Numeric process fd is the nearest analogy, but a vNFS `Fd` is not necessarily an OS fd. | Client-side handle-table index, if an adapter provides one. | Client descriptor-table slot, not a wire field. |
 | `Target<'a, F>` | Borrowed application operation target: a path or an open file reference. Does not transfer cleanup ownership. | Path operand or borrowed fd. | Object resource key or borrowed client reader/writer. | Resolved to path lookup or the open instance's retained reference. |
 | `FileOperand`; `FileOperand::Fd(fd)` (`vfsi_core`) | Native backend operand: path, numeric descriptor, or special directory target. Cloning it neither duplicates an open nor owns cleanup. | Path/fd/current-directory operand. | Resource key or client handle-table lookup. | Client resolves it to a protocol object reference and, when needed, open state. |
@@ -367,7 +367,7 @@ request `index()`, and operation/path context. It does not infer completion
 certainty or retry safety from status codes.
 `transport_kind()` preserves known timeout, connection, invalid-reply, and
 authentication categories. Unclassified causes remain `Other`, without
-guessing from message text. `err_no()` is a raw compatibility accessor;
+guessing from message text. `raw_code()` is a raw compatibility accessor;
 prefer `kind()` and `status()` for interpretation.
 
 Prefer `try_close()` and `vclose(&mut files)` when cleanup errors matter.
@@ -391,8 +391,8 @@ must impose a finite default allocation limit and expose an explicit override.
 and `VfsiExt::read_to_string` therefore inherit a 16 MiB client budget.
 Callers may select another bound with `ReadOptions` on `vread`,
 `read_files_with_options`, or `read_to_string_with_options`. A
-`ReadOptions::with_max_total_bytes(Some(NonZeroUsize))` override must be nonzero;
-`None` inherits the client default. Native backend whole-file collection uses
+`ReadOptions::with_max_total_bytes(NonZeroUsize)` override must be nonzero;
+New options inherit the client default. Native backend whole-file collection uses
 the separate `ReadAllOptions` type on `VectorBackend::vread_all_with_options_impl`.
 `ResourceLimits` sets client defaults through `NfsBuilder::limits`,
 `NfsClient::with_limits`, or `Auto::with_limits`. Existing clones retain their
@@ -417,6 +417,11 @@ string unchanged. The cursor can advance, including a one-byte EOF probe;
 these methods do not roll back the cursor. These limits bound logical payloads,
 not process RSS or collection performed by arbitrary standard-I/O wrappers.
 
+Directory operations share the same default metadata selection, with or without
+explicit default options: mode, size, link count, file ID, and filesystem ID.
+Select UID/GID, timestamps, change IDs, or other additional fields explicitly
+with ListDirOptions::with_fields to request their backend and decoding work.
+
 Allocating directory APIs are bounded for the same reason. `VfsiExt::read_dir`
 uses finite entry and combined-path-byte defaults; `read_dir_with_options` and
 `ListDirOptions` select tighter limits or explicitly opt into unlimited
@@ -435,7 +440,10 @@ Use `with_enter_leave(true)` for lifecycle events and `with_sort_by_name(true)` 
 siblings; those modes retain bounded directory buffers. The default entry-only
 mode stays paged and retains native anchored child cursors and batching. With
 lifecycle events enabled, `SkipSubtree` on Enter prevents descent.
-`visit_dirs_ordered` still supplies custom ordering and complete listings.
+`visit_dirs_ordered` still supplies custom ordering and complete listings. Sorting and enter/leave options
+belong to listdir; page primitives and collecting helpers reject them before I/O.
+The shallow read_dir_with_options helper also rejects recursive options; use
+read_dirs_with_options for recursive collection.
 `vgetattrs` accepts paths and retained handles through `AsTarget`, including
 mixed vectors of `Target::path(...)` and `Target::file(...)`. Handle queries
 retain object identity; unsupported backends return an error instead of
@@ -480,6 +488,11 @@ The SMB backend exposes `SmbConnectOptions` through
 separate deadlines; the request deadline is also applied to sends, response
 waiting, and SMB credit acquisition.
 
+Metadata options use with_follow_final_symlink: ancestor components retain
+ordinary resolution. Directory options use with_allow_symlink_components:
+false requires no symlinks in the directory path, including ancestors, and
+backends unable to provide that guarantee return Unsupported.
+
 ## Lifecycle and read results
 
 File and directory Drop queues cleanup without acquiring the backend mutex or
@@ -492,7 +505,29 @@ timeouts; this is not a cancellation mechanism.
 Lifecycle observers are delivered after the backend lock is released. They may
 reenter the client. Keep callbacks short and avoid strong observer/client cycles.
 
-`ReadResult` has private fields. Use `offset()`, `read()`, `eof()`, `data()`,
+`ReadResult` has private fields. Use `offset()`, `bytes_read()`, `eof()`, `data()`,
 `is_buffered()`, and `into_data()`. Backend implementers construct owned results
 with `ReadResult::owned`, which derives the byte count, or use
 `ReadResult::buffered` for caller-owned storage. Results never retain buffer borrows.
+
+## Migrating requests and policies
+
+The pre-1.0 API uses `FileHandle` for owned open instances and `RenameMode` for
+rename choices. Use `WriteOp::at` for portable positional writes. Path mapping
+types live under `vnfs::helpers`; `nfs::mount` no longer reexports them.
+
+Errors are opaque. Use `kind()`, `status()`, `domain()`, `index()`, and context
+accessors, or `raw_code()` when integrating with a raw status interface.
+Construct unattributed semantic errors with `Error::from_status(None, status)`.
+`transport_message()` exposes the original transport diagnostic.
+
+`OpenOp::new` borrows its path; use `into_owned()` to retain a request independently.
+Depth setters take `DepthLimit`: `new(depth)` accepts finite values from 0
+through 65533, and `unlimited()` is explicit. Read budget overrides take `NonZeroUsize`; fresh `ReadOptions` inherit
+the client's budget. Directory metadata defaults to stat fields; request richer
+fields explicitly. Page visitors reject sorting and enter/leave flags, and
+`read_dir_with_options` rejects recursive collection.
+
+Metadata policies use `with_follow_final_symlink`; directory policies use
+`with_allow_symlink_components`. Local Rust clients require an existing directory
+root and preserve lookup failures. Create directories explicitly before connecting.

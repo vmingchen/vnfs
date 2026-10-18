@@ -187,7 +187,7 @@ fn unified_collection_keeps_grouping_limits_and_generic_metadata_paths() {
             &["/a"],
             shallow
                 .with_recursive(true)
-                .with_max_depth(0)
+                .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"))
                 .with_truncate_at_max_depth(true),
         )
         .unwrap();
@@ -197,7 +197,7 @@ fn unified_collection_keeps_grouping_limits_and_generic_metadata_paths() {
     let metadata = fs
         .vgetattrs(
             &paths,
-            crate::AttrsOptions::new().with_follow_symlinks(false),
+            crate::AttrsOptions::new().with_follow_final_symlink(false),
         )
         .unwrap();
     assert!(metadata[0].is_symlink());
@@ -205,7 +205,7 @@ fn unified_collection_keeps_grouping_limits_and_generic_metadata_paths() {
     assert!(
         fs.vgetattrs(
             &[std::path::PathBuf::from("/link")],
-            crate::AttrsOptions::new().with_follow_symlinks(false)
+            crate::AttrsOptions::new().with_follow_final_symlink(false)
         )
         .unwrap()[0]
             .is_symlink()
@@ -213,15 +213,18 @@ fn unified_collection_keeps_grouping_limits_and_generic_metadata_paths() {
     assert!(
         fs.vgetattrs(
             &["/link"],
-            crate::AttrsOptions::new().with_follow_symlinks(false)
+            crate::AttrsOptions::new().with_follow_final_symlink(false)
         )
         .unwrap()[0]
             .is_symlink()
     );
     assert!(
-        fs.vgetattrs::<String>(&[], crate::AttrsOptions::new().with_follow_symlinks(false))
-            .unwrap()
-            .is_empty()
+        fs.vgetattrs::<String>(
+            &[],
+            crate::AttrsOptions::new().with_follow_final_symlink(false)
+        )
+        .unwrap()
+        .is_empty()
     );
 }
 
@@ -262,9 +265,11 @@ fn unified_visiting_preserves_depth_defaults_fields_and_failures() {
         .with_recursive(true)
         .with_max_entries(10);
     assert!(
-        fs.visit_entries_with_options(&["/tree"], recursive.with_max_depth(0), |_, _| Ok(
-            ControlFlow::Continue(())
-        ))
+        fs.visit_entries_with_options(
+            &["/tree"],
+            recursive.with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth")),
+            |_, _| Ok(ControlFlow::Continue(()))
+        )
         .is_err()
     );
     for (depth, count) in [(0, 1), (1, 3), (2, 3)] {
@@ -272,7 +277,11 @@ fn unified_visiting_preserves_depth_defaults_fields_and_failures() {
         fs.visit_entries_with_options(
             &["/tree"],
             recursive
-                .with_max_depth(depth)
+                .with_max_depth(if depth == usize::MAX {
+                    vfsi_core::api::DepthLimit::unlimited()
+                } else {
+                    vfsi_core::api::DepthLimit::new(depth).expect("finite depth")
+                })
                 .with_truncate_at_max_depth(true)
                 .with_fields(Attributes::SIZE),
             |_, entry| {
@@ -471,7 +480,7 @@ fn blanket_helpers_preserve_order_empty_files_limits_and_error_indices() {
     assert_eq!(
         fs.read_files_with_options(
             &["/a", "/b", "/a"],
-            crate::ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(8))
+            crate::ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(8).unwrap())
         )
         .unwrap()
         .len(),
@@ -812,7 +821,7 @@ fn singleton_walk_reports_the_root_index_not_an_entry_index() {
     fs.write("/a/f", b"x").unwrap();
     let options = crate::ListDirOptions::new()
         .with_recursive(true)
-        .with_max_depth(0);
+        .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"));
     // Concrete method syntax must use the same extension as generic code,
     // not leak the backend's per-entry index.
     assert_eq!(
@@ -855,13 +864,13 @@ fn blanket_scalar_helpers_and_new_vectors_preserve_limits_stop_and_indices() {
     scalar(&fs);
     fs.vrename(
         &[("/one/renamed", "/one/a"), ("/two/b", "/two/c")],
-        crate::RenameOptions::Replace,
+        crate::RenameMode::Replace,
     )
     .unwrap();
     let error = fs
         .vrename(
             &[("/one/a", "/one/moved"), ("/absent", "/two/moved")],
-            crate::RenameOptions::Replace,
+            crate::RenameMode::Replace,
         )
         .unwrap_err();
     assert_eq!(error.index(), Some(1));

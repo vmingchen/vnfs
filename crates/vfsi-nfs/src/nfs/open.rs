@@ -522,7 +522,7 @@ mod tests {
 
         assert_eq!(client.setattr_calls.get(), 1);
         assert_eq!(error.index(), Some(8));
-        assert_eq!(error.err_no(), nfsstat4_NFS4ERR_ACCESS);
+        assert_eq!(error.raw_code(), nfsstat4_NFS4ERR_ACCESS);
         assert_eq!(
             client.closed,
             vec![(vec![1, 2], 3, [4; 12]), (vec![5], 6, [7; 12])]

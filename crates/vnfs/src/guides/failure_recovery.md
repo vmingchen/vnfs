@@ -15,7 +15,7 @@ status nor index alone proves that retrying a mutation is safe.
 
 Use `kind()` for portable classification, `status()` and `domain()` for native
 details, and `transport_kind()` for known timeout, connection, invalid-reply,
-or authentication provenance. Unknown causes remain `Other`. `err_no()` is a
+or authentication provenance. Unknown causes remain `Other`. `raw_code()` is a
 compatibility value, not universally a POSIX errno. Standard-I/O adapters
 preserve the original error as an `io::Error` source.
 

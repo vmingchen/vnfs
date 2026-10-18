@@ -18,7 +18,9 @@ use std::collections::HashMap;
 use std::fs::{File, FileTimes, OpenOptions};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt, PermissionsExt, symlink};
+use std::os::unix::fs::{
+    FileExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
@@ -292,13 +294,17 @@ impl LocalBackend {
         Ok(())
     }
 
-    /// Prepare a root (created if missing) with an explicit synchronous executor.
+    /// Open an existing directory with an explicit synchronous executor.
     pub fn new(root: PathBuf, engine: impl io::DescriptorIo + 'static) -> VfResult<Self> {
-        std::fs::create_dir_all(&root).map_err(|error| VfError::failure(0, Self::errno(&error)))?;
-        let root_canon = std::fs::canonicalize(&root)
-            .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
-        let root_dir =
-            File::open(&root_canon).map_err(|error| VfError::failure(0, Self::errno(&error)))?;
+        let root_error = |error: std::io::Error| {
+            VfError::failure(0, Self::errno(&error)).with_context("connect", &root)
+        };
+        let root_canon = std::fs::canonicalize(&root).map_err(root_error)?;
+        let root_dir = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY)
+            .open(&root_canon)
+            .map_err(root_error)?;
         Ok(LocalBackend {
             io: Box::new(engine),
             root: root_canon.clone(),
@@ -2172,12 +2178,12 @@ impl VectorBackend for LocalBackend {
     fn vrename_with_options_impl(
         &mut self,
         pairs: &[(FileOperand, FileOperand)],
-        options: vfsi_core::api::RenameOptions,
+        options: vfsi_core::api::RenameMode,
     ) -> VfRes {
         if pairs.is_empty() {
             return Ok(());
         }
-        if options == vfsi_core::api::RenameOptions::Replace {
+        if options == vfsi_core::api::RenameMode::Replace {
             return self.vrename_impl(pairs);
         }
         #[cfg(target_os = "linux")]
@@ -2195,15 +2201,15 @@ impl VectorBackend for LocalBackend {
                     .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
                 let destination_name = cstring_from_bytes(path_bytes(&destination))
                     .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
-                if options == vfsi_core::api::RenameOptions::Exchange
+                if options == vfsi_core::api::RenameMode::Exchange
                     && source_path == destination_path
                 {
                     continue;
                 }
                 let flags = match options {
-                    vfsi_core::api::RenameOptions::NoReplace => libc::RENAME_NOREPLACE,
-                    vfsi_core::api::RenameOptions::Exchange => libc::RENAME_EXCHANGE,
-                    vfsi_core::api::RenameOptions::Replace => unreachable!(),
+                    vfsi_core::api::RenameMode::NoReplace => libc::RENAME_NOREPLACE,
+                    vfsi_core::api::RenameMode::Exchange => libc::RENAME_EXCHANGE,
+                    vfsi_core::api::RenameMode::Replace => unreachable!(),
                 };
                 // SAFETY: both NUL-terminated path buffers and their directory anchors
                 // stay live; flags are supported renameat2 constants.
@@ -2225,7 +2231,7 @@ impl VectorBackend for LocalBackend {
                     let destination_is_directory = std::fs::symlink_metadata(&destination)
                         .map(|metadata| metadata.is_dir())
                         .unwrap_or(false);
-                    let errno = if options == vfsi_core::api::RenameOptions::NoReplace {
+                    let errno = if options == vfsi_core::api::RenameMode::NoReplace {
                         noreplace_error_code(
                             &error,
                             source_is_directory,

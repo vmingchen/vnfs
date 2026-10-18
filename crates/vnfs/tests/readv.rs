@@ -1,6 +1,6 @@
 #![cfg(all(feature = "auto", target_os = "linux"))]
 use vnfs::error::ErrorKind;
-use vnfs::files::{OpenFd, ReadOp, ReadOptions, ResourceLimits, Vfsi, VfsiExt};
+use vnfs::files::{FileHandle, ReadOp, ReadOptions, ResourceLimits, Vfsi, VfsiExt};
 use vnfs::posix::Posix;
 
 fn mixed<C: Vfsi>(fs: &C) {
@@ -20,7 +20,7 @@ fn mixed<C: Vfsi>(fs: &C) {
                 ReadOp::into(&file, 5, &mut buffer),
                 ReadOp::whole("/empty"),
             ],
-            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(9)),
+            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(9).unwrap()),
         )
         .unwrap();
     assert_eq!(results[0].data(), Some(b"xyz".as_slice()));
@@ -66,7 +66,7 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
     assert_eq!(
         fs.vread(
             [ReadOp::whole("/a"), ReadOp::whole("/b")],
-            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(6))
+            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(6).unwrap())
         )
         .unwrap()
         .len(),
@@ -93,11 +93,7 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
         .unwrap_err();
     assert_eq!(error.index(), Some(0));
     assert_eq!(&buffer, b"abc"); // Reads are not atomic; earlier buffers may be filled.
-    assert!(
-        fs.vread([], ReadOptions::new().with_max_total_bytes(None))
-            .unwrap()
-            .is_empty()
-    );
+    assert!(fs.vread([], ReadOptions::new()).unwrap().is_empty());
 }
 #[test]
 fn failure_indices_and_buffer_borrows_survive_consumption() {
@@ -282,7 +278,7 @@ fn text_options_inherit_or_override_budgets_and_preserve_utf8_errors() {
             .kind(),
         vnfs::error::ErrorKind::FileTooLarge
     );
-    let options = ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(5));
+    let options = ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(5).unwrap());
     assert_eq!(
         fs.read_to_string_with_options("/text", options).unwrap(),
         "hello"

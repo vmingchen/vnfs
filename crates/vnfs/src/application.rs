@@ -1,5 +1,7 @@
 //! Concrete client implementations of the portable VFSI contracts.
-use crate::{Attrs, DirectoryListing, OpenFd, OpenOp, ResourceLimits, Result, Vfsi, WriteResult};
+use crate::{
+    Attrs, DirectoryListing, FileHandle, OpenOp, ResourceLimits, Result, Vfsi, WriteResult,
+};
 use std::path::Path;
 macro_rules! client_methods {
     ($client:ty, $receiver:path) => {
@@ -39,7 +41,7 @@ macro_rules! client_methods {
 }
 
 #[cfg(feature = "nfs")]
-impl OpenFd for crate::NfsFile {
+impl FileHandle for crate::NfsFile {
     vfsi_sync::__vfsi_file_methods!(crate::NfsFile);
 }
 #[cfg(feature = "nfs")]
@@ -50,7 +52,7 @@ impl Vfsi for crate::NfsClient {
 }
 
 #[cfg(all(feature = "uring", target_os = "linux"))]
-impl OpenFd for crate::uring::UringFile {
+impl FileHandle for crate::uring::UringFile {
     vfsi_sync::__vfsi_file_methods!(crate::uring::UringFile);
 }
 #[cfg(all(feature = "uring", target_os = "linux"))]
@@ -67,7 +69,7 @@ impl Vfsi for crate::Uring {
 #[cfg(all(feature = "auto", target_os = "linux"))]
 mod routed {
     use super::*;
-    impl OpenFd for crate::AutoFile {
+    impl FileHandle for crate::AutoFile {
         vfsi_sync::__vfsi_file_methods!(crate::AutoFile);
     }
     impl Vfsi for crate::Auto {
@@ -88,7 +90,7 @@ impl Vfsi for crate::Posix {
     client_methods!(crate::Posix, std::convert::identity);
 }
 #[cfg(all(feature = "posix", unix))]
-impl OpenFd for crate::PosixFile {
+impl FileHandle for crate::PosixFile {
     vfsi_sync::__vfsi_file_methods!(crate::PosixFile);
 }
 

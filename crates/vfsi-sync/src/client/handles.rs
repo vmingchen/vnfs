@@ -64,7 +64,7 @@ impl<F: VectorBackend> Drop for FsDir<F> {
     }
 }
 
-/// Owned File Descriptor handle to one open instance, implementing [`crate::OpenFd`].
+/// Owned File Descriptor handle to one open instance, implementing [`crate::FileHandle`].
 ///
 /// This RAII value does not borrow the client. It owns the backend handle and
 /// cleanup obligation; borrowed requests keep that instance alive.

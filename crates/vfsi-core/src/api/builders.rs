@@ -3,6 +3,7 @@ use super::{OpenFlags, OpenOp, Result, Vfsi, VfsiExt};
 use std::{fmt, path::Path};
 
 /// `std::fs::OpenOptions`-style builder for any [`Vfsi`] client.
+#[must_use = "configuration and requests have no effect until used"]
 pub struct OpenOptions<'a, C: Vfsi + ?Sized> {
     client: &'a C,
     flags: OpenFlags,

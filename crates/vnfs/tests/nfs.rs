@@ -423,7 +423,7 @@ fn rust_native_client_workflow_on_nfs() {
                     .with_fields(
                         vnfs::directory::Attributes::MODE | vnfs::directory::Attributes::SIZE,
                     )
-                    .with_follow_symlinks(follow),
+                    .with_follow_final_symlink(follow),
             )
             .unwrap();
         assert_eq!(
@@ -466,7 +466,7 @@ fn rust_native_client_workflow_on_nfs() {
     vnfs::files::Vfsi::vrename(
         &client,
         &[(&paths[0], &renamed[0]), (&paths[1], &renamed[1])],
-        vnfs::directory::RenameOptions::Replace,
+        vnfs::directory::RenameMode::Replace,
     )
     .unwrap();
     assert_eq!(
@@ -621,7 +621,7 @@ fn application_collection_preserves_native_batching_and_root_groups() {
                 .with_max_entries(5),
         )
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
     let _ = vfsi_nfs::compound::thread_compound_stats();
     let trees = client
         .read_dirs_with_options(
@@ -675,7 +675,7 @@ fn whole_file_readv_honors_the_client_budget() {
             .vread(
                 [vnfs::files::ReadOp::whole(&path)],
                 vnfs::files::ReadOptions::new()
-                    .with_max_total_bytes(std::num::NonZeroUsize::new(BYTES - 1))
+                    .with_max_total_bytes(std::num::NonZeroUsize::new(BYTES - 1).unwrap())
             )
             .unwrap_err()
             .kind(),
@@ -908,7 +908,7 @@ fn open_excl_fails_if_exists() {
     // O_EXCL on an existing file must fail with NFS4ERR_EXIST (17), surfaced
     // directly by the structured error (no string parsing).
     match r {
-        Err(e) => assert_eq!(e.err_no(), nfsstat4_NFS4ERR_EXIST, "got {:?}", e),
+        Err(e) => assert_eq!(e.raw_code(), nfsstat4_NFS4ERR_EXIST, "got {:?}", e),
         Ok(_) => panic!("O_EXCL on existing file must fail"),
     }
 }
@@ -939,7 +939,7 @@ fn open_excl_rejects_a_second_attempt_after_its_own_create() {
             0o600,
         )
         .expect_err("a new O_EXCL request must reject the file created earlier");
-    assert_eq!(error.err_no(), nfsstat4_NFS4ERR_EXIST, "got {error:?}");
+    assert_eq!(error.raw_code(), nfsstat4_NFS4ERR_EXIST, "got {error:?}");
     c.remove_paths_impl(&[Path::new(&dir)], true)
         .expect("remove fixture");
 }
@@ -954,7 +954,7 @@ fn openv_excl_rejects_a_second_entry_for_the_same_path() {
     let error = VectorBackend::vopen_raw_impl(&mut c, &paths, &[flags; 2], &[0o600; 2])
         .expect_err("the second exclusive create must fail");
     assert_eq!(error.index(), Some(1), "got {error:?}");
-    assert_eq!(error.err_no(), nfsstat4_NFS4ERR_EXIST, "got {error:?}");
+    assert_eq!(error.raw_code(), nfsstat4_NFS4ERR_EXIST, "got {error:?}");
     assert!(c.exists_impl(Path::new(&f)).expect("stat created prefix"));
     assert_eq!(
         c.stat_impl(Path::new(&f)).unwrap().mode & 0o777,
@@ -1273,17 +1273,19 @@ fn bounded_walk_limits_nfs_accumulation() {
             &mut |_, _| {},
         )
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
 
     let error = c
         .walk_with_options_impl(
             Path::new(&dir),
             AttrMask::stat(),
-            ListDirOptions::new().with_recursive(true).with_max_depth(0),
+            ListDirOptions::new()
+                .with_recursive(true)
+                .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth")),
             &mut |_, _| {},
         )
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
 
     let walked = c
         .walk_with_options_impl(
@@ -1293,7 +1295,7 @@ fn bounded_walk_limits_nfs_accumulation() {
                 .with_recursive(true)
                 .with_max_entries(16)
                 .with_max_path_bytes(4096)
-                .with_max_depth(4),
+                .with_max_depth(vfsi_core::api::DepthLimit::new(4).expect("finite depth")),
             &mut |_, entries| entries.sort_by(|a, b| a.file.path().cmp(&b.file.path())),
         )
         .unwrap();
@@ -2017,7 +2019,7 @@ fn openv_partial_failure_resumes_from_failing_index() {
     assert_eq!(e.index(), Some(1), "resume must fail at the missing parent");
     assert_eq!(
         e.status(),
-        Some(StatusCode::Nfs(e.err_no())),
+        Some(StatusCode::Nfs(e.raw_code())),
         "the raw NFS status must retain its protocol domain"
     );
     assert!(
@@ -2691,7 +2693,7 @@ fn native_read_dirs_batches_and_reports_bounded_errors() {
                 .with_max_entries(5),
         )
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
 
     let missing = [directories[0].clone(), format!("{dir}/missing")];
     let error = client
@@ -2937,7 +2939,7 @@ fn transport_error_on_unreachable_server() {
         Err(e) => e,
     };
     assert!(e.is_transport(), "unreachable server is a transport error");
-    assert_eq!(e.err_no(), VF_ERR_RPC);
+    assert_eq!(e.raw_code(), VF_ERR_RPC);
 }
 
 // ---------------------------------------------------------------------------
@@ -3604,7 +3606,7 @@ fn copyv_extent_semantics_and_server_telemetry() {
                     vfsi_core::CopyOptions::new(),
                 )
                 .expect_err("same-file server COPY must be rejected");
-            assert!(matches!(error.err_no(), ERR_EXIST | ERR_INVAL));
+            assert!(matches!(error.raw_code(), ERR_EXIST | ERR_INVAL));
             assert_eq!(read_all(&mut c, Path::new(&same)), b"abcdefghij");
         }
     }
@@ -3633,7 +3635,7 @@ fn copyv_reports_mid_batch_failure_index() {
         )
         .expect_err("missing middle source must fail");
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.err_no(), libc::ENOENT as u32);
+    assert_eq!(error.raw_code(), libc::ENOENT as u32);
     assert!(!c.exists_impl(Path::new(&dst2)).unwrap());
 }
 
@@ -4246,7 +4248,7 @@ fn directory_replacement_is_not_followed(mode: DirectoryVisit, replacement: Repl
     };
     let mut on_entry = |entry: &vnfs::directory::DirEntry| -> vnfs::Result<()> {
         if entry.path() == Path::new(&child) && !changed {
-            fs.vrename(&[(victim, &saved)], vnfs::directory::RenameOptions::Replace)?;
+            fs.vrename(&[(victim, &saved)], vnfs::directory::RenameMode::Replace)?;
             fs.symlink(link_target, victim)?;
             changed = true;
         }
@@ -4283,7 +4285,7 @@ fn directory_replacement_is_not_followed(mode: DirectoryVisit, replacement: Repl
     assert_eq!(error.index(), Some(0));
     assert!(
         matches!(
-            error.err_no(),
+            error.raw_code(),
             nfsv41_sys::nfsstat4_NFS4ERR_SYMLINK | nfsv41_sys::nfsstat4_NFS4ERR_NOTDIR
         ),
         "{error}"
@@ -4317,8 +4319,11 @@ fn directory_path_resolution_preserves_shallow_symlinks_and_rejects_strict_alias
             1
         );
         assert!(
-            fs.read_dir_with_options(path, ListDirOptions::new().with_follow_symlinks(false))
-                .is_err()
+            fs.read_dir_with_options(
+                path,
+                ListDirOptions::new().with_allow_symlink_components(false)
+            )
+            .is_err()
         );
     }
     fs.remove_dir_all(&dir).unwrap();
@@ -4418,7 +4423,7 @@ fn recursive_directory_pages_retain_the_parent_handle_after_rename() {
         ListDirOptions::new().with_recursive(true),
         |_, page| {
             if page.path == Path::new(&tree) && !renamed {
-                fs.vrename(&[(&tree, &moved)], vnfs::directory::RenameOptions::Replace)?;
+                fs.vrename(&[(&tree, &moved)], vnfs::directory::RenameMode::Replace)?;
                 renamed = true;
             }
             data += page
@@ -4659,7 +4664,7 @@ fn copy_options_nfs_mixed_source_symlinks_and_extents() {
         )
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.err_no(), libc::EEXIST as u32);
+    assert_eq!(error.raw_code(), libc::EEXIST as u32);
     // A failure in a data run after a link must also retain its input index.
     let error = fs
         .vcopy_impl(

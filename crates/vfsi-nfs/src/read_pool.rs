@@ -14,6 +14,7 @@ use super::{NfsClientBuilder, NfsVecFs};
 
 /// Controls concurrency and memory use for [`NfsReadPool`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct NfsReadPoolOptions {
     worker_count: usize,
     chunk_size: usize,
@@ -826,7 +827,7 @@ fn read_range(
                 &mut data[filled..],
             )],
             vfsi_core::api::ReadOptions::new()
-                .with_max_total_bytes(std::num::NonZeroUsize::new(length - filled)),
+                .with_max_total_bytes(std::num::NonZeroUsize::new(length - filled).unwrap()),
         )?;
         let count = results[0].bytes_read();
         if count == 0 {
@@ -918,7 +919,7 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert_eq!(error.err_no(), libc::EIO as u32);
+        assert_eq!(error.raw_code(), libc::EIO as u32);
         assert!(closed.get());
     }
 

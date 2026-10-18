@@ -96,7 +96,7 @@ fn buffered<F: Vfsi + ?Sized>(
             root,
             AttrsOptions::new()
                 .with_fields(fields)
-                .with_follow_symlinks(false),
+                .with_follow_final_symlink(false),
         )?
     } else {
         // The entry-only root is never exposed. READDIR validates its type;
@@ -125,7 +125,7 @@ fn buffered<F: Vfsi + ?Sized>(
     // ListDirOptions depth limits concern descent, not files in a root listing.
     // Admission below enforces them after allowing a directory to be pruned.
     budget = budget
-        .with_max_depth(usize::MAX)
+        .with_max_depth(crate::api::DepthLimit::unlimited())
         .with_truncate_at_max_depth(false);
     let mut retained_bytes = 0usize;
     super::traversal::walk_events(
@@ -147,12 +147,15 @@ fn buffered<F: Vfsi + ?Sized>(
             fs.read_dir_with_options(
                 path,
                 remaining
+                    .with_recursive(false)
+                    .with_enter_leave(false)
+                    .with_sort_by_name(false)
                     .with_max_path_bytes(bytes)
                     .with_fields(fields)
                     // Reopening a path is not anchored to the original page.
                     // Require atomic no-follow resolution, including ancestors.
-                    .with_follow_symlinks(
-                        options.follow_symlinks() && !options.recursive() && !lifecycle,
+                    .with_allow_symlink_components(
+                        options.allow_symlink_components() && !options.recursive() && !lifecycle,
                     ),
             )
         },
@@ -190,7 +193,7 @@ fn buffered<F: Vfsi + ?Sized>(
                 if !options.recursive() || decision == WalkControl::SkipSubtree {
                     return Ok(WalkControl::SkipSubtree);
                 }
-                if event.depth > walk.max_depth() {
+                if event.depth > walk.max_depth().get() {
                     if !walk.truncate_at_max_depth() {
                         return Err(limit_error(event.entry.path()));
                     }

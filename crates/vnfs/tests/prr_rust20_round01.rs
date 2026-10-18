@@ -82,11 +82,7 @@ impl Vfsi for Counted {
     fn vremove<P: AsRef<Path>>(&self, p: &[P], m: RemoveMode, o: RemoveOptions) -> Result<()> {
         self.fs.vremove(p, m, o)
     }
-    fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
-        &self,
-        p: &[(P, Q)],
-        o: RenameOptions,
-    ) -> Result<()> {
+    fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, p: &[(P, Q)], o: RenameMode) -> Result<()> {
         self.fs.vrename(p, o)
     }
     fn vlistdirs<P: AsRef<Path>>(
@@ -307,7 +303,7 @@ fn contents_cohorts_share_traversal_budget() {
     )
     .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
     assert_eq!(
         std::fs::read(root.path().join("out/same")).unwrap(),
         b"first"

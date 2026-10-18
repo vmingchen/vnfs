@@ -8,7 +8,7 @@ use vfsi_core::{Vfsi, VfsiExt};
 
 #[derive(Debug)]
 struct TestFile;
-impl OpenFd for TestFile {
+impl FileHandle for TestFile {
     fn path(&self) -> &Path {
         Path::new("/file")
     }
@@ -80,7 +80,7 @@ impl Vfsi for PortableFs {
         options: AttrsOptions,
     ) -> Result<Vec<Attrs>> {
         assert!(self.tree.get(), "unexpected metadata");
-        assert!(!options.follow_symlinks());
+        assert!(!options.follow_final_symlink());
         self.metadata.set(self.metadata.get() + 1);
         Ok(paths
             .iter()
@@ -88,7 +88,7 @@ impl Vfsi for PortableFs {
                 tree_entry(
                     match path.as_target() {
                         Target::Path(path) => path,
-                        Target::File(file) => OpenFd::path(file),
+                        Target::File(file) => FileHandle::path(file),
                     },
                     true,
                 )
@@ -148,11 +148,7 @@ impl Vfsi for PortableFs {
     ) -> Result<()> {
         panic!("unexpected copy")
     }
-    fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
-        &self,
-        _: &[(P, Q)],
-        _: RenameOptions,
-    ) -> Result<()> {
+    fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, _: &[(P, Q)], _: RenameMode) -> Result<()> {
         panic!("unexpected rename")
     }
     fn vremove<P: AsRef<Path>>(
@@ -539,7 +535,7 @@ fn buffered_listdir_forwards_remaining_budgets_fields_and_resolution_policy() {
             assert!(!options.recursive());
             assert!(!options.enter_leave());
             assert!(!options.sort_by_name());
-            assert_eq!(options.follow_symlinks(), !recursive && !lifecycle);
+            assert_eq!(options.allow_symlink_components(), !recursive && !lifecycle);
         }
     }
 }
@@ -592,15 +588,102 @@ fn consuming_reads_release_caller_buffers_and_owned_counts_are_derived() {
 
 impl DirHandle for TestFile {
     fn path(&self) -> &Path {
-        OpenFd::path(self)
+        FileHandle::path(self)
     }
     fn try_close(&mut self) -> Result<()> {
-        OpenFd::try_close(self)
+        FileHandle::try_close(self)
     }
     fn is_closed(&self) -> bool {
-        OpenFd::is_closed(self)
+        FileHandle::is_closed(self)
     }
     fn close(self) -> Result<()> {
-        OpenFd::close(self)
+        FileHandle::close(self)
     }
+}
+
+#[test]
+fn directory_defaults_match_with_or_without_explicit_options() {
+    let fs = PortableFs::default();
+    fs.read_dir("/a").unwrap();
+    fs.read_dir_with_options("/b", ListDirOptions::new())
+        .unwrap();
+    fs.read_dirs(&["/c"]).unwrap();
+    fs.read_dirs_with_options(&["/d"], ListDirOptions::new())
+        .unwrap();
+    fs.vlistdirs(&["/e"], ListDirOptions::new(), |_, _| {
+        Ok(ControlFlow::Continue(()))
+    })
+    .unwrap();
+    fs.listdir("/f", ListDirOptions::new(), |_| Ok(WalkControl::Continue))
+        .unwrap();
+    let options = fs.directory_options.take();
+    assert_eq!(options.len(), 6);
+    for options in options {
+        assert_eq!(options.fields(), Attributes::stat());
+        assert!(!options.fields().intersects(
+            Attributes::UID
+                | Attributes::GID
+                | Attributes::ATIME
+                | Attributes::MTIME
+                | Attributes::CTIME
+                | Attributes::CHANGE
+        ));
+    }
+    let selected = Attributes::UID | Attributes::GID | Attributes::MTIME | Attributes::CHANGE;
+    fs.read_dir_with_options("/g", ListDirOptions::new().with_fields(selected))
+        .unwrap();
+    assert_eq!(
+        fs.directory_options.borrow()[0].fields(),
+        selected | Attributes::MODE
+    );
+}
+
+#[test]
+fn collecting_and_page_adapters_reject_unhandled_policies_before_io() {
+    let fs = PortableFs::default();
+    for options in [
+        ListDirOptions::new().with_enter_leave(true),
+        ListDirOptions::new().with_sort_by_name(true),
+    ] {
+        assert_eq!(
+            fs.read_dir_with_options("/missing", options)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            fs.read_dirs_with_options(&["/missing"], options)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            fs.visit_entries_with_options(&["/missing"], options, |_, _| panic!(
+                "callback must not run"
+            ))
+            .unwrap_err()
+            .kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            fs.visit_dirs_ordered(
+                "/missing",
+                options,
+                |_, _| std::cmp::Ordering::Equal,
+                |_| true,
+                |_, _| panic!("callback must not run")
+            )
+            .unwrap_err()
+            .kind(),
+            ErrorKind::InvalidInput
+        );
+    }
+    assert_eq!(
+        fs.read_dir_with_options("/missing", ListDirOptions::new().with_recursive(true))
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(fs.listings.get(), 0);
+    assert_eq!(fs.metadata.get(), 0);
 }

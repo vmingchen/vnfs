@@ -677,7 +677,7 @@ fn short_write_failure_does_not_dispatch_a_later_file() {
             assert!(error.is_transport());
             assert_eq!(error.index(), None);
         } else {
-            assert_eq!(error.err_no(), libc::ENOSPC as u32);
+            assert_eq!(error.raw_code(), libc::ENOSPC as u32);
             assert_eq!(error.index(), Some(0));
         }
         assert_eq!(first_cursor, per as i64);
@@ -1003,7 +1003,7 @@ fn descriptor_zero_progress_is_an_error_not_a_retry_loop() {
                 )]))
                 .map(|_| ())
             };
-            assert_eq!(result.unwrap_err().err_no(), libc::EIO as u32);
+            assert_eq!(result.unwrap_err().raw_code(), libc::EIO as u32);
             assert_eq!(
                 fs.seek_raw_impl(&files[0], 0, vfsi_sync::SeekFrom::Cur)
                     .unwrap(),

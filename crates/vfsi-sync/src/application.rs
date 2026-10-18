@@ -24,6 +24,9 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
     ) -> Result<Vec<crate::DirectoryPage>>,
     mut callback: impl FnMut(usize, DirectoryListing) -> Result<std::ops::ControlFlow<()>>,
 ) -> Result<Vec<crate::TraversalCompletion>> {
+    if policy.enter_leave() || policy.sort_by_name() {
+        return Err(vfsi_core::api::Error::client(0, libc::EINVAL as u32));
+    }
     let directory = policy.directory_options(limits);
     let walk = policy.walk_options(limits);
     let mut budget = TraversalBudget::new(directory.max_entries(), directory.max_path_bytes());
@@ -128,7 +131,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
                     }
                     accepted += 1;
                     if policy.recursive() && entry.attrs().is_dir() {
-                        if depth >= walk.max_depth() {
+                        if depth >= walk.max_depth().get() {
                             if !walk.truncate_at_max_depth() {
                                 page_error = Some(
                                     vfsi_core::api::Error::client(index, libc::EFBIG as u32)
@@ -220,7 +223,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
     Ok(completed)
 }
 
-impl<F: crate::backend::HandleBackend> OpenFd for crate::OpenFile<F> {
+impl<F: crate::backend::HandleBackend> FileHandle for crate::OpenFile<F> {
     crate::__vfsi_file_methods!(crate::OpenFile<F>);
 }
 
@@ -326,7 +329,7 @@ pub(crate) fn metadata_backend<F, P: vfsi_core::AsTarget<crate::OpenFile<F>>>(
 where
     F: crate::backend::VectorBackend + 'static,
 {
-    client.vgetattrs_native(paths, options.fields(), options.follow_symlinks())
+    client.vgetattrs_native(paths, options.fields(), options.follow_final_symlink())
 }
 
 use vfsi_core::api::internal::{OwnedReadResult, ReadRequest, consume_ops, read_batch};
@@ -502,10 +505,10 @@ mod traversal_tests {
             );
             match outcome {
                 0 => assert_eq!(result.unwrap(), [crate::TraversalCompletion::Stopped]),
-                1 => assert_eq!(result.unwrap_err().err_no(), libc::EIO as u32),
+                1 => assert_eq!(result.unwrap_err().raw_code(), libc::EIO as u32),
                 _ => {
                     let error = result.unwrap_err();
-                    assert_eq!(error.err_no(), libc::EFBIG as u32);
+                    assert_eq!(error.raw_code(), libc::EFBIG as u32);
                     assert_eq!(error.path(), Some(Path::new("/tree/entry-2")));
                     if outcome == 3 {
                         assert!(live_budget_page);

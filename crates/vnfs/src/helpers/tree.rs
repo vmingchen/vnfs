@@ -55,6 +55,7 @@ struct Entry {
 /// # }
 /// ```
 #[derive(Debug)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct TreeBuilder {
     entries: Vec<Entry>,
     directories: HashSet<PathBuf>,

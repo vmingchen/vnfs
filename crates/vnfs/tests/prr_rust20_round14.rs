@@ -21,7 +21,7 @@ fn creation_permission_fault_releases_the_unregistered_descriptor() {
         let error = backend
             .open_raw_impl(Path::new("/created"), flags, 0o600)
             .unwrap_err();
-        assert_eq!(error.err_no(), libc::EPERM as u32);
+        assert_eq!(error.raw_code(), libc::EPERM as u32);
         assert!(script.is_consumed());
         assert_eq!(backend.test_open_handle_count(), 0);
         assert!(root.path().join("created").is_file());
@@ -68,7 +68,7 @@ fn failed_lookup_does_not_consume_creation_permission_fault() {
     let error = backend
         .open_raw_impl(Path::new("/missing"), libc::O_RDONLY, 0)
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::ENOENT as u32);
+    assert_eq!(error.raw_code(), libc::ENOENT as u32);
     assert!(!script.is_consumed());
     assert_eq!(backend.test_open_handle_count(), 0);
 }

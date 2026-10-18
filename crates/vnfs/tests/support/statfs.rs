@@ -43,15 +43,15 @@ pub fn check<F: Vfsi>(fs: &F, other: &F, directory: &str) {
     check_stats(&fs.statfs(Target::File(&files[0])).unwrap());
     let error = fs.vstatfs(&[&paths[1], &paths[0]]).unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.err_no(), libc::ENOENT as u32);
+    assert_eq!(error.raw_code(), libc::ENOENT as u32);
     let error = other.vstatfs(&[Target::File(&files[1])]).unwrap_err();
     assert_eq!(error.index(), Some(0));
-    assert_eq!(error.err_no(), libc::EINVAL as u32);
+    assert_eq!(error.raw_code(), libc::EINVAL as u32);
     fs.vclose(&mut files[..1]).unwrap();
     let error = fs
         .vstatfs(&[Target::File(&files[1]), Target::File(&files[0])])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.err_no(), libc::EBADF as u32);
+    assert_eq!(error.raw_code(), libc::EBADF as u32);
     fs.vclose(&mut files[1..]).unwrap();
 }

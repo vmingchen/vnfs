@@ -266,7 +266,7 @@ fn namespace_fallback_and_whole_file_limits_preserve_contracts() {
         .unwrap();
     assert_eq!(results[0].data(), Some(b"hello".as_slice()));
     assert_eq!(results[1].data(), Some(b"world".as_slice()));
-    let budget = ReadOptions::new().with_max_total_bytes(NonZeroUsize::new(4));
+    let budget = ReadOptions::new().with_max_total_bytes(NonZeroUsize::new(4).unwrap());
     assert!(fs.vread([ReadOp::whole("/a")], budget).is_err());
     assert_eq!(fs.read_dir("/").unwrap().len(), 2);
     fs.vrename(&[("/a", "/renamed")], Default::default())

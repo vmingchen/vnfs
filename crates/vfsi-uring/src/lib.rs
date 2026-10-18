@@ -35,6 +35,7 @@ struct Flags {
 /// Bounds both in-flight SQEs and the reusable owned scratch arena. No SQPOLL
 /// thread is started. A large operation is split into bounded contiguous chunks.
 #[derive(Clone, Copy, Debug)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct Options {
     pub(crate) queue_depth: NonZeroU32,
     pub(crate) max_batch_bytes: NonZeroUsize,
@@ -88,8 +89,8 @@ impl Options {
 
 pub use engine::{Stats, Telemetry};
 
-/// Construct a rooted VFSI client. Roots follow the local backend's semantics
-/// (including creating a missing root); configure [`vfsi_core::api::ResourceLimits`]
+/// Construct a VFSI client rooted at an existing directory.
+/// Configure [`vfsi_core::api::ResourceLimits`]
 /// on the returned client to change application allocation/traversal budgets.
 pub fn connect(
     root: impl AsRef<Path>,

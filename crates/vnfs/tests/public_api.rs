@@ -18,7 +18,7 @@ fn application_surface_is_small_and_typed() {
     assert_eq!(ReadOptions::new().max_total_bytes(), None);
     assert_eq!(
         ReadOptions::new()
-            .with_max_total_bytes(std::num::NonZeroUsize::new(42))
+            .with_max_total_bytes(std::num::NonZeroUsize::new(42).unwrap())
             .max_total_bytes(),
         std::num::NonZeroUsize::new(42)
     );
@@ -49,7 +49,7 @@ fn concrete_and_extension_directory_visitors_borrow_entries_consistently() {
             .read_files_with_options(
                 &["/file"],
                 vnfs::files::ReadOptions::new()
-                    .with_max_total_bytes(std::num::NonZeroUsize::new(4))
+                    .with_max_total_bytes(std::num::NonZeroUsize::new(4).unwrap())
             )
             .unwrap(),
         [b"data".to_vec()]
@@ -126,7 +126,7 @@ fn application_traversal_and_mutation_do_not_require_backend_imports() {
             "/a/link",
             vnfs::directory::AttrsOptions::new()
                 .with_fields(fields)
-                .with_follow_symlinks(false),
+                .with_follow_final_symlink(false),
         )?;
         let _ = client
             .read_dirs_with_options(
@@ -195,7 +195,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
                     vnfs::files::ReadOp::whole("/sub/b")
                 ],
                 vnfs::files::ReadOptions::new()
-                    .with_max_total_bytes(std::num::NonZeroUsize::new(5))
+                    .with_max_total_bytes(std::num::NonZeroUsize::new(5).unwrap())
             )
             .is_err()
     );
@@ -311,7 +311,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
                 std::path::Path::new("/sub/a"),
                 std::path::Path::new("/sub/link"),
             ],
-            vnfs::directory::AttrsOptions::new().with_follow_symlinks(false),
+            vnfs::directory::AttrsOptions::new().with_follow_final_symlink(false),
         )
         .unwrap();
     assert!(metadata[0].is_file());
@@ -369,7 +369,7 @@ fn tempfile_root() -> std::path::PathBuf {
 #[cfg(all(feature = "auto", target_os = "linux"))]
 #[test]
 fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types() {
-    use vnfs::files::{OpenFd, Vfsi, VfsiExt};
+    use vnfs::files::{FileHandle, Vfsi, VfsiExt};
     fn workflow<C: Vfsi>(client: &C, prefix: &str) -> vnfs::Result<()> {
         client.create_dir_all(prefix)?;
         let paths = [format!("{prefix}/a"), format!("{prefix}/b")];
@@ -473,11 +473,16 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
     let fs = vnfs::posix::Posix::new(root.path()).unwrap();
     fs.create_dir_all("/tree/child").unwrap();
     fs.write("/tree/child/file", b"x").unwrap();
-    for depth in [201, 254, 255, 256, 500, usize::MAX - 1, usize::MAX] {
-        let walk = ListDirOptions::new()
-            .with_recursive(true)
-            .with_max_depth(depth);
-        assert_eq!(walk.max_depth(), usize::MAX);
+    for depth in [201, 254, 255, 256, 500, 65533, usize::MAX] {
+        let walk =
+            ListDirOptions::new()
+                .with_recursive(true)
+                .with_max_depth(if depth == usize::MAX {
+                    vfsi_core::api::DepthLimit::unlimited()
+                } else {
+                    vfsi_core::api::DepthLimit::new(depth).expect("finite depth")
+                });
+        assert_eq!(walk.max_depth().get(), depth);
         let converted = walk;
         assert!(converted.recursive());
         let explicit = fs
@@ -492,14 +497,22 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
                 &["/tree"],
                 ListDirOptions::new()
                     .with_recursive(true)
-                    .with_max_depth(depth),
+                    .with_max_depth(if depth == usize::MAX {
+                        vfsi_core::api::DepthLimit::unlimited()
+                    } else {
+                        vfsi_core::api::DepthLimit::new(depth).expect("finite depth")
+                    }),
             )
             .unwrap();
         assert_eq!(explicit.len(), 2);
         assert_eq!(direct[0].len(), 2);
-        let inherited = vnfs::posix::Posix::new(root.path())
-            .unwrap()
-            .with_limits(ResourceLimits::new().with_max_walk_depth(depth));
+        let inherited = vnfs::posix::Posix::new(root.path()).unwrap().with_limits(
+            ResourceLimits::new().with_max_walk_depth(if depth == usize::MAX {
+                vfsi_core::api::DepthLimit::unlimited()
+            } else {
+                vfsi_core::api::DepthLimit::new(depth).expect("finite depth")
+            }),
+        );
         assert_eq!(
             inherited
                 .read_dirs_with_options(
@@ -518,7 +531,7 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
         fs.read_dirs_with_options(
             &["/tree"],
             vnfs::directory::ListDirOptions::new()
-                .with_max_depth(0)
+                .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"))
                 .with_fields(Attributes::MODE)
                 .with_recursive(true)
         )
@@ -529,7 +542,7 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
         fs.read_dirs_with_options(
             &["/tree"],
             vnfs::directory::ListDirOptions::new()
-                .with_max_depth(0)
+                .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"))
                 .with_truncate_at_max_depth(true)
                 .with_fields(Attributes::MODE)
                 .with_recursive(true)
@@ -543,7 +556,7 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
         fs.read_dirs_with_options(
             &["/tree"],
             vnfs::directory::ListDirOptions::new()
-                .with_max_depth(1)
+                .with_max_depth(vfsi_core::api::DepthLimit::new(1).expect("finite depth"))
                 .with_fields(Attributes::MODE)
                 .with_recursive(true)
         )
@@ -555,8 +568,9 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
     assert_eq!(
         ListDirOptions::new()
             .with_recursive(true)
-            .with_max_depth(200)
-            .max_depth(),
+            .with_max_depth(vfsi_core::api::DepthLimit::new(200).expect("finite depth"))
+            .max_depth()
+            .get(),
         200
     );
 }
@@ -612,7 +626,7 @@ fn vsetattrs_many_local_and_routed_files() {
     let updates = [vnfs::directory::SetAttrsOp::new("/link").len(11)];
     assert!(
         mounted
-            .vsetattrs(&[updates[0].with_follow_symlinks(false)])
+            .vsetattrs(&[updates[0].with_follow_final_symlink(false)])
             .is_err()
     );
     assert_eq!(
@@ -702,7 +716,7 @@ fn filesystem_stats_local_and_routed_handles() {
 #[test]
 fn explicit_io_adapter_bounds_collecting_reads_and_preserves_retained_identity() {
     use std::io::{Read, Seek, SeekFrom, Write};
-    use vnfs::files::OpenFd;
+    use vnfs::files::FileHandle;
     fn check<C: Vfsi>(fs: &C) {
         fs.write("/original", b"abcdef").unwrap();
         fs.write("/exact", b"abc").unwrap();
@@ -855,14 +869,14 @@ fn policy_builders_preserve_zero_budgets_and_bound_recovery() {
         .with_stream_chunk_size(std::num::NonZeroUsize::new(2).unwrap())
         .with_max_directory_entries(0)
         .with_max_directory_path_bytes(0)
-        .with_max_walk_depth(0);
+        .with_max_walk_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"));
     assert_eq!(limits.max_read_bytes(), 0);
     assert_eq!(limits.stream_chunk_size(), 2);
     assert_eq!(limits.max_directory_entries(), 0);
     assert_eq!(limits.max_directory_path_bytes(), 0);
-    assert_eq!(limits.max_walk_depth(), 0);
+    assert_eq!(limits.max_walk_depth().get(), 0);
     assert_eq!(limits.directory_options().max_entries(), 0);
-    assert_eq!(limits.walk_options().max_depth(), 0);
+    assert_eq!(limits.walk_options().max_depth().get(), 0);
     let remove = vnfs::directory::RemoveOptions::new()
         .with_batch_size(0)
         .with_retries(0)
@@ -902,7 +916,7 @@ fn invalid_open_batch_cannot_create_or_truncate_earlier_files() {
                 .err()
                 .unwrap();
             assert_eq!(error.index(), Some(2));
-            assert_eq!(error.err_no(), libc::EINVAL as u32);
+            assert_eq!(error.raw_code(), libc::EINVAL as u32);
             assert!(!root.join("new").exists());
             assert!(!root.join("invalid").exists());
             assert_eq!(std::fs::read(root.join("existing")).unwrap(), b"preserved");
@@ -922,7 +936,7 @@ fn invalid_open_batch_cannot_create_or_truncate_earlier_files() {
 #[test]
 fn object_identity_and_open_instances_are_distinct_concepts() {
     use vnfs::directory::{Attributes, AttrsOptions};
-    use vnfs::files::{OpenFd, ReadOp, ReadOptions, Target};
+    use vnfs::files::{FileHandle, ReadOp, ReadOptions, Target};
 
     fn check<C: Vfsi + VfsiExt>(fs: &C) {
         fs.write("/object", b"payload").unwrap();
@@ -986,7 +1000,7 @@ fn object_identity_and_open_instances_are_distinct_concepts() {
 fn canonical_open_descriptors_and_operands_preserve_ownership() {
     use vfsi_core::{AttrMask, FileOperand, Target};
     use vnfs::directory::AttrsOptions;
-    use vnfs::files::OpenFd;
+    use vnfs::files::FileHandle;
 
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("file"), b"retained").unwrap();
@@ -994,10 +1008,10 @@ fn canonical_open_descriptors_and_operands_preserve_ownership() {
     let mut file: vfsi_sync::OpenFile<_> = fs.open("/file").unwrap();
 
     // Canonical import paths expose the same borrowed descriptor contract.
-    let canonical: &dyn vnfs::files::OpenFd = &file;
-    let canonical: &dyn vfsi_core::OpenFd = canonical;
-    let canonical: &dyn vfsi_core::api::OpenFd = canonical;
-    let canonical: &dyn vfsi_core::api::prelude::OpenFd = canonical;
+    let canonical: &dyn vnfs::files::FileHandle = &file;
+    let canonical: &dyn vfsi_core::FileHandle = canonical;
+    let canonical: &dyn vfsi_core::api::FileHandle = canonical;
+    let canonical: &dyn vfsi_core::api::prelude::FileHandle = canonical;
     assert_eq!(canonical.path(), std::path::Path::new("/file"));
 
     let attrs = fs
@@ -1015,10 +1029,10 @@ fn canonical_open_descriptors_and_operands_preserve_ownership() {
     assert_eq!(operand.fd(), Some(7));
 
     // Borrowing through the trait does not acquire another cleanup owner.
-    OpenFd::try_close(&mut file).unwrap();
-    assert!(OpenFd::is_closed(&file));
+    FileHandle::try_close(&mut file).unwrap();
+    assert!(FileHandle::is_closed(&file));
     let error = fs.attrs(Target::file(&file)).unwrap_err();
-    assert_eq!(error.err_no(), libc::EBADF as u32);
+    assert_eq!(error.raw_code(), libc::EBADF as u32);
 }
 
 #[cfg(all(feature = "posix", unix))]
@@ -1078,4 +1092,75 @@ fn complete_writes_order_hardlinks_and_renamed_open_instances() {
         .unwrap();
         assert_eq!(fs.read("/alias").unwrap(), b"AABBBB");
     }
+}
+
+#[cfg(all(feature = "posix", unix))]
+#[test]
+fn symlink_policy_names_distinguish_final_metadata_from_directory_components() {
+    use vnfs::directory::{AttrsOptions, ListDirOptions};
+    let root = tempfile::tempdir().unwrap();
+    let fs = vnfs::posix::Posix::new(root.path()).unwrap();
+    fs.create_dir_all("/real/child").unwrap();
+    fs.write("/real/child/target", b"data").unwrap();
+    fs.symlink("real", "/parent").unwrap();
+    fs.symlink("target", "/real/child/link").unwrap();
+    let attrs = fs
+        .attrs_with_options(
+            "/parent/child/link",
+            AttrsOptions::new().with_follow_final_symlink(false),
+        )
+        .unwrap();
+    assert!(attrs.is_symlink(), "only the final link is left unresolved");
+    assert_eq!(
+        fs.attrs_with_options(
+            "/parent/child/link",
+            AttrsOptions::new().with_follow_final_symlink(true)
+        )
+        .unwrap()
+        .len(),
+        Some(4)
+    );
+    assert!(
+        fs.read_dir_with_options(
+            "/parent/child",
+            ListDirOptions::new().with_allow_symlink_components(false)
+        )
+        .is_err()
+    );
+    assert_eq!(
+        fs.read_dir_with_options(
+            "/parent/child",
+            ListDirOptions::new().with_allow_symlink_components(true)
+        )
+        .unwrap()
+        .len(),
+        2
+    );
+}
+
+#[cfg(all(feature = "posix", unix))]
+#[test]
+fn local_constructors_preserve_missing_and_non_directory_root_errors() {
+    let root = tempfile_root();
+    let missing = root.join("missing/child");
+    let error = vnfs::posix::Posix::new(&missing).err().unwrap();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(error.path(), Some(missing.as_path()));
+    assert!(!root.join("missing").exists());
+    let regular = root.join("file");
+    std::fs::write(&regular, b"data").unwrap();
+    let error = vnfs::posix::Posix::new(&regular).err().unwrap();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
+    assert_eq!(error.path(), Some(regular.as_path()));
+
+    #[cfg(all(feature = "auto", target_os = "linux"))]
+    {
+        let error = vnfs::mounted::Auto::new(&missing).err().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(error.path(), Some(missing.as_path()));
+        assert!(!root.join("missing").exists());
+        let error = vnfs::mounted::Auto::new(&regular).err().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }

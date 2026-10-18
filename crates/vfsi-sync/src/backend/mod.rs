@@ -497,16 +497,16 @@ pub trait VectorBackend: HandleBackend {
     fn vrename_with_options_impl(
         &mut self,
         pairs: &[(FileOperand, FileOperand)],
-        options: vfsi_core::api::RenameOptions,
+        options: vfsi_core::api::RenameMode,
     ) -> VfRes {
         match options {
-            vfsi_core::api::RenameOptions::Replace => self.vrename_impl(pairs),
-            vfsi_core::api::RenameOptions::NoReplace | vfsi_core::api::RenameOptions::Exchange
+            vfsi_core::api::RenameMode::Replace => self.vrename_impl(pairs),
+            vfsi_core::api::RenameMode::NoReplace | vfsi_core::api::RenameMode::Exchange
                 if pairs.is_empty() =>
             {
                 Ok(())
             }
-            vfsi_core::api::RenameOptions::NoReplace | vfsi_core::api::RenameOptions::Exchange => {
+            vfsi_core::api::RenameMode::NoReplace | vfsi_core::api::RenameMode::Exchange => {
                 Err(VfError::client(0, vfsi_core::VF_ERR_UNSUPPORTED))
             }
         }

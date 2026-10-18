@@ -155,7 +155,7 @@ There are no forwarding aliases for these names.
 
 | Removed spelling | Replacement |
 |---|---|
-| Core/API/prelude and `vnfs::files::FileHandle` trait | `OpenFd` at the corresponding import path |
+| Core/API/prelude and `vnfs::files::OpenFd` trait | `FileHandle` at the corresponding import path |
 | `vfsi_sync::FsFile<F>` | `vfsi_sync::OpenFile<F>` |
 | NFS `client::FileHandle` | `client::NfsFh` |
 | `VfFile` | `FileOperand` |

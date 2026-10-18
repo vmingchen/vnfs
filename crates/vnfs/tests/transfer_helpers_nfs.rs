@@ -38,7 +38,7 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
                 .create(&fs, format!("{src}/nested/files"))?;
             let destination = format!("{root}/no-replace");
             let error = fs
-                .vrename(&[(&src, &destination)], RenameOptions::NoReplace)
+                .vrename(&[(&src, &destination)], RenameMode::NoReplace)
                 .unwrap_err();
             assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
             // Default conflict-safe copying uses bounded descriptor vectors.

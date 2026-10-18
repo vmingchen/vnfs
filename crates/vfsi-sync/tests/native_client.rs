@@ -34,7 +34,7 @@ fn client_policy_applies_to_scalar_vector_and_into_reads_before_dispatch() {
         client
             .read_with_options(
                 "/file",
-                ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(6))
+                ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(6).unwrap())
             )
             .unwrap(),
         b"abcdef"
@@ -178,7 +178,7 @@ struct ScalarOnly {
     write_calls: Arc<AtomicUsize>,
     max_write_once: Option<usize>,
     interrupt_write_call: Option<usize>,
-    open_requests: Arc<Mutex<Vec<OpenOp>>>,
+    open_requests: Arc<Mutex<Vec<OpenOp<'static>>>>,
     directory_entries: usize,
     directory_page_sizes: Arc<Mutex<Vec<usize>>>,
     directory_fields: Arc<Mutex<Vec<vfsi_sync::AttrMask>>>,
@@ -752,7 +752,7 @@ fn shared_attribute_ops_preserve_all_fields_at_the_raw_backend_boundary() {
         .gid(43)
         .accessed(std::time::UNIX_EPOCH + std::time::Duration::new(123, 456))
         .modified(std::time::UNIX_EPOCH - std::time::Duration::new(1, 25))
-        .with_follow_symlinks(false);
+        .with_follow_final_symlink(false);
     vsetattrs_typed_default(backend, std::slice::from_ref(&op)).unwrap();
     // Borrowing the operation leaves it reusable; changing options performs no I/O.
     vsetattrs_typed_default(backend, std::slice::from_ref(&op)).unwrap();
@@ -767,7 +767,7 @@ fn shared_attribute_ops_preserve_all_fields_at_the_raw_backend_boundary() {
         Target::File(&file),
         vfsi_core::api::AttrsOptions::new()
             .with_fields(fields)
-            .with_follow_symlinks(false),
+            .with_follow_final_symlink(false),
     )
     .unwrap();
     assert_eq!(attrs.file, file);
@@ -829,10 +829,10 @@ fn shared_native_attribute_batches_preflight_and_remap_policy_run_errors() {
         SetAttrsOp::new(Target::Path(std::path::Path::new("/a"))).len(1),
         SetAttrsOp::new(Target::Path(std::path::Path::new("/b")))
             .len(2)
-            .with_follow_symlinks(false),
+            .with_follow_final_symlink(false),
         SetAttrsOp::new(Target::Path(std::path::Path::new("/c")))
             .len(3)
-            .with_follow_symlinks(false),
+            .with_follow_final_symlink(false),
         SetAttrsOp::new(Target::Path(std::path::Path::new("/a"))).len(4),
     ];
     let mut backend = AttrsBackend::default();
@@ -865,7 +865,7 @@ fn shared_native_attribute_batches_preflight_and_remap_policy_run_errors() {
         assert_eq!(backend.calls.len(), 2);
         if failure.index() == Some(1) {
             assert_eq!(error.index(), Some(2));
-            assert_eq!(error.err_no(), libc::ENOENT as u32);
+            assert_eq!(error.raw_code(), libc::ENOENT as u32);
         } else {
             assert!(error.is_transport());
             assert_eq!(error.index(), None);
@@ -1217,7 +1217,7 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
     );
     assert_eq!(
         backend
-            .vrename_with_options_impl(&paths, vfsi_core::api::RenameOptions::NoReplace)
+            .vrename_with_options_impl(&paths, vfsi_core::api::RenameMode::NoReplace)
             .unwrap_err()
             .kind(),
         std::io::ErrorKind::Unsupported
@@ -1274,7 +1274,7 @@ impl HandleBackend for ScalarOnly {
     fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, FileOperand>>]) -> VfResult<()> {
         let mut calls = self.attrs_calls.lock().unwrap();
         calls.push((
-            updates[0].follow_symlinks(),
+            updates[0].follow_final_symlink(),
             updates.iter().map(|op| op.requested_len()).collect(),
         ));
         if let Some((call, error)) = &self.attrs_failure
@@ -1299,7 +1299,10 @@ impl HandleBackend for ScalarOnly {
         std::mem::take(&mut *self.notifications.lock().unwrap())
     }
     fn open_impl(&mut self, request: &OpenOp) -> VfResult<FileOperand> {
-        self.open_requests.lock().unwrap().push(request.clone());
+        self.open_requests
+            .lock()
+            .unwrap()
+            .push(request.clone().into_owned());
         self.open = true;
         let fd = self.descriptor_objects.len() as i32 + 1;
         let next = self.named_objects.len() as u64;
@@ -1481,8 +1484,12 @@ fn setattrs_ops_batch_policy_runs_in_order_and_preflight_before_dispatch() {
     fs.vsetattrs(&[
         SetAttrsOp::new("/a").len(1),
         SetAttrsOp::new("/b").len(2),
-        SetAttrsOp::new("/c").len(3).with_follow_symlinks(false),
-        SetAttrsOp::new("/d").len(4).with_follow_symlinks(false),
+        SetAttrsOp::new("/c")
+            .len(3)
+            .with_follow_final_symlink(false),
+        SetAttrsOp::new("/d")
+            .len(4)
+            .with_follow_final_symlink(false),
         SetAttrsOp::new("/a").len(5),
     ])
     .unwrap();
@@ -1500,11 +1507,11 @@ fn setattrs_ops_batch_policy_runs_in_order_and_preflight_before_dispatch() {
             SetAttrsOp::new("/a").len(6),
             SetAttrsOp::new("/b")
                 .uid(u32::MAX)
-                .with_follow_symlinks(false),
+                .with_follow_final_symlink(false),
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.err_no(), libc::EINVAL as u32);
+    assert_eq!(error.raw_code(), libc::EINVAL as u32);
     assert!(calls.lock().unwrap().is_empty());
 }
 
@@ -1525,15 +1532,19 @@ fn setattrs_ops_remap_later_run_failures_without_replaying_or_dispatching_suffix
         let error = fs
             .vsetattrs(&[
                 SetAttrsOp::new("/a").len(1),
-                SetAttrsOp::new("/b").len(2).with_follow_symlinks(false),
-                SetAttrsOp::new("/c").len(3).with_follow_symlinks(false),
+                SetAttrsOp::new("/b")
+                    .len(2)
+                    .with_follow_final_symlink(false),
+                SetAttrsOp::new("/c")
+                    .len(3)
+                    .with_follow_final_symlink(false),
                 SetAttrsOp::new("/d").len(4),
             ])
             .unwrap_err();
         assert_eq!(calls.lock().unwrap().len(), 2);
         if failure.index() == Some(1) {
             assert_eq!(error.index(), Some(2));
-            assert_eq!(error.err_no(), libc::ENOENT as u32);
+            assert_eq!(error.raw_code(), libc::ENOENT as u32);
             assert_eq!(error.path(), Some(std::path::Path::new("/c")));
         } else {
             assert!(error.is_transport());
@@ -1578,7 +1589,7 @@ fn std_io_rejects_backend_results_that_violate_io_contracts() {
     let file = client.open("/file").unwrap();
     let error = client.std_io(&file).read(&mut [0; 4]).unwrap_err();
     let error = error.get_ref().unwrap().downcast_ref::<VfError>().unwrap();
-    assert_eq!(error.err_no(), vfsi_sync::ERR_IO);
+    assert_eq!(error.raw_code(), vfsi_sync::ERR_IO);
 
     let client = FsClient::new(ScalarOnly {
         oversized_write_count: true,
@@ -1615,7 +1626,7 @@ fn convenience_string_errors_retain_operation_and_path_context() {
         ..ScalarOnly::default()
     });
     let error = client.read_to_string("/not-utf8").unwrap_err();
-    assert_eq!(error.err_no(), vfsi_sync::ERR_INVAL);
+    assert_eq!(error.raw_code(), vfsi_sync::ERR_INVAL);
     assert_eq!(error.operation(), Some("read_to_string"));
     assert_eq!(error.path(), Some(std::path::Path::new("/not-utf8")));
 }
@@ -1629,10 +1640,10 @@ fn allocating_whole_file_reads_enforce_a_configurable_limit() {
     let error = client
         .read_with_options(
             "/file",
-            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(3)),
+            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(3).unwrap()),
         )
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
     assert_eq!(error.operation(), Some("read"));
     assert_eq!(error.path(), Some(std::path::Path::new("/file")));
 
@@ -1644,7 +1655,7 @@ fn allocating_whole_file_reads_enforce_a_configurable_limit() {
         client
             .read_with_options(
                 "/file",
-                ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(4))
+                ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(4).unwrap())
             )
             .unwrap(),
         b"four"
@@ -1658,7 +1669,7 @@ fn allocating_whole_file_reads_enforce_a_configurable_limit() {
         client
             .read_to_string_with_options(
                 "/file",
-                ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(4))
+                ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(4).unwrap())
             )
             .unwrap(),
         "utf8"
@@ -1747,14 +1758,14 @@ fn owned_vector_reads_reject_oversized_batches_before_backend_io() {
         .vread_with_limit_native(&[file.read_request_at(0, 3), file.read_request_at(3, 3)], 5)
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
     assert_eq!(error.path(), Some(std::path::Path::new("/file")));
     assert_eq!(read_calls.load(Ordering::SeqCst), 0);
 
     let error = client
         .vread_native(&[file.read_request_at(0, vfsi_sync::DEFAULT_READV_MAX_TOTAL_BYTES + 1)])
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
     assert_eq!(read_calls.load(Ordering::SeqCst), 0);
 
     let results = client
@@ -2141,7 +2152,7 @@ fn write_allv_rejects_zero_progress() {
     let error = client
         .vwrite_all_native(&[file.write_request_at(0, b"data")])
         .unwrap_err();
-    assert_eq!(error.err_no(), vfsi_sync::ERR_IO);
+    assert_eq!(error.raw_code(), vfsi_sync::ERR_IO);
     assert_eq!(error.index(), Some(0));
 }
 
@@ -2268,7 +2279,7 @@ fn successfully_closed_handle_returns_ebadf_instead_of_panicking() {
         client.std_io(&file).write(b"x").unwrap_err(),
     ] {
         let error = error.get_ref().unwrap().downcast_ref::<VfError>().unwrap();
-        assert_eq!(error.err_no(), vfsi_sync::ERR_EBADF);
+        assert_eq!(error.raw_code(), vfsi_sync::ERR_EBADF);
     }
 }
 
@@ -2334,7 +2345,7 @@ fn directory_visit_starts_with_one_entry_and_respects_tight_limits() {
         )
         .unwrap_err();
     assert_eq!(seen, 3);
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
     assert_eq!(*page_sizes.lock().unwrap(), [1, 3]);
 
     page_sizes.lock().unwrap().clear();
@@ -2669,7 +2680,7 @@ fn portable_handle_queries_and_sync_batch_and_preflight_every_handle() {
             Target::Path(std::path::Path::new("/link")),
             Target::file(&b),
         ],
-        AttrsOptions::new().with_follow_symlinks(false),
+        AttrsOptions::new().with_follow_final_symlink(false),
     )
     .unwrap();
     assert_eq!(

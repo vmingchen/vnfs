@@ -4,7 +4,7 @@ use crate::api::{
 };
 use std::path::Path;
 
-use super::{DirHandle, OpenFd};
+use super::{DirHandle, FileHandle};
 
 /// Vectorized filesystem operations for direct and routed application clients.
 /// Construction, builders and protocol-specific diagnostics stay concrete.
@@ -85,7 +85,7 @@ pub trait Vfsi {
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let entries = fs.vgetattrs(&["/file-1", "/link"],
     ///     AttrsOptions::new().with_fields(Attributes::MODE | Attributes::SIZE)
-    ///         .with_follow_symlinks(false))?;
+    ///         .with_follow_final_symlink(false))?;
     /// # let _ = entries;
     /// # Ok(())
     /// # }
@@ -131,7 +131,7 @@ pub trait Vfsi {
     /// fs.vsetattrs(&[
     ///     SetAttrsOp::file(file).len(1024),
     ///     SetAttrsOp::new(Target::Path(std::path::Path::new("/other"))).len(0)
-    ///         .with_follow_symlinks(false),
+    ///         .with_follow_final_symlink(false),
     /// ])?;
     /// # Ok(())
     /// # }
@@ -192,7 +192,7 @@ pub trait Vfsi {
     }
 
     /// Owned handle; vectors must contain handles belonging to this client.
-    type File: OpenFd + 'static;
+    type File: FileHandle + 'static;
 
     /// Collection/batch defaults, not a process memory cap or file-reader cap.
     ///
@@ -204,7 +204,7 @@ pub trait Vfsi {
     /// # fn example(fs: &impl Vfsi) {
     /// let limits = fs.limits();
     /// println!("owned-read budget: {} bytes", limits.max_read_bytes());
-    /// println!("walk depth: {}", limits.max_walk_depth());
+    /// println!("walk depth: {}", limits.max_walk_depth().get());
     /// # }
     /// ```
     fn limits(&self) -> ResourceLimits;
@@ -238,7 +238,7 @@ pub trait Vfsi {
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let results = fs.vread(
     ///     [ReadOp::whole("/config")],
-    ///     ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(1024 * 1024)),
+    ///     ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(1024 * 1024).unwrap()),
     /// )?;
     /// println!("{} bytes", results[0].bytes_read());
     /// # Ok(())
@@ -257,7 +257,7 @@ pub trait Vfsi {
     /// progress on failure. No snapshot or atomicity is promised.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{Vfsi, VfsiExt, OpenFd, ReadOp, WriteOp};
+    /// use vfsi_core::api::{Vfsi, VfsiExt, FileHandle, ReadOp, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let file = fs.open("/large")?;
     /// let mut buffer = [0_u8; 4096];
@@ -291,7 +291,7 @@ pub trait Vfsi {
     /// authorize replay after an ambiguous failure or guarantee durability.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{Vfsi, VfsiExt, OpenFd, OpenFlags, OpenOp, WriteOp};
+    /// use vfsi_core::api::{Vfsi, VfsiExt, FileHandle, OpenFlags, OpenOp, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let files = fs.vopen(&[
     ///     OpenOp::new("/file-1", OpenFlags::WRITE),
@@ -320,7 +320,7 @@ pub trait Vfsi {
     /// retained handles rather than resuming ordinary I/O as if nothing happened.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{Vfsi, VfsiExt, OpenFd, OpenFlags, OpenOp, WriteOp};
+    /// use vfsi_core::api::{Vfsi, VfsiExt, FileHandle, OpenFlags, OpenOp, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let mut files = fs.vopen(&[OpenOp::new("/file-1", OpenFlags::READ)])?;
     /// if let Err(error) = fs.vclose(&mut files) {
@@ -403,7 +403,7 @@ pub trait Vfsi {
     /// being emulated with check-then-rename.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{RenameOptions, Vfsi};
+    /// use vfsi_core::api::{RenameMode, Vfsi};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// fs.vrename(
     ///     &[("/old-1", "/new-1"), ("/old-2", "/new-2")],
@@ -415,7 +415,7 @@ pub trait Vfsi {
     fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         pairs: &[(P, Q)],
-        options: crate::api::RenameOptions,
+        options: crate::api::RenameMode,
     ) -> Result<()>;
 
     /// Visit shallow directories (default) or recursive trees using bounded pages.
@@ -425,6 +425,8 @@ pub trait Vfsi {
     /// whole vector. The returned prefix covers every root whose pages reached
     /// the callback; unfinished roots are Stopped. Pages may interleave between roots.
     ///
+    /// Sorting and enter/leave options are rejected before I/O; use VfsiExt::listdir
+    /// for those policies.
     /// Metadata is selected on directory pages, not through per-entry stat
     /// calls. Entry symlinks are never followed during recursive descent.
     /// Each page owns its entries; collection can transfer them without cloning.
@@ -434,7 +436,7 @@ pub trait Vfsi {
     /// use vfsi_core::api::{Vfsi, ListDirOptions, ControlFlow};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// fs.vlistdirs(&["/tree-1", "/tree-2"],
-    ///     ListDirOptions::new().with_recursive(true).with_max_depth(8),
+    ///     ListDirOptions::new().with_recursive(true).with_max_depth(vfsi_core::api::DepthLimit::new(8).expect("finite depth")),
     ///     |index, page| {
     ///         println!("{index}: {} ({} entries)", page.path.display(), page.entries.len());
     ///         Ok(ControlFlow::Continue(()))

@@ -59,7 +59,7 @@ pub fn walk_events(
                 if decision == WalkControl::SkipSubtree {
                     continue;
                 }
-                if event.depth > options.max_depth() {
+                if event.depth > options.max_depth().get() {
                     if options.truncate_at_max_depth() {
                         continue;
                     }
@@ -153,7 +153,9 @@ mod tests {
     }
     #[test]
     fn depth_limit_allows_boundary_entries_and_only_blocks_directory_descent() {
-        let options = ListDirOptions::new().with_recursive(true).with_max_depth(0);
+        let options = ListDirOptions::new()
+            .with_recursive(true)
+            .with_max_depth(crate::api::DepthLimit::new(0).expect("finite depth"));
         let mut events = Vec::new();
         assert_eq!(
             walk_events(
@@ -196,7 +198,7 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert_eq!(error.err_no(), libc::EFBIG as u32);
+        assert_eq!(error.raw_code(), libc::EFBIG as u32);
         assert!(strict_entries.contains(&PathBuf::from("/file")));
 
         let mut truncated_events = Vec::new();
@@ -254,7 +256,9 @@ mod tests {
             ListDirOptions::new()
                 .with_recursive(true)
                 .with_max_path_bytes(1),
-            ListDirOptions::new().with_recursive(true).with_max_depth(0),
+            ListDirOptions::new()
+                .with_recursive(true)
+                .with_max_depth(crate::api::DepthLimit::new(0).expect("finite depth")),
         ] {
             assert_eq!(
                 walk_events(
@@ -268,7 +272,7 @@ mod tests {
                     |_| Ok(WalkControl::Continue)
                 )
                 .unwrap_err()
-                .err_no(),
+                .raw_code(),
                 libc::EFBIG as u32
             );
         }

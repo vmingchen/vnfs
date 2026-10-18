@@ -199,7 +199,7 @@ impl Vfsi for Harness {
     fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         p: &[(P, Q)],
-        options: RenameOptions,
+        options: RenameMode,
     ) -> Result<()> {
         self.calls.borrow_mut().renames += 1;
         match self.fault.get() {
@@ -384,7 +384,7 @@ fn overlap_depth_and_budgets_are_explicit() {
         &fs,
         &["/src"],
         "/dst",
-        TransferOptions::new().with_max_depth(DepthLimit::new(0)),
+        TransferOptions::new().with_max_depth(DepthLimit::new(0).unwrap()),
     )
     .unwrap();
     assert_eq!(s.entries_skipped, 1);
@@ -717,12 +717,12 @@ fn no_replace_is_atomic_and_reports_existing_destination() {
     std::fs::write(t.path().join("source"), b"source").unwrap();
     std::fs::write(t.path().join("exists"), b"existing").unwrap();
     let error = fs
-        .vrename(&[("/source", "/exists")], RenameOptions::NoReplace)
+        .vrename(&[("/source", "/exists")], RenameMode::NoReplace)
         .unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
     assert_eq!(std::fs::read(t.path().join("source")).unwrap(), b"source");
     assert_eq!(std::fs::read(t.path().join("exists")).unwrap(), b"existing");
-    fs.vrename(&[("/source", "/new")], RenameOptions::NoReplace)
+    fs.vrename(&[("/source", "/new")], RenameMode::NoReplace)
         .unwrap();
     assert_eq!(std::fs::read(t.path().join("new")).unwrap(), b"source");
 }
@@ -734,7 +734,7 @@ fn exchange_swaps_names_atomically() {
     std::fs::write(root.path().join("left"), b"left data").unwrap();
     std::fs::write(root.path().join("right"), b"right data").unwrap();
 
-    fs.vrename(&[("/left", "/right")], RenameOptions::Exchange)
+    fs.vrename(&[("/left", "/right")], RenameMode::Exchange)
         .unwrap();
 
     assert_eq!(
@@ -754,7 +754,7 @@ fn exchange_requires_both_names_to_exist() {
     std::fs::write(root.path().join("source"), b"source data").unwrap();
 
     let error = fs
-        .vrename(&[("/source", "/missing")], RenameOptions::Exchange)
+        .vrename(&[("/source", "/missing")], RenameMode::Exchange)
         .unwrap_err();
 
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
@@ -773,7 +773,7 @@ fn no_replace_vector_reports_the_failing_pair_after_a_successful_prefix() {
     std::fs::write(t.path().join("b"), b"b").unwrap();
     std::fs::write(t.path().join("exists"), b"old").unwrap();
     let error = fs
-        .vrename(&[("/a", "/x"), ("/b", "/exists")], RenameOptions::NoReplace)
+        .vrename(&[("/a", "/x"), ("/b", "/exists")], RenameMode::NoReplace)
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(std::fs::read(t.path().join("x")).unwrap(), b"a");

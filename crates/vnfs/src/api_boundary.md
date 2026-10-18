@@ -690,25 +690,59 @@ let _ = vfsi_core::FileOperand::Fd(7).is_descriptor();
 use vfsi_sync::FsFile;
 ```
 
-The `OpenFd` contract and opaque `NfsFh` reference are distinct; neither retains
-the ambiguous `FileHandle` spelling at any former public import path:
+The portable `FileHandle` contract owns an open instance; the former
+`OpenFd` spelling is not retained:
 
 ```compile_fail,E0432
-use vfsi_core::FileHandle;
+use vfsi_core::OpenFd;
 ```
 
 ```compile_fail,E0432
-use vfsi_core::api::FileHandle;
+use vfsi_core::api::OpenFd;
 ```
 
 ```compile_fail,E0432
-use vfsi_core::api::prelude::FileHandle;
+use vfsi_core::api::prelude::OpenFd;
 ```
 
 ```compile_fail,E0432
-use vnfs::files::FileHandle;
+use vnfs::files::OpenFd;
 ```
+
+NFS object references use `NfsFh`, distinct from owned open handles:
 
 ```compile_fail,E0432
 use vfsi_nfs::client::FileHandle;
+```
+
+Rename modes have one name, and portable positional writes use `at`:
+
+```compile_fail,E0432
+use vnfs::directory::RenameOptions;
+```
+
+```compile_fail,E0599
+let file = ();
+let _ = vnfs::files::WriteOp::new(&file, 0, b"data");
+```
+
+Path mapping helpers have one canonical namespace:
+
+```compile_fail,E0603
+use vnfs::nfs::mount::PathMapper;
+```
+
+```compile_fail,E0603
+use vnfs::nfs::mount::ResolvePath;
+```
+
+Error representation is opaque; inspect typed status and context through methods:
+
+```compile_fail,E0616
+let mut error = vnfs::Error::failure(0, 2);
+error.index = Some(9);
+```
+
+```compile_fail,E0599
+let _ = vnfs::Error::failure(0, 2).err_no();
 ```

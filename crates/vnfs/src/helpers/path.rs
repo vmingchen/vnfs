@@ -107,7 +107,7 @@ mod tests {
         assert_eq!(mapper.local_root(), root);
         assert_eq!(mapper.local_path("child").unwrap(), root.join("child"));
         assert_eq!(
-            PathMapper::new(&root).unwrap_err().err_no(),
+            PathMapper::new(&root).unwrap_err().raw_code(),
             libc::ENOENT as u32
         );
     }

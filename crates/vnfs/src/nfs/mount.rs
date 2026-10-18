@@ -1,8 +1,7 @@
 //! Linux NFS mount discovery and local-to-remote path mapping.
-pub use crate::native_nfs::NfsMount;
-// Compatibility re-exports; new application code should use `helpers`.
 use crate::Result;
-pub use crate::helpers::{PathMapper, ResolvePath};
+use crate::helpers::{PathMapper, ResolvePath};
+pub use crate::native_nfs::NfsMount;
 use std::path::{Path, PathBuf};
 
 /// A direct NFS connection and the local-to-remote namespace mapping for one

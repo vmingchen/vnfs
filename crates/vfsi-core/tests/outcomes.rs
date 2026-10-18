@@ -6,7 +6,7 @@ use vfsi_core::{AttrMask, ErrorDomain, RpcError, StatusCode, TransportKind, VfAt
 fn rpc_conversion_preserves_messages_and_explicit_or_protocol_indices() {
     let transport = vfsi_core::error_from_rpc(RpcError::transport("connection refused"), 3);
     assert!(transport.is_transport());
-    assert_eq!(transport.err_no(), vfsi_core::VF_ERR_RPC);
+    assert_eq!(transport.raw_code(), vfsi_core::VF_ERR_RPC);
     assert_eq!(transport.index(), Some(3));
     assert!(transport.to_string().contains("connection refused"));
     let unknown = vfsi_core::error_from_rpc(RpcError::transport("server gone"), None);
@@ -207,7 +207,7 @@ fn status_without_a_known_index_is_not_reported_as_operation_zero() {
     assert_eq!(error.index(), None);
     assert_eq!(error.domain(), ErrorDomain::Nfs);
     assert_eq!(error.status(), Some(StatusCode::Nfs(10021)));
-    assert_eq!(error.err_no(), 10021);
+    assert_eq!(error.raw_code(), 10021);
 
     // Re-attributing turns it into a concrete operation failure.
     let attributed = error.with_index(5);
@@ -310,4 +310,102 @@ fn protocol_status_constructors_preserve_their_domains() {
     let smb = VfError::smb(2, 0xC000_0054);
     assert_eq!(smb.index(), Some(2));
     assert_eq!(smb.status(), Some(StatusCode::Smb(0xC000_0054)));
+}
+
+#[test]
+fn opaque_errors_keep_typed_status_context_and_optional_indices_consistent() {
+    for code in [0, 2, u32::MAX] {
+        for (status, domain) in [
+            (StatusCode::Errno(code), ErrorDomain::Filesystem),
+            (StatusCode::Nfs(code), ErrorDomain::Nfs),
+            (StatusCode::Smb(code), ErrorDomain::Smb),
+            (StatusCode::Client(code), ErrorDomain::Client),
+        ] {
+            for index in [None, Some(0), Some(7)] {
+                let error = VfError::from_status(index, status).with_context("read", "/file");
+                assert_eq!(error.status(), Some(status));
+                assert_eq!(error.domain(), domain);
+                assert_eq!(error.raw_code(), code);
+                assert_eq!(error.index(), index);
+                assert!(!error.is_transport());
+                assert_eq!(error.transport_kind(), None);
+                assert_eq!(error.transport_message(), None);
+                assert_eq!(error.clone(), error);
+                let mapped = error.clone().map_index(|index| index + 10);
+                assert_eq!(mapped.index(), index.map(|index| index + 10));
+                assert_eq!(mapped.status(), Some(status));
+                assert_eq!(mapped.operation(), Some("read"));
+                assert_eq!(mapped.path(), Some(Path::new("/file")));
+                let attributed = error.with_index(42);
+                assert_eq!(attributed.index(), Some(42));
+                assert_eq!(attributed.domain(), domain);
+                assert_eq!(attributed.status(), Some(status));
+            }
+        }
+    }
+    let mut called = false;
+    let unknown = VfError::from_status(None, StatusCode::Nfs(2)).map_index(|index| {
+        called = true;
+        index
+    });
+    assert!(!called);
+    assert_eq!(unknown.index(), None);
+    assert_eq!(
+        VfError::failure(3, 2),
+        VfError::from_status(3, StatusCode::Errno(2))
+    );
+    assert_eq!(
+        VfError::nfs(3, 2),
+        VfError::from_status(3, StatusCode::Nfs(2))
+    );
+    assert_eq!(
+        VfError::smb(3, 2),
+        VfError::from_status(3, StatusCode::Smb(2))
+    );
+    assert_eq!(
+        VfError::client(3, 2),
+        VfError::from_status(3, StatusCode::Client(2))
+    );
+}
+
+#[test]
+fn opaque_error_display_and_transport_diagnostics_preserve_context() {
+    for index in [None, Some(3)] {
+        let error = VfError::transport_with_kind(index, TransportKind::Timeout, "wire diagnostic")
+            .with_context("read", "/file");
+        assert_eq!(error.transport_message(), Some("wire diagnostic"));
+        assert_eq!(error.transport_kind(), Some(TransportKind::Timeout));
+        assert_eq!(error.domain(), ErrorDomain::Transport);
+        assert_eq!(error.raw_code(), vfsi_core::VF_ERR_RPC);
+        assert_eq!(error.status(), None);
+        assert_eq!(error.clone(), error);
+        let expected = match index {
+            Some(_) => "op 3 (read) for /file transport error: wire diagnostic",
+            None => "read for /file transport error: wire diagnostic",
+        };
+        assert_eq!(error.to_string(), expected);
+        let mapped = error.map_index(|index| index + 2);
+        assert_eq!(mapped.index(), index.map(|index| index + 2));
+        assert_eq!(mapped.transport_message(), Some("wire diagnostic"));
+        assert_eq!(mapped.transport_kind(), Some(TransportKind::Timeout));
+    }
+    assert_eq!(
+        VfError::transport(None, "wire").to_string(),
+        "transport error: wire"
+    );
+    assert_eq!(
+        VfError::transport(0, "wire").to_string(),
+        "op 0 transport error: wire"
+    );
+    let description = std::io::Error::from(std::io::ErrorKind::NotFound).to_string();
+    for (index, prefix, suffix) in [
+        (Some(3), "op 3 (read) for /file", ""),
+        (None, "read for /file", "; operation index unknown"),
+    ] {
+        let error = VfError::from_status(index, StatusCode::Errno(2)).with_context("read", "/file");
+        assert_eq!(
+            error.to_string(),
+            format!("{prefix} failed: {description} (Filesystem status 2{suffix})")
+        );
+    }
 }

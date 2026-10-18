@@ -25,7 +25,7 @@ fn open_after_create_probe<T>(
         Err(error)
             if !excl
                 && error.domain() == vfsi_core::ErrorDomain::Nfs
-                && error.err_no() == nfsstat4_NFS4ERR_EXIST =>
+                && error.raw_code() == nfsstat4_NFS4ERR_EXIST =>
         {
             open(false, false).map(|opened| (opened, false))
         }
@@ -216,7 +216,7 @@ impl HandleBackend for NfsVecFs {
             } else {
                 match self.resolve_path(&full, false) {
                     Ok(_) => false,
-                    Err(error) if error.err_no() == nfsstat4_NFS4ERR_NOENT => true,
+                    Err(error) if error.raw_code() == nfsstat4_NFS4ERR_NOENT => true,
                     Err(error) => return Err(error),
                 }
             }
@@ -451,7 +451,7 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.domain(), vfsi_core::ErrorDomain::Nfs);
-        assert_eq!(error.err_no(), nfsstat4_NFS4ERR_EXIST);
+        assert_eq!(error.raw_code(), nfsstat4_NFS4ERR_EXIST);
         assert_eq!(attempts, [(true, true)]);
     }
 }

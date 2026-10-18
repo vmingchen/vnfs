@@ -891,7 +891,7 @@ impl VectorBackend for NfsVecFs {
         // directory can share one compound instead of re-walking full paths.
         let mut frontier: Vec<(NfsFh, PathBuf)> = root_attrs
             .iter()
-            .filter(|entry| entry.ftype == VfType::Directory && options.max_depth() > 0)
+            .filter(|entry| entry.ftype == VfType::Directory && options.max_depth().get() > 0)
             .filter_map(|entry| {
                 entry
                     .file
@@ -982,7 +982,7 @@ impl VectorBackend for NfsVecFs {
                             .strip_prefix(root)
                             .map(|relative| relative.components().count())
                             .unwrap_or(usize::MAX)
-                            <= options.max_depth()
+                            <= options.max_depth().get()
                     {
                         next_frontier.push((results[index].fh.clone(), path.to_path_buf()));
                     }

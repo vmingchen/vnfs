@@ -29,7 +29,7 @@ fn mapping_preserves_final_links_and_rejects_escapes_and_destructive_dot_paths()
         session
             .map(root.path().join("link"), ResolvePath::Follow)
             .unwrap_err()
-            .err_no(),
+            .raw_code(),
         libc::EXDEV as u32
     );
     for suffix in ["/.", "/..", "/"] {
@@ -38,7 +38,7 @@ fn mapping_preserves_final_links_and_rejects_escapes_and_destructive_dot_paths()
             session
                 .map(spelling, ResolvePath::NoFollow)
                 .unwrap_err()
-                .err_no(),
+                .raw_code(),
             libc::EINVAL as u32
         );
     }
@@ -98,7 +98,7 @@ fn writer_bridge_handles_short_writes_and_never_replays_failed_output() {
         StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(3).unwrap()),
     )
     .unwrap_err();
-    assert_eq!(err.err_no(), libc::ENOSPC as u32);
+    assert_eq!(err.raw_code(), libc::ENOSPC as u32);
     assert_eq!(bad.bytes, b"0123");
     assert_eq!(bad.calls, 4);
 }
@@ -207,7 +207,7 @@ fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
             }
         )
         .unwrap_err()
-        .err_no(),
+        .raw_code(),
         libc::EFBIG as u32
     );
     assert_eq!(calls, 0);
@@ -223,7 +223,7 @@ fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
             |_, _| panic!("over-budget snapshot must not be delivered")
         )
         .unwrap_err()
-        .err_no(),
+        .raw_code(),
         libc::EFBIG as u32
     );
 }
@@ -241,7 +241,7 @@ fn ordered_walk_depth_zero_delivers_root_and_limits_descent_only() {
                 "/",
                 ListDirOptions::new()
                     .with_recursive(true)
-                    .with_max_depth(0)
+                    .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"))
                     .with_truncate_at_max_depth(truncate)
                     .with_fields(Attributes::MODE),
                 |a, b| a.path().cmp(b.path()),
@@ -267,7 +267,7 @@ fn ordered_walk_depth_zero_delivers_root_and_limits_descent_only() {
             "/",
             ListDirOptions::new()
                 .with_recursive(true)
-                .with_max_depth(0)
+                .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"))
                 .with_fields(Attributes::MODE),
             |a, b| a.path().cmp(b.path()),
             |_| true,
@@ -277,7 +277,7 @@ fn ordered_walk_depth_zero_delivers_root_and_limits_descent_only() {
             },
         )
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
     assert_eq!(strict_listings.len(), 1);
     assert_eq!(strict_listings[0].1, 0);
 
@@ -287,7 +287,7 @@ fn ordered_walk_depth_zero_delivers_root_and_limits_descent_only() {
             "/",
             ListDirOptions::new()
                 .with_recursive(true)
-                .with_max_depth(0)
+                .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"))
                 .with_truncate_at_max_depth(true)
                 .with_fields(Attributes::MODE),
             |a, b| a.path().cmp(b.path()),

@@ -42,6 +42,7 @@ struct CopyFlags {
 /// storage and traversal limits inherit the client's limits. Options never
 /// disable negotiated backend limits. Failure/cancellation leaves partial output.
 #[derive(Clone, Copy, Debug)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct TransferOptions {
     existing: Existing,
     layout: CopyLayout,
@@ -326,7 +327,7 @@ fn roots<P: AsRef<Path>>(
                 &paths,
                 AttrsOptions::new()
                     .with_fields(fields())
-                    .with_follow_symlinks(false),
+                    .with_follow_final_symlink(false),
             )
             .map_err(|e| mapped(e, batch))?;
         if metadata.len() != batch.len() {
@@ -573,7 +574,10 @@ fn copy_independent_roots(
                             .checked_add(1)
                             .ok_or_else(|| limit(parent.root, entry.path()))?;
                         if entry.attrs().is_dir()
-                            && depth > options.depth.map_or(limits.max_walk_depth(), |d| d.get())
+                            && depth
+                                > options
+                                    .depth
+                                    .map_or(limits.max_walk_depth().get(), |d| d.get())
                         {
                             if options.depth.is_some() {
                                 summary.entries_skipped += 1;
@@ -1105,7 +1109,7 @@ fn move_run<P: AsRef<Path>>(
                 .iter()
                 .map(|task| (&task.source, &task.destination))
                 .collect();
-            match fs.vrename(&pairs, crate::RenameOptions::NoReplace) {
+            match fs.vrename(&pairs, crate::RenameMode::NoReplace) {
                 Ok(()) => summary.roots_renamed += renames.len() as u64,
                 Err(error) if !error.is_transport() => {
                     // A strict batch may have renamed a prefix. Do not infer that

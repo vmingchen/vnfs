@@ -118,7 +118,7 @@ impl NfsVecFs {
                         if e.is_transport() {
                             return Err(e);
                         }
-                        let err = e.err_no();
+                        let err = e.raw_code();
                         for (i, _) in &entries {
                             out[*i] = Err(err);
                         }
@@ -142,7 +142,7 @@ impl NfsVecFs {
                             self.resolve_path_and_type(&full, true)
                         }) {
                             Ok(result) => Ok(result),
-                            Err(error) => Err(error.err_no()),
+                            Err(error) => Err(error.raw_code()),
                         };
                     }
                     Err(status) => out[*i] = Err(status),
@@ -327,7 +327,7 @@ impl NfsVecFs {
             let abs_path = path_from_bytes(&abs);
             let st = match self.lstat_impl(&abs_path) {
                 Ok(s) => s,
-                Err(e) if e.err_no() == ERR_NOENT => return Ok(path_from_bytes(&current)),
+                Err(e) if e.raw_code() == ERR_NOENT => return Ok(path_from_bytes(&current)),
                 Err(e) => return Err(e),
             };
             if st.ftype != VfType::Symlink {

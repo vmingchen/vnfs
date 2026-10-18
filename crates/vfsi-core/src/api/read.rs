@@ -4,15 +4,16 @@ use std::path::Path;
 
 /// One consuming read operation. Construction performs no I/O or allocation.
 /// Caller buffers are borrowed only until `Vfsi::vread` returns, including on errors.
-pub struct ReadOp<'a, H: crate::api::OpenFd + 'a> {
+#[must_use = "configuration and requests have no effect until used"]
+pub struct ReadOp<'a, H: crate::api::FileHandle + 'a> {
     source: OpSource<'a, H>,
 }
-enum OpSource<'a, H: crate::api::OpenFd + 'a> {
+enum OpSource<'a, H: crate::api::FileHandle + 'a> {
     Whole(&'a Path),
     Range(&'a H, u64, usize),
     Into(&'a H, u64, &'a mut [u8]),
 }
-impl<H: crate::api::OpenFd> std::fmt::Debug for ReadOp<'_, H> {
+impl<H: crate::api::FileHandle> std::fmt::Debug for ReadOp<'_, H> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.source {
             OpSource::Whole(path) => formatter.debug_tuple("ReadOp::whole").field(path).finish(),
@@ -27,17 +28,17 @@ impl<H: crate::api::OpenFd> std::fmt::Debug for ReadOp<'_, H> {
         }
     }
 }
-impl<'a, H: crate::api::OpenFd + 'a> From<&'a str> for ReadOp<'a, H> {
+impl<'a, H: crate::api::FileHandle + 'a> From<&'a str> for ReadOp<'a, H> {
     fn from(path: &'a str) -> Self {
         Self::whole(path)
     }
 }
-impl<'a, H: crate::api::OpenFd + 'a> From<&'a Path> for ReadOp<'a, H> {
+impl<'a, H: crate::api::FileHandle + 'a> From<&'a Path> for ReadOp<'a, H> {
     fn from(path: &'a Path) -> Self {
         Self::whole(path)
     }
 }
-impl<'a, H: crate::api::OpenFd + 'a> ReadOp<'a, H> {
+impl<'a, H: crate::api::FileHandle + 'a> ReadOp<'a, H> {
     /// Collect a complete file; fail instead of truncating at the byte budget.
     pub fn whole<P: AsRef<Path> + ?Sized>(path: &'a P) -> Self {
         Self {
@@ -81,59 +82,84 @@ impl<'a, H: crate::api::OpenFd + 'a> ReadOp<'a, H> {
 }
 
 /// Progress for one operation, with no borrowed references to caller storage.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ReadResult {
-    /// Resolved absolute offset; zero for a complete-file operation.
-    pub(crate) offset: u64,
-    /// Number of valid bytes in owned data or the caller's buffer.
-    pub(crate) bytes_read: usize,
-    /// True when the backend observed end of file.
-    pub(crate) eof: bool,
-    /// Owned contents for `whole`/`range`; `None` for `into`, including empty reads.
-    pub(crate) data: Option<Vec<u8>>,
+    offset: u64,
+    eof: bool,
+    payload: ReadPayload,
 }
-
+#[derive(Clone, PartialEq, Eq)]
+enum ReadPayload {
+    Owned(Vec<u8>),
+    Buffered(usize),
+}
+impl std::fmt::Debug for ReadResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadResult")
+            .field("offset", &self.offset())
+            .field("bytes_read", &self.bytes_read())
+            .field("eof", &self.eof())
+            .field("data", &self.data())
+            .finish()
+    }
+}
 impl ReadResult {
     /// Owned contents. The byte count is derived, never independently supplied.
     pub fn owned(offset: u64, data: Vec<u8>, eof: bool) -> Self {
         Self {
             offset,
-            bytes_read: data.len(),
             eof,
-            data: Some(data),
+            payload: ReadPayload::Owned(data),
         }
     }
-    /// Progress in caller storage, for implementing `Vfsi`. The implementation
-    /// must ensure `bytes_read` does not exceed the corresponding destination length.
+    /// Progress in caller storage, for implementing Vfsi. The implementation
+    /// must keep bytes_read within the corresponding destination length.
     pub const fn buffered(offset: u64, bytes_read: usize, eof: bool) -> Self {
         Self {
             offset,
-            bytes_read,
             eof,
-            data: None,
+            payload: ReadPayload::Buffered(bytes_read),
         }
     }
     pub const fn offset(&self) -> u64 {
         self.offset
     }
-    /// Number of valid bytes in the owned data or caller-provided buffer.
+    /// Number of valid bytes in owned data or caller-provided storage.
     pub const fn bytes_read(&self) -> usize {
-        self.bytes_read
+        match &self.payload {
+            ReadPayload::Owned(data) => data.len(),
+            ReadPayload::Buffered(count) => *count,
+        }
     }
     pub const fn eof(&self) -> bool {
         self.eof
     }
     pub fn data(&self) -> Option<&[u8]> {
-        self.data.as_deref()
+        match &self.payload {
+            ReadPayload::Owned(data) => Some(data.as_slice()),
+            ReadPayload::Buffered(_) => None,
+        }
     }
     pub fn into_data(self) -> Option<Vec<u8>> {
-        self.data
+        match self.payload {
+            ReadPayload::Owned(data) => Some(data),
+            ReadPayload::Buffered(_) => None,
+        }
     }
     pub const fn is_buffered(&self) -> bool {
-        self.data.is_none()
+        matches!(&self.payload, ReadPayload::Buffered(_))
     }
 }
 
+/// Fluent configuration must be retained; discarding a changed copy is diagnosed.
+///
+/// ```compile_fail
+/// #![deny(unused_must_use)]
+/// use vfsi_core::api::ReadOptions;
+/// let options = ReadOptions::new();
+/// options.with_max_total_bytes(std::num::NonZeroUsize::new(4096).unwrap());
+/// ```
+///
 /// Aggregate logical byte budget, defaulting to the client's policy (16 MiB).
 /// Range request lengths must fit even if EOF returns fewer bytes. Complete
 /// files share the remaining returned-data budget and fail rather than truncate.
@@ -142,13 +168,20 @@ impl ReadResult {
 /// use std::num::NonZeroUsize;
 /// use vfsi_core::api::ReadOptions;
 /// let inherited = ReadOptions::new();
-/// let limited = inherited.with_max_total_bytes(NonZeroUsize::new(4096));
+/// let limited = inherited.with_max_total_bytes(NonZeroUsize::new(4096).unwrap());
 /// assert_eq!(limited.max_total_bytes(), NonZeroUsize::new(4096));
 /// assert_eq!(limited.max_total_bytes_or(8192), 4096);
 /// assert_eq!(inherited.max_total_bytes(), None);
 /// assert_eq!(inherited.max_total_bytes_or(8192), 8192);
 /// ```
+/// Overrides require an explicitly validated nonzero value.
+///
+/// ```compile_fail
+/// use vfsi_core::api::ReadOptions;
+/// ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(0));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct ReadOptions {
     max_total_bytes: Option<std::num::NonZeroUsize>,
 }
@@ -159,11 +192,11 @@ impl ReadOptions {
             max_total_bytes: None,
         }
     }
-    /// Override the aggregate budget for this call; `None` restores inheritance.
+    /// Override the aggregate budget for this call. New options inherit client policy.
     /// Only nonzero overrides are representable. Stream larger files instead
     /// of raising this when bounded memory is required.
-    pub const fn with_max_total_bytes(mut self, bytes: Option<std::num::NonZeroUsize>) -> Self {
-        self.max_total_bytes = bytes;
+    pub const fn with_max_total_bytes(mut self, bytes: std::num::NonZeroUsize) -> Self {
+        self.max_total_bytes = Some(bytes);
         self
     }
     /// Return the configured override, not the effective client budget.
@@ -183,7 +216,7 @@ impl Default for ReadOptions {
         Self::new()
     }
 }
-pub fn consume_ops<'a, H: crate::api::OpenFd + 'a, R, B>(
+pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
     ops: impl IntoIterator<Item = ReadOp<'a, H>>,
     budget: usize,
     range: impl Fn(&'a H, u64, usize) -> R,
@@ -191,13 +224,77 @@ pub fn consume_ops<'a, H: crate::api::OpenFd + 'a, R, B>(
     owned: impl FnOnce(&[ReadRequest<'a, R>], usize) -> Result<Vec<OwnedReadResult>>,
     buffers: impl FnOnce(&mut [B], usize) -> Result<Vec<crate::api::ReadIntoResult>>,
 ) -> Result<Vec<ReadResult>> {
+    let mut ops = ops.into_iter();
+    let Some(first) = ops.next() else {
+        return Ok(Vec::new());
+    };
+    let second = ops.next();
+    if second.is_none() {
+        let length = match &first.source {
+            OpSource::Whole(_) => 0,
+            OpSource::Range(_, _, length) => *length,
+            OpSource::Into(_, _, buffer) => buffer.len(),
+        };
+        if length > budget {
+            return Err(Error::client(0, libc::EFBIG as u32));
+        }
+        let remap = |error: Error| match error.index() {
+            Some(0) | None => error,
+            Some(_) => Error::transport(None, "invalid vread_native backend error index"),
+        };
+        let request = match first.source {
+            OpSource::Whole(path) => ReadRequest::whole_file(path),
+            OpSource::Range(file, offset, length) => {
+                ReadRequest::range(range(file, offset, length))
+            }
+            OpSource::Into(file, offset, buffer) => {
+                let values = buffers(&mut [into(file, offset, buffer)], budget).map_err(remap)?;
+                if values.len() != 1 {
+                    return Err(Error::transport(
+                        None,
+                        "invalid vread_native buffer result count",
+                    ));
+                }
+                if values[0].bytes_read > budget {
+                    return Err(Error::transport(
+                        None,
+                        "vread_native backend exceeded byte budget",
+                    ));
+                }
+                return Ok(values
+                    .into_iter()
+                    .map(|result| {
+                        ReadResult::buffered(result.offset, result.bytes_read, result.eof)
+                    })
+                    .collect());
+            }
+        };
+        let values = owned(&[request], budget).map_err(remap)?;
+        if values.len() != 1 {
+            return Err(Error::transport(
+                None,
+                "invalid vread_native owned result count",
+            ));
+        }
+        if values[0].data.len() > budget {
+            return Err(Error::transport(
+                None,
+                "vread_native backend exceeded byte budget",
+            ));
+        }
+        return Ok(values
+            .into_iter()
+            .map(|result| ReadResult::owned(result.offset, result.data, result.eof))
+            .collect());
+    }
+    let ops = std::iter::once(first).chain(second).chain(ops);
     let mut owned_ops = Vec::new();
     let mut owned_indices = Vec::new();
     let mut buffer_ops = Vec::new();
     let mut buffer_indices = Vec::new();
     let mut requested = 0usize;
     let mut count = 0usize;
-    for (index, op) in ops.into_iter().enumerate() {
+    for (index, op) in ops.enumerate() {
         count += 1;
         let length = match &op.source {
             OpSource::Whole(_) => 0,
@@ -257,25 +354,33 @@ pub fn consume_ops<'a, H: crate::api::OpenFd + 'a, R, B>(
             "invalid vread_native owned result count",
         ));
     }
-    let mut output: Vec<Option<ReadResult>> = (0..count).map(|_| None).collect();
-    for (index, result) in buffer_indices.into_iter().zip(buffered) {
-        output[index] = Some(ReadResult {
-            offset: result.offset,
-            bytes_read: result.bytes_read,
-            eof: result.eof,
-            data: None,
-        });
-    }
-    for (index, result) in owned_indices.into_iter().zip(allocated) {
+    for result in &allocated {
         remaining = remaining
             .checked_sub(result.data.len())
             .ok_or_else(|| Error::transport(None, "vread_native backend exceeded byte budget"))?;
-        output[index] = Some(ReadResult {
-            offset: result.offset,
-            bytes_read: result.data.len(),
-            eof: result.eof,
-            data: Some(result.data),
-        });
+    }
+    if buffer_indices.is_empty() {
+        return Ok(allocated
+            .into_iter()
+            .map(|result| ReadResult::owned(result.offset, result.data, result.eof))
+            .collect());
+    }
+    if owned_indices.is_empty() {
+        return Ok(buffered
+            .into_iter()
+            .map(|result| ReadResult::buffered(result.offset, result.bytes_read, result.eof))
+            .collect());
+    }
+    let mut output: Vec<Option<ReadResult>> = (0..count).map(|_| None).collect();
+    for (index, result) in buffer_indices.into_iter().zip(buffered) {
+        output[index] = Some(ReadResult::buffered(
+            result.offset,
+            result.bytes_read,
+            result.eof,
+        ));
+    }
+    for (index, result) in owned_indices.into_iter().zip(allocated) {
+        output[index] = Some(ReadResult::owned(result.offset, result.data, result.eof));
     }
     output
         .into_iter()
@@ -410,18 +515,51 @@ mod option_layout_tests {
         let mut options = ReadOptions::new();
         assert_eq!(options.max_total_bytes_or(7), 7);
         for bytes in [1, 42, usize::MAX] {
-            let limit = NonZeroUsize::new(bytes);
+            let limit = NonZeroUsize::new(bytes).unwrap();
             options = options.with_max_total_bytes(limit);
-            assert_eq!(options.max_total_bytes(), limit);
+            assert_eq!(options.max_total_bytes(), Some(limit));
             assert_eq!(options.max_total_bytes_or(7), bytes);
         }
-        options = options.with_max_total_bytes(None);
+        options = ReadOptions::new();
         assert_eq!(options.max_total_bytes(), None);
         assert_eq!(options.max_total_bytes_or(7), 7);
         assert_eq!(
             options.max_total_bytes_or(0),
             0,
             "an inherited zero policy must not become unlimited"
+        );
+    }
+}
+
+#[cfg(test)]
+mod compact_read_tests {
+    use super::*;
+    #[test]
+    fn compact_read_results_preserve_owned_and_buffered_empty_progress() {
+        if cfg!(target_pointer_width = "64") {
+            assert_eq!(std::mem::size_of::<ReadResult>(), 40);
+        }
+        let owned = ReadResult::owned(7, Vec::new(), true);
+        const BUFFERED: ReadResult = ReadResult::buffered(7, 0, true);
+        assert_eq!(owned.bytes_read(), 0);
+        assert_eq!(owned.offset(), BUFFERED.offset());
+        assert_eq!(owned.eof(), BUFFERED.eof());
+        assert_eq!(owned.data(), Some(b"".as_slice()));
+        assert_eq!(BUFFERED.data(), None);
+        assert_ne!(owned, BUFFERED);
+        assert!(!owned.is_buffered());
+        assert!(BUFFERED.is_buffered());
+        assert_eq!(owned.clone().into_data(), Some(Vec::new()));
+        assert_eq!(BUFFERED.clone().into_data(), None);
+        let data = vec![1, 2, 3];
+        let pointer = data.as_ptr();
+        let result = ReadResult::owned(9, data, false);
+        assert_eq!(result.bytes_read(), 3);
+        let extracted = result.into_data().unwrap();
+        assert_eq!(extracted.as_ptr(), pointer);
+        assert_eq!(
+            ReadResult::buffered(0, usize::MAX, false).bytes_read(),
+            usize::MAX
         );
     }
 }

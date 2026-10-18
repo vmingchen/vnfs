@@ -1901,7 +1901,7 @@ impl NfsClient {
                         if error.is_transport() {
                             RpcError::transport(error.to_string())
                         } else {
-                            RpcError::op(start, error.err_no())
+                            RpcError::op(start, error.raw_code())
                         }
                     })?;
             }

@@ -200,15 +200,13 @@ fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
     let what = path
         .map(|p| format!(": '{}'", p.display()))
         .unwrap_or_default();
-    let error = match e {
-        error if error.kind() == std::io::ErrorKind::Unsupported => {
-            let context = if error.path() == path { "" } else { &what };
-            PyErr::new::<PyNotImplementedError, _>(format!("{error}{context}"))
-        }
-        VfError::Transport { message, .. } => {
-            PyErr::new::<PyConnectionError, _>(format!("{}{}", message, what))
-        }
-        VfError::Op { err_no, .. } | VfError::OpUnattributed { err_no, .. } => match err_no {
+    let error = if e.kind() == std::io::ErrorKind::Unsupported {
+        let context = if e.path() == path { "" } else { &what };
+        PyErr::new::<PyNotImplementedError, _>(format!("{e}{context}"))
+    } else if let Some(message) = e.transport_message() {
+        PyErr::new::<PyConnectionError, _>(format!("{message}{what}"))
+    } else {
+        match e.raw_code() {
             ERR_NOENT => {
                 PyErr::new::<PyFileNotFoundError, _>((2, "No such file or directory", filename))
             }
@@ -218,8 +216,7 @@ fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
             ERR_ISDIR => PyErr::new::<PyIsADirectoryError, _>((21, "Is a directory", filename)),
             ERR_INVAL => PyErr::new::<PyOSError, _>((22, "Invalid argument", filename)),
             other => PyErr::new::<PyOSError, _>((other, "op failed", filename)),
-        },
-        _ => PyErr::new::<PyOSError, _>("unknown vnfs error"),
+        }
     };
     if let Some(index) = index {
         Python::attach(|py| {
@@ -370,6 +367,16 @@ fn fs_obj_id(attrs: &VfAttrs) -> Option<vfsi_core::FsObjId> {
         .returned
         .contains(AttrMask::identity())
         .then(|| vfsi_core::FsObjId::new(attrs.fs_id, attrs.fileid))
+}
+
+fn checked_depth(depth: usize) -> PyResult<vfsi_core::api::DepthLimit> {
+    if depth == usize::MAX {
+        Ok(vfsi_core::api::DepthLimit::unlimited())
+    } else {
+        vfsi_core::api::DepthLimit::new(depth).ok_or_else(|| {
+            PyValueError::new_err("depth must be at most 65533, or usize::MAX for unlimited")
+        })
+    }
 }
 
 fn full_mask() -> AttrMask {
@@ -524,7 +531,7 @@ fn attrs_many_impl(
                     return Err(e);
                 }
                 let orig = remaining[bi];
-                errors.insert(orig, e.err_no());
+                errors.insert(orig, e.raw_code());
                 remaining.remove(bi);
             }
         }
@@ -566,7 +573,7 @@ fn read_allv_impl(
                     return Err(e);
                 }
                 let orig = remaining[bi];
-                errors.insert(orig, e.err_no());
+                errors.insert(orig, e.raw_code());
                 remaining.remove(bi);
             }
         }
@@ -687,7 +694,7 @@ fn mount_error(error: VfError, path: &Path) -> PyErr {
     if error.is_transport() {
         to_py_err(error, Some(path))
     } else {
-        PyOSError::new_err((error.err_no(), error.to_string(), path.to_path_buf()))
+        PyOSError::new_err((error.raw_code(), error.to_string(), path.to_path_buf()))
     }
 }
 
@@ -749,6 +756,7 @@ impl NfsClient {
         mount_config: Option<Py<MountConfiguration>>,
         auto_reconnect: bool,
     ) -> PyResult<Self> {
+        checked_depth(walk_max_depth)?;
         let mount_config = mount_config.map(|config| config.borrow(py).clone());
         if mount_config.is_some() && (backend != "nfs" || root.is_some()) {
             return Err(PyValueError::new_err(
@@ -1190,7 +1198,7 @@ impl NfsClient {
                             return Err(to_py_err(error, None));
                         }
                         let original_index = remaining.remove(batch_index);
-                        errors.insert(original_index, error.err_no());
+                        errors.insert(original_index, error.raw_code());
                     }
                 }
             }
@@ -1557,7 +1565,7 @@ impl NfsClient {
                             return Err(to_py_err(e, None));
                         }
                         let orig = remaining[bi];
-                        errors.insert(orig, e.err_no());
+                        errors.insert(orig, e.raw_code());
                         results[orig] = None;
                         remaining.remove(bi);
                     }
@@ -1775,7 +1783,7 @@ impl NfsClient {
                                 .with_recursive(true)
                                 .with_max_entries(max_entries)
                                 .with_max_path_bytes(max_path_bytes)
-                                .with_max_depth(max_depth),
+                                .with_max_depth(checked_depth(max_depth)?),
                             &mut no_sort,
                         )
                         .map_err(|e| to_py_err(e, Some(p.as_path())))?
@@ -1824,15 +1832,18 @@ impl NfsClient {
         sort: bool,
         max_depth: Option<usize>,
     ) -> PyResult<WalkResult> {
+        if let Some(depth) = max_depth {
+            checked_depth(depth)?;
+        }
         let options = ListDirOptions::new()
             .with_recursive(true)
             .with_max_entries(self.directory_max_entries)
             .with_max_path_bytes(self.directory_max_path_bytes)
-            .with_max_depth(
+            .with_max_depth(checked_depth(
                 max_depth
                     .unwrap_or(self.walk_max_depth)
                     .min(self.walk_max_depth),
-            )
+            )?)
             .with_truncate_at_max_depth(
                 max_depth.is_some_and(|depth| depth <= self.walk_max_depth),
             );
@@ -2088,7 +2099,7 @@ impl NfsClient {
                             data[index] = None;
                         }
                         let original_index = write_remaining[batch_index];
-                        errors.insert(original_index, error.err_no());
+                        errors.insert(original_index, error.raw_code());
                         data[original_index] = None;
                         write_remaining.drain(..=batch_index);
                     }
@@ -2201,7 +2212,7 @@ impl NfsClient {
                             return Err(to_py_err(e, None));
                         }
                         let failed = remaining[bi];
-                        errors.insert(failed, e.err_no());
+                        errors.insert(failed, e.raw_code());
                         let mut next = Vec::new();
                         for (batch_index, (&index, &length)) in
                             remaining.iter().zip(&chunks).enumerate()
@@ -2321,6 +2332,26 @@ impl BindingBackend for SmbVecFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn walk_rejects_invalid_depth_before_clamping_or_backend_io() {
+        Python::initialize();
+        Python::attach(|py| {
+            let root = prr_test_support::TestRoot::new();
+            let backend = prr_test_support::FaultBackend::new(&root.0, None);
+            let attrs_calls = backend.attrs_calls.clone();
+            let client = prr_test_support::client(backend);
+            for depth in [65534, 65535, usize::MAX - 1] {
+                let error = client
+                    .walk(py, PathBuf::from("/"), false, Some(depth))
+                    .unwrap_err();
+                assert!(error.is_instance_of::<PyValueError>(py));
+            }
+            assert!(attrs_calls.lock().unwrap().is_empty());
+            assert_eq!(checked_depth(201).unwrap().get(), 201);
+            assert!(checked_depth(usize::MAX).unwrap().is_unlimited());
+        });
+    }
 
     #[test]
     fn referral_exceptions_preserve_diagnostics_paths_and_optional_indices() {
@@ -2671,7 +2702,7 @@ mod aggregate_listdir_error_tests {
         };
         let error = aggregate_listdirs(&mut backend, &paths, 2, 100).unwrap_err();
         assert_eq!(
-            (error.err_no(), error.index()),
+            (error.raw_code(), error.index()),
             (libc::EFBIG as u32, Some(0))
         );
         assert_eq!(backend.vector_entries, 3);
@@ -2688,7 +2719,7 @@ mod aggregate_listdir_error_tests {
         };
         let error = aggregate_listdirs(&mut backend, &paths, 100, 1).unwrap_err();
         assert_eq!(
-            (error.err_no(), error.index()),
+            (error.raw_code(), error.index()),
             (libc::EFBIG as u32, Some(0))
         );
         assert_eq!(backend.vector_entries, 1);
@@ -2721,7 +2752,7 @@ mod aggregate_listdir_error_tests {
         };
         let error = aggregate_listdirs(&mut backend, &paths, 1, 100).unwrap_err();
         assert_eq!(
-            (error.err_no(), error.index()),
+            (error.raw_code(), error.index()),
             (libc::EFBIG as u32, Some(0))
         );
         assert_eq!(backend.vector_entries, 2);

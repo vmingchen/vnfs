@@ -11,6 +11,7 @@ struct WriteFlags {
 /// Policy for positional vector writes. Defaults to reporting short writes.
 /// Completion is not atomicity, durability, or permission to replay failed RPCs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct WriteOptions {
     flags: WriteFlags,
 }
@@ -38,6 +39,7 @@ impl WriteOptions {
 /// Construction performs no I/O or allocation. Does not change the file cursor.
 /// Uses the same storage definition as the native [`crate::WriteOp`].
 #[repr(transparent)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct WriteOp<'a, H>(crate::internal::WriteRequest<&'a H, &'a [u8], u64, ()>);
 
 impl<H> Copy for WriteOp<'_, H> {}
@@ -53,12 +55,8 @@ impl<H> std::fmt::Debug for WriteOp<'_, H> {
 }
 impl<'a, H> WriteOp<'a, H> {
     /// Borrow a handle and payload at an absolute byte offset.
-    pub fn new(file: &'a H, offset: u64, data: &'a [u8]) -> Self {
-        Self(crate::internal::WriteRequest::new(file, offset, data))
-    }
-    /// Borrow a handle and payload at an absolute byte offset.
     pub fn at(file: &'a H, offset: u64, data: &'a [u8]) -> Self {
-        Self::new(file, offset, data)
+        Self(crate::internal::WriteRequest::new(file, offset, data))
     }
     pub fn file(&self) -> &'a H {
         self.0.file()

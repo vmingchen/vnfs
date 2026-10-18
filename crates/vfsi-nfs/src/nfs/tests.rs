@@ -59,7 +59,7 @@ fn read_only_mounts_reject_all_mutating_open_flags() {
     }
     assert!(check_mount_write(true, 0).is_ok());
     assert_eq!(
-        check_mount_write(true, 1).unwrap_err().err_no(),
+        check_mount_write(true, 1).unwrap_err().raw_code(),
         libc::EROFS as u32
     );
     assert!(check_mount_write(false, 1).is_ok());
@@ -93,7 +93,7 @@ fn live_read_only_mount_retains_restriction_after_native_reconnect() {
                 0o600
             )
             .unwrap_err()
-            .err_no(),
+            .raw_code(),
         libc::EROFS as u32
     );
     drop(backend);
@@ -272,7 +272,7 @@ fn walk_page_decoder_stops_at_entry_and_path_budgets() {
         &mut output,
     )
     .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
     assert_eq!(count, 1);
     assert_eq!(output.len(), 1);
 
@@ -295,7 +295,7 @@ fn walk_page_decoder_stops_at_entry_and_path_budgets() {
         &mut output,
     )
     .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
     assert_eq!(count, 0);
     assert!(output.is_empty());
 }
@@ -441,7 +441,7 @@ fn invalid_client_owner_fails_before_network_io() {
             .err()
             .expect("invalid client owner must be rejected");
         assert_eq!(error.domain(), ErrorDomain::Client);
-        assert_eq!(error.err_no(), ERR_INVAL);
+        assert_eq!(error.raw_code(), ERR_INVAL);
         assert_eq!(error.operation(), Some("connect"));
     }
 }
@@ -454,7 +454,7 @@ fn client_pool_validates_size_and_gives_explicit_owners_distinct_ids() {
             .err()
             .expect("invalid pool size must be rejected before network I/O");
         assert_eq!(error.domain(), ErrorDomain::Client);
-        assert_eq!(error.err_no(), ERR_INVAL);
+        assert_eq!(error.raw_code(), ERR_INVAL);
         assert_eq!(error.operation(), Some("connect_pool"));
     }
     let builder = NfsClientBuilder::new("unused").client_owner(vec![b'x'; 1024]);
@@ -565,7 +565,7 @@ fn live_reconnect_uses_resolved_mount_after_discovery_path_disappears() {
         backend
             .open_path_impl(VfPathBase::Abs, Path::new("forbidden"), libc::O_WRONLY, 0)
             .unwrap_err()
-            .err_no(),
+            .raw_code(),
         libc::EROFS as u32
     );
 }
@@ -686,7 +686,7 @@ fn live_nofollow_setattr_respects_symlink_semantics() {
     let error = backend
         .vsetattrs_raw_nofollow_impl(std::slice::from_ref(&mode_update))
         .unwrap_err();
-    assert_eq!(error.err_no(), VF_ERR_UNSUPPORTED);
+    assert_eq!(error.raw_code(), VF_ERR_UNSUPPORTED);
     let after_mode_link = snapshot(&mut backend, "/link", false);
     let after_mode_target = snapshot(&mut backend, "/target", true);
     assert_eq!(after_mode_link.mode, before_link.mode);
@@ -805,7 +805,7 @@ fn live_guarded_setattr_handles_symlink_cohorts_on_a_bounded_stack() {
             updates.push(update("/tail".into(), 0o666));
             let error = backend.vsetattrs_raw_impl(&updates).unwrap_err();
             assert_eq!(error.index(), Some(missing_index));
-            assert_eq!(error.err_no(), ERR_NOENT);
+            assert_eq!(error.raw_code(), ERR_NOENT);
             assert_eq!(
                 backend.stat_impl(Path::new("/tail")).unwrap().mode & 0o777,
                 0o640,

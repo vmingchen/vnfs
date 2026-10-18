@@ -9,7 +9,7 @@ impl<F: VectorBackend> FsClient<F> {
     pub(crate) fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         pairs: &[(P, Q)],
-        options: vfsi_core::api::RenameOptions,
+        options: vfsi_core::api::RenameMode,
     ) -> VfResult<()> {
         if pairs.is_empty() {
             return Ok(());

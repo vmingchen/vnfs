@@ -428,50 +428,74 @@ mod contract_tests {
 mod walk_depth_tests {
     use super::{DepthLimit, ListDirOptions};
     #[test]
-    fn depth_limit_is_one_byte_and_preserves_optional_inheritance() {
-        const UNLIMITED: DepthLimit = DepthLimit::new(201);
-        assert_eq!(std::mem::size_of::<DepthLimit>(), 1);
-        assert_eq!(std::mem::size_of::<Option<DepthLimit>>(), 1);
+    fn depth_limit_is_compact_and_finite_values_never_become_unlimited() {
+        const UNLIMITED: DepthLimit = DepthLimit::unlimited();
+        assert_eq!(std::mem::size_of::<DepthLimit>(), 2);
+        assert_eq!(std::mem::size_of::<Option<DepthLimit>>(), 2);
         assert!(UNLIMITED.is_unlimited());
-        for depth in 0..=200 {
-            let limit = DepthLimit::new(depth);
+        for depth in (0..=200).chain([201, 255, 256, 500, 65533]) {
+            let limit = DepthLimit::new(depth).unwrap();
             assert!(!limit.is_unlimited());
             assert_eq!(limit.get(), depth);
         }
-        for depth in [201, 255, 256, 500, usize::MAX - 1, usize::MAX] {
-            assert_eq!(DepthLimit::new(depth), DepthLimit::unlimited());
+        for depth in [65534, 65535, usize::MAX - 1, usize::MAX] {
+            assert_eq!(DepthLimit::new(depth), None);
         }
-        assert_ne!(None, Some(DepthLimit::new(0)));
+        assert_ne!(None, DepthLimit::new(0));
         assert_ne!(None, Some(DepthLimit::unlimited()));
     }
     #[test]
     fn depth_limits_normalize_without_wrapping_and_keep_other_options() {
         const UNLIMITED: ListDirOptions = ListDirOptions::new()
             .with_recursive(true)
-            .with_max_depth(201);
-        assert_eq!(UNLIMITED.max_depth(), usize::MAX);
+            .with_max_depth(DepthLimit::unlimited());
+        assert_eq!(UNLIMITED.max_depth().get(), usize::MAX);
         for depth in 0..=200 {
             let options = ListDirOptions::new()
                 .with_recursive(true)
-                .with_max_depth(depth)
+                .with_max_depth(if depth == usize::MAX {
+                    vfsi_core::api::DepthLimit::unlimited()
+                } else {
+                    vfsi_core::api::DepthLimit::new(depth).expect("finite depth")
+                })
                 .with_max_entries(7)
                 .with_max_path_bytes(11)
                 .with_truncate_at_max_depth(true);
-            assert_eq!(options.max_depth(), depth);
+            assert_eq!(options.max_depth().get(), depth);
             assert_eq!(options.max_entries(), 7);
             assert_eq!(options.max_path_bytes(), 11);
             assert!(options.truncate_at_max_depth());
         }
-        for depth in [201, 254, 255, 256, 500, usize::MAX - 1, usize::MAX] {
-            let options = ListDirOptions::new()
-                .with_recursive(true)
-                .with_max_depth(depth);
-            assert_eq!(options.max_depth(), usize::MAX);
-            assert_eq!(options.with_max_depth(0).max_depth(), 0);
-            assert_eq!(options.with_max_depth(200).max_depth(), 200);
+        for depth in [201, 254, 255, 256, 500, 65533, usize::MAX] {
+            let options =
+                ListDirOptions::new()
+                    .with_recursive(true)
+                    .with_max_depth(if depth == usize::MAX {
+                        vfsi_core::api::DepthLimit::unlimited()
+                    } else {
+                        vfsi_core::api::DepthLimit::new(depth).expect("finite depth")
+                    });
+            assert_eq!(options.max_depth().get(), depth);
+            assert_eq!(
+                options
+                    .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"))
+                    .max_depth()
+                    .get(),
+                0
+            );
+            assert_eq!(
+                options
+                    .with_max_depth(vfsi_core::api::DepthLimit::new(200).expect("finite depth"))
+                    .max_depth()
+                    .get(),
+                200
+            );
         }
         assert_eq!(
-            ListDirOptions::unlimited().with_recursive(true).max_depth(),
+            ListDirOptions::unlimited()
+                .with_recursive(true)
+                .max_depth()
+                .get(),
             usize::MAX
         );
     }

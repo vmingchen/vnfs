@@ -4,6 +4,7 @@ use std::path::Path;
 /// Construction performs no I/O and can borrow the path without allocating.
 /// Parents must exist; submit independent siblings together with [`super::Vfsi::vmkdir`].
 #[derive(Clone, Copy, Debug)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct MkDirOp<P> {
     path: P,
     mode: u32,

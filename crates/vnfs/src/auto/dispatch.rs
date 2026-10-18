@@ -1207,12 +1207,12 @@ impl Auto {
     pub(crate) fn vrename_impl<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         pairs: &[(P, Q)],
-        options: crate::RenameOptions,
+        options: crate::RenameMode,
     ) -> VfResult<()> {
         if pairs.is_empty() {
             return Ok(());
         }
-        if options != crate::RenameOptions::Replace {
+        if options != crate::RenameMode::Replace {
             let mounts = read_mounts(false);
             for (index, (source, destination)) in pairs.iter().enumerate() {
                 let a = self.resolve(source.as_ref(), &mounts);

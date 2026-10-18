@@ -54,38 +54,28 @@ pub const NF4FIFO: u32 = 7;
 /// because some failures cannot be attributed to one request).
 /// An indexed failure does not roll back an already-completed prefix, and a
 /// transport failure can make the outcome of an in-flight mutation ambiguous.
+///
+/// Construct errors through the typed factories and inspect them through methods;
+/// status domains and transport provenance cannot be modified independently.
+///
+/// ```compile_fail
+/// let mut error = vfsi_core::VfError::failure(0, 2);
+/// error.index = Some(9);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum VfError {
-    /// A filesystem status failure; `err_no` is errno-style or an NFS4ERR
-    /// code, mirroring the C `tc_res` struct.
-    Op {
-        index: usize,
-        err_no: u32,
-        domain: ErrorDomain,
-        operation: Option<&'static str>,
-        path: Option<PathBuf>,
-    },
-    /// A filesystem / protocol status that cannot be attributed to a specific
-    /// operation index (for example a compound-level failure with no per-op
-    /// result). Unlike [`Op`](VfError::Op), it does not pretend the failure is
-    /// operation 0. [`index`](VfError::index) reports `None`.
-    OpUnattributed {
-        err_no: u32,
-        domain: ErrorDomain,
-        operation: Option<&'static str>,
-        path: Option<PathBuf>,
-    },
-    /// A transport / client-side failure with a human-readable message; there
-    /// is no filesystem status ([`err_no`](VfError::err_no) reports
-    /// [`VF_ERR_RPC`]). `index` is `None` when the failure cannot be
-    /// attributed to any operation.
+pub struct VfError {
+    index: Option<usize>,
+    detail: ErrorDetail,
+    operation: Option<&'static str>,
+    path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ErrorDetail {
+    Status(StatusCode),
     Transport {
-        index: Option<usize>,
         kind: TransportKind,
         message: String,
-        operation: Option<&'static str>,
-        path: Option<PathBuf>,
     },
 }
 
@@ -111,46 +101,32 @@ pub enum StatusCode {
 }
 
 impl VfError {
-    pub fn failure(index: usize, err_no: u32) -> VfError {
-        VfError::Op {
-            index,
-            err_no,
-            domain: ErrorDomain::Filesystem,
+    /// A typed status, with an optional logical request index.
+    pub fn from_status(index: impl Into<Option<usize>>, status: StatusCode) -> Self {
+        Self {
+            index: index.into(),
+            detail: ErrorDetail::Status(status),
             operation: None,
             path: None,
         }
     }
 
+    pub fn failure(index: usize, err_no: u32) -> VfError {
+        Self::from_status(index, StatusCode::Errno(err_no))
+    }
+
     pub fn client(index: usize, code: u32) -> VfError {
-        VfError::Op {
-            index,
-            err_no: code,
-            domain: ErrorDomain::Client,
-            operation: None,
-            path: None,
-        }
+        Self::from_status(index, StatusCode::Client(code))
     }
 
     /// A status returned by an NFS server.
     pub fn nfs(index: usize, status: u32) -> VfError {
-        VfError::Op {
-            index,
-            err_no: status,
-            domain: ErrorDomain::Nfs,
-            operation: None,
-            path: None,
-        }
+        Self::from_status(index, StatusCode::Nfs(status))
     }
 
     /// A status returned by an SMB server.
     pub fn smb(index: usize, status: u32) -> VfError {
-        VfError::Op {
-            index,
-            err_no: status,
-            domain: ErrorDomain::Smb,
-            operation: None,
-            path: None,
-        }
+        Self::from_status(index, StatusCode::Smb(status))
     }
 
     /// A transport / client-side failure. `index` is best-effort; pass `None`
@@ -164,10 +140,12 @@ impl VfError {
         kind: TransportKind,
         message: impl Into<String>,
     ) -> VfError {
-        VfError::Transport {
+        Self {
             index: index.into(),
-            kind,
-            message: message.into(),
+            detail: ErrorDetail::Transport {
+                kind,
+                message: message.into(),
+            },
             operation: None,
             path: None,
         }
@@ -181,227 +159,136 @@ impl VfError {
     /// An index is not a completion boundary: this item can itself contain
     /// completed chunks, and other requests can already have changed state.
     pub fn index(&self) -> Option<usize> {
-        match self {
-            VfError::Op { index, .. } => Some(*index),
-            VfError::OpUnattributed { .. } => None,
-            VfError::Transport { index, .. } => *index,
-        }
+        self.index
     }
 
-    /// Raw compatibility code: errno, NFS status, SMB status, or [`VF_ERR_RPC`].
+    /// Raw code in the error's status domain, or [`VF_ERR_RPC`] for transport.
     /// Application code should use [`kind`](Self::kind) or typed
     /// [`status`](Self::status), not compare this value to errno constants.
-    pub fn err_no(&self) -> u32 {
-        match self {
-            VfError::Op { err_no, .. } | VfError::OpUnattributed { err_no, .. } => *err_no,
-            VfError::Transport { .. } => VF_ERR_RPC,
+    pub fn raw_code(&self) -> u32 {
+        match self.status() {
+            Some(
+                StatusCode::Errno(code)
+                | StatusCode::Nfs(code)
+                | StatusCode::Smb(code)
+                | StatusCode::Client(code),
+            ) => code,
+            None => VF_ERR_RPC,
         }
     }
 
-    /// Whether this is a transport / client-side failure (no filesystem
-    /// status).
+    /// Whether this is a transport failure with no filesystem status.
     pub fn is_transport(&self) -> bool {
-        matches!(self, VfError::Transport { .. })
+        matches!(&self.detail, ErrorDetail::Transport { .. })
     }
 
     /// Transport provenance only; this never authorizes mutation replay.
     pub fn transport_kind(&self) -> Option<TransportKind> {
-        match self {
-            Self::Transport { kind, .. } => Some(*kind),
+        match &self.detail {
+            ErrorDetail::Transport { kind, .. } => Some(*kind),
+            _ => None,
+        }
+    }
+
+    /// The backend's transport diagnostic, without formatted index/path context.
+    pub fn transport_message(&self) -> Option<&str> {
+        match &self.detail {
+            ErrorDetail::Transport { message, .. } => Some(message),
             _ => None,
         }
     }
 
     /// Re-attribute this error to a different operation index.
-    pub fn with_index(self, index: usize) -> VfError {
-        match self {
-            VfError::Op {
-                err_no,
-                domain,
-                operation,
-                path,
-                ..
-            }
-            | VfError::OpUnattributed {
-                err_no,
-                domain,
-                operation,
-                path,
-            } => VfError::Op {
-                index,
-                err_no,
-                domain,
-                operation,
-                path,
-            },
-            VfError::Transport {
-                kind,
-                message,
-                operation,
-                path,
-                ..
-            } => VfError::Transport {
-                index: Some(index),
-                kind,
-                message,
-                operation,
-                path,
-            },
-        }
+    pub fn with_index(mut self, index: usize) -> VfError {
+        self.index = Some(index);
+        self
     }
 
     /// Transform a known request index while preserving an unattributable
-    /// transport failure as `None`.
-    pub fn map_index(self, map: impl FnOnce(usize) -> usize) -> VfError {
-        match self.index() {
-            Some(index) => self.with_index(map(index)),
-            None => self,
-        }
+    /// failure as `None`.
+    pub fn map_index(mut self, map: impl FnOnce(usize) -> usize) -> VfError {
+        self.index = self.index.map(map);
+        self
     }
 
     /// Attach operation and path context without string parsing.
     pub fn with_context(mut self, operation: &'static str, path: impl Into<PathBuf>) -> Self {
-        match &mut self {
-            VfError::Op {
-                operation: op,
-                path: p,
-                ..
-            }
-            | VfError::OpUnattributed {
-                operation: op,
-                path: p,
-                ..
-            }
-            | VfError::Transport {
-                operation: op,
-                path: p,
-                ..
-            } => {
-                *op = Some(operation);
-                *p = Some(path.into());
-            }
-        }
+        self.operation = Some(operation);
+        self.path = Some(path.into());
         self
     }
 
     pub fn domain(&self) -> ErrorDomain {
-        match self {
-            VfError::Op { domain, .. } | VfError::OpUnattributed { domain, .. } => *domain,
-            VfError::Transport { .. } => ErrorDomain::Transport,
+        match self.status() {
+            Some(StatusCode::Errno(_)) => ErrorDomain::Filesystem,
+            Some(StatusCode::Nfs(_)) => ErrorDomain::Nfs,
+            Some(StatusCode::Smb(_)) => ErrorDomain::Smb,
+            Some(StatusCode::Client(_)) => ErrorDomain::Client,
+            None => ErrorDomain::Transport,
         }
     }
 
     pub fn status(&self) -> Option<StatusCode> {
-        let (err_no, domain) = match self {
-            VfError::Op { err_no, domain, .. } | VfError::OpUnattributed { err_no, domain, .. } => {
-                (*err_no, *domain)
-            }
-            VfError::Transport { .. } => return None,
-        };
-        Some(match domain {
-            ErrorDomain::Nfs => StatusCode::Nfs(err_no),
-            ErrorDomain::Smb => StatusCode::Smb(err_no),
-            ErrorDomain::Client => StatusCode::Client(err_no),
-            _ => StatusCode::Errno(err_no),
-        })
+        match &self.detail {
+            ErrorDetail::Status(status) => Some(*status),
+            ErrorDetail::Transport { .. } => None,
+        }
     }
 
     pub fn operation(&self) -> Option<&'static str> {
-        match self {
-            VfError::Op { operation, .. }
-            | VfError::OpUnattributed { operation, .. }
-            | VfError::Transport { operation, .. } => *operation,
-        }
+        self.operation
     }
 
     pub fn path(&self) -> Option<&Path> {
-        match self {
-            VfError::Op { path, .. }
-            | VfError::OpUnattributed { path, .. }
-            | VfError::Transport { path, .. } => path.as_deref(),
-        }
+        self.path.as_deref()
     }
 }
 
 impl std::fmt::Display for VfError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            VfError::Op {
-                index,
-                err_no,
-                operation,
-                path,
-                ..
-            } => {
-                write!(f, "op {}", index)?;
-                if let Some(operation) = operation {
-                    write!(f, " ({operation})")?;
-                }
-                if let Some(path) = path {
-                    write!(f, " for {}", path.display())?;
-                }
-                write!(
-                    f,
-                    " failed: {} ({:?} status {})",
-                    std::io::Error::from(self.kind()),
-                    self.domain(),
-                    err_no
-                )
-            }
-            VfError::OpUnattributed {
-                err_no,
-                operation,
-                path,
-                ..
-            } => {
-                if let Some(operation) = operation {
-                    write!(f, "{operation}")?;
-                } else {
-                    write!(f, "operation")?;
-                }
-                if let Some(path) = path {
-                    write!(f, " for {}", path.display())?;
-                }
-                write!(
-                    f,
-                    " failed: {} ({:?} status {}; operation index unknown)",
-                    std::io::Error::from(self.kind()),
-                    self.domain(),
-                    err_no
-                )
-            }
-            VfError::Transport {
-                index: Some(index),
-                message,
-                operation,
-                path,
-                ..
-            } => {
+        match self.index {
+            Some(index) => {
                 write!(f, "op {index}")?;
-                if let Some(operation) = operation {
+                if let Some(operation) = self.operation {
                     write!(f, " ({operation})")?;
                 }
-                if let Some(path) = path {
+                if let Some(path) = &self.path {
                     write!(f, " for {}", path.display())?;
                 }
-                write!(f, " transport error: {message}")
             }
-            VfError::Transport {
-                index: None,
-                message,
-                operation,
-                path,
-                ..
-            } => {
-                if let Some(operation) = operation {
+            None if self.is_transport() => {
+                if let Some(operation) = self.operation {
                     write!(f, "{operation} ")?;
                 }
-                if let Some(path) = path {
+                if let Some(path) = &self.path {
                     write!(f, "for {} ", path.display())?;
                 }
-                write!(f, "transport error: {}", message)
             }
-        }?;
+            None => {
+                write!(f, "{}", self.operation.unwrap_or("operation"))?;
+                if let Some(path) = &self.path {
+                    write!(f, " for {}", path.display())?;
+                }
+            }
+        }
+        if let Some(message) = self.transport_message() {
+            if self.index.is_some() {
+                write!(f, " ")?;
+            }
+            write!(f, "transport error: {message}")?;
+        } else {
+            write!(
+                f,
+                " failed: {} ({:?} status {}",
+                std::io::Error::from(self.kind()),
+                self.domain(),
+                self.raw_code(),
+            )?;
+            if self.index.is_none() {
+                write!(f, "; operation index unknown")?;
+            }
+            write!(f, ")")?;
+        }
         match self.status() {
             Some(StatusCode::Nfs(10019)) => {
                 write!(f, "; {}", crate::error::NFS_REFERRAL_UNSUPPORTED)
@@ -423,31 +310,13 @@ impl std::error::Error for VfError {}
 /// filesystem status. The RPC's wire-operation index is not used here.
 pub fn error_from_rpc(e: RpcError, index: impl Into<Option<usize>>) -> VfError {
     if e.is_transport() {
-        VfError::Transport {
-            index: index.into(),
-            kind: e.transport_kind.unwrap_or(TransportKind::Other),
-            message: e.message,
-            operation: None,
-            path: None,
-        }
+        VfError::transport_with_kind(
+            index,
+            e.transport_kind.unwrap_or(TransportKind::Other),
+            e.message,
+        )
     } else {
-        match index.into() {
-            Some(index) => VfError::Op {
-                index,
-                err_no: e.status,
-                domain: ErrorDomain::Nfs,
-                operation: None,
-                path: None,
-            },
-            // A status with no known operation index must not masquerade
-            // as operation 0. Preserve it as unattributed.
-            None => VfError::OpUnattributed {
-                err_no: e.status,
-                domain: ErrorDomain::Nfs,
-                operation: None,
-                path: None,
-            },
-        }
+        VfError::from_status(index, StatusCode::Nfs(e.status))
     }
 }
 
@@ -595,19 +464,29 @@ pub fn open_flags_to_libc(flags: OpenFlags) -> VfResult<i32> {
 /// One complete open request. This replaces three error-prone parallel
 /// slices of paths, flags, and modes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OpenOp {
-    path: PathBuf,
+#[must_use = "configuration and requests have no effect until used"]
+pub struct OpenOp<'a> {
+    path: std::borrow::Cow<'a, Path>,
     flags: OpenFlags,
     mode: u32,
 }
 
-impl OpenOp {
+impl<'a> OpenOp<'a> {
     pub fn path(&self) -> &Path {
-        &self.path
+        self.path.as_ref()
     }
-    /// Consume the request and transfer its path without cloning storage.
+    /// Extract an owned path. Borrowed paths are copied; owned storage is moved.
     pub fn into_path(self) -> PathBuf {
-        self.path
+        self.path.into_owned()
+    }
+    /// Retain this request independently of the source pathname.
+    /// An already-owned request transfers its allocation without copying.
+    pub fn into_owned(self) -> OpenOp<'static> {
+        OpenOp {
+            path: std::borrow::Cow::Owned(self.path.into_owned()),
+            flags: self.flags,
+            mode: self.mode,
+        }
     }
     pub const fn flags(&self) -> OpenFlags {
         self.flags
@@ -616,15 +495,15 @@ impl OpenOp {
     pub const fn creation_mode(&self) -> u32 {
         self.mode
     }
-
-    pub fn new(path: impl Into<PathBuf>, flags: OpenFlags) -> Self {
+    /// Borrow a pathname without allocating. Use into_owned() for a stored plan
+    /// that must outlive its source paths.
+    pub fn new<P: AsRef<Path> + ?Sized>(path: &'a P, flags: OpenFlags) -> Self {
         Self {
-            path: path.into(),
+            path: std::borrow::Cow::Borrowed(path.as_ref()),
             flags,
             mode: 0o666,
         }
     }
-
     pub fn mode(mut self, mode: u32) -> Self {
         self.mode = mode;
         self
@@ -1131,7 +1010,7 @@ impl Permissions {
 /// for comparing objects reported by the same backend identity namespace; it
 /// is not a global ID across servers or unrelated backend clients. IDs can be
 /// reused after deletion, so this is not a durable globally unique identifier.
-/// It does not identify an open instance; see [`crate::api::OpenFd`] for that.
+/// It does not identify an open instance; see [`crate::api::FileHandle`] for that.
 ///
 /// Request both components before comparing underlying objects:
 ///
@@ -1499,6 +1378,7 @@ struct RemoveFlags {
 /// as much as possible, report the first error) or fail fast. Backends using
 /// the generic remover support only the default options and reject others.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct RemoveOptions {
     /// Keep removing after a per-entry failure and report the first error at
     /// the end. When `false`, the first failure aborts.
@@ -1852,6 +1732,7 @@ struct CopyFlags {
 /// symlink, its link text is copied and an existing destination is not replaced.
 /// Destination symlinks for data copies retain normal following behavior.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct CopyOptions {
     flags: CopyFlags,
 }
@@ -2056,5 +1937,44 @@ mod sparse_metadata_tests {
         assert_eq!(size_only.len(), Some(123));
         assert_eq!(size_only.is_empty(), Some(false));
         assert_eq!(size_only.permissions(), None);
+    }
+}
+
+#[cfg(test)]
+mod open_request_ownership_tests {
+    use super::*;
+    #[test]
+    fn borrowed_open_requests_and_their_clones_reuse_path_storage() {
+        let path = PathBuf::from("/borrowed-file");
+        let pointer = path.as_os_str().as_encoded_bytes().as_ptr();
+        let request = OpenOp::new(&path, OpenFlags::READ);
+        assert_eq!(
+            request.path().as_os_str().as_encoded_bytes().as_ptr(),
+            pointer
+        );
+        assert_eq!(
+            request
+                .clone()
+                .path()
+                .as_os_str()
+                .as_encoded_bytes()
+                .as_ptr(),
+            pointer
+        );
+    }
+    #[test]
+    fn owned_open_requests_outlive_inputs_and_transfer_their_storage() {
+        let request = {
+            let path = PathBuf::from("/retained-plan");
+            OpenOp::new(&path, OpenFlags::WRITE | OpenFlags::CREATE_NEW)
+                .mode(0o640)
+                .into_owned()
+        };
+        let pointer = request.path().as_os_str().as_encoded_bytes().as_ptr();
+        assert_eq!(request.creation_mode(), 0o640);
+        assert_eq!(request.flags(), OpenFlags::WRITE | OpenFlags::CREATE_NEW);
+        let path = request.into_path();
+        assert_eq!(path, Path::new("/retained-plan"));
+        assert_eq!(path.as_os_str().as_encoded_bytes().as_ptr(), pointer);
     }
 }

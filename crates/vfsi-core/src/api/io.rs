@@ -37,6 +37,9 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
     }
 
     fn read_at(&mut self, buffer: &mut [u8], budget: usize) -> Result<(usize, bool)> {
+        if buffer.is_empty() {
+            return Ok((0, false));
+        }
         let length = buffer.len().min(budget);
         if !buffer.is_empty() && length == 0 {
             return Err(Error::client(0, libc::EFBIG as u32));
@@ -50,7 +53,7 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
                 self.position,
                 &mut buffer[..length],
             )],
-            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(budget)),
+            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(budget).unwrap()),
         )?;
         let [value] = values.as_slice() else {
             return Err(invalid("invalid read count"));

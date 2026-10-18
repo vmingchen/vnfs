@@ -1,7 +1,7 @@
 use crate::api::{Attrs, CopyOptions, DirectoryListing, MkDirOp, OpenOp, Result, SetAttrsOp};
 use std::path::Path;
 
-use super::{OpenFd, Vfsi};
+use super::{FileHandle, Vfsi};
 
 /// Scalar operations and convenience workflows alongside the [`Vfsi`] vectors.
 ///
@@ -55,7 +55,7 @@ pub trait VfsiExt: Vfsi {
     /// lifecycle only; use vectors or [`std_io`](VfsiExt::std_io) for I/O.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{Vfsi, VfsiExt, OpenFd, WriteOp};
+    /// use vfsi_core::api::{Vfsi, VfsiExt, FileHandle, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let file = fs.open("/config")?;
     /// let mut header = [0_u8; 128];
@@ -79,7 +79,7 @@ pub trait VfsiExt: Vfsi {
     /// use [`open_with`](VfsiExt::open_with) with `WRITE | CREATE_NEW` instead.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{Vfsi, VfsiExt, OpenFd, WriteOp};
+    /// use vfsi_core::api::{Vfsi, VfsiExt, FileHandle, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let file = fs.create("/output")?;
     /// let result = fs.vwrite(&[WriteOp::at(&file, 0, b"complete contents")], vfsi_core::api::WriteOptions::new().with_write_all(true));
@@ -108,7 +108,7 @@ pub trait VfsiExt: Vfsi {
     /// symlink resolution and independently opened handles for singleton vectors.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{Vfsi, VfsiExt, OpenFd, OpenFlags, OpenOp, WriteOp};
+    /// use vfsi_core::api::{Vfsi, VfsiExt, FileHandle, OpenFlags, OpenOp, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let file = fs.open_with(OpenOp::new(
     ///     "/new-file", OpenFlags::WRITE | OpenFlags::CREATE_NEW,
@@ -184,7 +184,7 @@ pub trait VfsiExt: Vfsi {
     /// use vfsi_core::api::{Vfsi, VfsiExt, ReadOptions, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let files = fs.read_files_with_options(&["/config"],
-    ///     ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(1024 * 1024)))?;
+    ///     ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(1024 * 1024).unwrap()))?;
     /// # let _ = files;
     /// # Ok(())
     /// # }
@@ -210,13 +210,14 @@ pub trait VfsiExt: Vfsi {
             .into_iter()
             .enumerate()
             .map(|(index, result)| {
-                let data = result.data.ok_or_else(|| {
+                let complete = result.offset() == 0 && result.eof();
+                let data = result.into_data().ok_or_else(|| {
                     crate::api::Error::transport(
                         Some(index),
                         "whole-file vread_native omitted owned data",
                     )
                 })?;
-                if data.len() != result.bytes_read || result.offset != 0 || !result.eof {
+                if !complete {
                     return Err(crate::api::Error::transport(
                         Some(index),
                         "whole-file vread_native returned incomplete or invalid data",
@@ -254,7 +255,7 @@ pub trait VfsiExt: Vfsi {
     /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let text = fs.read_to_string_with_options("/config", vfsi_core::api::ReadOptions::new()
-    ///     .with_max_total_bytes(std::num::NonZeroUsize::new(4096)))?;
+    ///     .with_max_total_bytes(std::num::NonZeroUsize::new(4096).unwrap()))?;
     /// println!("{text}");
     /// # Ok(())
     /// # }
@@ -475,7 +476,7 @@ pub trait VfsiExt: Vfsi {
         attrs_query(self, path, crate::api::AttrsOptions::new(), "attrs")
     }
 
-    /// Single-target convenience. For multiple paths, prefer [`Vfsi::vgetattrs`] with selected fields and follow_symlinks(false).
+    /// Single-target convenience. For multiple paths, prefer [`Vfsi::vgetattrs`] with selected fields and follow_final_symlink(false).
     ///
     /// Query one path with selected fields and final-symlink behavior; absent fields remain None.
     ///
@@ -488,7 +489,7 @@ pub trait VfsiExt: Vfsi {
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let attrs = fs.attrs_with_options(
     ///     "/file-1", vfsi_core::api::AttrsOptions::new()
-    ///         .with_fields(Attributes::MODE | Attributes::BLOCKS).with_follow_symlinks(false),
+    ///         .with_fields(Attributes::MODE | Attributes::BLOCKS).with_follow_final_symlink(false),
     /// )?;
     /// if let Some(blocks) = attrs.blocks() {
     ///     println!("allocated blocks: {blocks}");
@@ -504,7 +505,7 @@ pub trait VfsiExt: Vfsi {
         attrs_query(self, path, options, "attrs_with_options")
     }
 
-    /// Single-target convenience. For multiple paths, prefer [`Vfsi::vgetattrs`] with follow_symlinks(false).
+    /// Single-target convenience. For multiple paths, prefer [`Vfsi::vgetattrs`] with follow_final_symlink(false).
     ///
     /// Query the final symlink itself instead of following it.
     ///
@@ -523,7 +524,7 @@ pub trait VfsiExt: Vfsi {
         attrs_query(
             self,
             path,
-            crate::api::AttrsOptions::new().with_follow_symlinks(false),
+            crate::api::AttrsOptions::new().with_follow_final_symlink(false),
             "symlink_attrs",
         )
     }
@@ -543,16 +544,13 @@ pub trait VfsiExt: Vfsi {
     /// # }
     /// ```
     fn read_dir(&self, path: impl AsRef<Path>) -> Result<Vec<crate::api::DirEntry>> {
-        self.read_dir_with_options(
-            path,
-            crate::api::ListDirOptions::new().with_fields(crate::api::Attributes::stat()),
-        )
+        self.read_dir_with_options(path, crate::api::ListDirOptions::new())
     }
 
     /// Single-target convenience. For multiple directories, prefer [`VfsiExt::read_dirs_with_options`] with one aggregate budget.
     ///
     /// Collect one shallow directory with selected metadata and entry/path-byte limits.
-    /// This helper forces shallow mode; use `read_dirs_with_options` with
+    /// Recursive options are rejected; use `read_dirs_with_options` with
     /// `ListDirOptions::with_recursive(true)` to collect a tree.
     ///
     /// ```no_run
@@ -569,7 +567,15 @@ pub trait VfsiExt: Vfsi {
         path: impl AsRef<Path>,
         options: crate::api::ListDirOptions,
     ) -> Result<Vec<crate::api::DirEntry>> {
-        let mut trees = self.read_dirs_with_options(&[path], options.with_recursive(false))?;
+        if options.recursive() {
+            return Err(
+                crate::api::Error::client(0, libc::EINVAL as u32).with_context(
+                    "read_dir_with_options requires shallow options",
+                    path.as_ref(),
+                ),
+            );
+        }
+        let mut trees = self.read_dirs_with_options(&[path], options)?;
         Ok(single_completion(single_tree(&mut trees)?, "read_dirs")?.entries)
     }
 
@@ -593,10 +599,7 @@ pub trait VfsiExt: Vfsi {
     /// # }
     /// ```
     fn read_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<DirectoryListing>> {
-        let trees = self.read_dirs_with_options(
-            paths,
-            crate::api::ListDirOptions::new().with_fields(crate::api::Attributes::stat()),
-        )?;
+        let trees = self.read_dirs_with_options(paths, crate::api::ListDirOptions::new())?;
         if trees.len() != paths.len() || trees.iter().any(|tree| tree.len() != 1) {
             return Err(crate::api::Error::transport(
                 None,
@@ -635,6 +638,7 @@ pub trait VfsiExt: Vfsi {
         paths: &[P],
         options: crate::api::ListDirOptions,
     ) -> Result<Vec<Vec<DirectoryListing>>> {
+        require_page_options(options)?;
         let mut trees: Vec<Vec<DirectoryListing>> = (0..paths.len()).map(|_| Vec::new()).collect();
         let mut positions: Vec<std::collections::HashMap<std::path::PathBuf, usize>> = (0..paths
             .len())
@@ -680,7 +684,7 @@ pub trait VfsiExt: Vfsi {
     /// directory paths, including ancestors. Backends unable to guarantee that
     /// return Unsupported instead of checking and then following the path.
     /// Ordinary shallow listing retains the backend's path resolution; use
-    /// `follow_symlinks(false)` to require no-follow directory opens explicitly.
+    /// `allow_symlink_components(false)` to require no-follow directory opens explicitly.
     ///
     /// The root is depth zero and its children have depth one. Directory depth
     /// limits control descent; shallow mode ignores them. Lifecycle mode charges
@@ -740,6 +744,7 @@ pub trait VfsiExt: Vfsi {
         options: crate::api::ListDirOptions,
         mut callback: impl FnMut(usize, &crate::api::DirEntry) -> Result<std::ops::ControlFlow<()>>,
     ) -> Result<Vec<crate::api::TraversalCompletion>> {
+        require_page_options(options)?;
         self.vlistdirs(paths, options, |index, page| {
             for entry in &page.entries {
                 if callback(index, entry)?.is_break() {
@@ -788,6 +793,7 @@ pub trait VfsiExt: Vfsi {
         mut descend: impl FnMut(&crate::api::DirEntry) -> bool,
         mut visitor: impl FnMut(DirectoryListing, usize) -> Result<crate::api::WalkControl>,
     ) -> Result<crate::api::TraversalCompletion> {
+        require_page_options(options)?;
         let options = options.walk_options(self.limits());
         let root = root.as_ref();
         let mut budget =
@@ -800,7 +806,7 @@ pub trait VfsiExt: Vfsi {
                 budget.remaining_options(
                     crate::api::ListDirOptions::new()
                         .with_fields(options.fields())
-                        .with_follow_symlinks(options.follow_symlinks()),
+                        .with_allow_symlink_components(options.allow_symlink_components()),
                 ),
             )?;
             for entry in &entries {
@@ -823,7 +829,7 @@ pub trait VfsiExt: Vfsi {
                 crate::api::WalkControl::SkipSubtree => continue,
                 crate::api::WalkControl::Continue => {}
             }
-            if depth >= options.max_depth() && !children.is_empty() {
+            if depth >= options.max_depth().get() && !children.is_empty() {
                 if !options.truncate_at_max_depth() {
                     return Err(crate::api::Error::client(0, libc::EFBIG as u32)
                         .with_context("visit_dirs_ordered", &children[0]));
@@ -871,7 +877,7 @@ pub trait VfsiExt: Vfsi {
 
     /// Change ownership of one path or opened object through [`Vfsi::vsetattrs`].
     /// `None` leaves the corresponding owner/group unchanged. Use the vector
-    /// with [`SetAttrsOp::with_follow_symlinks(false)`](SetAttrsOp::with_follow_symlinks)
+    /// with [`SetAttrsOp::with_follow_final_symlink(false)`](SetAttrsOp::with_follow_final_symlink)
     /// to change a symlink itself.
     fn chown<T: crate::api::AsTarget<Self::File>>(
         &self,
@@ -951,7 +957,7 @@ pub trait VfsiExt: Vfsi {
             }
             match self.vmkdir(&[MkDirOp::new(&current, 0o777)]) {
                 Ok(()) => {}
-                Err(error) if error.err_no() == crate::ERR_EXIST => {
+                Err(error) if error.raw_code() == crate::ERR_EXIST => {
                     if !self.attrs(&current)?.is_dir() {
                         return Err(crate::api::Error::client(0, crate::ERR_NOTDIR)
                             .with_context("create_dir_all", &current));
@@ -979,7 +985,7 @@ pub trait VfsiExt: Vfsi {
     /// # }
     /// ```
     fn rename(&self, source: impl AsRef<Path>, destination: impl AsRef<Path>) -> Result<()> {
-        self.vrename(&[(source, destination)], crate::api::RenameOptions::Replace)
+        self.vrename(&[(source, destination)], crate::api::RenameMode::Replace)
     }
 
     /// Single-target convenience. For multiple file pairs, prefer [`Vfsi::vcopy`].
@@ -1191,4 +1197,12 @@ fn single_tree(trees: &mut Vec<Vec<DirectoryListing>>) -> Result<Vec<DirectoryLi
         ));
     }
     Ok(trees.remove(0))
+}
+
+fn require_page_options(options: crate::api::ListDirOptions) -> Result<()> {
+    if options.enter_leave() || options.sort_by_name() {
+        Err(crate::api::Error::client(0, libc::EINVAL as u32))
+    } else {
+        Ok(())
+    }
 }
