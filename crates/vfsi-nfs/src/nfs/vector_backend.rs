@@ -57,11 +57,10 @@ impl VectorBackend for NfsVecFs {
             let open = self
                 .open_files
                 .get(&fd)
-                .cloned()
                 .ok_or_else(|| VfError::failure(i, ERR_EBADF))?;
             fds.push(fd);
             ops.push(crate::client::CloseOp {
-                fh: open.fh,
+                fh: open.fh.clone(),
                 stateid: open.stateid,
             });
         }

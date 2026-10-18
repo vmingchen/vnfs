@@ -14,7 +14,7 @@ fn page_faults_do_not_replay_transport_failures_and_reject_malformed_shapes() {
             ResourceLimits::default(),
             |_| Ok(32),
             |_| Ok(()),
-            |_, _, _, _| {
+            |_, _, _, _, _| {
                 calls += 1;
                 match malformed {
                     0 => Err(crate::Error::transport(None, "lost reply")),
@@ -49,7 +49,7 @@ fn page_faults_do_not_replay_transport_failures_and_reject_malformed_shapes() {
         ResourceLimits::default(),
         |_| Ok(32),
         |_| Ok(()),
-        |paths, _, _, _| {
+        |paths, _, _, _, _| {
             calls += 1;
             if paths.len() == 2 {
                 return Err(crate::Error::client(1, libc::ENOENT as u32));
@@ -89,7 +89,7 @@ fn directory_continuations_run_in_vector_waves_and_cancellation_marks_unfinished
             ResourceLimits::default(),
             |_| Ok(32),
             |_| Ok(()),
-            |paths, cursors, _, _| {
+            |paths, cursors, _, _, _| {
                 widths.push(paths.len());
                 paths
                     .iter()

@@ -1917,9 +1917,8 @@ impl NfsClient {
         py: Python<'_>,
         pairs: Vec<(PathBuf, PathBuf)>,
     ) -> PyResult<CopyManyResult> {
-        let sources: Vec<PathBuf> = pairs.iter().map(|(s, _)| s.clone()).collect();
-        let dests: Vec<PathBuf> = pairs.iter().map(|(_, d)| d.clone()).collect();
         let n = pairs.len();
+        let (sources, dests): (Vec<PathBuf>, Vec<PathBuf>) = pairs.into_iter().unzip();
         let max_total_bytes = self.read_all_max_total_bytes;
         let max_directory_entries = self.directory_max_entries;
         let max_directory_path_bytes = self.directory_max_path_bytes;

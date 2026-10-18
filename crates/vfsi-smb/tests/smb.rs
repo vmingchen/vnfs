@@ -1000,3 +1000,88 @@ fn copy_options_reject_unsupported_symlink_preservation_before_lookup() {
     assert_eq!(error.raw_code(), VF_ERR_UNSUPPORTED);
     assert_eq!(error.index(), Some(0));
 }
+
+#[test]
+fn client_extent_copy_rejects_forward_aliases_before_mutation() {
+    let Some(mut backend) = connect() else { return };
+    let Ok(local_root) = std::env::var("VFSI_SMB_LOCAL_ROOT") else {
+        assert!(
+            !required("VFSI_SMB_REQUIRED"),
+            "local backing root is required for the hard-link alias fixture"
+        );
+        return;
+    };
+    let root = PathBuf::from(format!("/vfsi-copy-alias-{}", std::process::id()));
+    let local = Path::new(&local_root).join(root.strip_prefix("/").unwrap());
+    backend.ensure_dir_impl(&root, 0o777).unwrap();
+    let source = root.join("source");
+    let alias = root.join("alias");
+    let data: Vec<u8> = (0..(2 * 1024 * 1024 + 257))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    fs::write(local.join("source"), &data).unwrap();
+    fs::hard_link(local.join("source"), local.join("alias")).unwrap();
+    for destination in [&source, &alias] {
+        for length in [Some(data.len() as u64 - 1), None] {
+            let result = backend.vcopy_data_impl(&[ExtentPair::from_os_paths(
+                &source,
+                0,
+                destination,
+                1,
+                length,
+            )]);
+            let unchanged = fs::read(local.join("source")).unwrap() == data;
+            assert!(unchanged, "copy overwrote unread source bytes");
+            let error =
+                result.expect_err("forward alias copy must not overwrite unread source bytes");
+            assert_eq!(error.raw_code(), libc::EINVAL as u32);
+            assert_eq!(error.index(), Some(0));
+            assert!(unchanged, "rejected copies must leave the source unchanged");
+        }
+    }
+    cleanup_test_tree(&root);
+}
+
+#[test]
+fn client_extent_copy_preserves_safe_shifted_ranges() {
+    let Some(mut backend) = connect() else { return };
+    let root = PathBuf::from(format!("/vfsi-copy-safe-{}", std::process::id()));
+    backend.ensure_dir_impl(&root, 0o777).unwrap();
+    let source = root.join("source");
+    let other = root.join("other");
+    for (src, dst, length, separate, expected) in [
+        (4, 0, None, false, b"456789".as_slice()),
+        (8, 10, Some(10), false, b"012345678989".as_slice()),
+        (0, 2, Some(6), true, b"\x00\x00012345".as_slice()),
+        (0, 0, None, false, b"0123456789".as_slice()),
+    ] {
+        backend
+            .vwrite_impl(&borrow_writes(&[vfsi_sync::WriteOp::from_os_path(
+                &source,
+                VfOffset::At(0),
+                b"0123456789".to_vec(),
+            )
+            .with_creation()
+            .with_truncate()]))
+            .unwrap();
+        let destination = if separate { &other } else { &source };
+        backend
+            .vcopy_data_impl(&[ExtentPair::from_os_paths(
+                &source,
+                src,
+                destination,
+                dst,
+                length,
+            )])
+            .unwrap_or_else(|error| {
+                panic!("copy {src} -> {dst}, {length:?}, separate={separate}: {error:?}")
+            });
+        assert_eq!(
+            backend
+                .vread_all_impl(&[FileOperand::from_os_path(destination)])
+                .unwrap()[0],
+            expected
+        );
+    }
+    cleanup_test_tree(&root);
+}

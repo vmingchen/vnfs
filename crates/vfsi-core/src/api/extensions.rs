@@ -760,7 +760,9 @@ pub trait VfsiExt: Vfsi {
     /// The shared workflow sorts them; callbacks cannot replace validated entries.
     /// `descend` selects directories before their contents are read; it does not
     /// filter entries delivered in their parent's listing. Symlinks are never
-    /// traversed. `visitor` runs outside backend locks and may stop immediately
+    /// traversed. Descendant opens reject symlinks in every component; backends
+    /// unable to guarantee that return Unsupported. The root uses the supplied
+    /// path-resolution policy. `visitor` runs outside backend locks and may stop immediately
     /// or skip all children of the current directory. Errors after delivered
     /// listings must not trigger replay through another backend.
     ///
@@ -806,7 +808,11 @@ pub trait VfsiExt: Vfsi {
                 budget.remaining_options(
                     crate::api::ListDirOptions::new()
                         .with_fields(options.fields())
-                        .with_allow_symlink_components(options.allow_symlink_components()),
+                        // Descendants were observed as real directories in a prior
+                        // listing. Reopening must not follow swapped ancestors.
+                        .with_allow_symlink_components(
+                            depth == 0 && options.allow_symlink_components(),
+                        ),
                 ),
             )?;
             for entry in &entries {

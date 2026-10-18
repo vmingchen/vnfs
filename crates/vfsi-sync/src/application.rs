@@ -21,6 +21,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
         Vec<Option<crate::DirPageCursor>>,
         usize,
         usize,
+        bool,
     ) -> Result<Vec<crate::DirectoryPage>>,
     mut callback: impl FnMut(usize, DirectoryListing) -> Result<std::ops::ControlFlow<()>>,
 ) -> Result<Vec<crate::TraversalCompletion>> {
@@ -68,7 +69,10 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
             .collect();
         let requested = budget.remaining_entries().saturating_add(1);
         let mut deferred_error = None;
-        let pages = match fetch(&paths, cursors, 1, requested) {
+        // Only input roots may follow caller-permitted path components.
+        // Descendant paths were admitted from earlier no-follow metadata.
+        let follow_symlinks = policy.allow_symlink_components() && cohort[0].2 == 0;
+        let pages = match fetch(&paths, cursors, 1, requested, follow_symlinks) {
             Ok(pages) => pages,
             Err(error)
                 if !policy.recursive()
@@ -85,6 +89,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
                     (0..failed).map(|_| None).collect(),
                     1,
                     requested,
+                    follow_symlinks,
                 )
                 .map_err(|error| error.map_index(|i| cohort.get(i).map_or(i, |state| state.0)))?;
                 cohort.truncate(failed);
@@ -193,7 +198,15 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
                 .map(|state| state.0.1.as_path())
                 .collect();
             let requested = budget.remaining_entries().saturating_add(1);
-            let pages = fetch(&paths, cursors, requested.min(128), requested).map_err(|error| {
+            let follow_symlinks = policy.allow_symlink_components() && continuations[0].0.2 == 0;
+            let pages = fetch(
+                &paths,
+                cursors,
+                requested.min(128),
+                requested,
+                follow_symlinks,
+            )
+            .map_err(|error| {
                 error.map_index(|i| continuations.get(i).map_or(i, |state| state.0.0))
             })?;
             if pages.len() != continuations.len() {
@@ -364,8 +377,9 @@ mod traversal_tests {
         Vec<Option<DirPageCursor>>,
         usize,
         usize,
+        bool,
     ) -> Result<Vec<crate::DirectoryPage>> {
-        move |paths, cursors, page_size, max_entries| {
+        move |paths, cursors, page_size, max_entries, _follow_symlinks| {
             let mut pages = Vec::with_capacity(paths.len());
             for (path, cursor) in paths.iter().zip(cursors) {
                 let mut snapshot = match cursor {
@@ -476,10 +490,16 @@ mod traversal_tests {
                 ResourceLimits::default(),
                 |_| Ok(1),
                 |_| Ok(()),
-                |paths, cursors, page_size, max_entries| {
+                |paths, cursors, page_size, max_entries, follow_symlinks| {
                     // A legal short page leaves a live snapshot when the byte
                     // limit rejects its second entry, after accepting the first.
-                    let pages = fetch(paths, cursors, page_size.min(2), max_entries)?;
+                    let pages = fetch(
+                        paths,
+                        cursors,
+                        page_size.min(2),
+                        max_entries,
+                        follow_symlinks,
+                    )?;
                     if outcome == 3 && pages[0].0.entries.len() == 2 {
                         assert!(pages[0].1.is_some());
                         live_budget_page = true;
@@ -517,6 +537,42 @@ mod traversal_tests {
             }
             assert_eq!(callbacks, if outcome >= 2 { 2 } else { 1 });
             assert_eq!(live.load(Ordering::SeqCst), 0);
+        }
+    }
+    #[test]
+    fn recursive_pages_keep_root_policy_and_reject_descendant_symlinks() {
+        for recursive in [false, true] {
+            for allow in [false, true] {
+                let live = Arc::new(AtomicUsize::new(0));
+                let peak = Arc::new(AtomicUsize::new(0));
+                let mut fetch = snapshot_pages(live, peak);
+                let mut observed = Vec::new();
+                visit_directory_pages(
+                    &["/tree"],
+                    ListDirOptions::new()
+                        .with_recursive(recursive)
+                        .with_allow_symlink_components(allow),
+                    ResourceLimits::default(),
+                    |_| Ok(1),
+                    |_| Ok(()),
+                    |paths, cursors, page_size, max_entries, follow| {
+                        for path in paths {
+                            observed.push((path.to_path_buf(), follow));
+                        }
+                        fetch(paths, cursors, page_size, max_entries, follow)
+                    },
+                    |_, _| Ok(std::ops::ControlFlow::Continue(())),
+                )
+                .unwrap();
+                assert!(observed.len() > 1, "exercise continuation fetches");
+                assert_eq!(
+                    observed.iter().any(|(path, _)| path != Path::new("/tree")),
+                    recursive
+                );
+                for (path, follow) in observed {
+                    assert_eq!(follow, allow && path == Path::new("/tree"));
+                }
+            }
         }
     }
 }

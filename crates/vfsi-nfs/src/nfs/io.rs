@@ -43,10 +43,9 @@ pub(super) fn remap_descriptor_chunk_error(
     start: usize,
     owners: &[usize],
 ) -> VfError {
-    error.index().map_or(error.clone(), |local_index| {
+    error.map_index(|local_index| {
         let chunk_index = start.saturating_add(local_index);
-        let index = owners.get(chunk_index).copied().unwrap_or(chunk_index);
-        error.with_index(index)
+        owners.get(chunk_index).copied().unwrap_or(chunk_index)
     })
 }
 

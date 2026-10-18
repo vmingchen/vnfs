@@ -128,8 +128,8 @@ impl Auto {
         };
         // Do not bypass kernel symlink resolution or map a path outside root.
         // For creation, inspect the existing parent instead of the missing file.
-        let (canonical, inspect) = match fs::canonicalize(&host_path) {
-            Ok(actual) => (actual.clone(), actual),
+        let (canonical, parent) = match fs::canonicalize(&host_path) {
+            Ok(actual) => (actual, None),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let Some(parent) = host_path.parent() else {
                     return mounted();
@@ -140,14 +140,14 @@ impl Auto {
                 let Some(name) = host_path.file_name() else {
                     return mounted();
                 };
-                (parent.join(name), parent)
+                (parent.join(name), Some(parent))
             }
             Err(_) => return mounted(),
         };
         if canonical != host_path || !canonical.starts_with(&self.root) {
             return mounted();
         }
-        let Some(mount_id) = path_mount_id(&inspect) else {
+        let Some(mount_id) = path_mount_id(parent.as_deref().unwrap_or(&canonical)) else {
             return mounted();
         };
         let Some(spec) = mounts

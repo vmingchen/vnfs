@@ -1464,6 +1464,64 @@ impl SmbVecFs {
         }
     }
 
+    /// Compare retained objects, including aliases across different path spellings.
+    /// Only potentially overlapping forward copies need these identity queries.
+    fn copy_handles_alias(&mut self, files: [FileId; 2]) -> VfResult<bool> {
+        let mut identities = [(0, 0); 2];
+        for (identity, file_id) in identities.iter_mut().zip(files) {
+            // Related compound operations share one handle on SMB servers.
+            // Query each retained handle in its own compound, never mix them.
+            let requests = [
+                (InfoType::File, FILE_INTERNAL_INFORMATION, 8),
+                (InfoType::Filesystem, 1, 128),
+            ]
+            .map(|(info_type, class, length)| QueryInfoRequest {
+                info_type,
+                file_info_class: class,
+                output_buffer_length: length,
+                additional_information: 0,
+                flags: 0,
+                file_id,
+                input_buffer: Vec::new(),
+            });
+            let operations = requests.each_ref().map(|request| CompoundOp {
+                command: Command::QueryInfo,
+                body: request,
+                tree_id: Some(self.tree.tree_id),
+                credit_charge: CreditCharge(1),
+            });
+            let responses = self
+                .runtime
+                .block_on(self.client.connection_mut().execute_compound(&operations))
+                .map_err(|error| smb_error(error, 0))?;
+            let responses = collect_compound(responses, operations.len())?;
+            let buffers: Vec<_> = responses
+                .into_iter()
+                .map(|response| {
+                    require_status(&response, Command::QueryInfo, 0)?;
+                    QueryInfoResponse::unpack(&mut ReadCursor::new(&response.body))
+                        .map(|response| response.output_buffer)
+                        .map_err(|error| smb_error(error, 0))
+                })
+                .collect::<VfResult<_>>()?;
+            let index = buffers[0]
+                .get(..8)
+                .ok_or_else(|| VfError::transport(None, "short SMB copy file-index response"))?;
+            let volume = buffers[1]
+                .get(8..12)
+                .ok_or_else(|| VfError::transport(None, "short SMB copy volume response"))?;
+            if index == [0; 8] || volume == [0; 4] {
+                return Err(VfError::unsupported(0));
+            }
+            // File indices are volume-local; a share can span several volumes.
+            *identity = (
+                u64::from_le_bytes(index.try_into().expect("eight-byte slice")),
+                u32::from_le_bytes(volume.try_into().expect("four-byte slice")),
+            );
+        }
+        Ok(identities[0] == identities[1])
+    }
+
     fn copy_client_side(&mut self, pair: &ExtentPair) -> VfResult<()> {
         let source = self.local_path_string(&pair.src_path)?;
         let destination = self.local_path_string(&pair.dst_path)?;
@@ -1479,6 +1537,14 @@ impl SmbVecFs {
         let length = pair.length.unwrap_or(available).min(available);
         let mut copied = 0u64;
         let result = (|| {
+            if pair.dst_offset > pair.src_offset
+                && pair.dst_offset - pair.src_offset < length
+                && self.copy_handles_alias([src_id, dst_id])?
+            {
+                // Forward chunking would overwrite bytes a later read still
+                // needs. Reject before writing, flushing or truncating either alias.
+                return Err(VfError::failure(0, ERR_INVAL));
+            }
             while copied < length {
                 let wanted = (length - copied).min(1 << 20) as usize;
                 let src_offset = checked_offset(pair.src_offset, copied, 0)?;

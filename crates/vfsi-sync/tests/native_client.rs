@@ -3278,3 +3278,166 @@ fn projected_metadata_vectors_convert_each_target_once_and_preflight_all_mutatio
     assert_eq!(calls.get(), 2);
     assert!(updates.lock().unwrap().is_empty());
 }
+
+#[test]
+fn projected_io_errors_allow_client_reentry() {
+    #[cfg(feature = "test-support")]
+    if vfsi_sync::test_support::supervise_with_deadline("projected_io_errors_allow_client_reentry")
+    {
+        return;
+    }
+    let fs = FsClient::new(WriteBoundaryProbe {
+        failure: Some(VfError::client(0, libc::ENOSPC as u32)),
+        ..Default::default()
+    });
+    let file = fs.open("/file").unwrap();
+    let reads = [file.read_request_at(0, 1)];
+    let error = fs
+        .vread_with_limit_projected_native(&reads, 1, |request| {
+            fs.capabilities().unwrap();
+            request
+        })
+        .unwrap_err();
+    assert_eq!(error.index(), Some(0));
+    assert_eq!(error.path(), Some(std::path::Path::new("/file")));
+    let writes = [file.write_request_at(0, b"x")];
+    let error = fs
+        .vwrite_mapped_native(&writes, |request| {
+            fs.capabilities().unwrap();
+            *request
+        })
+        .unwrap_err();
+    assert_eq!(error.raw_code(), libc::ENOSPC as u32);
+    assert_eq!(error.index(), Some(0));
+    assert_eq!(error.path(), Some(std::path::Path::new("/file")));
+}
+
+#[test]
+fn complete_write_projection_can_reenter_during_alias_planning() {
+    #[cfg(feature = "test-support")]
+    if vfsi_sync::test_support::supervise_with_deadline(
+        "complete_write_projection_can_reenter_during_alias_planning",
+    ) {
+        return;
+    }
+    for unknown_objects in [false, true] {
+        let backend = WriteBoundaryProbe {
+            scalar: ScalarOnly {
+                unknown_objects,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let waves = backend.calls.clone();
+        let fs = FsClient::new(backend);
+        let first = fs.open("/first").unwrap();
+        let second = fs.open("/second").unwrap();
+        let writes = [
+            first.write_request_at(0, b"abc"),
+            second.write_request_at(0, b"xyz"),
+        ];
+        let calls = std::cell::Cell::new(0);
+        let results = fs
+            .vwrite_all_mapped_native(&writes, |request| {
+                calls.set(calls.get() + 1);
+                fs.capabilities().unwrap();
+                *request
+            })
+            .unwrap();
+        assert!(results.iter().all(|result| result.bytes_written == 3));
+        assert_eq!(calls.get(), writes.len());
+        let waves = waves.lock().unwrap();
+        if unknown_objects {
+            assert_eq!(waves.len(), 4);
+            assert!(waves.iter().all(|wave| wave.len() == 1));
+        } else {
+            assert_eq!(waves.len(), 2);
+            assert!(waves.iter().all(|wave| wave.len() == 2));
+        }
+    }
+}
+
+#[test]
+fn malformed_open_results_retain_failed_cleanup_for_retry() {
+    for failures in [1, 2] {
+        let backend = ScalarOnly {
+            vector_result_limit: Arc::new(Mutex::new(Some(1))),
+            close_failures_remaining: failures,
+            ..Default::default()
+        };
+        let observed = backend.close_observed.clone();
+        let client = FsClient::new(backend);
+        let error = client
+            .vopen(&[
+                OpenOp::new("/first", OpenFlags::READ),
+                OpenOp::new("/second", OpenFlags::READ),
+            ])
+            .unwrap_err();
+        assert!(error.is_transport());
+        assert_eq!(error.index(), None);
+        assert!(error.to_string().contains("1 results for 2 requests"));
+        assert_eq!(observed.load(Ordering::SeqCst), 1);
+        for _ in 1..failures {
+            assert!(client.drain_cleanup().is_err());
+        }
+        client.drain_cleanup().unwrap();
+        assert_eq!(observed.load(Ordering::SeqCst), failures + 1);
+        let backend = client.into_inner().unwrap();
+        assert!(!backend.open);
+        assert_eq!(backend.close_calls, failures + 1);
+    }
+}
+
+#[test]
+fn generic_path_conversion_can_reenter_namespace_operations() {
+    #[cfg(feature = "test-support")]
+    if vfsi_sync::test_support::supervise_with_deadline(
+        "generic_path_conversion_can_reenter_namespace_operations",
+    ) {
+        return;
+    }
+    struct ReentrantPath<'a, F: VectorBackend>(&'a FsClient<F>, &'static std::path::Path);
+    impl<F: VectorBackend + 'static> AsRef<std::path::Path> for ReentrantPath<'_, F> {
+        fn as_ref(&self) -> &std::path::Path {
+            self.0.capabilities().unwrap();
+            self.1
+        }
+    }
+    let fs = FsClient::new(DefaultBackend {
+        scalar: ScalarOnly {
+            read_failure: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    let path = |name: &'static str| ReentrantPath(&fs, std::path::Path::new(name));
+    assert!(
+        fs.vrename(&[(path("/from"), path("/to"))], Default::default())
+            .is_err()
+    );
+    assert!(
+        fs.vmkdir(&[vfsi_core::api::MkDirOp::new(path("/dir"), 0o777)])
+            .is_err()
+    );
+    assert!(
+        fs.vcopy(&[(path("/from"), path("/to"))], Default::default())
+            .is_err()
+    );
+    assert!(
+        fs.read_files_native(&[path("/file")], Default::default())
+            .is_err()
+    );
+    assert!(fs.ensure_empty_dir(path("/dir")).is_err());
+
+    let fs = FsClient::new(DirectoryProbe::default());
+    let closed = fs
+        .vopen_dirs(&[
+            ReentrantPath(&fs, std::path::Path::new("/0")),
+            ReentrantPath(&fs, std::path::Path::new("/1")),
+        ])
+        .unwrap();
+    assert_eq!(closed.len(), 2);
+    for dir in closed {
+        dir.close().unwrap();
+    }
+}

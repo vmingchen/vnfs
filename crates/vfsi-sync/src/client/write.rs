@@ -190,13 +190,15 @@ impl<F: VectorBackend> FsClient<F> {
         F: 'b,
     {
         let writes = self.write_ops(requests, &project)?;
-        let results = self.lock()?.vwrite_impl(&writes).map_err(|error| {
-            error
-                .index()
-                .and_then(|index| requests.get(index).map(&project))
-                .map_or(error.clone(), |request| {
-                    error.with_context("vwrite_native", request.file().path())
-                })
+        // Drop the backend guard before invoking caller projection code.
+        let result = self.lock()?.vwrite_impl(&writes);
+        let results = result.map_err(|error| {
+            with_indexed_context(error, "vwrite_native", |index| {
+                requests
+                    .get(index)
+                    .map(&project)
+                    .map(|request| request.file().path())
+            })
         })?;
         if results.len() != requests.len() {
             return Err(wrong_result_count(
@@ -206,12 +208,12 @@ impl<F: VectorBackend> FsClient<F> {
             ));
         }
         validate_write_results("vwrite_native", &writes, &results).map_err(|error| {
-            error
-                .index()
-                .and_then(|index| requests.get(index).map(&project))
-                .map_or(error.clone(), |request| {
-                    error.with_context("vwrite_native", request.file().path())
-                })
+            with_indexed_context(error, "vwrite_native", |index| {
+                requests
+                    .get(index)
+                    .map(&project)
+                    .map(|request| request.file().path())
+            })
         })?;
         Ok(results.into_iter().map(write_result).collect())
     }
@@ -227,7 +229,7 @@ impl<F: VectorBackend> FsClient<F> {
     }
 
     /// Complete mapped writes with whole-batch preflight and dependency waves.
-    /// The mapper must return the same file, offset, and payload on each call.
+    /// Each borrowed request is projected once, before acquiring the backend lock.
     #[doc(hidden)]
     pub fn vwrite_all_mapped_native<'b, T>(
         &self,
@@ -239,7 +241,7 @@ impl<F: VectorBackend> FsClient<F> {
     {
         // Whole-batch validation precedes identity queries and all writes,
         // including validation of empty requests and foreign/closed handles.
-        let mut offsets = Vec::with_capacity(requests.len());
+        let mut prepared = Vec::with_capacity(requests.len());
         let mut raw_files = Vec::with_capacity(requests.len());
         for (index, request) in requests.iter().map(&project).enumerate() {
             self.validate_owner(request.file(), index)?;
@@ -258,13 +260,14 @@ impl<F: VectorBackend> FsClient<F> {
                     VfError::client(index, libc::EOVERFLOW as u32)
                         .with_context("vwrite_all_native", request.file().path())
                 })?;
-            offsets.push(offset);
+            // Reuse the offset allocation to retain the cheap borrowed request.
+            prepared.push((request, offset));
             if !request.data().is_empty() {
                 raw_files.push(raw);
             }
         }
         let graph_nodes = if raw_files.len() > 1 {
-            requests.len()
+            prepared.len()
         } else {
             0
         };
@@ -276,9 +279,9 @@ impl<F: VectorBackend> FsClient<F> {
         if raw_files.len() < 2 {
             // A scalar nonempty request needs neither identity nor graph work.
             wave_indices.extend(
-                requests
+                prepared
                     .iter()
-                    .map(&project)
+                    .map(|(request, _)| *request)
                     .enumerate()
                     .filter(|(_, request)| !request.data().is_empty())
                     .map(|(index, _)| index),
@@ -286,20 +289,20 @@ impl<F: VectorBackend> FsClient<F> {
         } else {
             let map_identity_error = |error: VfError| {
                 let error = error.map_index(|raw_index| {
-                    requests
+                    prepared
                         .iter()
-                        .map(&project)
+                        .map(|(request, _)| *request)
                         .enumerate()
                         .filter(|(_, request)| !request.data().is_empty())
                         .nth(raw_index)
                         .map_or(raw_index, |(index, _)| index)
                 });
-                error
-                    .index()
-                    .and_then(|index| requests.get(index).map(&project))
-                    .map_or(error.clone(), |request| {
-                        error.with_context("vwrite_all_native", request.file().path())
-                    })
+                with_indexed_context(error, "vwrite_all_native", |index| {
+                    prepared
+                        .get(index)
+                        .map(|(request, _)| *request)
+                        .map(|request| request.file().path())
+                })
             };
             let mut backend = self.lock()?;
             backend
@@ -308,7 +311,7 @@ impl<F: VectorBackend> FsClient<F> {
             let mut unknown = false;
             let mut prior_by_object = HashMap::new();
             let mut prior_unknown = WriteDependencies::default();
-            for (index, request) in requests.iter().map(&project).enumerate() {
+            for (index, request) in prepared.iter().map(|(request, _)| *request).enumerate() {
                 if request.data().is_empty() {
                     continue;
                 }
@@ -330,11 +333,15 @@ impl<F: VectorBackend> FsClient<F> {
                     }
                     remaining_dependencies.fill(0);
                     wave_indices.clear();
-                    for (earlier, previous) in requests[..index].iter().map(&project).enumerate() {
+                    for (earlier, previous) in prepared[..index]
+                        .iter()
+                        .map(|(request, _)| *request)
+                        .enumerate()
+                    {
                         if previous.data().is_empty() {
                             continue;
                         }
-                        let offset = offsets[earlier];
+                        let offset = prepared[earlier].1;
                         add_write_dependencies(
                             (
                                 earlier,
@@ -356,7 +363,7 @@ impl<F: VectorBackend> FsClient<F> {
                         .entry(object.expect("known object reference"))
                         .or_default()
                 };
-                let offset = offsets[index];
+                let offset = prepared[index].1;
                 // Complete conflicting requests before dispatching later bytes,
                 // so retries cannot interleave aliases or overwrite their data.
                 add_write_dependencies(
@@ -374,15 +381,15 @@ impl<F: VectorBackend> FsClient<F> {
             }
         }
         drop(raw_files);
-        let mut totals = vec![0usize; requests.len()];
-        let mut stable = vec![true; requests.len()];
+        let mut totals = vec![0usize; prepared.len()];
+        let mut stable = vec![true; prepared.len()];
         let mut next_wave_indices = Vec::new();
         while !wave_indices.is_empty() {
             next_wave_indices.clear();
             let wave: Vec<_> = wave_indices
                 .iter()
                 .map(|&index| {
-                    let request = project(&requests[index]);
+                    let request = prepared[index].0;
                     let VfOffset::At(offset) = request.offset() else {
                         return Err(VfError::client(index, crate::ERR_INVAL)
                             .with_context("vwrite_all_native", request.file().path()));
@@ -402,7 +409,7 @@ impl<F: VectorBackend> FsClient<F> {
                 error.map_index(|index| wave_indices.get(index).copied().unwrap_or(index))
             })?;
             for (&index, result) in wave_indices.iter().zip(results) {
-                let request = project(&requests[index]);
+                let request = prepared[index].0;
                 if result.bytes_written == 0 {
                     return Err(VfError::client(index, crate::ERR_IO)
                         .with_context("vwrite_all_native", request.file().path()));
@@ -412,7 +419,7 @@ impl<F: VectorBackend> FsClient<F> {
                     // Preserve the last reported end even when outside writers
                     // append between short-write waves. This is an aggregate
                     // completion offset, not a guarantee of a contiguous extent.
-                    offsets[index] = result
+                    prepared[index].1 = result
                         .offset
                         .checked_add(result.bytes_written as u64)
                         .and_then(|end| end.checked_sub(totals[index] as u64))
@@ -447,10 +454,10 @@ impl<F: VectorBackend> FsClient<F> {
             }
             std::mem::swap(&mut wave_indices, &mut next_wave_indices);
         }
-        Ok(offsets
+        Ok(prepared
             .into_iter()
             .enumerate()
-            .map(|(index, offset)| FsWriteResult {
+            .map(|(index, (_, offset))| FsWriteResult {
                 offset,
                 bytes_written: totals[index],
                 stable: stable[index],

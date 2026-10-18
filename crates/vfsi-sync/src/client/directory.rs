@@ -106,7 +106,8 @@ impl<F: VectorBackend> FsClient<F> {
     /// Create `path` if missing, otherwise empty it. Errors if it exists and is
     /// not a directory (a symlink to a directory is not a directory here).
     pub fn ensure_empty_dir(&self, path: impl AsRef<Path>) -> VfResult<()> {
-        self.lock()?.ensure_empty_dir_impl(path.as_ref())
+        let path = path.as_ref();
+        self.lock()?.ensure_empty_dir_impl(path)
     }
 
     /// Empty a directory while keeping it, with explicit removal policy.
@@ -133,22 +134,27 @@ impl<F: VectorBackend> FsClient<F> {
         if paths.is_empty() {
             return Ok(Vec::new());
         }
+        // Convert caller paths and allocate diagnostic storage before locking.
+        // These are the same handle/path allocations required on success.
+        let mut output: Vec<_> = paths
+            .iter()
+            .map(|path| FsDir {
+                inner: Arc::clone(&self.inner),
+                dir: None,
+                path: path.as_ref().to_path_buf(),
+            })
+            .collect();
         let mut backend = self.lock()?;
-        let mut output = Vec::with_capacity(paths.len());
-        for (index, path) in paths.iter().enumerate() {
-            let path = path.as_ref();
-            let dir = backend.open_dir_impl(path).map_err(|error| {
-                crate::application::vector_index(error, index).with_context("vopen_dirs", path)
+        for (index, handle) in output.iter_mut().enumerate() {
+            let dir = backend.open_dir_impl(&handle.path).map_err(|error| {
+                crate::application::vector_index(error, index)
+                    .with_context("vopen_dirs", &handle.path)
             })?;
             if !matches!(dir, VfDir::Descriptor { .. }) {
                 let _ = backend.close_dir_impl(&dir);
-                return Err(VfError::unsupported(index).with_context("vopen_dirs", path));
+                return Err(VfError::unsupported(index).with_context("vopen_dirs", &handle.path));
             }
-            output.push(FsDir {
-                inner: Arc::clone(&self.inner),
-                dir: Some(dir),
-                path: path.to_path_buf(),
-            });
+            handle.dir = Some(dir);
         }
         Ok(output)
     }
@@ -207,12 +213,7 @@ impl<F: VectorBackend> FsClient<F> {
         self.lock()?
             .remove_paths_with_options_impl(&paths, recursive, options)
             .map_err(|error| {
-                error
-                    .index()
-                    .and_then(|index| paths.get(index))
-                    .map_or(error.clone(), |path| {
-                        error.with_context("vremove_native", path)
-                    })
+                with_indexed_context(error, "vremove_native", |index| paths.get(index).copied())
             })
     }
 }

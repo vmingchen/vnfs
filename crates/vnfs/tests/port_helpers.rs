@@ -303,3 +303,72 @@ fn ordered_walk_depth_zero_delivers_root_and_limits_descent_only() {
     assert_eq!(truncated_listings[0].1, 0);
     assert_eq!(truncated_listings[0].2.len(), 2);
 }
+
+#[test]
+fn ordered_walk_rejects_replaced_children_and_ancestors() {
+    for (victim, target, outside) in [
+        ("/tree/child", "../outside", "/outside"),
+        ("/tree", "outside", "/outside/child"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let fs = Posix::new(root.path()).unwrap();
+        fs.create_dir_all("/tree/child").unwrap();
+        fs.create_dir_all(outside).unwrap();
+        fs.write(format!("{outside}/secret"), b"must not traverse")
+            .unwrap();
+        let mut changed = false;
+        let mut escaped = false;
+        let result = fs.visit_dirs_ordered(
+            "/tree",
+            ListDirOptions::new(),
+            |a, b| a.path().cmp(b.path()),
+            |_| true,
+            |listing, _| {
+                for entry in &listing.entries {
+                    if entry.path() == Path::new("/tree/child") && !changed {
+                        fs.rename(victim, "/saved")?;
+                        fs.symlink(target, victim)?;
+                        changed = true;
+                    }
+                    escaped |= entry.path().ends_with("secret");
+                }
+                Ok(WalkControl::Continue)
+            },
+        );
+        assert!(changed);
+        assert!(!escaped, "followed replacement of {victim}");
+        assert_eq!(result.unwrap_err().index(), Some(0));
+    }
+}
+
+#[test]
+fn ordered_walk_preserves_the_input_roots_component_policy() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Posix::new(root.path()).unwrap();
+    fs.create_dir_all("/real/tree").unwrap();
+    fs.write("/real/tree/file", b"x").unwrap();
+    fs.symlink("real", "/alias").unwrap();
+    for allow in [false, true] {
+        let mut pages = Vec::new();
+        let result = fs.visit_dirs_ordered(
+            "/alias/tree",
+            ListDirOptions::new().with_allow_symlink_components(allow),
+            |a, b| a.path().cmp(b.path()),
+            |_| true,
+            |listing, depth| {
+                assert_eq!(depth, 0);
+                pages.push(listing);
+                Ok(WalkControl::Continue)
+            },
+        );
+        if allow {
+            assert_eq!(result.unwrap(), TraversalCompletion::Complete);
+            assert_eq!(pages.len(), 1);
+            assert_eq!(pages[0].path, Path::new("/alias/tree"));
+            assert_eq!(pages[0].entries[0].path(), Path::new("/alias/tree/file"));
+        } else {
+            assert!(result.is_err());
+            assert!(pages.is_empty());
+        }
+    }
+}

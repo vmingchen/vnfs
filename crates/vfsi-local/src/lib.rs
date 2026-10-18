@@ -1020,6 +1020,31 @@ impl LocalBackend {
         Ok(())
     }
 
+    /// Keep every attribute on the directory identity already held by the
+    /// listing, including named attributes after its diagnostic path changes.
+    fn directory_entry_attrs(
+        &self,
+        parent: &AnchoredPath,
+        path: &Path,
+        name: &std::ffi::OsStr,
+        masks: AttrMask,
+    ) -> VfResult<VfAttrs> {
+        let real = AnchoredPath {
+            path: parent.join(name),
+            anchor: None, // the borrowed parent owns the live directory anchor
+            nofollow_on_open: true,
+        };
+        let metadata = std::fs::symlink_metadata(&real)
+            .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
+        let mut attrs = VfAttrs {
+            file: FileOperand::from_os_path(path),
+            masks,
+            ..VfAttrs::default()
+        };
+        self.fill_attrs(&mut attrs, Some(&real), &metadata)?;
+        Ok(attrs)
+    }
+
     fn ownership_ids(a: &VfAttrs, index: usize) -> VfResult<(Option<u32>, Option<u32>)> {
         let uid = a.masks.contains(AttrMask::UID).then_some(a.uid);
         let gid = a.masks.contains(AttrMask::GID).then_some(a.gid);
@@ -1344,15 +1369,8 @@ impl LocalBackend {
                 }
                 let name = entry.file_name().as_bytes().to_vec();
                 let path = current.join(path_from_bytes(&name));
-                let mut attrs = VfAttrs {
-                    file: FileOperand::from_os_path(&path),
-                    masks,
-                    ..VfAttrs::default()
-                };
-                let metadata = std::fs::symlink_metadata(entry.path())
-                    .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
-                let real = self.no_follow_path(&self.resolve(&path))?;
-                self.fill_attrs(&mut attrs, Some(&real), &metadata)
+                let attrs = self
+                    .directory_entry_attrs(&p, &path, &entry.file_name(), masks)
                     .map_err(|error| error.with_index(out.len()))?;
                 if recursive && attrs.ftype == VfType::Directory {
                     children.push(path);
@@ -1423,6 +1441,7 @@ impl LocalBackend {
         let mut so = p.src_offset;
         let mut doff = p.dst_offset;
         let mut copied: u64 = 0;
+        let mut buf = Vec::new();
         loop {
             if let Some(length) = p.length
                 && copied >= length
@@ -1431,15 +1450,14 @@ impl LocalBackend {
             }
             let remaining = p.length.map_or(u64::MAX, |l| l - copied);
             let chunk_len = remaining.min(1 << 20) as usize;
-            let mut buf = vec![0u8; chunk_len];
+            buf.resize(chunk_len, 0);
             let n = src
                 .read_at(&mut buf, so)
                 .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
             if n == 0 {
                 break; // EOF
             }
-            buf.truncate(n);
-            dst.write_all_at(&buf, doff)
+            dst.write_all_at(&buf[..n], doff)
                 .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
             so = so.checked_add(n as u64).ok_or_else(|| Self::overflow(0))?;
             doff = doff
@@ -2115,15 +2133,8 @@ impl VectorBackend for LocalBackend {
             };
             let entry = entry.map_err(|error| VfError::failure(0, Self::errno(&error)))?;
             let path = state.virtual_dir.join(entry.file_name());
-            let mut attrs = VfAttrs {
-                file: FileOperand::from_os_path(&path),
-                masks,
-                ..VfAttrs::default()
-            };
-            let metadata = std::fs::symlink_metadata(entry.path())
-                .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
-            let real = self.no_follow_path(&self.resolve(&path))?;
-            self.fill_attrs(&mut attrs, Some(&real), &metadata)
+            let attrs = self
+                .directory_entry_attrs(&state._anchor, &path, &entry.file_name(), masks)
                 .map_err(|error| error.with_index(page.len()))?;
             page.push(attrs);
         }
@@ -2146,15 +2157,8 @@ impl VectorBackend for LocalBackend {
             }
             let entry = entry.map_err(|error| VfError::failure(0, Self::errno(&error)))?;
             let path = dir.join(entry.file_name());
-            let mut attrs = VfAttrs {
-                file: FileOperand::from_os_path(&path),
-                masks,
-                ..VfAttrs::default()
-            };
-            let metadata = std::fs::symlink_metadata(entry.path())
-                .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
-            let real = self.no_follow_path(&self.resolve(&path))?;
-            self.fill_attrs(&mut attrs, Some(&real), &metadata)
+            let attrs = self
+                .directory_entry_attrs(&p, &path, &entry.file_name(), masks)
                 .map_err(|error| error.with_index(count))?;
             if !cb(&attrs) {
                 return Ok(());

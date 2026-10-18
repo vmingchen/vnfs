@@ -77,7 +77,7 @@ impl NfsVecFs {
         files: &[&FileOperand],
         follow: bool,
     ) -> VfResult<Vec<Result<(NfsFh, u32), u32>>> {
-        use std::collections::{BTreeMap, HashMap};
+        use std::collections::BTreeMap;
         // Group by parent directory.
         let mut groups: BTreeMap<Box<[u8]>, Vec<_>> = BTreeMap::new();
         let mut out: Vec<Result<(NfsFh, u32), u32>> =
@@ -105,30 +105,23 @@ impl NfsVecFs {
                 .or_default()
                 .push((i, name));
         }
-        let mut dir_cache: HashMap<Box<[u8]>, NfsFh> = HashMap::new();
-        for (dir, entries) in groups {
-            let dirfh = match dir_cache.get(&dir) {
-                Some(fh) => fh.clone(),
-                None => match self.resolve_path(&path_from_bytes(&dir), true) {
-                    Ok(fh) => {
-                        dir_cache.insert(dir, fh.clone());
-                        fh
+        for (dir, mut entries) in groups {
+            let dirfh = match self.resolve_path(&path_from_bytes(&dir), true) {
+                Ok(fh) => fh,
+                Err(e) => {
+                    if e.is_transport() {
+                        return Err(e);
                     }
-                    Err(e) => {
-                        if e.is_transport() {
-                            return Err(e);
-                        }
-                        let err = e.raw_code();
-                        for (i, _) in &entries {
-                            out[*i] = Err(err);
-                        }
-                        continue;
+                    let err = e.raw_code();
+                    for (i, _) in &entries {
+                        out[*i] = Err(err);
                     }
-                },
+                    continue;
+                }
             };
             let ops: Vec<(NfsFh, Vec<u8>)> = entries
-                .iter()
-                .map(|(_, name)| (dirfh.clone(), name.clone()))
+                .iter_mut()
+                .map(|(_, name)| (dirfh.clone(), std::mem::take(name)))
                 .collect();
             let results = self
                 .nfs

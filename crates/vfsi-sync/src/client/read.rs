@@ -98,13 +98,15 @@ impl<F: VectorBackend> FsClient<F> {
             }
         }
         let reads = self.read_ops(requests, &project)?;
-        let results = self.lock()?.vread_impl(&reads).map_err(|error| {
-            error
-                .index()
-                .and_then(|index| requests.get(index).map(&project))
-                .map_or(error.clone(), |request| {
-                    error.with_context("vread_native", request.file.path())
-                })
+        // Drop the backend guard before invoking caller projection code.
+        let result = self.lock()?.vread_impl(&reads);
+        let results = result.map_err(|error| {
+            with_indexed_context(error, "vread_native", |index| {
+                requests
+                    .get(index)
+                    .map(&project)
+                    .map(|request| request.file.path())
+            })
         })?;
         if results.len() != requests.len() {
             return Err(wrong_result_count(
@@ -114,12 +116,12 @@ impl<F: VectorBackend> FsClient<F> {
             ));
         }
         validate_read_results("vread_native", &reads, &results).map_err(|error| {
-            error
-                .index()
-                .and_then(|index| requests.get(index).map(&project))
-                .map_or(error.clone(), |request| {
-                    error.with_context("vread_native", request.file.path())
-                })
+            with_indexed_context(error, "vread_native", |index| {
+                requests
+                    .get(index)
+                    .map(&project)
+                    .map(|request| request.file.path())
+            })
         })?;
         Ok(results.into_iter().map(read_result).collect())
     }
@@ -200,20 +202,14 @@ impl<F: VectorBackend> FsClient<F> {
             self.lock()?.vread_into_impl(&reads, &mut buffers)
         }
         .map_err(|error| {
-            error
-                .index()
-                .and_then(|index| requests.get(index))
-                .map_or(error.clone(), |request| {
-                    error.with_context("vread_into_native", request.file.path())
-                })
+            with_indexed_context(error, "vread_into_native", |index| {
+                requests.get(index).map(|request| request.file.path())
+            })
         })?;
         validate_read_into_results("vread_into_native", &reads, &results).map_err(|error| {
-            error
-                .index()
-                .and_then(|index| requests.get(index))
-                .map_or(error.clone(), |request| {
-                    error.with_context("vread_into_native", request.file.path())
-                })
+            with_indexed_context(error, "vread_into_native", |index| {
+                requests.get(index).map(|request| request.file.path())
+            })
         })?;
         Ok(results
             .into_iter()
@@ -240,17 +236,12 @@ impl<F: VectorBackend> FsClient<F> {
             .iter()
             .map(|path| FileOperand::from_os_path(path.as_ref()))
             .collect();
-        let result = self
-            .lock()?
-            .vread_all_with_options_impl(&files, options)
-            .map_err(|error| {
-                error
-                    .index()
-                    .and_then(|index| paths.get(index))
-                    .map_or(error.clone(), |path| {
-                        error.with_context("read_files", path.as_ref())
-                    })
-            });
+        let result = self.lock()?.vread_all_with_options_impl(&files, options);
+        let result = result.map_err(|error| {
+            with_indexed_context(error, "read_files", |index| {
+                paths.get(index).map(|path| path.as_ref())
+            })
+        });
         result.and_then(|buffers| {
             if buffers.len() != paths.len() {
                 Err(wrong_result_count("read_files", paths.len(), buffers.len()))

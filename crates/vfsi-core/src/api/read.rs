@@ -485,6 +485,19 @@ pub fn read_batch<R>(
             .checked_sub(r.len())
             .ok_or_else(|| Error::transport(None, "vread_native backend exceeded byte budget"))?;
     }
+    if path_indices.is_empty() {
+        return Ok(range_results);
+    }
+    if range_indices.is_empty() {
+        return Ok(path_results
+            .into_iter()
+            .map(|data| OwnedReadResult {
+                offset: 0,
+                data,
+                eof: true,
+            })
+            .collect());
+    }
     let mut output: Vec<Option<OwnedReadResult>> = (0..requests.len()).map(|_| None).collect();
     for (i, r) in range_indices.into_iter().zip(range_results) {
         output[i] = Some(r);

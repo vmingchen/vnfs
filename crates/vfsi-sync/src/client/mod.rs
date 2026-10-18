@@ -19,6 +19,17 @@ use crate::{
     WriteResult,
 };
 
+fn with_indexed_context<'a>(
+    error: VfError,
+    operation: &'static str,
+    path: impl FnOnce(usize) -> Option<&'a Path>,
+) -> VfError {
+    match error.index().and_then(path) {
+        Some(path) => error.with_context(operation, path),
+        None => error,
+    }
+}
+
 fn read_result(result: ReadResult) -> FsReadResult {
     FsReadResult {
         offset: result.offset,
@@ -151,17 +162,26 @@ impl<F: VectorBackend> FsClient<F> {
         vfsi_core::internal::validate_open_requests(requests)?;
         let mut filesystem = self.lock()?;
         let files = filesystem.vopen_impl(requests).map_err(|error| {
-            error
-                .index()
-                .and_then(|index| requests.get(index))
-                .map_or(error.clone(), |request| {
-                    error.with_context("vopen", request.path())
-                })
+            with_indexed_context(error, "vopen", |index| {
+                requests.get(index).map(|request| request.path())
+            })
         })?;
         if files.len() != requests.len() {
             let error = wrong_result_count("vopen", requests.len(), files.len());
-            for file in &files {
-                let _ = filesystem.close_impl(file);
+            for (index, file) in files.into_iter().enumerate() {
+                if filesystem.close_impl(&file).is_err() {
+                    // Keep failed cleanup under the same RAII/deferred-close
+                    // ownership as ordinary handles, preserving the shape error.
+                    drop(OpenFile {
+                        inner: Arc::clone(&self.inner),
+                        file: Some(file),
+                        append: false,
+                        path: requests
+                            .get(index)
+                            .map(|request| request.path().to_path_buf())
+                            .unwrap_or_default(),
+                    });
+                }
             }
             return Err(error);
         }
@@ -204,13 +224,10 @@ impl<F: VectorBackend> FsClient<F> {
             .map(|file| file.raw().cloned())
             .collect::<VfResult<_>>()?;
         self.lock()?.vclose_impl(&descriptors).map_err(|error| {
-            error
-                .index()
-                .and_then(|index| files.get(index))
-                .map_or(error.clone(), |file| {
-                    error.with_context("vclose_owned", file.path())
-                })
-                .map_index(|index| positions.get(index).copied().unwrap_or(index))
+            with_indexed_context(error, "vclose_owned", |index| {
+                files.get(index).map(|file| file.path())
+            })
+            .map_index(|index| positions.get(index).copied().unwrap_or(index))
         })?;
         for file in &mut files {
             file.file = None;

@@ -4334,6 +4334,7 @@ fn buffered_directory_walk_rejects_an_ancestor_replaced_by_a_symlink() {
 #[derive(Clone, Copy, Debug)]
 enum DirectoryVisit {
     Pages,
+    Ordered,
     Events(vnfs::directory::WalkOptions),
 }
 
@@ -4392,6 +4393,20 @@ fn directory_replacement_is_not_followed(mode: DirectoryVisit, replacement: Repl
         Ok(())
     };
     let result = match mode {
+        DirectoryVisit::Ordered => fs
+            .visit_dirs_ordered(
+                &tree,
+                ListDirOptions::new(),
+                |a, b| a.path().cmp(b.path()),
+                |_| true,
+                |listing, _| {
+                    for entry in &listing.entries {
+                        on_entry(entry)?;
+                    }
+                    Ok(vnfs::directory::WalkControl::Continue)
+                },
+            )
+            .map(|_| ()),
         DirectoryVisit::Events(options) => fs
             .listdir(&tree, options, |event| {
                 on_entry(&event.entry)?;
@@ -4876,4 +4891,11 @@ fn portable_auto_directory_vectors_preflight_and_retain_identity() {
     let namespace = vnfs::posix::Posix::new(root.path()).unwrap();
     let verify = Nfs::from_mount(root.path()).unwrap();
     portable_directory_handles::check(&fs, &other, &namespace, &verify);
+}
+
+#[test]
+fn ordered_directory_walk_rejects_replaced_children_and_ancestors() {
+    for replacement in [ReplacedDirectory::Child, ReplacedDirectory::Ancestor] {
+        directory_replacement_is_not_followed(DirectoryVisit::Ordered, replacement);
+    }
 }
