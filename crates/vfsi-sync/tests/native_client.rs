@@ -3298,3 +3298,34 @@ fn complete_write_projection_can_reenter_during_alias_planning() {
         }
     }
 }
+
+#[test]
+fn malformed_open_results_retain_failed_cleanup_for_retry() {
+    for failures in [1, 2] {
+        let backend = ScalarOnly {
+            vector_result_limit: Arc::new(Mutex::new(Some(1))),
+            close_failures_remaining: failures,
+            ..Default::default()
+        };
+        let observed = backend.close_observed.clone();
+        let client = FsClient::new(backend);
+        let error = client
+            .vopen(&[
+                OpenOp::new("/first", OpenFlags::READ),
+                OpenOp::new("/second", OpenFlags::READ),
+            ])
+            .unwrap_err();
+        assert!(error.is_transport());
+        assert_eq!(error.index(), None);
+        assert!(error.to_string().contains("1 results for 2 requests"));
+        assert_eq!(observed.load(Ordering::SeqCst), 1);
+        for _ in 1..failures {
+            assert!(client.drain_cleanup().is_err());
+        }
+        client.drain_cleanup().unwrap();
+        assert_eq!(observed.load(Ordering::SeqCst), failures + 1);
+        let backend = client.into_inner().unwrap();
+        assert!(!backend.open);
+        assert_eq!(backend.close_calls, failures + 1);
+    }
+}

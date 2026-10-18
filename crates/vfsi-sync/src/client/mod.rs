@@ -160,8 +160,20 @@ impl<F: VectorBackend> FsClient<F> {
         })?;
         if files.len() != requests.len() {
             let error = wrong_result_count("vopen", requests.len(), files.len());
-            for file in &files {
-                let _ = filesystem.close_impl(file);
+            for (index, file) in files.into_iter().enumerate() {
+                if filesystem.close_impl(&file).is_err() {
+                    // Keep failed cleanup under the same RAII/deferred-close
+                    // ownership as ordinary handles, preserving the shape error.
+                    drop(OpenFile {
+                        inner: Arc::clone(&self.inner),
+                        file: Some(file),
+                        append: false,
+                        path: requests
+                            .get(index)
+                            .map(|request| request.path().to_path_buf())
+                            .unwrap_or_default(),
+                    });
+                }
             }
             return Err(error);
         }
