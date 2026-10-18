@@ -5,6 +5,33 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+## Coordinated patch release - 2026-10-18
+
+- Rust: vnfs 0.0.24, vfsi-core 0.1.12, vfsi-sync 0.1.13,
+  vfsi-local 0.1.11, vfsi-posix 0.1.3, vfsi-uring 0.1.3,
+  vfsi-nfs 0.1.12, vfsi-smb 0.1.10, nfsv41-sys 0.1.13, and
+  vfsi-c 0.3.8. Internal dependency floors advance together;
+  the external libntirpc-sys dependency remains at 0.3.2.
+- Python: nfs4fs 0.3.9 requires vfsi-fsspec 0.1.9. The private shared
+  native build crate advances to 0.1.4; Python SMB distribution versions
+  are unchanged.
+- Pre-1.0 Rust API cleanup: owned handles use FileHandle, rename choices
+  use RenameMode, positional writes use WriteOp::at, and errors are opaque
+  with typed status and context accessors. Removed deprecated aliases;
+  see docs/RUST_API.md for the current interface and migration notes.
+- Compacted filesystem statistics, attributes, read results, and attribute
+  update requests. OpenOp borrows paths until ownership is requested, and
+  simple read cohorts avoid dispatcher/reordering allocations.
+- Read budget overrides require NonZeroUsize. Traversal uses checked finite
+  DepthLimit values or an explicitly unlimited limit; invalid Python/C depth
+  settings fail before backend I/O.
+- Directory operations share stat metadata defaults, distinguish final-symlink
+  policies from directory-component policies, and reject unsupported presentation
+  flags. Local Rust backends require an existing directory and preserve lookup
+  errors. C smoke tests now create their fixtures explicitly.
+- Updated PyO3 to 0.30.1, SMB2 to 0.30.0, Tokio to 1.53.3, and proptest to
+  1.12.0, with regression coverage for SMB negotiation deadlines and metadata decoding.
+
 ## NFS and dependency patch release - 2026-10-17
 
 - Rust: vnfs 0.0.23, vfsi-core 0.1.11, vfsi-sync 0.1.12,

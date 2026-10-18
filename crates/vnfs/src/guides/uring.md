@@ -4,7 +4,7 @@ Enable the optional Linux backend without bringing in the NFS native library:
 
 ```toml
 [dependencies]
-vnfs = { version = "0.0.23", default-features = false, features = ["uring"] }
+vnfs = { version = "0.0.24", default-features = false, features = ["uring"] }
 ```
 
 The optional uring feature is available on Linux in the published vnfs crate.
