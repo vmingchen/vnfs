@@ -4,7 +4,7 @@ use std::{
     cell::Cell,
     path::Path,
 };
-use vfsi_core::api::internal::{OwnedReadResult, consume_ops};
+use vfsi_core::api::internal::{OwnedReadResult, ReadRequest, consume_ops, read_batch};
 use vfsi_core::api::*;
 
 struct TrackingAllocator;
@@ -145,4 +145,47 @@ fn singleton_preflight_and_backend_indices_do_not_replay_or_mutate() {
     .unwrap_err();
     assert!(error.is_transport());
     assert_eq!(error.index(), None);
+}
+
+#[test]
+fn range_batches_reuse_backend_result_storage() {
+    let requests = [ReadRequest::range(7), ReadRequest::range(11)];
+    let replies: Vec<_> = [7, 11]
+        .into_iter()
+        .map(|offset| OwnedReadResult {
+            offset,
+            data: vec![offset as u8],
+            eof: true,
+        })
+        .collect();
+    let storage = replies.as_ptr();
+    let payloads: Vec<_> = replies.iter().map(|reply| reply.data.as_ptr()).collect();
+    let (result, allocations) = measured(|| {
+        read_batch(
+            &requests,
+            2,
+            |ranges, budget| {
+                assert_eq!(ranges, [&7, &11]);
+                assert_eq!(budget, 2);
+                Ok(replies)
+            },
+            |_, _| panic!("range-only batches must not submit path reads"),
+        )
+        .unwrap()
+    });
+    assert_eq!(
+        result.as_ptr(),
+        storage,
+        "range results should retain backend storage"
+    );
+    assert!(
+        allocations <= 2,
+        "range dispatcher allocated {allocations} times"
+    );
+    for ((reply, payload), offset) in result.iter().zip(payloads).zip([7, 11]) {
+        assert_eq!(reply.offset, offset);
+        assert_eq!(reply.data, [offset as u8]);
+        assert_eq!(reply.data.as_ptr(), payload);
+        assert!(reply.eof);
+    }
 }

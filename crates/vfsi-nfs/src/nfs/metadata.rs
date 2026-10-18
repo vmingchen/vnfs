@@ -488,11 +488,8 @@ impl NfsVecFs {
         let files: Vec<&FileOperand> = attrs.iter().map(|a| &a.file).collect();
         let resolved = self.resolve_files_nfs(&files, follow)?;
         let mut ops = Vec::with_capacity(attrs.len());
-        for (i, a) in attrs.iter().enumerate() {
-            let (fh, ftype) = match &resolved[i] {
-                Ok(x) => x.clone(),
-                Err(status) => return Err(VfError::nfs(i, *status)),
-            };
+        for (i, (a, resolution)) in attrs.iter().zip(resolved).enumerate() {
+            let (fh, ftype) = resolution.map_err(|status| VfError::nfs(i, status))?;
             if nofollow_symlink_setattr_is_unsupported(follow, ftype, a.masks) {
                 // NFSv4 has no non-following mode/size setter for symlinks;
                 // refuse like the `std::fs` backend instead of pretending the
@@ -620,21 +617,18 @@ impl NfsVecFs {
         let files: Vec<&FileOperand> = attrs.iter().map(|a| &a.file).collect();
         let resolved = self.resolve_files_nfs(&files, follow)?;
         let mut ops = Vec::with_capacity(attrs.len());
-        let mut ids_list = Vec::with_capacity(attrs.len());
         let mut first_failure: Option<VfError> = None;
-        for (i, a) in attrs.iter().enumerate() {
-            let fh = match &resolved[i] {
-                Ok((fh, _)) => fh.clone(),
+        for (i, (a, resolution)) in attrs.iter().zip(resolved).enumerate() {
+            let fh = match resolution {
+                Ok((fh, _)) => fh,
                 Err(status) => {
                     if first_failure.is_none() {
-                        first_failure = Some(VfError::nfs(i, *status));
+                        first_failure = Some(VfError::nfs(i, status));
                     }
-                    ids_list.push(Vec::new());
                     continue;
                 }
             };
             let ids = request_mask_to_attr_list(&a.masks);
-            ids_list.push(ids.clone());
             ops.push(crate::client::GetattrOp { fh, attrs: ids });
         }
         if let Some(e) = first_failure {
@@ -644,8 +638,8 @@ impl NfsVecFs {
             .nfs
             .getattr_many(&ops)
             .map_err(vfsi_core::error_from_rpc_indexed)?;
-        for ((a, ids), list) in attrs.iter_mut().zip(ids_list).zip(results) {
-            let v = parse_attr_list(&ids, &list)?;
+        for ((a, op), list) in attrs.iter_mut().zip(ops).zip(results) {
+            let v = parse_attr_list(&op.attrs, &list)?;
             apply_attrs(a, &v);
         }
         Ok(())
@@ -936,5 +930,86 @@ mod tests {
         assert_eq!(attrs.returned, AttrMask::UID | AttrMask::GID);
         assert_eq!(attrs.uid, 42);
         assert_eq!(attrs.gid, 99);
+    }
+    #[test]
+    fn phased_metadata_preserves_grouping_masks_duplicates_and_error_indices() {
+        let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+            assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+            return;
+        };
+        let minor = std::env::var("VFSI_NFS_MINOR")
+            .unwrap_or_else(|_| "2".into())
+            .parse()
+            .unwrap();
+        let mut backend = NfsVecFs::connect_minor(&server, minor).unwrap();
+        use vfsi_sync::test_support::borrow_writes;
+        let root = format!("/vfsi-phased-metadata-{}", std::process::id());
+        for parent in ["a", "b"] {
+            backend
+                .ensure_dir_impl(Path::new(&format!("{root}/{parent}")), 0o755)
+                .unwrap();
+        }
+        let paths = [
+            format!("{root}/a/one"),
+            format!("{root}/b/two"),
+            format!("{root}/a/three"),
+        ];
+        let writes: Vec<_> = paths
+            .iter()
+            .zip([b"a".as_slice(), b"bb", b"ccc"])
+            .map(|(path, data)| {
+                vfsi_sync::WriteOp::from_path(path, VfOffset::At(0), data.to_vec())
+                    .with_creation()
+                    .with_truncate()
+            })
+            .collect();
+        backend.vwrite_impl(&borrow_writes(&writes)).unwrap();
+        let mut attrs: Vec<_> = [
+            (2, AttrMask::SIZE),
+            (1, AttrMask::MODE),
+            (0, AttrMask::SIZE | AttrMask::MODE),
+            (2, AttrMask::identity()),
+        ]
+        .into_iter()
+        .map(|(index, masks)| VfAttrs {
+            file: FileOperand::from_path(&paths[index]),
+            masks,
+            ..Default::default()
+        })
+        .collect();
+        #[cfg(feature = "test-faults")]
+        let _ = crate::compound::thread_compound_stats();
+        backend.getattrsv_phased(&mut attrs, true).unwrap();
+        #[cfg(feature = "test-faults")]
+        assert_eq!(
+            crate::compound::thread_compound_stats().0,
+            7,
+            "resolve and type-check each unique parent once, lookup its children together, then fetch attributes together"
+        );
+        assert_eq!(attrs[0].size, 3);
+        assert_eq!(attrs[2].size, 1);
+        assert_eq!(attrs[1].ftype, VfType::Regular);
+        assert_ne!(attrs[3].fileid, 0);
+        for attr in &attrs {
+            assert!(attr.returned.contains(attr.masks));
+        }
+        let mut invalid: Vec<_> = [
+            &paths[0],
+            &format!("{root}/missing/file"),
+            &format!("{root}/b/missing"),
+        ]
+        .into_iter()
+        .map(|path| VfAttrs {
+            file: FileOperand::from_path(path),
+            masks: AttrMask::SIZE,
+            ..Default::default()
+        })
+        .collect();
+        let error = backend.getattrsv_phased(&mut invalid, true).unwrap_err();
+        assert_eq!(error.index(), Some(1));
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        backend
+            .remove_paths_impl(&[Path::new(&root)], true)
+            .unwrap();
     }
 }

@@ -137,12 +137,9 @@ impl<F: VectorBackend> FsClient<F> {
             .collect();
         let result = self.lock()?.vcopy_impl(&extents, options);
         result.map_err(|error| {
-            error
-                .index()
-                .and_then(|index| pairs.get(index))
-                .map_or(error.clone(), |(_, to)| {
-                    error.with_context("vcopy", to.as_ref())
-                })
+            with_indexed_context(error, "vcopy", |index| {
+                pairs.get(index).map(|(_, to)| to.as_ref())
+            })
         })
     }
 }

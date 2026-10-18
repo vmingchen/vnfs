@@ -1441,6 +1441,7 @@ impl LocalBackend {
         let mut so = p.src_offset;
         let mut doff = p.dst_offset;
         let mut copied: u64 = 0;
+        let mut buf = Vec::new();
         loop {
             if let Some(length) = p.length
                 && copied >= length
@@ -1449,15 +1450,14 @@ impl LocalBackend {
             }
             let remaining = p.length.map_or(u64::MAX, |l| l - copied);
             let chunk_len = remaining.min(1 << 20) as usize;
-            let mut buf = vec![0u8; chunk_len];
+            buf.resize(chunk_len, 0);
             let n = src
                 .read_at(&mut buf, so)
                 .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
             if n == 0 {
                 break; // EOF
             }
-            buf.truncate(n);
-            dst.write_all_at(&buf, doff)
+            dst.write_all_at(&buf[..n], doff)
                 .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
             so = so.checked_add(n as u64).ok_or_else(|| Self::overflow(0))?;
             doff = doff

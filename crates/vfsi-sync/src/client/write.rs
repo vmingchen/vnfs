@@ -78,12 +78,12 @@ impl<F: VectorBackend> FsClient<F> {
         // Drop the backend guard before invoking caller projection code.
         let result = self.lock()?.vwrite_impl(&writes);
         let results = result.map_err(|error| {
-            error
-                .index()
-                .and_then(|index| requests.get(index).map(&project))
-                .map_or(error.clone(), |request| {
-                    error.with_context("vwrite_native", request.file().path())
-                })
+            with_indexed_context(error, "vwrite_native", |index| {
+                requests
+                    .get(index)
+                    .map(&project)
+                    .map(|request| request.file().path())
+            })
         })?;
         if results.len() != requests.len() {
             return Err(wrong_result_count(
@@ -93,12 +93,12 @@ impl<F: VectorBackend> FsClient<F> {
             ));
         }
         validate_write_results("vwrite_native", &writes, &results).map_err(|error| {
-            error
-                .index()
-                .and_then(|index| requests.get(index).map(&project))
-                .map_or(error.clone(), |request| {
-                    error.with_context("vwrite_native", request.file().path())
-                })
+            with_indexed_context(error, "vwrite_native", |index| {
+                requests
+                    .get(index)
+                    .map(&project)
+                    .map(|request| request.file().path())
+            })
         })?;
         Ok(results.into_iter().map(write_result).collect())
     }
@@ -182,12 +182,12 @@ impl<F: VectorBackend> FsClient<F> {
                         .nth(raw_index)
                         .map_or(raw_index, |(index, _)| index)
                 });
-                error
-                    .index()
-                    .and_then(|index| prepared.get(index).map(|(request, _)| *request))
-                    .map_or(error.clone(), |request| {
-                        error.with_context("vwrite_all_native", request.file().path())
-                    })
+                with_indexed_context(error, "vwrite_all_native", |index| {
+                    prepared
+                        .get(index)
+                        .map(|(request, _)| *request)
+                        .map(|request| request.file().path())
+                })
             };
             let mut backend = self.lock()?;
             backend

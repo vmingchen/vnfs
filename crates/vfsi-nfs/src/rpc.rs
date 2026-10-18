@@ -279,7 +279,6 @@ impl RpcClient {
 
         let host_c =
             std::ffi::CString::new(host).map_err(|e| RpcError::transport(e.to_string()))?;
-        let nettype = std::ffi::CString::new("tcp").unwrap();
         let mut timeout = timeval {
             tv_sec: connect_timeout.as_secs().min(i64::MAX as u64) as _,
             tv_usec: connect_timeout.subsec_micros() as _,
@@ -299,7 +298,7 @@ impl RpcClient {
                     host_c.as_ptr(),
                     NFS4_PROGRAM,
                     NFS_V4,
-                    nettype.as_ptr(),
+                    c"tcp".as_ptr(),
                     &timeout,
                 )
             },

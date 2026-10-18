@@ -149,7 +149,6 @@ impl HandleBackend for NfsVecFs {
         let Some(observer) = &self.observer else {
             return Vec::new();
         };
-        let observer = observer.clone();
         let events = std::mem::take(&mut self.pending_events);
         if events.is_empty() {
             return Vec::new();

@@ -2209,4 +2209,37 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn extent_copy_preserves_multi_chunk_ranges_and_final_size() {
+        const CHUNK: usize = 1 << 20;
+        let (root, mut backend) = fs("multi-chunk-copy");
+        let data: Vec<u8> = (0..CHUNK * 2 + 37).map(|i| (i % 251) as u8).collect();
+        std::fs::write(root.0.join("source"), &data).unwrap();
+        for (offset, length) in [
+            (0, None),
+            (7, Some((CHUNK + 13) as u64)),
+            (3, Some(0)),
+            ((data.len() + 1) as u64, None),
+        ] {
+            let destination = root.0.join("destination");
+            std::fs::write(&destination, vec![0xff; data.len() + 100]).unwrap();
+            backend
+                .vcopy_data_impl(&[ExtentPair::new(
+                    "/source",
+                    offset,
+                    "/destination",
+                    5,
+                    length,
+                )])
+                .unwrap();
+            let start = (offset as usize).min(data.len());
+            let wanted =
+                length.map_or(data.len() - start, |n| (n as usize).min(data.len() - start));
+            let copied = std::fs::read(&destination).unwrap();
+            assert_eq!(copied.len(), 5 + wanted);
+            assert_eq!(&copied[..5], &[0xff; 5]);
+            assert_eq!(&copied[5..], &data[start..start + wanted]);
+            assert_eq!(std::fs::read(root.0.join("source")).unwrap(), data);
+        }
+    }
 }

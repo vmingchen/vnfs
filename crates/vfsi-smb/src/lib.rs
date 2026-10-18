@@ -1467,8 +1467,8 @@ impl SmbVecFs {
     /// Compare retained objects, including aliases across different path spellings.
     /// Only potentially overlapping forward copies need these identity queries.
     fn copy_handles_alias(&mut self, files: [FileId; 2]) -> VfResult<bool> {
-        let mut identities = Vec::with_capacity(files.len());
-        for file_id in files {
+        let mut identities = [(0, 0); 2];
+        for (identity, file_id) in identities.iter_mut().zip(files) {
             // Related compound operations share one handle on SMB servers.
             // Query each retained handle in its own compound, never mix them.
             let requests = [
@@ -1514,10 +1514,10 @@ impl SmbVecFs {
                 return Err(VfError::unsupported(0));
             }
             // File indices are volume-local; a share can span several volumes.
-            identities.push((
+            *identity = (
                 u64::from_le_bytes(index.try_into().expect("eight-byte slice")),
                 u32::from_le_bytes(volume.try_into().expect("four-byte slice")),
-            ));
+            );
         }
         Ok(identities[0] == identities[1])
     }

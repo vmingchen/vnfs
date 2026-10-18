@@ -213,12 +213,7 @@ impl<F: VectorBackend> FsClient<F> {
         self.lock()?
             .remove_paths_with_options_impl(&paths, recursive, options)
             .map_err(|error| {
-                error
-                    .index()
-                    .and_then(|index| paths.get(index))
-                    .map_or(error.clone(), |path| {
-                        error.with_context("vremove_native", path)
-                    })
+                with_indexed_context(error, "vremove_native", |index| paths.get(index).copied())
             })
     }
 }
