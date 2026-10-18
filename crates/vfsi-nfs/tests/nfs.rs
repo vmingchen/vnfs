@@ -1130,6 +1130,92 @@ fn symlinked_directories_work_for_mkdir_and_batched_listdir() {
     assert!(listed.contains(&format!("{target}/created")));
 }
 
+#[cfg(feature = "test-faults")]
+#[test]
+fn batched_symlink_resolution_preserves_transport_errors() {
+    let Some(mut fs) = connect() else { return };
+    let root = format!("/vfsi-symlink-transport-{}", std::process::id());
+    let target = format!("{root}/target");
+    let link = format!("{root}/link");
+    fs.ensure_dir_impl(Path::new(&root), 0o755).unwrap();
+    fs.ensure_dir_impl(Path::new(&target), 0o755).unwrap();
+    fs.vsymlink_impl(&[Path::new("target")], &[Path::new(&link)])
+        .unwrap();
+    fs.set_auto_reconnect(false);
+    let dirs = [Path::new(&target), Path::new(&link)];
+    let mut outcomes = Vec::new();
+    for kind in [
+        vfsi_core::TransportKind::Timeout,
+        vfsi_core::TransportKind::Connection,
+        vfsi_core::TransportKind::Auth,
+        vfsi_core::TransportKind::InvalidReply,
+    ] {
+        for index in [None, Some(0)] {
+            let injected =
+                VfError::transport_with_kind(index, kind, "symlink target lookup failed")
+                    .with_context("resolve symlink", &link);
+            let expected = injected.clone().map_index(|_| 1);
+            let fault = Arc::new(FaultScript::one(
+                OpenFaultPoint::BeforeFollowSymlink { index: 1 },
+                injected,
+            ));
+            fs.set_fault_injector(fault.clone());
+            let actual =
+                fs.vlistdir_pages_impl(&dirs, AttrMask::MODE, vec![None, None], 1, 10, true);
+            outcomes.push((expected, actual, fault.is_consumed()));
+        }
+    }
+    fs.set_fault_injector(Arc::new(FaultScript::new([])));
+    fs.remove_paths_impl(&[Path::new(&root)], true).unwrap();
+    for (expected, actual, consumed) in outcomes {
+        assert!(consumed, "the live symlink fallback must execute");
+        assert_eq!(actual.err().expect("injected lookup failure"), expected);
+    }
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn batched_symlink_resolution_recovers_after_a_transport_failure() {
+    let Some(mut fs) = connect() else { return };
+    let root = format!("/vfsi-symlink-recovery-{}", std::process::id());
+    let target = format!("{root}/target");
+    let link = format!("{root}/link");
+    fs.ensure_dir_impl(Path::new(&root), 0o755).unwrap();
+    fs.ensure_dir_impl(Path::new(&target), 0o755).unwrap();
+    fs.vsymlink_impl(&[Path::new("target")], &[Path::new(&link)])
+        .unwrap();
+    fs.set_auto_reconnect(true);
+    let fault = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeFollowSymlink { index: 1 },
+        VfError::transport_with_kind(
+            None,
+            vfsi_core::TransportKind::Connection,
+            "symlink target connection lost",
+        ),
+    ));
+    fs.set_fault_injector(fault.clone());
+    let pages = fs.vlistdir_pages_impl(
+        &[Path::new(&target), Path::new(&link)],
+        AttrMask::MODE,
+        vec![None, None],
+        1,
+        10,
+        true,
+    );
+    let resolutions = fault
+        .visited()
+        .iter()
+        .filter(|point| matches!(point, OpenFaultPoint::BeforeFollowSymlink { index: 1 }))
+        .count();
+    fs.set_fault_injector(Arc::new(FaultScript::new([])));
+    fs.remove_paths_impl(&[Path::new(&root)], true).unwrap();
+    assert!(fault.is_consumed());
+    let pages = pages.expect("read-only symlink lookup should recover and retry");
+    assert_eq!(pages.len(), 2);
+    assert!(pages.iter().all(|(entries, _, _)| entries.is_empty()));
+    assert_eq!(resolutions, 2, "retry the symlink lookup exactly once");
+}
+
 #[test]
 fn shared_contract_through_the_published_crate() {
     let Some(mut fs) = connect() else {
