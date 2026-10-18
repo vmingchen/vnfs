@@ -604,3 +604,40 @@ impl DirHandle for TestFile {
         OpenFd::close(self)
     }
 }
+
+#[test]
+fn directory_defaults_match_with_or_without_explicit_options() {
+    let fs = PortableFs::default();
+    fs.read_dir("/a").unwrap();
+    fs.read_dir_with_options("/b", ListDirOptions::new())
+        .unwrap();
+    fs.read_dirs(&["/c"]).unwrap();
+    fs.read_dirs_with_options(&["/d"], ListDirOptions::new())
+        .unwrap();
+    fs.vlistdirs(&["/e"], ListDirOptions::new(), |_, _| {
+        Ok(ControlFlow::Continue(()))
+    })
+    .unwrap();
+    fs.listdir("/f", ListDirOptions::new(), |_| Ok(WalkControl::Continue))
+        .unwrap();
+    let options = fs.directory_options.take();
+    assert_eq!(options.len(), 6);
+    for options in options {
+        assert_eq!(options.fields(), Attributes::stat());
+        assert!(!options.fields().intersects(
+            Attributes::UID
+                | Attributes::GID
+                | Attributes::ATIME
+                | Attributes::MTIME
+                | Attributes::CTIME
+                | Attributes::CHANGE
+        ));
+    }
+    let selected = Attributes::UID | Attributes::GID | Attributes::MTIME | Attributes::CHANGE;
+    fs.read_dir_with_options("/g", ListDirOptions::new().with_fields(selected))
+        .unwrap();
+    assert_eq!(
+        fs.directory_options.borrow()[0].fields(),
+        selected | Attributes::MODE
+    );
+}

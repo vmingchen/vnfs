@@ -134,15 +134,7 @@ impl ListDirOptions {
         !self.flags.no_follow()
     }
     pub fn fields(self) -> Attributes {
-        self.fields.unwrap_or_else(|| {
-            Attributes::stat()
-                | Attributes::UID
-                | Attributes::GID
-                | Attributes::ATIME
-                | Attributes::MTIME
-                | Attributes::CTIME
-                | Attributes::CHANGE
-        }) | Attributes::MODE
+        self.fields.unwrap_or_else(Attributes::stat) | Attributes::MODE
     }
     /// Configured entry budget, or the built-in default before client resolution.
     pub fn max_entries(self) -> usize {

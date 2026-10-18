@@ -417,6 +417,11 @@ string unchanged. The cursor can advance, including a one-byte EOF probe;
 these methods do not roll back the cursor. These limits bound logical payloads,
 not process RSS or collection performed by arbitrary standard-I/O wrappers.
 
+Directory operations share the same default metadata selection, with or without
+explicit default options: mode, size, link count, file ID, and filesystem ID.
+Select UID/GID, timestamps, change IDs, or other additional fields explicitly
+with ListDirOptions::with_fields to request their backend and decoding work.
+
 Allocating directory APIs are bounded for the same reason. `VfsiExt::read_dir`
 uses finite entry and combined-path-byte defaults; `read_dir_with_options` and
 `ListDirOptions` select tighter limits or explicitly opt into unlimited

@@ -544,10 +544,7 @@ pub trait VfsiExt: Vfsi {
     /// # }
     /// ```
     fn read_dir(&self, path: impl AsRef<Path>) -> Result<Vec<crate::api::DirEntry>> {
-        self.read_dir_with_options(
-            path,
-            crate::api::ListDirOptions::new().with_fields(crate::api::Attributes::stat()),
-        )
+        self.read_dir_with_options(path, crate::api::ListDirOptions::new())
     }
 
     /// Single-target convenience. For multiple directories, prefer [`VfsiExt::read_dirs_with_options`] with one aggregate budget.
@@ -594,10 +591,7 @@ pub trait VfsiExt: Vfsi {
     /// # }
     /// ```
     fn read_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<DirectoryListing>> {
-        let trees = self.read_dirs_with_options(
-            paths,
-            crate::api::ListDirOptions::new().with_fields(crate::api::Attributes::stat()),
-        )?;
+        let trees = self.read_dirs_with_options(paths, crate::api::ListDirOptions::new())?;
         if trees.len() != paths.len() || trees.iter().any(|tree| tree.len() != 1) {
             return Err(crate::api::Error::transport(
                 None,
