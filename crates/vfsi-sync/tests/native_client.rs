@@ -178,7 +178,7 @@ struct ScalarOnly {
     write_calls: Arc<AtomicUsize>,
     max_write_once: Option<usize>,
     interrupt_write_call: Option<usize>,
-    open_requests: Arc<Mutex<Vec<OpenOp>>>,
+    open_requests: Arc<Mutex<Vec<OpenOp<'static>>>>,
     directory_entries: usize,
     directory_page_sizes: Arc<Mutex<Vec<usize>>>,
     directory_fields: Arc<Mutex<Vec<vfsi_sync::AttrMask>>>,
@@ -1299,7 +1299,10 @@ impl HandleBackend for ScalarOnly {
         std::mem::take(&mut *self.notifications.lock().unwrap())
     }
     fn open_impl(&mut self, request: &OpenOp) -> VfResult<FileOperand> {
-        self.open_requests.lock().unwrap().push(request.clone());
+        self.open_requests
+            .lock()
+            .unwrap()
+            .push(request.clone().into_owned());
         self.open = true;
         let fd = self.descriptor_objects.len() as i32 + 1;
         let next = self.named_objects.len() as u64;

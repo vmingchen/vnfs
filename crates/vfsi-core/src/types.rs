@@ -596,19 +596,28 @@ pub fn open_flags_to_libc(flags: OpenFlags) -> VfResult<i32> {
 /// slices of paths, flags, and modes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use = "configuration and requests have no effect until used"]
-pub struct OpenOp {
-    path: PathBuf,
+pub struct OpenOp<'a> {
+    path: std::borrow::Cow<'a, Path>,
     flags: OpenFlags,
     mode: u32,
 }
 
-impl OpenOp {
+impl<'a> OpenOp<'a> {
     pub fn path(&self) -> &Path {
-        &self.path
+        self.path.as_ref()
     }
-    /// Consume the request and transfer its path without cloning storage.
+    /// Extract an owned path. Borrowed paths are copied; owned storage is moved.
     pub fn into_path(self) -> PathBuf {
-        self.path
+        self.path.into_owned()
+    }
+    /// Retain this request independently of the source pathname.
+    /// An already-owned request transfers its allocation without copying.
+    pub fn into_owned(self) -> OpenOp<'static> {
+        OpenOp {
+            path: std::borrow::Cow::Owned(self.path.into_owned()),
+            flags: self.flags,
+            mode: self.mode,
+        }
     }
     pub const fn flags(&self) -> OpenFlags {
         self.flags
@@ -617,15 +626,15 @@ impl OpenOp {
     pub const fn creation_mode(&self) -> u32 {
         self.mode
     }
-
-    pub fn new(path: impl Into<PathBuf>, flags: OpenFlags) -> Self {
+    /// Borrow a pathname without allocating. Use into_owned() for a stored plan
+    /// that must outlive its source paths.
+    pub fn new<P: AsRef<Path> + ?Sized>(path: &'a P, flags: OpenFlags) -> Self {
         Self {
-            path: path.into(),
+            path: std::borrow::Cow::Borrowed(path.as_ref()),
             flags,
             mode: 0o666,
         }
     }
-
     pub fn mode(mut self, mode: u32) -> Self {
         self.mode = mode;
         self
@@ -2059,5 +2068,44 @@ mod sparse_metadata_tests {
         assert_eq!(size_only.len(), Some(123));
         assert_eq!(size_only.is_empty(), Some(false));
         assert_eq!(size_only.permissions(), None);
+    }
+}
+
+#[cfg(test)]
+mod open_request_ownership_tests {
+    use super::*;
+    #[test]
+    fn borrowed_open_requests_and_their_clones_reuse_path_storage() {
+        let path = PathBuf::from("/borrowed-file");
+        let pointer = path.as_os_str().as_encoded_bytes().as_ptr();
+        let request = OpenOp::new(&path, OpenFlags::READ);
+        assert_eq!(
+            request.path().as_os_str().as_encoded_bytes().as_ptr(),
+            pointer
+        );
+        assert_eq!(
+            request
+                .clone()
+                .path()
+                .as_os_str()
+                .as_encoded_bytes()
+                .as_ptr(),
+            pointer
+        );
+    }
+    #[test]
+    fn owned_open_requests_outlive_inputs_and_transfer_their_storage() {
+        let request = {
+            let path = PathBuf::from("/retained-plan");
+            OpenOp::new(&path, OpenFlags::WRITE | OpenFlags::CREATE_NEW)
+                .mode(0o640)
+                .into_owned()
+        };
+        let pointer = request.path().as_os_str().as_encoded_bytes().as_ptr();
+        assert_eq!(request.creation_mode(), 0o640);
+        assert_eq!(request.flags(), OpenFlags::WRITE | OpenFlags::CREATE_NEW);
+        let path = request.into_path();
+        assert_eq!(path, Path::new("/retained-plan"));
+        assert_eq!(path.as_os_str().as_encoded_bytes().as_ptr(), pointer);
     }
 }
