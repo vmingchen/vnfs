@@ -127,7 +127,7 @@ impl HandleBackend for NfsVecFs {
                     decode_filesystem_stats(bitmap, &bytes).map_err(|e| e.with_index(index))?;
                 // Client mount policy is known; the protocol has no filesystem read-only attribute.
                 if self.read_only {
-                    stats.read_only = Some(true);
+                    stats = stats.with_read_only(Some(true));
                 }
                 Ok(stats)
             })

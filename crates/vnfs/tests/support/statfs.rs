@@ -1,12 +1,12 @@
 use vnfs::files::{FilesystemStats, Target, Vfsi, VfsiExt};
 
 fn check_stats(stats: &FilesystemStats) {
-    let total = stats.total_bytes.expect("total capacity");
-    let free = stats.free_bytes.expect("free capacity");
-    let available = stats.available_bytes.expect("available capacity");
+    let total = stats.total_bytes().expect("total capacity");
+    let free = stats.free_bytes().expect("free capacity");
+    let available = stats.available_bytes().expect("available capacity");
     assert!(total > 0);
     assert!(available <= free && free <= total);
-    assert!(stats.max_name_len.unwrap() > 0);
+    assert!(stats.max_name_len().unwrap() > 0);
 }
 
 pub fn check<F: Vfsi>(fs: &F, other: &F, directory: &str) {
@@ -25,7 +25,7 @@ pub fn check<F: Vfsi>(fs: &F, other: &F, directory: &str) {
         check_stats(value);
     }
     let single = fs.statfs(&paths[0]).unwrap();
-    assert_eq!(single.total_bytes, stats[0].total_bytes);
+    assert_eq!(single.total_bytes(), stats[0].total_bytes());
     let requests: Vec<_> = paths
         .iter()
         .map(|p| vnfs::files::OpenOp::new(p, vnfs::files::OpenFlags::READ))
@@ -38,7 +38,7 @@ pub fn check<F: Vfsi>(fs: &F, other: &F, directory: &str) {
         Target::Path(std::path::Path::new(&paths[1])),
     ];
     let stats = fs.vstatfs(&mixed).unwrap();
-    assert_eq!(stats[0].total_bytes, stats[1].total_bytes);
+    assert_eq!(stats[0].total_bytes(), stats[1].total_bytes());
     // A renamed handle must not reopen its missing original name.
     check_stats(&fs.statfs(Target::File(&files[0])).unwrap());
     let error = fs.vstatfs(&[&paths[1], &paths[0]]).unwrap_err();

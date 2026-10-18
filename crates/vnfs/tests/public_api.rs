@@ -674,33 +674,33 @@ fn filesystem_stats_local_and_routed_handles() {
         "/auto",
     );
     let stats = mounted.statfs("/").unwrap();
-    assert!(stats.fragment_size.unwrap() > 0);
-    assert!(stats.block_size.unwrap() > 0);
-    assert_eq!(stats.read_only, Some(false));
-    assert!(stats.max_path_len.unwrap() > 0);
-    assert!(stats.file_size_bits.unwrap() > 0);
-    assert!(stats.max_file_size.is_none());
+    assert!(stats.fragment_size().unwrap() > 0);
+    assert!(stats.block_size().unwrap() > 0);
+    assert_eq!(stats.read_only(), Some(false));
+    assert!(stats.max_path_len().unwrap() > 0);
+    assert!(stats.file_size_bits().unwrap() > 0);
+    assert!(stats.max_file_size().is_none());
     // Direct fd identity remains valid after unlink, without pathname lookup.
     use vnfs::files::Target;
     let file = mounted.open("/local/renamed").unwrap();
     mounted.remove_file("/local/renamed").unwrap();
     assert_eq!(
-        mounted.statfs(Target::File(&file)).unwrap().total_bytes,
-        stats.total_bytes
+        mounted.statfs(Target::File(&file)).unwrap().total_bytes(),
+        stats.total_bytes()
     );
     file.close().unwrap();
     std::os::unix::fs::symlink("local/stats-1", root.path().join("symlink")).unwrap();
     assert_eq!(
-        mounted.statfs("/symlink").unwrap().total_bytes,
-        stats.total_bytes
+        mounted.statfs("/symlink").unwrap().total_bytes(),
+        stats.total_bytes()
     );
     // Compare static values against the POSIX source independently.
     use std::os::fd::AsRawFd;
     let fd = std::fs::File::open(root.path()).unwrap();
     let mut raw: libc::statvfs = unsafe { std::mem::zeroed() };
     assert_eq!(unsafe { libc::fstatvfs(fd.as_raw_fd(), &mut raw) }, 0);
-    assert_eq!(stats.total_bytes, raw.f_blocks.checked_mul(raw.f_frsize));
-    assert_eq!(stats.fragment_size, Some(raw.f_frsize));
+    assert_eq!(stats.total_bytes(), raw.f_blocks.checked_mul(raw.f_frsize));
+    assert_eq!(stats.fragment_size(), Some(raw.f_frsize));
 }
 
 #[cfg(all(feature = "auto", target_os = "linux"))]

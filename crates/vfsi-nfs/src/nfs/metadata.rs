@@ -334,20 +334,26 @@ pub(super) fn decode_filesystem_stats(bitmap: bitmap4, bytes: &[u8]) -> VfResult
                 continue;
             }
             let attribute = (word * 32 + bit) as u32;
-            match attribute {
-                FATTR4_FILES_AVAIL => stats.available_files = Some(read_u64(bytes, &mut offset)?),
-                FATTR4_FILES_FREE => stats.free_files = Some(read_u64(bytes, &mut offset)?),
-                FATTR4_FILES_TOTAL => stats.total_files = Some(read_u64(bytes, &mut offset)?),
-                FATTR4_MAXFILESIZE => stats.max_file_size = Some(read_u64(bytes, &mut offset)?),
-                FATTR4_MAXLINK => stats.max_links = Some(u64::from(read_u32(bytes, &mut offset)?)),
-                FATTR4_MAXNAME => {
-                    stats.max_name_len = Some(u64::from(read_u32(bytes, &mut offset)?))
+            stats = match attribute {
+                FATTR4_FILES_AVAIL => {
+                    stats.with_available_files(Some(read_u64(bytes, &mut offset)?))
                 }
-                FATTR4_SPACE_AVAIL => stats.available_bytes = Some(read_u64(bytes, &mut offset)?),
-                FATTR4_SPACE_FREE => stats.free_bytes = Some(read_u64(bytes, &mut offset)?),
-                FATTR4_SPACE_TOTAL => stats.total_bytes = Some(read_u64(bytes, &mut offset)?),
+                FATTR4_FILES_FREE => stats.with_free_files(Some(read_u64(bytes, &mut offset)?)),
+                FATTR4_FILES_TOTAL => stats.with_total_files(Some(read_u64(bytes, &mut offset)?)),
+                FATTR4_MAXFILESIZE => stats.with_max_file_size(Some(read_u64(bytes, &mut offset)?)),
+                FATTR4_MAXLINK => {
+                    stats.with_max_links(Some(u64::from(read_u32(bytes, &mut offset)?)))
+                }
+                FATTR4_MAXNAME => {
+                    stats.with_max_name_len(Some(u64::from(read_u32(bytes, &mut offset)?)))
+                }
+                FATTR4_SPACE_AVAIL => {
+                    stats.with_available_bytes(Some(read_u64(bytes, &mut offset)?))
+                }
+                FATTR4_SPACE_FREE => stats.with_free_bytes(Some(read_u64(bytes, &mut offset)?)),
+                FATTR4_SPACE_TOTAL => stats.with_total_bytes(Some(read_u64(bytes, &mut offset)?)),
                 _ => return Err(attr_decode_error()),
-            }
+            };
         }
     }
     if offset != bytes.len() {

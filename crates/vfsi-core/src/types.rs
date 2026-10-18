@@ -1570,27 +1570,264 @@ pub enum VfDir {
 /// Filesystem capacity and limits for the filesystem containing a target.
 /// Values are observations, not reservations. `None` means unknown or unsupported.
 /// Byte counts use the filesystem allocation unit, not its preferred I/O size.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Getters preserve zero and false as known values. Fluent `with_*` setters
+/// accept `None` to restore an unknown value.
+///
+/// ```
+/// use vfsi_core::FilesystemStats;
+/// let stats = FilesystemStats::default()
+///     .with_free_bytes(Some(0))
+///     .with_read_only(Some(false));
+/// assert_eq!(stats.free_bytes(), Some(0));
+/// assert_eq!(stats.read_only(), Some(false));
+/// assert_eq!(stats.total_bytes(), None);
+/// ```
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct FilesystemStats {
-    pub total_bytes: Option<u64>,
-    pub free_bytes: Option<u64>,
-    /// Space available to an unprivileged caller (may exclude reserved blocks).
-    pub available_bytes: Option<u64>,
-    pub total_files: Option<u64>,
-    pub free_files: Option<u64>,
-    pub available_files: Option<u64>,
-    /// Preferred I/O block size.
-    pub block_size: Option<u64>,
-    /// Allocation unit used by capacity counts.
-    pub fragment_size: Option<u64>,
-    pub max_name_len: Option<u64>,
-    pub max_path_len: Option<u64>,
-    pub max_links: Option<u64>,
-    pub max_file_size: Option<u64>,
-    /// POSIX FILESIZEBITS; this is not necessarily the filesystem's file-size limit.
-    pub file_size_bits: Option<u32>,
-    pub read_only: Option<bool>,
-    pub no_set_id: Option<bool>,
+    total_bytes: u64,
+    free_bytes: u64,
+    available_bytes: u64,
+    total_files: u64,
+    free_files: u64,
+    available_files: u64,
+    block_size: u64,
+    fragment_size: u64,
+    max_name_len: u64,
+    max_path_len: u64,
+    max_links: u64,
+    max_file_size: u64,
+    file_size_bits: u32,
+    flags: FilesystemStatsFlags,
+}
+
+#[bitfields::bitfield(u32)]
+#[derive(PartialEq, Eq)]
+struct FilesystemStatsFlags {
+    #[bits(15)]
+    present: u16,
+    read_only: bool,
+    no_set_id: bool,
+    #[bits(15)]
+    _reserved: u16,
+}
+
+// One presence bit per logical field. Unknown payloads are always zeroed so
+// derived equality is semantic and independent of a value's update history.
+macro_rules! filesystem_stat_field {
+    ($(#[$doc:meta])* $field:ident, $setter:ident, $ty:ty, $bit:literal) => {
+        $(#[$doc])*
+        pub const fn $field(&self) -> Option<$ty> {
+            if self.flags.present() & (1 << $bit) != 0 {
+                Some(self.$field)
+            } else {
+                None
+            }
+        }
+        #[doc = concat!("Set `", stringify!($field), "`; `None` marks it unknown.")]
+        pub fn $setter(mut self, value: Option<$ty>) -> Self {
+            self.set_present($bit, value.is_some());
+            self.$field = value.unwrap_or_default();
+            self
+        }
+    };
+}
+
+impl FilesystemStats {
+    fn set_present(&mut self, bit: u32, present: bool) {
+        let mask = 1 << bit;
+        let bits = self.flags.present() & !mask;
+        self.flags
+            .set_present(bits | if present { mask } else { 0 });
+    }
+
+    filesystem_stat_field!(/// Total capacity in bytes.
+        total_bytes, with_total_bytes, u64, 0);
+    filesystem_stat_field!(/// Free capacity in bytes, including reserved space.
+        free_bytes, with_free_bytes, u64, 1);
+    filesystem_stat_field!(/// Space available to an unprivileged caller (may exclude reserved blocks).
+        available_bytes, with_available_bytes, u64, 2);
+    filesystem_stat_field!(/// Total file count.
+        total_files, with_total_files, u64, 3);
+    filesystem_stat_field!(/// Free file count.
+        free_files, with_free_files, u64, 4);
+    filesystem_stat_field!(/// File count available to an unprivileged caller.
+        available_files, with_available_files, u64, 5);
+    filesystem_stat_field!(/// Preferred I/O block size in bytes.
+        block_size, with_block_size, u64, 6);
+    filesystem_stat_field!(/// Allocation unit used by capacity counts, in bytes.
+        fragment_size, with_fragment_size, u64, 7);
+    filesystem_stat_field!(/// Maximum filename length in bytes.
+        max_name_len, with_max_name_len, u64, 8);
+    filesystem_stat_field!(/// Maximum path length in bytes.
+        max_path_len, with_max_path_len, u64, 9);
+    filesystem_stat_field!(/// Maximum number of hard links.
+        max_links, with_max_links, u64, 10);
+    filesystem_stat_field!(/// Maximum file size in bytes.
+        max_file_size, with_max_file_size, u64, 11);
+    filesystem_stat_field!(/// POSIX FILESIZEBITS; not necessarily the filesystem's file-size limit.
+        file_size_bits, with_file_size_bits, u32, 12);
+
+    /// Whether the filesystem is read-only, when known.
+    pub const fn read_only(&self) -> Option<bool> {
+        if self.flags.present() & (1 << 13) != 0 {
+            Some(self.flags.read_only())
+        } else {
+            None
+        }
+    }
+    /// Set read-only status; `None` marks it unknown.
+    pub fn with_read_only(mut self, value: Option<bool>) -> Self {
+        self.set_present(13, value.is_some());
+        self.flags.set_read_only(value.unwrap_or_default());
+        self
+    }
+    /// Whether set-user-ID and set-group-ID bits are ignored, when known.
+    pub const fn no_set_id(&self) -> Option<bool> {
+        if self.flags.present() & (1 << 14) != 0 {
+            Some(self.flags.no_set_id())
+        } else {
+            None
+        }
+    }
+    /// Set the no-set-ID status; `None` marks it unknown.
+    pub fn with_no_set_id(mut self, value: Option<bool>) -> Self {
+        self.set_present(14, value.is_some());
+        self.flags.set_no_set_id(value.unwrap_or_default());
+        self
+    }
+}
+
+impl std::fmt::Debug for FilesystemStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FilesystemStats")
+            .field("total_bytes", &self.total_bytes())
+            .field("free_bytes", &self.free_bytes())
+            .field("available_bytes", &self.available_bytes())
+            .field("total_files", &self.total_files())
+            .field("free_files", &self.free_files())
+            .field("available_files", &self.available_files())
+            .field("block_size", &self.block_size())
+            .field("fragment_size", &self.fragment_size())
+            .field("max_name_len", &self.max_name_len())
+            .field("max_path_len", &self.max_path_len())
+            .field("max_links", &self.max_links())
+            .field("max_file_size", &self.max_file_size())
+            .field("file_size_bits", &self.file_size_bits())
+            .field("read_only", &self.read_only())
+            .field("no_set_id", &self.no_set_id())
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod filesystem_stats_tests {
+    use super::*;
+
+    fn values(stats: &FilesystemStats) -> [Option<u64>; 15] {
+        [
+            stats.total_bytes(),
+            stats.free_bytes(),
+            stats.available_bytes(),
+            stats.total_files(),
+            stats.free_files(),
+            stats.available_files(),
+            stats.block_size(),
+            stats.fragment_size(),
+            stats.max_name_len(),
+            stats.max_path_len(),
+            stats.max_links(),
+            stats.max_file_size(),
+            stats.file_size_bits().map(u64::from),
+            stats.read_only().map(u64::from),
+            stats.no_set_id().map(u64::from),
+        ]
+    }
+
+    #[test]
+    fn compact_layout_preserves_all_optional_values_independently() {
+        assert_eq!(std::mem::size_of::<FilesystemStatsFlags>(), 4);
+        assert_eq!(std::mem::size_of::<FilesystemStats>(), 104);
+        let empty = FilesystemStats::default();
+        assert_eq!(values(&empty), [None; 15]);
+        let full = empty
+            .clone()
+            .with_total_bytes(Some(1))
+            .with_free_bytes(Some(2))
+            .with_available_bytes(Some(3))
+            .with_total_files(Some(4))
+            .with_free_files(Some(5))
+            .with_available_files(Some(6))
+            .with_block_size(Some(7))
+            .with_fragment_size(Some(8))
+            .with_max_name_len(Some(9))
+            .with_max_path_len(Some(10))
+            .with_max_links(Some(11))
+            .with_max_file_size(Some(12))
+            .with_file_size_bits(Some(13))
+            .with_read_only(Some(true))
+            .with_no_set_id(Some(false));
+        assert_eq!(
+            values(&full),
+            [
+                Some(1),
+                Some(2),
+                Some(3),
+                Some(4),
+                Some(5),
+                Some(6),
+                Some(7),
+                Some(8),
+                Some(9),
+                Some(10),
+                Some(11),
+                Some(12),
+                Some(13),
+                Some(1),
+                Some(0)
+            ]
+        );
+        macro_rules! check {
+            ($setter:ident, $bit:literal, $ty:ty, $($value:expr),+) => {
+                for value in [$(Some::<$ty>($value),)+ None] {
+                    let mut expected = values(&full);
+                    expected[$bit] = value.map(u64::from);
+                    assert_eq!(values(&full.clone().$setter(value)), expected);
+                    let populated = empty.clone().$setter(value);
+                    let mut expected = [None; 15];
+                    expected[$bit] = value.map(u64::from);
+                    assert_eq!(values(&populated), expected);
+                    assert_eq!(populated.$setter(None), empty);
+                }
+            };
+        }
+        check!(with_total_bytes, 0, u64, 0, 1, u64::MAX);
+        check!(with_free_bytes, 1, u64, 0, 1, u64::MAX);
+        check!(with_available_bytes, 2, u64, 0, 1, u64::MAX);
+        check!(with_total_files, 3, u64, 0, 1, u64::MAX);
+        check!(with_free_files, 4, u64, 0, 1, u64::MAX);
+        check!(with_available_files, 5, u64, 0, 1, u64::MAX);
+        check!(with_block_size, 6, u64, 0, 1, u64::MAX);
+        check!(with_fragment_size, 7, u64, 0, 1, u64::MAX);
+        check!(with_max_name_len, 8, u64, 0, 1, u64::MAX);
+        check!(with_max_path_len, 9, u64, 0, 1, u64::MAX);
+        check!(with_max_links, 10, u64, 0, 1, u64::MAX);
+        check!(with_max_file_size, 11, u64, 0, 1, u64::MAX);
+        check!(with_file_size_bits, 12, u32, 0, 1, u32::MAX);
+        check!(with_read_only, 13, bool, false, true);
+        check!(with_no_set_id, 14, bool, false, true);
+    }
+
+    #[test]
+    fn debug_reports_logical_optional_values_not_storage() {
+        let stats = FilesystemStats::default()
+            .with_free_bytes(Some(0))
+            .with_read_only(Some(false));
+        let debug = format!("{stats:?}");
+        assert!(debug.contains("total_bytes: None"));
+        assert!(debug.contains("free_bytes: Some(0)"));
+        assert!(debug.contains("read_only: Some(false)"));
+        assert!(!debug.contains("flags"));
+    }
 }
 
 #[bitfields::bitfield(u8)]

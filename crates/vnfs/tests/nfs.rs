@@ -4584,9 +4584,9 @@ fn filesystem_stats_nfs_vectors() {
         compounds < 16,
         "statistics must batch 63 handles, got {compounds}"
     );
-    assert!(stats[0].max_file_size.unwrap() > 0);
-    assert!(stats[0].block_size.is_none());
-    assert!(stats[0].read_only.is_none());
+    assert!(stats[0].max_file_size().unwrap() > 0);
+    assert!(stats[0].block_size().is_none());
+    assert!(stats[0].read_only().is_none());
     fs.vclose(&mut files).unwrap();
     fs.remove_dir_all(directory).unwrap();
 }

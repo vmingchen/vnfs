@@ -2474,25 +2474,26 @@ fn local_filesystem_stats(fd: std::os::fd::RawFd, index: usize) -> VfResult<File
             Err(VfError::failure(index, errno as u32))
         }
     };
-    Ok(FilesystemStats {
-        total_bytes: bytes(raw.f_blocks)?,
-        free_bytes: bytes(raw.f_bfree)?,
-        available_bytes: bytes(raw.f_bavail)?,
-        total_files: Some(raw.f_files),
-        free_files: Some(raw.f_ffree),
-        available_files: Some(raw.f_favail),
-        block_size: Some(raw.f_bsize),
-        fragment_size: Some(raw.f_frsize),
-        max_name_len: conf(libc::_PC_NAME_MAX)?,
-        max_path_len: conf(libc::_PC_PATH_MAX)?,
-        max_links: conf(libc::_PC_LINK_MAX)?,
-        file_size_bits: conf(libc::_PC_FILESIZEBITS)?
-            .map(|value| {
-                u32::try_from(value).map_err(|_| VfError::failure(index, libc::EOVERFLOW as u32))
-            })
-            .transpose()?,
-        read_only: Some(raw.f_flag & libc::ST_RDONLY != 0),
-        no_set_id: Some(raw.f_flag & libc::ST_NOSUID != 0),
-        ..FilesystemStats::default()
-    })
+    Ok(FilesystemStats::default()
+        .with_total_bytes(bytes(raw.f_blocks)?)
+        .with_free_bytes(bytes(raw.f_bfree)?)
+        .with_available_bytes(bytes(raw.f_bavail)?)
+        .with_total_files(Some(raw.f_files))
+        .with_free_files(Some(raw.f_ffree))
+        .with_available_files(Some(raw.f_favail))
+        .with_block_size(Some(raw.f_bsize))
+        .with_fragment_size(Some(raw.f_frsize))
+        .with_max_name_len(conf(libc::_PC_NAME_MAX)?)
+        .with_max_path_len(conf(libc::_PC_PATH_MAX)?)
+        .with_max_links(conf(libc::_PC_LINK_MAX)?)
+        .with_file_size_bits(
+            conf(libc::_PC_FILESIZEBITS)?
+                .map(|value| {
+                    u32::try_from(value)
+                        .map_err(|_| VfError::failure(index, libc::EOVERFLOW as u32))
+                })
+                .transpose()?,
+        )
+        .with_read_only(Some(raw.f_flag & libc::ST_RDONLY != 0))
+        .with_no_set_id(Some(raw.f_flag & libc::ST_NOSUID != 0)))
 }

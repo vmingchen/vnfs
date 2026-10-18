@@ -128,7 +128,7 @@ fn show_capacity(fs: &impl Vfsi) -> Result<()> {
     println!(
         "{} namespaces; available bytes: {:?}",
         capacities.len(),
-        capacity.available_bytes
+        capacity.available_bytes()
     );
     fs.close_files(vec![file])?;
     Ok(())
@@ -136,7 +136,8 @@ fn show_capacity(fs: &impl Vfsi) -> Result<()> {
 ```
 
 `FilesystemStats` reports total, free, and caller-available byte and file
-counts, plus supported limits and flags. Unknown fields are `None`, including
+counts, plus supported limits and flags, through getters such as `available_bytes()`.
+Unknown fields are `None`, including
 limits the backend cannot determine. These are observations, not reservations
 or the client's `ResourceLimits` policy. Paths follow final symlinks; handles
 query their retained objects even after rename.
