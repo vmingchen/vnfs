@@ -1124,6 +1124,73 @@ impl LocalBackend {
         self.setattr_path(a, i, &p, true)
     }
 
+    #[cfg(target_os = "linux")]
+    fn set_times_path(a: &VfAttrs, path: &AnchoredPath, index: usize) -> VfResult<()> {
+        // A resolved following path already pins its target. A no-follow
+        // path only pins its parent, so pin and inspect the leaf as well.
+        // O_PATH needs no read access and never waits for a FIFO peer.
+        let leaf = if path.nofollow_on_open {
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_PATH | libc::O_NOFOLLOW)
+                .open(path)
+                .map_err(|error| VfError::failure(index, Self::errno(&error)))?;
+            if file
+                .metadata()
+                .map_err(|error| VfError::failure(index, Self::errno(&error)))?
+                .file_type()
+                .is_symlink()
+            {
+                return Err(VfError::unsupported(index));
+            }
+            Some(file)
+        } else {
+            None
+        };
+        let descriptor_path;
+        let path = if let Some(file) = &leaf {
+            descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+            descriptor_path.as_path()
+        } else {
+            path.as_ref()
+        };
+        let name = cstring_from_bytes(path_bytes(path))
+            .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
+        let mut times = [libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        }; 2];
+        for (slot, mask, seconds, nanoseconds) in [
+            (0, AttrMask::ATIME, a.atime_sec, a.atime_nsec),
+            (1, AttrMask::MTIME, a.mtime_sec, a.mtime_nsec),
+        ] {
+            if a.masks.contains(mask) {
+                Self::system_time(seconds, nanoseconds, index)?;
+                // time_t is narrower on some Linux targets.
+                #[allow(clippy::useless_conversion)]
+                let tv_sec = seconds
+                    .try_into()
+                    .map_err(|_| VfError::failure(index, ERR_INVAL))?;
+                times[slot] = libc::timespec {
+                    tv_sec,
+                    tv_nsec: nanoseconds as libc::c_long,
+                };
+            }
+        }
+        // Follow only the procfs link to the pinned object. Unlike opening
+        // for content I/O, utimensat needs ownership but no read permission.
+        // This uses no AT_EMPTY_PATH extension and works on Linux 5.6.
+        // SAFETY: the owned anchors, NUL-terminated path and two timespecs
+        // stay live for the synchronous syscall.
+        if unsafe { libc::utimensat(libc::AT_FDCWD, name.as_ptr(), times.as_ptr(), 0) } != 0 {
+            return Err(VfError::failure(
+                index,
+                Self::errno(&std::io::Error::last_os_error()),
+            ));
+        }
+        Ok(())
+    }
+
     fn setattr_path(
         &mut self,
         a: &VfAttrs,
@@ -1157,28 +1224,33 @@ impl LocalBackend {
             }
         }
         if a.masks.intersects(AttrMask::ATIME | AttrMask::MTIME) {
-            let mut options = OpenOptions::new();
-            // This descriptor only updates metadata: a FIFO must not wait
-            // for a writer before its timestamps can be changed.
-            let flags = libc::O_NONBLOCK
-                | if path.nofollow_on_open {
-                    libc::O_NOFOLLOW
-                } else {
-                    0
-                };
-            options.read(true).custom_flags(flags);
-            let file = options
-                .open(path)
-                .map_err(|error| VfError::failure(i, Self::errno(&error)))?;
-            let mut times = FileTimes::new();
-            if a.masks.contains(AttrMask::ATIME) {
-                times = times.set_accessed(Self::system_time(a.atime_sec, a.atime_nsec, i)?);
+            #[cfg(target_os = "linux")]
+            Self::set_times_path(a, path, i)?;
+            #[cfg(not(target_os = "linux"))]
+            {
+                let mut options = OpenOptions::new();
+                // This descriptor only updates metadata: a FIFO must not wait
+                // for a writer before its timestamps can be changed.
+                let flags = libc::O_NONBLOCK
+                    | if path.nofollow_on_open {
+                        libc::O_NOFOLLOW
+                    } else {
+                        0
+                    };
+                options.read(true).custom_flags(flags);
+                let file = options
+                    .open(path)
+                    .map_err(|error| VfError::failure(i, Self::errno(&error)))?;
+                let mut times = FileTimes::new();
+                if a.masks.contains(AttrMask::ATIME) {
+                    times = times.set_accessed(Self::system_time(a.atime_sec, a.atime_nsec, i)?);
+                }
+                if a.masks.contains(AttrMask::MTIME) {
+                    times = times.set_modified(Self::system_time(a.mtime_sec, a.mtime_nsec, i)?);
+                }
+                file.set_times(times)
+                    .map_err(|error| VfError::failure(i, Self::errno(&error)))?;
             }
-            if a.masks.contains(AttrMask::MTIME) {
-                times = times.set_modified(Self::system_time(a.mtime_sec, a.mtime_nsec, i)?);
-            }
-            file.set_times(times)
-                .map_err(|error| VfError::failure(i, Self::errno(&error)))?;
         }
         Ok(())
     }
