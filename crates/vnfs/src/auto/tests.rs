@@ -618,7 +618,8 @@ fn live_nfs_mount_uses_direct_connection() {
         client
             .read_files_with_options(
                 &paths,
-                crate::ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(15))
+                crate::ReadOptions::new()
+                    .with_max_total_bytes(std::num::NonZeroUsize::new(15).unwrap())
             )
             .is_err()
     );

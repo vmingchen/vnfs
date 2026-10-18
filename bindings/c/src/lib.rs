@@ -1281,6 +1281,14 @@ pub unsafe extern "C" fn vfsi_walk(
         if !mask().contains(fields) {
             return libc::ENOTSUP;
         }
+        let depth = if options.max_depth == usize::MAX {
+            vnfs::directory::DepthLimit::unlimited()
+        } else {
+            let Some(depth) = vnfs::directory::DepthLimit::new(options.max_depth) else {
+                return libc::EINVAL;
+            };
+            depth
+        };
         let result = (|| -> Result<(), VfError> {
             let path = vpath_for(fs, &root)?;
             let mut root_attrs = VfAttrs {
@@ -1297,7 +1305,7 @@ pub unsafe extern "C" fn vfsi_walk(
                 .with_recursive(true)
                 .with_max_entries(options.max_entries)
                 .with_max_path_bytes(options.max_path_bytes)
-                .with_max_depth(options.max_depth);
+                .with_max_depth(depth);
             vfsi_sync::walk_events(
                 vnfs::directory::DirEntry::new(path, metadata),
                 walk_options,
@@ -4544,6 +4552,43 @@ mod tests {
             libc::ENOTSUP
         );
         assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn c_walk_rejects_invalid_depth_before_backend_metadata() {
+        unsafe extern "C" fn unexpected(
+            _: *const c_char,
+            _: u32,
+            _: usize,
+            _: *const vfsi_attrs,
+            _: *mut c_void,
+        ) -> u32 {
+            panic!("callback must not run");
+        }
+        let root = CString::new("/").unwrap();
+        // This backend would fail root metadata with ENOTSUP if called.
+        let fixture = ListingFixture::new(1, AttrMask::MODE, 0);
+        for max_depth in [65534, 65535, usize::MAX - 1] {
+            let options = vfsi_walk_options {
+                max_entries: 10,
+                max_path_bytes: 1024,
+                max_depth,
+                attributes: VFSI_ATTR_MODE,
+                sort_by_name: 0,
+            };
+            assert_eq!(
+                unsafe {
+                    vfsi_walk(
+                        fixture.fs,
+                        root.as_ptr(),
+                        &options,
+                        Some(unexpected),
+                        std::ptr::null_mut(),
+                    )
+                },
+                libc::EINVAL
+            );
+        }
     }
 
     #[test]

@@ -117,12 +117,15 @@ pub fn walk_with_options_impl_default<F: VectorBackend + ?Sized>(
             .filter(|e| e.ftype == VfType::Directory)
             .filter_map(|e| e.file.path().map(|p| p.to_path_buf()))
             .collect();
-        if !subdirs.is_empty() && depth >= options.max_depth() && !options.truncate_at_max_depth() {
+        if !subdirs.is_empty()
+            && depth >= options.max_depth().get()
+            && !options.truncate_at_max_depth()
+        {
             return Err(
                 VfError::failure(entry_count, libc::EFBIG as u32).with_context("walk", &dir)
             );
         }
-        if depth < options.max_depth() {
+        if depth < options.max_depth().get() {
             for s in subdirs.into_iter().rev() {
                 stack.push((s, depth + 1));
             }

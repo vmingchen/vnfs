@@ -204,7 +204,7 @@ pub trait Vfsi {
     /// # fn example(fs: &impl Vfsi) {
     /// let limits = fs.limits();
     /// println!("owned-read budget: {} bytes", limits.max_read_bytes());
-    /// println!("walk depth: {}", limits.max_walk_depth());
+    /// println!("walk depth: {}", limits.max_walk_depth().get());
     /// # }
     /// ```
     fn limits(&self) -> ResourceLimits;
@@ -238,7 +238,7 @@ pub trait Vfsi {
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let results = fs.vread(
     ///     [ReadOp::whole("/config")],
-    ///     ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(1024 * 1024)),
+    ///     ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(1024 * 1024).unwrap()),
     /// )?;
     /// println!("{} bytes", results[0].bytes_read());
     /// # Ok(())
@@ -434,7 +434,7 @@ pub trait Vfsi {
     /// use vfsi_core::api::{Vfsi, ListDirOptions, ControlFlow};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// fs.vlistdirs(&["/tree-1", "/tree-2"],
-    ///     ListDirOptions::new().with_recursive(true).with_max_depth(8),
+    ///     ListDirOptions::new().with_recursive(true).with_max_depth(vfsi_core::api::DepthLimit::new(8).expect("finite depth")),
     ///     |index, page| {
     ///         println!("{index}: {} ({} entries)", page.path.display(), page.entries.len());
     ///         Ok(ControlFlow::Continue(()))

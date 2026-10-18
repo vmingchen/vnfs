@@ -167,7 +167,7 @@ pub(super) fn append_bounded_walk_page(
                 .strip_prefix(root)
                 .map(|relative| relative.components().count())
                 .unwrap_or(usize::MAX);
-            if depth > options.max_depth() && !options.truncate_at_max_depth() {
+            if depth > options.max_depth().get() && !options.truncate_at_max_depth() {
                 return Err(
                     VfError::failure(*entry_count, libc::EFBIG as u32).with_context("walk", dir)
                 );

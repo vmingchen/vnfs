@@ -18,7 +18,7 @@ fn application_surface_is_small_and_typed() {
     assert_eq!(ReadOptions::new().max_total_bytes(), None);
     assert_eq!(
         ReadOptions::new()
-            .with_max_total_bytes(std::num::NonZeroUsize::new(42))
+            .with_max_total_bytes(std::num::NonZeroUsize::new(42).unwrap())
             .max_total_bytes(),
         std::num::NonZeroUsize::new(42)
     );
@@ -49,7 +49,7 @@ fn concrete_and_extension_directory_visitors_borrow_entries_consistently() {
             .read_files_with_options(
                 &["/file"],
                 vnfs::files::ReadOptions::new()
-                    .with_max_total_bytes(std::num::NonZeroUsize::new(4))
+                    .with_max_total_bytes(std::num::NonZeroUsize::new(4).unwrap())
             )
             .unwrap(),
         [b"data".to_vec()]
@@ -195,7 +195,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
                     vnfs::files::ReadOp::whole("/sub/b")
                 ],
                 vnfs::files::ReadOptions::new()
-                    .with_max_total_bytes(std::num::NonZeroUsize::new(5))
+                    .with_max_total_bytes(std::num::NonZeroUsize::new(5).unwrap())
             )
             .is_err()
     );
@@ -473,11 +473,16 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
     let fs = vnfs::posix::Posix::new(root.path()).unwrap();
     fs.create_dir_all("/tree/child").unwrap();
     fs.write("/tree/child/file", b"x").unwrap();
-    for depth in [201, 254, 255, 256, 500, usize::MAX - 1, usize::MAX] {
-        let walk = ListDirOptions::new()
-            .with_recursive(true)
-            .with_max_depth(depth);
-        assert_eq!(walk.max_depth(), usize::MAX);
+    for depth in [201, 254, 255, 256, 500, 65533, usize::MAX] {
+        let walk =
+            ListDirOptions::new()
+                .with_recursive(true)
+                .with_max_depth(if depth == usize::MAX {
+                    vfsi_core::api::DepthLimit::unlimited()
+                } else {
+                    vfsi_core::api::DepthLimit::new(depth).expect("finite depth")
+                });
+        assert_eq!(walk.max_depth().get(), depth);
         let converted = walk;
         assert!(converted.recursive());
         let explicit = fs
@@ -492,14 +497,22 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
                 &["/tree"],
                 ListDirOptions::new()
                     .with_recursive(true)
-                    .with_max_depth(depth),
+                    .with_max_depth(if depth == usize::MAX {
+                        vfsi_core::api::DepthLimit::unlimited()
+                    } else {
+                        vfsi_core::api::DepthLimit::new(depth).expect("finite depth")
+                    }),
             )
             .unwrap();
         assert_eq!(explicit.len(), 2);
         assert_eq!(direct[0].len(), 2);
-        let inherited = vnfs::posix::Posix::new(root.path())
-            .unwrap()
-            .with_limits(ResourceLimits::new().with_max_walk_depth(depth));
+        let inherited = vnfs::posix::Posix::new(root.path()).unwrap().with_limits(
+            ResourceLimits::new().with_max_walk_depth(if depth == usize::MAX {
+                vfsi_core::api::DepthLimit::unlimited()
+            } else {
+                vfsi_core::api::DepthLimit::new(depth).expect("finite depth")
+            }),
+        );
         assert_eq!(
             inherited
                 .read_dirs_with_options(
@@ -518,7 +531,7 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
         fs.read_dirs_with_options(
             &["/tree"],
             vnfs::directory::ListDirOptions::new()
-                .with_max_depth(0)
+                .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"))
                 .with_fields(Attributes::MODE)
                 .with_recursive(true)
         )
@@ -529,7 +542,7 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
         fs.read_dirs_with_options(
             &["/tree"],
             vnfs::directory::ListDirOptions::new()
-                .with_max_depth(0)
+                .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"))
                 .with_truncate_at_max_depth(true)
                 .with_fields(Attributes::MODE)
                 .with_recursive(true)
@@ -543,7 +556,7 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
         fs.read_dirs_with_options(
             &["/tree"],
             vnfs::directory::ListDirOptions::new()
-                .with_max_depth(1)
+                .with_max_depth(vfsi_core::api::DepthLimit::new(1).expect("finite depth"))
                 .with_fields(Attributes::MODE)
                 .with_recursive(true)
         )
@@ -555,8 +568,9 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
     assert_eq!(
         ListDirOptions::new()
             .with_recursive(true)
-            .with_max_depth(200)
-            .max_depth(),
+            .with_max_depth(vfsi_core::api::DepthLimit::new(200).expect("finite depth"))
+            .max_depth()
+            .get(),
         200
     );
 }
@@ -855,14 +869,14 @@ fn policy_builders_preserve_zero_budgets_and_bound_recovery() {
         .with_stream_chunk_size(std::num::NonZeroUsize::new(2).unwrap())
         .with_max_directory_entries(0)
         .with_max_directory_path_bytes(0)
-        .with_max_walk_depth(0);
+        .with_max_walk_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"));
     assert_eq!(limits.max_read_bytes(), 0);
     assert_eq!(limits.stream_chunk_size(), 2);
     assert_eq!(limits.max_directory_entries(), 0);
     assert_eq!(limits.max_directory_path_bytes(), 0);
-    assert_eq!(limits.max_walk_depth(), 0);
+    assert_eq!(limits.max_walk_depth().get(), 0);
     assert_eq!(limits.directory_options().max_entries(), 0);
-    assert_eq!(limits.walk_options().max_depth(), 0);
+    assert_eq!(limits.walk_options().max_depth().get(), 0);
     let remove = vnfs::directory::RemoveOptions::new()
         .with_batch_size(0)
         .with_retries(0)

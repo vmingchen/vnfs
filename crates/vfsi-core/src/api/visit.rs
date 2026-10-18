@@ -104,10 +104,9 @@ impl ListDirOptions {
     /// In recursive mode, encountering a directory beyond this limit is an
     /// error unless `truncate_at_max_depth(true)` is selected. Shallow mode
     /// ignores depth settings and intentionally visits only immediate children.
-    /// Finite depths range from 0 through 200; any larger value disables
-    /// the depth limit. Entry and path-byte budgets remain in effect.
-    pub const fn with_max_depth(mut self, value: usize) -> Self {
-        self.depth = Some(DepthLimit::new(value));
+    /// Use a checked finite depth or explicitly select an unlimited depth.
+    pub const fn with_max_depth(mut self, value: DepthLimit) -> Self {
+        self.depth = Some(value);
         self
     }
     /// Intentionally stop descending at the depth limit instead of failing.
@@ -163,9 +162,9 @@ impl ListDirOptions {
                 .map_or(super::DEFAULT_DIRECTORY_MAX_PATH_BYTES, |v| v.get() - 1)
         }
     }
-    pub fn max_depth(self) -> usize {
+    pub fn max_depth(self) -> DepthLimit {
         self.depth
-            .map_or(super::DEFAULT_WALK_MAX_DEPTH, DepthLimit::get)
+            .unwrap_or_else(|| DepthLimit::new(super::DEFAULT_WALK_MAX_DEPTH).unwrap())
     }
     pub const fn truncate_at_max_depth(self) -> bool {
         self.flags.truncate()
@@ -182,10 +181,7 @@ impl ListDirOptions {
         } else {
             limits.max_directory_path_bytes()
         };
-        self.depth = Some(
-            self.depth
-                .unwrap_or_else(|| DepthLimit::new(limits.max_walk_depth())),
-        );
+        self.depth = Some(self.depth.unwrap_or_else(|| limits.max_walk_depth()));
         self.with_max_entries(entries).with_max_path_bytes(bytes)
     }
     /// Resolve a recursive traversal against the client's defaults.
@@ -217,19 +213,26 @@ mod option_layout_tests {
         let limits = ResourceLimits::new()
             .with_max_directory_entries(usize::MAX)
             .with_max_directory_path_bytes(13)
-            .with_max_walk_depth(3);
+            .with_max_walk_depth(crate::api::DepthLimit::new(3).expect("finite depth"));
         let inherited = ListDirOptions::new().walk_options(limits);
         assert!(!ListDirOptions::new().enter_leave());
         assert!(!ListDirOptions::new().sort_by_name());
         assert!(ListDirOptions::new().follow_symlinks());
         assert_eq!(inherited.max_entries(), limits.walk_options().max_entries());
-        assert_eq!(inherited.max_depth(), limits.walk_options().max_depth());
+        assert_eq!(
+            inherited.max_depth().get(),
+            limits.walk_options().max_depth().get()
+        );
         assert_eq!(inherited.max_path_bytes(), 13);
         for value in [0, 1, 200, usize::MAX] {
             let options = ListDirOptions::new()
                 .with_max_entries(value)
                 .with_max_path_bytes(value)
-                .with_max_depth(value)
+                .with_max_depth(if value == usize::MAX {
+                    crate::api::DepthLimit::unlimited()
+                } else {
+                    crate::api::DepthLimit::new(value).expect("finite depth")
+                })
                 .with_recursive(true)
                 .with_enter_leave(true)
                 .with_sort_by_name(true)
@@ -241,7 +244,7 @@ mod option_layout_tests {
             assert_eq!(walk.fields(), options.fields());
             assert!(!walk.follow_symlinks());
             assert_eq!(walk.max_path_bytes(), value);
-            assert_eq!(walk.max_depth(), value);
+            assert_eq!(walk.max_depth().get(), value);
             assert!(walk.truncate_at_max_depth());
             assert!(options.recursive());
             assert!(options.enter_leave());
@@ -263,13 +266,16 @@ mod option_layout_tests {
             let zero = changed
                 .with_max_entries(0)
                 .with_max_path_bytes(0)
-                .with_max_depth(0);
+                .with_max_depth(crate::api::DepthLimit::new(0).expect("finite depth"));
             assert_eq!(zero.walk_options(limits).max_entries(), 0);
             assert_eq!(zero.walk_options(limits).max_path_bytes(), 0);
-            assert_eq!(zero.walk_options(limits).max_depth(), 0);
+            assert_eq!(zero.walk_options(limits).max_depth().get(), 0);
         }
         assert_eq!(
-            ListDirOptions::unlimited().walk_options(limits).max_depth(),
+            ListDirOptions::unlimited()
+                .walk_options(limits)
+                .max_depth()
+                .get(),
             usize::MAX
         );
         eprintln!(

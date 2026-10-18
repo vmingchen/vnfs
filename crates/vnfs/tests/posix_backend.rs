@@ -175,7 +175,7 @@ fn one_shot_file_vectors_roundtrip_and_bound_returned_bytes() {
     let error = client
         .read_files_with_options(
             &["/file-1", "/file-2"],
-            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(9)),
+            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(9).unwrap()),
         )
         .unwrap_err();
     assert_eq!(error.err_no(), libc::EFBIG as u32);
@@ -1335,7 +1335,9 @@ fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
         .walk_with_options_impl(
             Path::new("/tree"),
             AttrMask::stat(),
-            ListDirOptions::new().with_recursive(true).with_max_depth(0),
+            ListDirOptions::new()
+                .with_recursive(true)
+                .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth")),
             &mut |_, _| {},
         )
         .unwrap_err();

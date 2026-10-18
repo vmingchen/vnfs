@@ -73,8 +73,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .collect::<Vec<_>>(),
         )?;
         let mut buffers = vec![vec![0u8; size]; offsets.len()];
-        let budget =
-            ReadOptions::new().with_max_total_bytes(NonZeroUsize::new(size * offsets.len()));
+        let budget = ReadOptions::new()
+            .with_max_total_bytes(NonZeroUsize::new(size * offsets.len()).unwrap());
         let mut samples = Vec::new();
         let source: Vec<_> = paths
             .iter()

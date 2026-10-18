@@ -184,7 +184,7 @@ pub trait VfsiExt: Vfsi {
     /// use vfsi_core::api::{Vfsi, VfsiExt, ReadOptions, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let files = fs.read_files_with_options(&["/config"],
-    ///     ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(1024 * 1024)))?;
+    ///     ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(1024 * 1024).unwrap()))?;
     /// # let _ = files;
     /// # Ok(())
     /// # }
@@ -254,7 +254,7 @@ pub trait VfsiExt: Vfsi {
     /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let text = fs.read_to_string_with_options("/config", vfsi_core::api::ReadOptions::new()
-    ///     .with_max_total_bytes(std::num::NonZeroUsize::new(4096)))?;
+    ///     .with_max_total_bytes(std::num::NonZeroUsize::new(4096).unwrap()))?;
     /// println!("{text}");
     /// # Ok(())
     /// # }
@@ -823,7 +823,7 @@ pub trait VfsiExt: Vfsi {
                 crate::api::WalkControl::SkipSubtree => continue,
                 crate::api::WalkControl::Continue => {}
             }
-            if depth >= options.max_depth() && !children.is_empty() {
+            if depth >= options.max_depth().get() && !children.is_empty() {
                 if !options.truncate_at_max_depth() {
                     return Err(crate::api::Error::client(0, libc::EFBIG as u32)
                         .with_context("visit_dirs_ordered", &children[0]));

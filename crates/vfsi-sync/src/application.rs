@@ -128,7 +128,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
                     }
                     accepted += 1;
                     if policy.recursive() && entry.attrs().is_dir() {
-                        if depth >= walk.max_depth() {
+                        if depth >= walk.max_depth().get() {
                             if !walk.truncate_at_max_depth() {
                                 page_error = Some(
                                     vfsi_core::api::Error::client(index, libc::EFBIG as u32)

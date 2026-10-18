@@ -372,6 +372,16 @@ fn fs_obj_id(attrs: &VfAttrs) -> Option<vfsi_core::FsObjId> {
         .then(|| vfsi_core::FsObjId::new(attrs.fs_id, attrs.fileid))
 }
 
+fn checked_depth(depth: usize) -> PyResult<vfsi_core::api::DepthLimit> {
+    if depth == usize::MAX {
+        Ok(vfsi_core::api::DepthLimit::unlimited())
+    } else {
+        vfsi_core::api::DepthLimit::new(depth).ok_or_else(|| {
+            PyValueError::new_err("depth must be at most 65533, or usize::MAX for unlimited")
+        })
+    }
+}
+
 fn full_mask() -> AttrMask {
     AttrMask::MODE
         .union(AttrMask::SIZE)
@@ -749,6 +759,7 @@ impl NfsClient {
         mount_config: Option<Py<MountConfiguration>>,
         auto_reconnect: bool,
     ) -> PyResult<Self> {
+        checked_depth(walk_max_depth)?;
         let mount_config = mount_config.map(|config| config.borrow(py).clone());
         if mount_config.is_some() && (backend != "nfs" || root.is_some()) {
             return Err(PyValueError::new_err(
@@ -1232,7 +1243,10 @@ impl NfsClient {
                 )
                 .map_err(|e| to_py_err(e, None))?;
             let writes = validate_write_results("pwrite_many", &ops, writes)?;
-            Ok(writes.into_iter().map(|write| write.bytes_written).collect())
+            Ok(writes
+                .into_iter()
+                .map(|write| write.bytes_written)
+                .collect())
         })
     }
 
@@ -1772,7 +1786,7 @@ impl NfsClient {
                                 .with_recursive(true)
                                 .with_max_entries(max_entries)
                                 .with_max_path_bytes(max_path_bytes)
-                                .with_max_depth(max_depth),
+                                .with_max_depth(checked_depth(max_depth)?),
                             &mut no_sort,
                         )
                         .map_err(|e| to_py_err(e, Some(p.as_path())))?
@@ -1821,15 +1835,18 @@ impl NfsClient {
         sort: bool,
         max_depth: Option<usize>,
     ) -> PyResult<WalkResult> {
+        if let Some(depth) = max_depth {
+            checked_depth(depth)?;
+        }
         let options = ListDirOptions::new()
             .with_recursive(true)
             .with_max_entries(self.directory_max_entries)
             .with_max_path_bytes(self.directory_max_path_bytes)
-            .with_max_depth(
+            .with_max_depth(checked_depth(
                 max_depth
                     .unwrap_or(self.walk_max_depth)
                     .min(self.walk_max_depth),
-            )
+            )?)
             .with_truncate_at_max_depth(
                 max_depth.is_some_and(|depth| depth <= self.walk_max_depth),
             );
@@ -2318,6 +2335,26 @@ impl BindingBackend for SmbVecFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn walk_rejects_invalid_depth_before_clamping_or_backend_io() {
+        Python::initialize();
+        Python::attach(|py| {
+            let root = prr_test_support::TestRoot::new();
+            let backend = prr_test_support::FaultBackend::new(&root.0, None);
+            let attrs_calls = backend.attrs_calls.clone();
+            let client = prr_test_support::client(backend);
+            for depth in [65534, 65535, usize::MAX - 1] {
+                let error = client
+                    .walk(py, PathBuf::from("/"), false, Some(depth))
+                    .unwrap_err();
+                assert!(error.is_instance_of::<PyValueError>(py));
+            }
+            assert!(attrs_calls.lock().unwrap().is_empty());
+            assert_eq!(checked_depth(201).unwrap().get(), 201);
+            assert!(checked_depth(usize::MAX).unwrap().is_unlimited());
+        });
+    }
 
     #[test]
     fn referral_exceptions_preserve_diagnostics_paths_and_optional_indices() {

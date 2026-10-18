@@ -827,7 +827,7 @@ fn read_range(
                 &mut data[filled..],
             )],
             vfsi_core::api::ReadOptions::new()
-                .with_max_total_bytes(std::num::NonZeroUsize::new(length - filled)),
+                .with_max_total_bytes(std::num::NonZeroUsize::new(length - filled).unwrap()),
         )?;
         let count = results[0].bytes_read();
         if count == 0 {

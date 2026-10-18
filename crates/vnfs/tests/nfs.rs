@@ -675,7 +675,7 @@ fn whole_file_readv_honors_the_client_budget() {
             .vread(
                 [vnfs::files::ReadOp::whole(&path)],
                 vnfs::files::ReadOptions::new()
-                    .with_max_total_bytes(std::num::NonZeroUsize::new(BYTES - 1))
+                    .with_max_total_bytes(std::num::NonZeroUsize::new(BYTES - 1).unwrap())
             )
             .unwrap_err()
             .kind(),
@@ -1279,7 +1279,9 @@ fn bounded_walk_limits_nfs_accumulation() {
         .walk_with_options_impl(
             Path::new(&dir),
             AttrMask::stat(),
-            ListDirOptions::new().with_recursive(true).with_max_depth(0),
+            ListDirOptions::new()
+                .with_recursive(true)
+                .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth")),
             &mut |_, _| {},
         )
         .unwrap_err();
@@ -1293,7 +1295,7 @@ fn bounded_walk_limits_nfs_accumulation() {
                 .with_recursive(true)
                 .with_max_entries(16)
                 .with_max_path_bytes(4096)
-                .with_max_depth(4),
+                .with_max_depth(vfsi_core::api::DepthLimit::new(4).expect("finite depth")),
             &mut |_, entries| entries.sort_by(|a, b| a.file.path().cmp(&b.file.path())),
         )
         .unwrap();

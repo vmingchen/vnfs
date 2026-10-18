@@ -141,7 +141,7 @@ impl ReadResult {
 /// #![deny(unused_must_use)]
 /// use vfsi_core::api::ReadOptions;
 /// let options = ReadOptions::new();
-/// options.with_max_total_bytes(std::num::NonZeroUsize::new(4096));
+/// options.with_max_total_bytes(std::num::NonZeroUsize::new(4096).unwrap());
 /// ```
 ///
 /// Aggregate logical byte budget, defaulting to the client's policy (16 MiB).
@@ -152,11 +152,17 @@ impl ReadResult {
 /// use std::num::NonZeroUsize;
 /// use vfsi_core::api::ReadOptions;
 /// let inherited = ReadOptions::new();
-/// let limited = inherited.with_max_total_bytes(NonZeroUsize::new(4096));
+/// let limited = inherited.with_max_total_bytes(NonZeroUsize::new(4096).unwrap());
 /// assert_eq!(limited.max_total_bytes(), NonZeroUsize::new(4096));
 /// assert_eq!(limited.max_total_bytes_or(8192), 4096);
 /// assert_eq!(inherited.max_total_bytes(), None);
 /// assert_eq!(inherited.max_total_bytes_or(8192), 8192);
+/// ```
+/// Overrides require an explicitly validated nonzero value.
+///
+/// ```compile_fail
+/// use vfsi_core::api::ReadOptions;
+/// ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(0));
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use = "configuration and requests have no effect until used"]
@@ -170,11 +176,11 @@ impl ReadOptions {
             max_total_bytes: None,
         }
     }
-    /// Override the aggregate budget for this call; `None` restores inheritance.
+    /// Override the aggregate budget for this call. New options inherit client policy.
     /// Only nonzero overrides are representable. Stream larger files instead
     /// of raising this when bounded memory is required.
-    pub const fn with_max_total_bytes(mut self, bytes: Option<std::num::NonZeroUsize>) -> Self {
-        self.max_total_bytes = bytes;
+    pub const fn with_max_total_bytes(mut self, bytes: std::num::NonZeroUsize) -> Self {
+        self.max_total_bytes = Some(bytes);
         self
     }
     /// Return the configured override, not the effective client budget.
@@ -421,12 +427,12 @@ mod option_layout_tests {
         let mut options = ReadOptions::new();
         assert_eq!(options.max_total_bytes_or(7), 7);
         for bytes in [1, 42, usize::MAX] {
-            let limit = NonZeroUsize::new(bytes);
+            let limit = NonZeroUsize::new(bytes).unwrap();
             options = options.with_max_total_bytes(limit);
-            assert_eq!(options.max_total_bytes(), limit);
+            assert_eq!(options.max_total_bytes(), Some(limit));
             assert_eq!(options.max_total_bytes_or(7), bytes);
         }
-        options = options.with_max_total_bytes(None);
+        options = ReadOptions::new();
         assert_eq!(options.max_total_bytes(), None);
         assert_eq!(options.max_total_bytes_or(7), 7);
         assert_eq!(

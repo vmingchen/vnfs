@@ -16,7 +16,7 @@ use std::num::NonZeroUsize;
 # fn example(fs: &vnfs::nfs::NfsClient) -> vnfs::Result<()> {
 let results = fs.vread(
     [ReadOp::whole("/file-1"), ReadOp::whole("/file-2")],
-    ReadOptions::new().with_max_total_bytes(NonZeroUsize::new(32 * 1024 * 1024)),
+    ReadOptions::new().with_max_total_bytes(NonZeroUsize::new(32 * 1024 * 1024).unwrap()),
 )?;
 # let _ = results;
 # Ok(())

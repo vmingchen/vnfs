@@ -147,7 +147,9 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
             .with_recursive(recursive)
             .with_enter_leave(lifecycle)
             .with_sort_by_name(sort)
-            .with_max_depth(usize::from(recursive));
+            .with_max_depth(
+                vfsi_core::api::DepthLimit::new(usize::from(recursive)).expect("finite depth"),
+            );
         let mut expected: Vec<_> = ["/tree/empty", "/tree/link", "/tree/sub", "/tree/top"]
             .map(std::path::PathBuf::from)
             .into();
@@ -267,12 +269,21 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
         }
         if recursive {
             assert_eq!(
-                collect(options.with_max_depth(0)).unwrap_err().kind(),
+                collect(
+                    options
+                        .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"))
+                )
+                .unwrap_err()
+                .kind(),
                 vnfs::error::ErrorKind::FileTooLarge,
                 "{name}"
             );
-            let truncated =
-                collect(options.with_max_depth(0).with_truncate_at_max_depth(true)).unwrap();
+            let truncated = collect(
+                options
+                    .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"))
+                    .with_truncate_at_max_depth(true),
+            )
+            .unwrap();
             let shallow: Vec<_> = expected
                 .iter()
                 .filter(|p| p.as_path() != Path::new("/tree/sub/leaf"))
@@ -280,14 +291,19 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
                 .collect();
             assert_eq!(truncated, shallow, "{name}");
             if lifecycle {
-                fs.listdir("/tree", options.with_max_depth(0), |event| {
-                    assert_ne!(event.entry.path(), Path::new("/tree/sub/leaf"));
-                    Ok(if event.depth > 0 && event.kind == WalkEventKind::Enter {
-                        WalkControl::SkipSubtree
-                    } else {
-                        WalkControl::Continue
-                    })
-                })
+                fs.listdir(
+                    "/tree",
+                    options
+                        .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth")),
+                    |event| {
+                        assert_ne!(event.entry.path(), Path::new("/tree/sub/leaf"));
+                        Ok(if event.depth > 0 && event.kind == WalkEventKind::Enter {
+                            WalkControl::SkipSubtree
+                        } else {
+                            WalkControl::Continue
+                        })
+                    },
+                )
                 .unwrap();
             }
         }
@@ -377,10 +393,15 @@ fn scalar_collectors_select_named_scope_and_respect_visit_budgets() {
             .any(|listing| listing.path == Path::new("/tree/sub"))
     );
     assert_eq!(
-        fs.read_dirs_with_options(&["/tree"], options.with_max_depth(0).with_recursive(true))
-            .map(|mut trees| trees.remove(0))
-            .unwrap_err()
-            .kind(),
+        fs.read_dirs_with_options(
+            &["/tree"],
+            options
+                .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"))
+                .with_recursive(true)
+        )
+        .map(|mut trees| trees.remove(0))
+        .unwrap_err()
+        .kind(),
         vnfs::error::ErrorKind::FileTooLarge
     );
 }

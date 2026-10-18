@@ -384,7 +384,7 @@ fn overlap_depth_and_budgets_are_explicit() {
         &fs,
         &["/src"],
         "/dst",
-        TransferOptions::new().with_max_depth(DepthLimit::new(0)),
+        TransferOptions::new().with_max_depth(DepthLimit::new(0).unwrap()),
     )
     .unwrap();
     assert_eq!(s.entries_skipped, 1);

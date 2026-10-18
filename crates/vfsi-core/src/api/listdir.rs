@@ -125,7 +125,7 @@ fn buffered<F: Vfsi + ?Sized>(
     // ListDirOptions depth limits concern descent, not files in a root listing.
     // Admission below enforces them after allowing a directory to be pruned.
     budget = budget
-        .with_max_depth(usize::MAX)
+        .with_max_depth(crate::api::DepthLimit::unlimited())
         .with_truncate_at_max_depth(false);
     let mut retained_bytes = 0usize;
     super::traversal::walk_events(
@@ -190,7 +190,7 @@ fn buffered<F: Vfsi + ?Sized>(
                 if !options.recursive() || decision == WalkControl::SkipSubtree {
                     return Ok(WalkControl::SkipSubtree);
                 }
-                if event.depth > walk.max_depth() {
+                if event.depth > walk.max_depth().get() {
                     if !walk.truncate_at_max_depth() {
                         return Err(limit_error(event.entry.path()));
                     }

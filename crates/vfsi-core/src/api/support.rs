@@ -58,24 +58,28 @@ pub const DEFAULT_DIRECTORY_MAX_PATH_BYTES: usize = 16 * 1024 * 1024;
 /// Default recursion depth for recursive walks.
 pub const DEFAULT_WALK_MAX_DEPTH: usize = 128;
 
-/// Compact traversal depth: 0 through 200 are finite, larger inputs are unlimited.
-/// The root has depth zero. Unlimited depth does not disable entry/byte budgets.
-/// Both this type and `Option<DepthLimit>` occupy one byte.
+/// A checked finite traversal depth or an explicitly unlimited traversal.
+/// The root has depth zero. Unlimited depth retains entry and byte budgets.
+/// Finite depths 0 through 65,533 are representable; larger values are rejected.
+/// Both this type and Option<DepthLimit> occupy two bytes.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DepthLimit(std::num::NonZeroU8);
+pub struct DepthLimit(std::num::NonZeroU16);
 
 impl DepthLimit {
-    /// Normalize a requested depth. Every value above 200 means unlimited.
-    pub const fn new(depth: usize) -> Self {
-        let encoded = if depth <= 200 { (depth + 1) as u8 } else { 202 };
-        Self(std::num::NonZeroU8::new(encoded).expect("depth encoding is nonzero"))
+    /// Construct a finite limit. Out-of-range input never disables the limit.
+    pub const fn new(depth: usize) -> Option<Self> {
+        if depth <= u16::MAX as usize - 2 {
+            Some(Self(std::num::NonZeroU16::new((depth + 1) as u16).unwrap()))
+        } else {
+            None
+        }
     }
     /// Disable the depth limit while retaining other traversal budgets.
     pub const fn unlimited() -> Self {
-        Self::new(usize::MAX)
+        Self(std::num::NonZeroU16::MAX)
     }
-    /// Effective finite limit, or `usize::MAX` for unlimited traversal.
+    /// Effective finite limit, or usize::MAX for unlimited traversal.
     pub const fn get(self) -> usize {
         if self.is_unlimited() {
             usize::MAX
@@ -83,9 +87,8 @@ impl DepthLimit {
             self.0.get() as usize - 1
         }
     }
-    /// Whether traversal has no depth limit.
     pub const fn is_unlimited(self) -> bool {
-        self.0.get() == 202
+        self.0.get() == u16::MAX
     }
 }
 
@@ -148,7 +151,7 @@ pub struct ResourceLimits {
     /// Aggregate logical path bytes, excluding allocator and metadata overhead.
     max_directory_path_bytes: usize,
     /// Maximum descent depth; the starting directory is depth zero.
-    max_walk_depth: usize,
+    max_walk_depth: DepthLimit,
 }
 
 impl Default for ResourceLimits {
@@ -159,7 +162,7 @@ impl Default for ResourceLimits {
                 .unwrap(),
             max_directory_entries: crate::api::DEFAULT_DIRECTORY_MAX_ENTRIES,
             max_directory_path_bytes: crate::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES,
-            max_walk_depth: crate::api::DEFAULT_WALK_MAX_DEPTH,
+            max_walk_depth: DepthLimit::new(crate::api::DEFAULT_WALK_MAX_DEPTH).unwrap(),
         }
     }
 }
@@ -205,12 +208,12 @@ impl ResourceLimits {
         self.max_directory_path_bytes
     }
     /// Set maximum descent depth; zero includes only the starting directory.
-    pub const fn with_max_walk_depth(mut self, value: usize) -> Self {
+    pub const fn with_max_walk_depth(mut self, value: DepthLimit) -> Self {
         self.max_walk_depth = value;
         self
     }
     /// Read the configured policy value.
-    pub const fn max_walk_depth(self) -> usize {
+    pub const fn max_walk_depth(self) -> DepthLimit {
         self.max_walk_depth
     }
 
@@ -234,4 +237,27 @@ impl ResourceLimits {
 pub struct DirectoryListing {
     pub path: PathBuf,
     pub entries: Vec<DirEntry>,
+}
+
+#[cfg(test)]
+mod depth_limit_tests {
+    use super::*;
+    #[test]
+    fn checked_depths_preserve_finite_limits_and_inheritance() {
+        for depth in [0, 1, 128, 200, 201, 500, 65533] {
+            let limit = DepthLimit::new(depth).unwrap();
+            assert!(!limit.is_unlimited());
+            let limits = ResourceLimits::new().with_max_walk_depth(limit);
+            assert_eq!(ListDirOptions::new().resolve(limits).max_depth(), limit);
+        }
+        for invalid in [65534, 65535, usize::MAX] {
+            assert!(DepthLimit::new(invalid).is_none());
+        }
+        assert!(
+            ListDirOptions::new()
+                .resolve(ResourceLimits::new().with_max_walk_depth(DepthLimit::unlimited()))
+                .max_depth()
+                .is_unlimited()
+        );
+    }
 }

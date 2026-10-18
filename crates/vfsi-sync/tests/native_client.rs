@@ -34,7 +34,7 @@ fn client_policy_applies_to_scalar_vector_and_into_reads_before_dispatch() {
         client
             .read_with_options(
                 "/file",
-                ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(6))
+                ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(6).unwrap())
             )
             .unwrap(),
         b"abcdef"
@@ -1629,7 +1629,7 @@ fn allocating_whole_file_reads_enforce_a_configurable_limit() {
     let error = client
         .read_with_options(
             "/file",
-            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(3)),
+            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(3).unwrap()),
         )
         .unwrap_err();
     assert_eq!(error.err_no(), libc::EFBIG as u32);
@@ -1644,7 +1644,7 @@ fn allocating_whole_file_reads_enforce_a_configurable_limit() {
         client
             .read_with_options(
                 "/file",
-                ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(4))
+                ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(4).unwrap())
             )
             .unwrap(),
         b"four"
@@ -1658,7 +1658,7 @@ fn allocating_whole_file_reads_enforce_a_configurable_limit() {
         client
             .read_to_string_with_options(
                 "/file",
-                ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(4))
+                ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(4).unwrap())
             )
             .unwrap(),
         "utf8"

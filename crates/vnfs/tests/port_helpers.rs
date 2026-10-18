@@ -241,7 +241,7 @@ fn ordered_walk_depth_zero_delivers_root_and_limits_descent_only() {
                 "/",
                 ListDirOptions::new()
                     .with_recursive(true)
-                    .with_max_depth(0)
+                    .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"))
                     .with_truncate_at_max_depth(truncate)
                     .with_fields(Attributes::MODE),
                 |a, b| a.path().cmp(b.path()),
@@ -267,7 +267,7 @@ fn ordered_walk_depth_zero_delivers_root_and_limits_descent_only() {
             "/",
             ListDirOptions::new()
                 .with_recursive(true)
-                .with_max_depth(0)
+                .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"))
                 .with_fields(Attributes::MODE),
             |a, b| a.path().cmp(b.path()),
             |_| true,
@@ -287,7 +287,7 @@ fn ordered_walk_depth_zero_delivers_root_and_limits_descent_only() {
             "/",
             ListDirOptions::new()
                 .with_recursive(true)
-                .with_max_depth(0)
+                .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"))
                 .with_truncate_at_max_depth(true)
                 .with_fields(Attributes::MODE),
             |a, b| a.path().cmp(b.path()),

@@ -574,7 +574,10 @@ fn copy_independent_roots(
                             .checked_add(1)
                             .ok_or_else(|| limit(parent.root, entry.path()))?;
                         if entry.attrs().is_dir()
-                            && depth > options.depth.map_or(limits.max_walk_depth(), |d| d.get())
+                            && depth
+                                > options
+                                    .depth
+                                    .map_or(limits.max_walk_depth().get(), |d| d.get())
                         {
                             if options.depth.is_some() {
                                 summary.entries_skipped += 1;

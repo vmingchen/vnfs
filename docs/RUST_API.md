@@ -391,8 +391,8 @@ must impose a finite default allocation limit and expose an explicit override.
 and `VfsiExt::read_to_string` therefore inherit a 16 MiB client budget.
 Callers may select another bound with `ReadOptions` on `vread`,
 `read_files_with_options`, or `read_to_string_with_options`. A
-`ReadOptions::with_max_total_bytes(Some(NonZeroUsize))` override must be nonzero;
-`None` inherits the client default. Native backend whole-file collection uses
+`ReadOptions::with_max_total_bytes(NonZeroUsize)` override must be nonzero;
+New options inherit the client default. Native backend whole-file collection uses
 the separate `ReadAllOptions` type on `VectorBackend::vread_all_with_options_impl`.
 `ResourceLimits` sets client defaults through `NfsBuilder::limits`,
 `NfsClient::with_limits`, or `Auto::with_limits`. Existing clones retain their
