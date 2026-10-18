@@ -3253,3 +3253,48 @@ fn projected_io_errors_allow_client_reentry() {
     assert_eq!(error.index(), Some(0));
     assert_eq!(error.path(), Some(std::path::Path::new("/file")));
 }
+
+#[test]
+fn complete_write_projection_can_reenter_during_alias_planning() {
+    #[cfg(feature = "test-support")]
+    if vfsi_sync::test_support::supervise_with_deadline(
+        "complete_write_projection_can_reenter_during_alias_planning",
+    ) {
+        return;
+    }
+    for unknown_objects in [false, true] {
+        let backend = WriteBoundaryProbe {
+            scalar: ScalarOnly {
+                unknown_objects,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let waves = backend.calls.clone();
+        let fs = FsClient::new(backend);
+        let first = fs.open("/first").unwrap();
+        let second = fs.open("/second").unwrap();
+        let writes = [
+            first.write_request_at(0, b"abc"),
+            second.write_request_at(0, b"xyz"),
+        ];
+        let calls = std::cell::Cell::new(0);
+        let results = fs
+            .vwrite_all_mapped_native(&writes, |request| {
+                calls.set(calls.get() + 1);
+                fs.capabilities().unwrap();
+                *request
+            })
+            .unwrap();
+        assert!(results.iter().all(|result| result.bytes_written == 3));
+        assert_eq!(calls.get(), writes.len());
+        let waves = waves.lock().unwrap();
+        if unknown_objects {
+            assert_eq!(waves.len(), 4);
+            assert!(waves.iter().all(|wave| wave.len() == 1));
+        } else {
+            assert_eq!(waves.len(), 2);
+            assert!(waves.iter().all(|wave| wave.len() == 2));
+        }
+    }
+}
