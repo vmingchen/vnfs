@@ -305,7 +305,7 @@ fn application_metadata_and_batch_mutations() {
             "/link",
             vnfs::directory::AttrsOptions::new()
                 .with_fields(Attributes::MODE | Attributes::BLOCKS)
-                .with_follow_symlinks(false),
+                .with_follow_final_symlink(false),
         )
         .unwrap();
     assert!(metadata.is_symlink());

@@ -62,7 +62,7 @@ macro_rules! __vfsi_client_methods {
                         &[path],
                         vfsi_core::api::AttrsOptions::new()
                             .with_fields(vfsi_core::api::Attributes::MODE)
-                            .with_follow_symlinks(false),
+                            .with_follow_final_symlink(false),
                     )?;
                     if metadata.len() != 1 {
                         return Err(vfsi_core::api::Error::transport(
@@ -84,7 +84,7 @@ macro_rules! __vfsi_client_methods {
                         cursors,
                         page_size,
                         max_entries,
-                        options.follow_symlinks(),
+                        options.allow_symlink_components(),
                     )
                 },
                 callback,

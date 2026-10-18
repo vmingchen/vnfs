@@ -80,7 +80,7 @@ impl Vfsi for PortableFs {
         options: AttrsOptions,
     ) -> Result<Vec<Attrs>> {
         assert!(self.tree.get(), "unexpected metadata");
-        assert!(!options.follow_symlinks());
+        assert!(!options.follow_final_symlink());
         self.metadata.set(self.metadata.get() + 1);
         Ok(paths
             .iter()
@@ -539,7 +539,7 @@ fn buffered_listdir_forwards_remaining_budgets_fields_and_resolution_policy() {
             assert!(!options.recursive());
             assert!(!options.enter_leave());
             assert!(!options.sort_by_name());
-            assert_eq!(options.follow_symlinks(), !recursive && !lifecycle);
+            assert_eq!(options.allow_symlink_components(), !recursive && !lifecycle);
         }
     }
 }

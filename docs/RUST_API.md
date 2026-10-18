@@ -174,7 +174,7 @@ operations without constructing `VfAttrs` or calling backend traits directly.
 fields such as size, permissions, allocated blocks, device ID, full mode,
 and named-attribute presence as `Option`, so missing values are not confused
 with zero. Use `attrs_with_options` with
-`AttrsOptions::with_follow_symlinks(false)` for a no-follow query, and `vlistdirs`
+`AttrsOptions::with_follow_final_symlink(false)` for a no-follow query, and `vlistdirs`
 to visit pages for several directory operands, with
 `ListDirOptions::with_recursive(true)` for bounded recursive trees. Use the
 `VfsiExt::read_dirs_with_options` collector only when retained listings are
@@ -487,6 +487,11 @@ The SMB backend exposes `SmbConnectOptions` through
 `SmbVecFs::connect_with_options`. Connect setup and ordinary requests have
 separate deadlines; the request deadline is also applied to sends, response
 waiting, and SMB credit acquisition.
+
+Metadata options use with_follow_final_symlink: ancestor components retain
+ordinary resolution. Directory options use with_allow_symlink_components:
+false requires no symlinks in the directory path, including ancestors, and
+backends unable to provide that guarantee return Unsupported.
 
 ## Lifecycle and read results
 

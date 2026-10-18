@@ -327,7 +327,7 @@ fn roots<P: AsRef<Path>>(
                 &paths,
                 AttrsOptions::new()
                     .with_fields(fields())
-                    .with_follow_symlinks(false),
+                    .with_follow_final_symlink(false),
             )
             .map_err(|e| mapped(e, batch))?;
         if metadata.len() != batch.len() {

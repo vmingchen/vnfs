@@ -752,7 +752,7 @@ fn shared_attribute_ops_preserve_all_fields_at_the_raw_backend_boundary() {
         .gid(43)
         .accessed(std::time::UNIX_EPOCH + std::time::Duration::new(123, 456))
         .modified(std::time::UNIX_EPOCH - std::time::Duration::new(1, 25))
-        .with_follow_symlinks(false);
+        .with_follow_final_symlink(false);
     vsetattrs_typed_default(backend, std::slice::from_ref(&op)).unwrap();
     // Borrowing the operation leaves it reusable; changing options performs no I/O.
     vsetattrs_typed_default(backend, std::slice::from_ref(&op)).unwrap();
@@ -767,7 +767,7 @@ fn shared_attribute_ops_preserve_all_fields_at_the_raw_backend_boundary() {
         Target::File(&file),
         vfsi_core::api::AttrsOptions::new()
             .with_fields(fields)
-            .with_follow_symlinks(false),
+            .with_follow_final_symlink(false),
     )
     .unwrap();
     assert_eq!(attrs.file, file);
@@ -829,10 +829,10 @@ fn shared_native_attribute_batches_preflight_and_remap_policy_run_errors() {
         SetAttrsOp::new(Target::Path(std::path::Path::new("/a"))).len(1),
         SetAttrsOp::new(Target::Path(std::path::Path::new("/b")))
             .len(2)
-            .with_follow_symlinks(false),
+            .with_follow_final_symlink(false),
         SetAttrsOp::new(Target::Path(std::path::Path::new("/c")))
             .len(3)
-            .with_follow_symlinks(false),
+            .with_follow_final_symlink(false),
         SetAttrsOp::new(Target::Path(std::path::Path::new("/a"))).len(4),
     ];
     let mut backend = AttrsBackend::default();
@@ -1274,7 +1274,7 @@ impl HandleBackend for ScalarOnly {
     fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, FileOperand>>]) -> VfResult<()> {
         let mut calls = self.attrs_calls.lock().unwrap();
         calls.push((
-            updates[0].follow_symlinks(),
+            updates[0].follow_final_symlink(),
             updates.iter().map(|op| op.requested_len()).collect(),
         ));
         if let Some((call, error)) = &self.attrs_failure
@@ -1484,8 +1484,12 @@ fn setattrs_ops_batch_policy_runs_in_order_and_preflight_before_dispatch() {
     fs.vsetattrs(&[
         SetAttrsOp::new("/a").len(1),
         SetAttrsOp::new("/b").len(2),
-        SetAttrsOp::new("/c").len(3).with_follow_symlinks(false),
-        SetAttrsOp::new("/d").len(4).with_follow_symlinks(false),
+        SetAttrsOp::new("/c")
+            .len(3)
+            .with_follow_final_symlink(false),
+        SetAttrsOp::new("/d")
+            .len(4)
+            .with_follow_final_symlink(false),
         SetAttrsOp::new("/a").len(5),
     ])
     .unwrap();
@@ -1503,7 +1507,7 @@ fn setattrs_ops_batch_policy_runs_in_order_and_preflight_before_dispatch() {
             SetAttrsOp::new("/a").len(6),
             SetAttrsOp::new("/b")
                 .uid(u32::MAX)
-                .with_follow_symlinks(false),
+                .with_follow_final_symlink(false),
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
@@ -1528,8 +1532,12 @@ fn setattrs_ops_remap_later_run_failures_without_replaying_or_dispatching_suffix
         let error = fs
             .vsetattrs(&[
                 SetAttrsOp::new("/a").len(1),
-                SetAttrsOp::new("/b").len(2).with_follow_symlinks(false),
-                SetAttrsOp::new("/c").len(3).with_follow_symlinks(false),
+                SetAttrsOp::new("/b")
+                    .len(2)
+                    .with_follow_final_symlink(false),
+                SetAttrsOp::new("/c")
+                    .len(3)
+                    .with_follow_final_symlink(false),
                 SetAttrsOp::new("/d").len(4),
             ])
             .unwrap_err();
@@ -2672,7 +2680,7 @@ fn portable_handle_queries_and_sync_batch_and_preflight_every_handle() {
             Target::Path(std::path::Path::new("/link")),
             Target::file(&b),
         ],
-        AttrsOptions::new().with_follow_symlinks(false),
+        AttrsOptions::new().with_follow_final_symlink(false),
     )
     .unwrap();
     assert_eq!(

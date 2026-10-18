@@ -75,7 +75,7 @@ pub fn native_metadata_impl_default<F: VectorBackend + ?Sized>(
         masks: options.fields(),
         ..VfAttrs::default()
     };
-    let result = if options.follow_symlinks() {
+    let result = if options.follow_final_symlink() {
         backend.vgetattrs_impl(std::slice::from_mut(&mut attrs))
     } else {
         backend.vgetattrs_nofollow_impl(std::slice::from_mut(&mut attrs))
@@ -97,7 +97,7 @@ pub fn native_metadata_path_impl_default<F: VectorBackend + ?Sized>(
         Target::Path(path),
         vfsi_core::api::AttrsOptions::new()
             .with_fields(metadata_mask())
-            .with_follow_symlinks(follow),
+            .with_follow_final_symlink(follow),
     )
     .map(vfsi_core::metadata_from_attrs)
 }
@@ -173,10 +173,10 @@ pub fn vsetattrs_typed_default<F: VectorBackend + ?Sized>(
         .collect::<VfResult<Vec<_>>>()?;
     let mut start = 0;
     while start < updates.len() {
-        let follow = updates[start].follow_symlinks();
+        let follow = updates[start].follow_final_symlink();
         let count = updates[start..]
             .iter()
-            .take_while(|op| op.follow_symlinks() == follow)
+            .take_while(|op| op.follow_final_symlink() == follow)
             .count();
         let result = if follow {
             backend.vsetattrs_raw_impl(&attrs[start..start + count])

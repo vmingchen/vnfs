@@ -11,6 +11,10 @@ struct AttrsFlags {
 
 /// Select metadata fields and whether to follow the final symlink.
 /// Ancestor symlinks use ordinary backend path-resolution semantics.
+/// ```compile_fail
+/// use vfsi_core::api::AttrsOptions;
+/// AttrsOptions::new().with_follow_symlinks(false);
+/// ```
 #[derive(Clone, Copy, Debug)]
 #[must_use = "configuration and requests have no effect until used"]
 pub struct AttrsOptions {
@@ -36,7 +40,7 @@ impl AttrsOptions {
         self
     }
     /// Follow the final symlink when true; otherwise describe the link itself.
-    pub fn with_follow_symlinks(mut self, follow: bool) -> Self {
+    pub fn with_follow_final_symlink(mut self, follow: bool) -> Self {
         self.flags.set_follow(follow);
         self
     }
@@ -45,7 +49,7 @@ impl AttrsOptions {
         self.fields
     }
     /// Whether to follow the final component if it is a symlink.
-    pub fn follow_symlinks(self) -> bool {
+    pub fn follow_final_symlink(self) -> bool {
         self.flags.follow()
     }
 }
@@ -87,7 +91,7 @@ impl<T> SetAttrsOp<T> {
 
     /// Follow the final path symlink when true, or modify the link itself when
     /// false. Opened objects retain their identity regardless of this setting.
-    pub fn with_follow_symlinks(mut self, follow: bool) -> Self {
+    pub fn with_follow_final_symlink(mut self, follow: bool) -> Self {
         self.flags.set_follow(follow);
         self
     }
@@ -179,7 +183,7 @@ impl<T> SetAttrsOp<T> {
     }
 
     /// Whether the final path symlink is followed.
-    pub fn follow_symlinks(&self) -> bool {
+    pub fn follow_final_symlink(&self) -> bool {
         self.flags.follow()
     }
 }
@@ -224,7 +228,7 @@ mod option_layout_tests {
         let accessed = std::time::UNIX_EPOCH + std::time::Duration::from_secs(123);
         let modified = std::time::UNIX_EPOCH - std::time::Duration::from_secs(456);
         let empty = SetAttrsOp::new(NonClone);
-        assert!(empty.follow_symlinks());
+        assert!(empty.follow_final_symlink());
         assert_eq!(empty.requested_permissions(), None);
         assert_eq!(empty.requested_len(), None);
         assert_eq!(empty.requested_uid(), None);
@@ -238,7 +242,7 @@ mod option_layout_tests {
             .gid(43)
             .accessed(accessed)
             .modified(modified)
-            .with_follow_symlinks(false);
+            .with_follow_final_symlink(false);
         for path in ["/first", "/second"] {
             let rebound = op.with_target(path);
             assert_eq!(*rebound.target(), path);
@@ -248,38 +252,38 @@ mod option_layout_tests {
             assert_eq!(rebound.requested_gid(), Some(43));
             assert_eq!(rebound.requested_accessed(), Some(accessed));
             assert_eq!(rebound.requested_modified(), Some(modified));
-            assert!(!rebound.follow_symlinks());
+            assert!(!rebound.follow_final_symlink());
         }
         let replaced = op
             .with_target("/third")
             .len(10)
             .uid(44)
-            .with_follow_symlinks(true);
+            .with_follow_final_symlink(true);
         assert_eq!(replaced.requested_len(), Some(10));
         assert_eq!(replaced.requested_uid(), Some(44));
-        assert!(replaced.follow_symlinks());
+        assert!(replaced.follow_final_symlink());
         assert_eq!(op.requested_len(), Some(0));
         assert_eq!(op.requested_uid(), Some(42));
-        assert!(!op.follow_symlinks());
+        assert!(!op.follow_final_symlink());
     }
     #[test]
     fn packed_follow_flag_preserves_selected_fields() {
         assert_eq!(std::mem::size_of::<AttrsFlags>(), 1);
-        assert!(AttrsOptions::default().follow_symlinks());
+        assert!(AttrsOptions::default().follow_final_symlink());
         let op = SetAttrsOp::new("/file").len(0).uid(42);
         assert_eq!(*op.target(), "/file");
-        assert!(op.follow_symlinks());
-        let op = op.with_follow_symlinks(false);
-        assert!(!op.follow_symlinks());
+        assert!(op.follow_final_symlink());
+        let op = op.with_follow_final_symlink(false);
+        assert!(!op.follow_final_symlink());
         assert_eq!(op.requested_len(), Some(0));
         assert_eq!(op.requested_uid(), Some(42));
         let fields = crate::api::Attributes::SIZE | crate::api::Attributes::CHANGE;
         let options = AttrsOptions::new().with_fields(fields);
         for follow in [false, true, false] {
-            let changed = options.with_follow_symlinks(follow);
-            assert_eq!(changed.follow_symlinks(), follow);
+            let changed = options.with_follow_final_symlink(follow);
+            assert_eq!(changed.follow_final_symlink(), follow);
             assert_eq!(changed.fields(), fields);
-            assert!(options.follow_symlinks());
+            assert!(options.follow_final_symlink());
         }
     }
 }
@@ -310,7 +314,10 @@ mod compact_update_tests {
                 if bits & 8 != 0 {
                     op = op.len(length);
                 }
-                for op in [op, op.with_target("/other").with_follow_symlinks(false)] {
+                for op in [
+                    op,
+                    op.with_target("/other").with_follow_final_symlink(false),
+                ] {
                     assert_eq!(
                         op.requested_permissions(),
                         (bits & 1 != 0).then_some(permissions)

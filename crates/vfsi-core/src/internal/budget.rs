@@ -86,13 +86,13 @@ mod tests {
         let options = budget.remaining_options(
             ListDirOptions::new()
                 .with_recursive(true)
-                .with_follow_symlinks(true)
+                .with_allow_symlink_components(true)
                 .with_max_depth(crate::api::DepthLimit::new(7).expect("finite depth")),
         );
         assert_eq!(options.max_entries(), usize::MAX - 1);
         assert_eq!(options.max_path_bytes(), usize::MAX - 5);
         assert!(options.recursive());
-        assert!(options.follow_symlinks());
+        assert!(options.allow_symlink_components());
         assert_eq!(options.max_depth().get(), 7);
     }
 }

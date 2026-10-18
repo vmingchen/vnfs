@@ -96,7 +96,7 @@ fn buffered<F: Vfsi + ?Sized>(
             root,
             AttrsOptions::new()
                 .with_fields(fields)
-                .with_follow_symlinks(false),
+                .with_follow_final_symlink(false),
         )?
     } else {
         // The entry-only root is never exposed. READDIR validates its type;
@@ -154,8 +154,8 @@ fn buffered<F: Vfsi + ?Sized>(
                     .with_fields(fields)
                     // Reopening a path is not anchored to the original page.
                     // Require atomic no-follow resolution, including ancestors.
-                    .with_follow_symlinks(
-                        options.follow_symlinks() && !options.recursive() && !lifecycle,
+                    .with_allow_symlink_components(
+                        options.allow_symlink_components() && !options.recursive() && !lifecycle,
                     ),
             )
         },

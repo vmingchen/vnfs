@@ -85,7 +85,7 @@ pub trait Vfsi {
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let entries = fs.vgetattrs(&["/file-1", "/link"],
     ///     AttrsOptions::new().with_fields(Attributes::MODE | Attributes::SIZE)
-    ///         .with_follow_symlinks(false))?;
+    ///         .with_follow_final_symlink(false))?;
     /// # let _ = entries;
     /// # Ok(())
     /// # }
@@ -131,7 +131,7 @@ pub trait Vfsi {
     /// fs.vsetattrs(&[
     ///     SetAttrsOp::file(file).len(1024),
     ///     SetAttrsOp::new(Target::Path(std::path::Path::new("/other"))).len(0)
-    ///         .with_follow_symlinks(false),
+    ///         .with_follow_final_symlink(false),
     /// ])?;
     /// # Ok(())
     /// # }

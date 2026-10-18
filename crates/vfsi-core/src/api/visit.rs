@@ -19,6 +19,13 @@ struct VisitFlags {
 /// Defaults to immediate children only. Collection retains native batching;
 /// visiting delivers owned directory pages incrementally through callbacks.
 /// Unspecified budgets inherit the client's resource limits.
+/// Require no symlink components when false; metadata's final-component
+/// option has a deliberately different name.
+///
+/// ```compile_fail
+/// use vfsi_core::api::ListDirOptions;
+/// ListDirOptions::new().with_follow_symlinks(false);
+/// ```
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[must_use = "configuration and requests have no effect until used"]
 pub struct ListDirOptions {
@@ -78,7 +85,7 @@ impl ListDirOptions {
     /// backends unable to guarantee it return Unsupported. Recursive entry
     /// symlinks are never traversed regardless of this setting. Buffered
     /// recursive/lifecycle `listdir` enforces false when reopening directories.
-    pub const fn with_follow_symlinks(mut self, value: bool) -> Self {
+    pub const fn with_allow_symlink_components(mut self, value: bool) -> Self {
         self.flags.set_no_follow(!value);
         self
     }
@@ -130,7 +137,7 @@ impl ListDirOptions {
     pub const fn sort_by_name(self) -> bool {
         self.flags.sort_by_name()
     }
-    pub const fn follow_symlinks(self) -> bool {
+    pub const fn allow_symlink_components(self) -> bool {
         !self.flags.no_follow()
     }
     pub fn fields(self) -> Attributes {
@@ -209,7 +216,7 @@ mod option_layout_tests {
         let inherited = ListDirOptions::new().walk_options(limits);
         assert!(!ListDirOptions::new().enter_leave());
         assert!(!ListDirOptions::new().sort_by_name());
-        assert!(ListDirOptions::new().follow_symlinks());
+        assert!(ListDirOptions::new().allow_symlink_components());
         assert_eq!(inherited.max_entries(), limits.walk_options().max_entries());
         assert_eq!(
             inherited.max_depth().get(),
@@ -228,31 +235,31 @@ mod option_layout_tests {
                 .with_recursive(true)
                 .with_enter_leave(true)
                 .with_sort_by_name(true)
-                .with_follow_symlinks(false)
+                .with_allow_symlink_components(false)
                 .with_truncate_at_max_depth(true)
                 .with_fields(Attributes::SIZE);
             let walk = options.walk_options(limits);
             assert_eq!(walk.max_entries(), value);
             assert_eq!(walk.fields(), options.fields());
-            assert!(!walk.follow_symlinks());
+            assert!(!walk.allow_symlink_components());
             assert_eq!(walk.max_path_bytes(), value);
             assert_eq!(walk.max_depth().get(), value);
             assert!(walk.truncate_at_max_depth());
             assert!(options.recursive());
             assert!(options.enter_leave());
             assert!(options.sort_by_name());
-            assert!(!options.follow_symlinks());
+            assert!(!options.allow_symlink_components());
             assert_eq!(options.fields(), Attributes::SIZE | Attributes::MODE);
             let changed = options
                 .with_recursive(false)
                 .with_truncate_at_max_depth(false)
                 .with_enter_leave(false)
                 .with_sort_by_name(false);
-            let changed = changed.with_follow_symlinks(true);
+            let changed = changed.with_allow_symlink_components(true);
             assert!(!changed.recursive());
             assert!(!changed.enter_leave());
             assert!(!changed.sort_by_name());
-            assert!(changed.follow_symlinks());
+            assert!(changed.allow_symlink_components());
             assert!(!changed.walk_options(limits).truncate_at_max_depth());
             assert_eq!(changed.directory_options(limits).max_entries(), value);
             let zero = changed

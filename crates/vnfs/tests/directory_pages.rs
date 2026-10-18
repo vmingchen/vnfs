@@ -70,7 +70,7 @@ fn page_delivery_is_bounded_reentrant_and_reports_empty_directory_cancellation()
 }
 
 #[test]
-fn recursive_roots_and_entries_never_follow_final_symlinks() {
+fn recursive_roots_and_entries_never_allow_symlink_componentss() {
     let root = tempfile::tempdir().unwrap();
     let fs = Posix::new(root.path()).unwrap();
     fs.create_dir("/target").unwrap();

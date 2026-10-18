@@ -47,7 +47,7 @@ pub fn tree_stats(
         &[root],
         AttrsOptions::new()
             .with_fields(fields)
-            .with_follow_symlinks(false),
+            .with_follow_final_symlink(false),
     )?;
     if metadata.len() != 1 {
         return Err(crate::Error::transport_with_kind(

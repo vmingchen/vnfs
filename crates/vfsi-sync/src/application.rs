@@ -329,7 +329,7 @@ pub(crate) fn metadata_backend<F, P: vfsi_core::AsTarget<crate::OpenFile<F>>>(
 where
     F: crate::backend::VectorBackend + 'static,
 {
-    client.vgetattrs_native(paths, options.fields(), options.follow_symlinks())
+    client.vgetattrs_native(paths, options.fields(), options.follow_final_symlink())
 }
 
 use vfsi_core::api::internal::{OwnedReadResult, ReadRequest, consume_ops, read_batch};

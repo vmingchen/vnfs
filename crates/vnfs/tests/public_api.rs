@@ -126,7 +126,7 @@ fn application_traversal_and_mutation_do_not_require_backend_imports() {
             "/a/link",
             vnfs::directory::AttrsOptions::new()
                 .with_fields(fields)
-                .with_follow_symlinks(false),
+                .with_follow_final_symlink(false),
         )?;
         let _ = client
             .read_dirs_with_options(
@@ -311,7 +311,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
                 std::path::Path::new("/sub/a"),
                 std::path::Path::new("/sub/link"),
             ],
-            vnfs::directory::AttrsOptions::new().with_follow_symlinks(false),
+            vnfs::directory::AttrsOptions::new().with_follow_final_symlink(false),
         )
         .unwrap();
     assert!(metadata[0].is_file());
@@ -626,7 +626,7 @@ fn vsetattrs_many_local_and_routed_files() {
     let updates = [vnfs::directory::SetAttrsOp::new("/link").len(11)];
     assert!(
         mounted
-            .vsetattrs(&[updates[0].with_follow_symlinks(false)])
+            .vsetattrs(&[updates[0].with_follow_final_symlink(false)])
             .is_err()
     );
     assert_eq!(
@@ -1092,4 +1092,48 @@ fn complete_writes_order_hardlinks_and_renamed_open_instances() {
         .unwrap();
         assert_eq!(fs.read("/alias").unwrap(), b"AABBBB");
     }
+}
+
+#[cfg(all(feature = "posix", unix))]
+#[test]
+fn symlink_policy_names_distinguish_final_metadata_from_directory_components() {
+    use vnfs::directory::{AttrsOptions, ListDirOptions};
+    let root = tempfile::tempdir().unwrap();
+    let fs = vnfs::posix::Posix::new(root.path()).unwrap();
+    fs.create_dir_all("/real/child").unwrap();
+    fs.write("/real/child/target", b"data").unwrap();
+    fs.symlink("real", "/parent").unwrap();
+    fs.symlink("target", "/real/child/link").unwrap();
+    let attrs = fs
+        .attrs_with_options(
+            "/parent/child/link",
+            AttrsOptions::new().with_follow_final_symlink(false),
+        )
+        .unwrap();
+    assert!(attrs.is_symlink(), "only the final link is left unresolved");
+    assert_eq!(
+        fs.attrs_with_options(
+            "/parent/child/link",
+            AttrsOptions::new().with_follow_final_symlink(true)
+        )
+        .unwrap()
+        .len(),
+        Some(4)
+    );
+    assert!(
+        fs.read_dir_with_options(
+            "/parent/child",
+            ListDirOptions::new().with_allow_symlink_components(false)
+        )
+        .is_err()
+    );
+    assert_eq!(
+        fs.read_dir_with_options(
+            "/parent/child",
+            ListDirOptions::new().with_allow_symlink_components(true)
+        )
+        .unwrap()
+        .len(),
+        2
+    );
 }

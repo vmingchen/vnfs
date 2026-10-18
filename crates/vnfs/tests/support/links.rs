@@ -53,7 +53,7 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
     let read = fs.vreadlink(&links).unwrap();
     assert_eq!(read, targets.iter().map(PathBuf::from).collect::<Vec<_>>());
     for attrs in fs
-        .vgetattrs(&links, AttrsOptions::new().with_follow_symlinks(false))
+        .vgetattrs(&links, AttrsOptions::new().with_follow_final_symlink(false))
         .unwrap()
     {
         assert!(attrs.is_symlink());

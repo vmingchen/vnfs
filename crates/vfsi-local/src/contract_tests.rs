@@ -138,7 +138,7 @@ mod tests {
                 .len(3)
                 .permissions(Permissions::from_mode(0o640))
                 .modified(modified)
-                .with_follow_symlinks(false)])
+                .with_follow_final_symlink(false)])
             .unwrap();
         let attrs = client
             .attrs_with_options(
@@ -1399,7 +1399,7 @@ mod tests {
     }
 
     #[test]
-    fn lsetattrsv_does_not_follow_symlinks() {
+    fn lsetattrsv_does_not_follow_final_symlink() {
         use std::os::unix::fs::PermissionsExt;
         let (root, mut fs) = fs("lsetattr");
         write(&mut fs, "/target", b"x");

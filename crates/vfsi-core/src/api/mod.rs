@@ -157,10 +157,14 @@ mod target_tests {
         for target in [first, second.as_target()] {
             assert!(matches!(target, Target::File(actual) if std::ptr::eq(actual, &file)));
         }
-        let (first, second) = copy(SetAttrsOp::file(&file).len(0).with_follow_symlinks(false));
+        let (first, second) = copy(
+            SetAttrsOp::file(&file)
+                .len(0)
+                .with_follow_final_symlink(false),
+        );
         for op in [first, second] {
             assert_eq!(op.requested_len(), Some(0));
-            assert!(!op.follow_symlinks());
+            assert!(!op.follow_final_symlink());
             assert!(matches!(op.target(), Target::File(actual) if std::ptr::eq(*actual, &file)));
         }
         let path = std::path::Path::new("/file");

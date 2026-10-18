@@ -114,9 +114,12 @@ fn attrs_query<C: Vfsi>(fs: &C) {
             .is_file()
     );
     assert!(
-        fs.attrs_with_options("/link", AttrsOptions::new().with_follow_symlinks(false))
-            .unwrap()
-            .is_symlink()
+        fs.attrs_with_options(
+            "/link",
+            AttrsOptions::new().with_follow_final_symlink(false)
+        )
+        .unwrap()
+        .is_symlink()
     );
     let scalar = fs
         .attrs_with_options("/a", AttrsOptions::new().with_fields(Attributes::FILEID))
@@ -130,7 +133,7 @@ fn attrs_query<C: Vfsi>(fs: &C) {
     let links = fs
         .vgetattrs(
             &["/a", "/link", "/dangling"],
-            AttrsOptions::new().with_follow_symlinks(false),
+            AttrsOptions::new().with_follow_final_symlink(false),
         )
         .unwrap();
     assert!(links[0].is_file());
@@ -170,7 +173,7 @@ fn attrs_query<C: Vfsi>(fs: &C) {
             "/link",
             vnfs::directory::AttrsOptions::new()
                 .with_fields(Attributes::MODE)
-                .with_follow_symlinks(false)
+                .with_follow_final_symlink(false)
         )
         .unwrap()
         .is_symlink()

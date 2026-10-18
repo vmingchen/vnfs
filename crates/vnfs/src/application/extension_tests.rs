@@ -197,7 +197,7 @@ fn unified_collection_keeps_grouping_limits_and_generic_metadata_paths() {
     let metadata = fs
         .vgetattrs(
             &paths,
-            crate::AttrsOptions::new().with_follow_symlinks(false),
+            crate::AttrsOptions::new().with_follow_final_symlink(false),
         )
         .unwrap();
     assert!(metadata[0].is_symlink());
@@ -205,7 +205,7 @@ fn unified_collection_keeps_grouping_limits_and_generic_metadata_paths() {
     assert!(
         fs.vgetattrs(
             &[std::path::PathBuf::from("/link")],
-            crate::AttrsOptions::new().with_follow_symlinks(false)
+            crate::AttrsOptions::new().with_follow_final_symlink(false)
         )
         .unwrap()[0]
             .is_symlink()
@@ -213,15 +213,18 @@ fn unified_collection_keeps_grouping_limits_and_generic_metadata_paths() {
     assert!(
         fs.vgetattrs(
             &["/link"],
-            crate::AttrsOptions::new().with_follow_symlinks(false)
+            crate::AttrsOptions::new().with_follow_final_symlink(false)
         )
         .unwrap()[0]
             .is_symlink()
     );
     assert!(
-        fs.vgetattrs::<String>(&[], crate::AttrsOptions::new().with_follow_symlinks(false))
-            .unwrap()
-            .is_empty()
+        fs.vgetattrs::<String>(
+            &[],
+            crate::AttrsOptions::new().with_follow_final_symlink(false)
+        )
+        .unwrap()
+        .is_empty()
     );
 }
 

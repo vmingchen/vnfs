@@ -423,7 +423,7 @@ fn rust_native_client_workflow_on_nfs() {
                     .with_fields(
                         vnfs::directory::Attributes::MODE | vnfs::directory::Attributes::SIZE,
                     )
-                    .with_follow_symlinks(follow),
+                    .with_follow_final_symlink(follow),
             )
             .unwrap();
         assert_eq!(
@@ -4319,8 +4319,11 @@ fn directory_path_resolution_preserves_shallow_symlinks_and_rejects_strict_alias
             1
         );
         assert!(
-            fs.read_dir_with_options(path, ListDirOptions::new().with_follow_symlinks(false))
-                .is_err()
+            fs.read_dir_with_options(
+                path,
+                ListDirOptions::new().with_allow_symlink_components(false)
+            )
+            .is_err()
         );
     }
     fs.remove_dir_all(&dir).unwrap();

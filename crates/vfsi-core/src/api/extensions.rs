@@ -476,7 +476,7 @@ pub trait VfsiExt: Vfsi {
         attrs_query(self, path, crate::api::AttrsOptions::new(), "attrs")
     }
 
-    /// Single-target convenience. For multiple paths, prefer [`Vfsi::vgetattrs`] with selected fields and follow_symlinks(false).
+    /// Single-target convenience. For multiple paths, prefer [`Vfsi::vgetattrs`] with selected fields and follow_final_symlink(false).
     ///
     /// Query one path with selected fields and final-symlink behavior; absent fields remain None.
     ///
@@ -489,7 +489,7 @@ pub trait VfsiExt: Vfsi {
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let attrs = fs.attrs_with_options(
     ///     "/file-1", vfsi_core::api::AttrsOptions::new()
-    ///         .with_fields(Attributes::MODE | Attributes::BLOCKS).with_follow_symlinks(false),
+    ///         .with_fields(Attributes::MODE | Attributes::BLOCKS).with_follow_final_symlink(false),
     /// )?;
     /// if let Some(blocks) = attrs.blocks() {
     ///     println!("allocated blocks: {blocks}");
@@ -505,7 +505,7 @@ pub trait VfsiExt: Vfsi {
         attrs_query(self, path, options, "attrs_with_options")
     }
 
-    /// Single-target convenience. For multiple paths, prefer [`Vfsi::vgetattrs`] with follow_symlinks(false).
+    /// Single-target convenience. For multiple paths, prefer [`Vfsi::vgetattrs`] with follow_final_symlink(false).
     ///
     /// Query the final symlink itself instead of following it.
     ///
@@ -524,7 +524,7 @@ pub trait VfsiExt: Vfsi {
         attrs_query(
             self,
             path,
-            crate::api::AttrsOptions::new().with_follow_symlinks(false),
+            crate::api::AttrsOptions::new().with_follow_final_symlink(false),
             "symlink_attrs",
         )
     }
@@ -684,7 +684,7 @@ pub trait VfsiExt: Vfsi {
     /// directory paths, including ancestors. Backends unable to guarantee that
     /// return Unsupported instead of checking and then following the path.
     /// Ordinary shallow listing retains the backend's path resolution; use
-    /// `follow_symlinks(false)` to require no-follow directory opens explicitly.
+    /// `allow_symlink_components(false)` to require no-follow directory opens explicitly.
     ///
     /// The root is depth zero and its children have depth one. Directory depth
     /// limits control descent; shallow mode ignores them. Lifecycle mode charges
@@ -806,7 +806,7 @@ pub trait VfsiExt: Vfsi {
                 budget.remaining_options(
                     crate::api::ListDirOptions::new()
                         .with_fields(options.fields())
-                        .with_follow_symlinks(options.follow_symlinks()),
+                        .with_allow_symlink_components(options.allow_symlink_components()),
                 ),
             )?;
             for entry in &entries {
@@ -877,7 +877,7 @@ pub trait VfsiExt: Vfsi {
 
     /// Change ownership of one path or opened object through [`Vfsi::vsetattrs`].
     /// `None` leaves the corresponding owner/group unchanged. Use the vector
-    /// with [`SetAttrsOp::with_follow_symlinks(false)`](SetAttrsOp::with_follow_symlinks)
+    /// with [`SetAttrsOp::with_follow_final_symlink(false)`](SetAttrsOp::with_follow_final_symlink)
     /// to change a symlink itself.
     fn chown<T: crate::api::AsTarget<Self::File>>(
         &self,

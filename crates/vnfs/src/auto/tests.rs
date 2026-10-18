@@ -409,7 +409,7 @@ fn local_paths_stay_mounted_and_open_file_roundtrips() {
         .mounted
         .vgetattrs(
             &[Path::new("/one"), Path::new("/link")],
-            crate::AttrsOptions::new().with_follow_symlinks(false),
+            crate::AttrsOptions::new().with_follow_final_symlink(false),
         )
         .unwrap();
     assert_eq!(metadata[0].file_type(), crate::FileType::Regular);
@@ -418,7 +418,7 @@ fn local_paths_stay_mounted_and_open_file_roundtrips() {
         .mounted
         .vgetattrs(
             &[Path::new("/one"), Path::new("/missing")],
-            crate::AttrsOptions::new().with_follow_symlinks(false),
+            crate::AttrsOptions::new().with_follow_final_symlink(false),
         )
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
