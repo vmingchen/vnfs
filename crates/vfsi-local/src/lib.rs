@@ -2178,12 +2178,12 @@ impl VectorBackend for LocalBackend {
     fn vrename_with_options_impl(
         &mut self,
         pairs: &[(FileOperand, FileOperand)],
-        options: vfsi_core::api::RenameOptions,
+        options: vfsi_core::api::RenameMode,
     ) -> VfRes {
         if pairs.is_empty() {
             return Ok(());
         }
-        if options == vfsi_core::api::RenameOptions::Replace {
+        if options == vfsi_core::api::RenameMode::Replace {
             return self.vrename_impl(pairs);
         }
         #[cfg(target_os = "linux")]
@@ -2201,15 +2201,15 @@ impl VectorBackend for LocalBackend {
                     .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
                 let destination_name = cstring_from_bytes(path_bytes(&destination))
                     .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
-                if options == vfsi_core::api::RenameOptions::Exchange
+                if options == vfsi_core::api::RenameMode::Exchange
                     && source_path == destination_path
                 {
                     continue;
                 }
                 let flags = match options {
-                    vfsi_core::api::RenameOptions::NoReplace => libc::RENAME_NOREPLACE,
-                    vfsi_core::api::RenameOptions::Exchange => libc::RENAME_EXCHANGE,
-                    vfsi_core::api::RenameOptions::Replace => unreachable!(),
+                    vfsi_core::api::RenameMode::NoReplace => libc::RENAME_NOREPLACE,
+                    vfsi_core::api::RenameMode::Exchange => libc::RENAME_EXCHANGE,
+                    vfsi_core::api::RenameMode::Replace => unreachable!(),
                 };
                 // SAFETY: both NUL-terminated path buffers and their directory anchors
                 // stay live; flags are supported renameat2 constants.
@@ -2231,7 +2231,7 @@ impl VectorBackend for LocalBackend {
                     let destination_is_directory = std::fs::symlink_metadata(&destination)
                         .map(|metadata| metadata.is_dir())
                         .unwrap_or(false);
-                    let errno = if options == vfsi_core::api::RenameOptions::NoReplace {
+                    let errno = if options == vfsi_core::api::RenameMode::NoReplace {
                         noreplace_error_code(
                             &error,
                             source_is_directory,

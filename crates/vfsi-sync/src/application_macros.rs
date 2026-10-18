@@ -42,7 +42,7 @@ macro_rules! __vfsi_client_methods {
         fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
             &self,
             pairs: &[(P, Q)],
-            options: vfsi_core::api::RenameOptions,
+            options: vfsi_core::api::RenameMode,
         ) -> Result<()> {
             <$client>::$rename($receiver(self), pairs, options)
         }

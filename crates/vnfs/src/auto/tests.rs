@@ -128,7 +128,7 @@ fn child_seeds_recheck_routing_and_keep_owner_validation() {
             )
             .err()
             .unwrap()
-            .err_no(),
+            .raw_code(),
         libc::EINVAL as u32
     );
 }
@@ -181,7 +181,7 @@ fn routed_pages_enforce_public_budgets_and_pin_cursor_ownership() {
             )
             .err()
             .unwrap()
-            .err_no(),
+            .raw_code(),
         libc::EINVAL as u32
     );
     let cursor = client
@@ -209,7 +209,7 @@ fn routed_pages_enforce_public_budgets_and_pin_cursor_ownership() {
             )
             .err()
             .unwrap()
-            .err_no(),
+            .raw_code(),
         libc::EINVAL as u32
     );
     let cursor = client
@@ -432,7 +432,7 @@ fn local_paths_stay_mounted_and_open_file_roundtrips() {
             crate::ReadOptions::default(),
         )
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
     assert_eq!(
         tiny.vread(
             [crate::ReadOp::range(&tiny_file, 0, 3)],
@@ -454,7 +454,7 @@ fn local_paths_stay_mounted_and_open_file_roundtrips() {
             crate::ReadOptions::default(),
         )
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
     client.close_files(files).unwrap();
     fs::remove_dir_all(root).unwrap();
 }
@@ -498,7 +498,7 @@ fn write_allv_preflights_closed_empty_and_overflowing_requests_locally() {
         assert_eq!(first, b"original");
         assert_eq!(error.index(), Some(1));
         assert_eq!(
-            error.err_no(),
+            error.raw_code(),
             if closed { libc::EBADF } else { libc::EOVERFLOW } as u32
         );
         assert_eq!(error.operation(), Some("vwrite_native"));
@@ -833,7 +833,7 @@ fn live_write_allv_preflights_invalid_later_requests_across_routes() {
         assert_eq!(second, b"original");
         assert_eq!(error.index(), Some(1));
         assert_eq!(
-            error.err_no(),
+            error.raw_code(),
             if invalid == 0 {
                 libc::EOVERFLOW
             } else {
@@ -1073,14 +1073,14 @@ fn live_mount_alias_clients_share_identity_and_cross_routes_never_use_kernel_cop
         client
             .vhardlink(&[(&source, &destination)])
             .unwrap_err()
-            .err_no(),
+            .raw_code(),
         libc::EXDEV as u32
     );
     assert_eq!(
         client
             .vrename(&[(&source, &destination)], Default::default())
             .unwrap_err()
-            .err_no(),
+            .raw_code(),
         libc::EXDEV as u32
     );
     client.remove_file(&source).unwrap();

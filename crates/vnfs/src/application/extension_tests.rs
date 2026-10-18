@@ -864,13 +864,13 @@ fn blanket_scalar_helpers_and_new_vectors_preserve_limits_stop_and_indices() {
     scalar(&fs);
     fs.vrename(
         &[("/one/renamed", "/one/a"), ("/two/b", "/two/c")],
-        crate::RenameOptions::Replace,
+        crate::RenameMode::Replace,
     )
     .unwrap();
     let error = fs
         .vrename(
             &[("/one/a", "/one/moved"), ("/absent", "/two/moved")],
-            crate::RenameOptions::Replace,
+            crate::RenameMode::Replace,
         )
         .unwrap_err();
     assert_eq!(error.index(), Some(1));

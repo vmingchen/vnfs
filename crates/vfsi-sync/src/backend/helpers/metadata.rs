@@ -45,7 +45,7 @@ pub fn exists_impl_default<F: VectorBackend + ?Sized>(
 ) -> VfResult<bool> {
     match backend.lstat_impl(path) {
         Ok(_) => Ok(true),
-        Err(e) if e.err_no() == ERR_NOENT => Ok(false),
+        Err(e) if e.raw_code() == ERR_NOENT => Ok(false),
         Err(e) => Err(e),
     }
 }

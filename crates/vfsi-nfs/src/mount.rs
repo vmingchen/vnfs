@@ -486,7 +486,7 @@ mod tests {
     fn relative_mount_paths_are_rejected_before_resolution() {
         for path in ["", ".", "data", "../data"] {
             assert_eq!(
-                NfsMount::discover(path).unwrap_err().err_no(),
+                NfsMount::discover(path).unwrap_err().raw_code(),
                 libc::EINVAL as u32,
                 "{path:?}"
             );
@@ -511,7 +511,7 @@ mod tests {
         };
         assert!(mount.verify_file_id(123).is_ok());
         assert_eq!(
-            mount.verify_file_id(124).unwrap_err().err_no(),
+            mount.verify_file_id(124).unwrap_err().raw_code(),
             libc::ESTALE as u32
         );
         let mut matching = crate::NfsConnectOptions::default();
@@ -524,7 +524,7 @@ mod tests {
             mount
                 .validate_options(mount.host(), &matching)
                 .unwrap_err()
-                .err_no(),
+                .raw_code(),
             libc::ESTALE as u32
         );
         let mut conflicts = vec![("different-server", matching.clone())];
@@ -545,7 +545,7 @@ mod tests {
         }
         for (host, options) in conflicts {
             let error = mount.validate_options(host, &options).unwrap_err();
-            assert_eq!(error.err_no(), libc::EINVAL as u32);
+            assert_eq!(error.raw_code(), libc::EINVAL as u32);
             assert_eq!(
                 error.operation(),
                 Some("conflicting mount connection options")

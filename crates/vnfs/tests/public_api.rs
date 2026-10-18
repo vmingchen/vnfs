@@ -369,7 +369,7 @@ fn tempfile_root() -> std::path::PathBuf {
 #[cfg(all(feature = "auto", target_os = "linux"))]
 #[test]
 fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types() {
-    use vnfs::files::{OpenFd, Vfsi, VfsiExt};
+    use vnfs::files::{FileHandle, Vfsi, VfsiExt};
     fn workflow<C: Vfsi>(client: &C, prefix: &str) -> vnfs::Result<()> {
         client.create_dir_all(prefix)?;
         let paths = [format!("{prefix}/a"), format!("{prefix}/b")];
@@ -716,7 +716,7 @@ fn filesystem_stats_local_and_routed_handles() {
 #[test]
 fn explicit_io_adapter_bounds_collecting_reads_and_preserves_retained_identity() {
     use std::io::{Read, Seek, SeekFrom, Write};
-    use vnfs::files::OpenFd;
+    use vnfs::files::FileHandle;
     fn check<C: Vfsi>(fs: &C) {
         fs.write("/original", b"abcdef").unwrap();
         fs.write("/exact", b"abc").unwrap();
@@ -916,7 +916,7 @@ fn invalid_open_batch_cannot_create_or_truncate_earlier_files() {
                 .err()
                 .unwrap();
             assert_eq!(error.index(), Some(2));
-            assert_eq!(error.err_no(), libc::EINVAL as u32);
+            assert_eq!(error.raw_code(), libc::EINVAL as u32);
             assert!(!root.join("new").exists());
             assert!(!root.join("invalid").exists());
             assert_eq!(std::fs::read(root.join("existing")).unwrap(), b"preserved");
@@ -936,7 +936,7 @@ fn invalid_open_batch_cannot_create_or_truncate_earlier_files() {
 #[test]
 fn object_identity_and_open_instances_are_distinct_concepts() {
     use vnfs::directory::{Attributes, AttrsOptions};
-    use vnfs::files::{OpenFd, ReadOp, ReadOptions, Target};
+    use vnfs::files::{FileHandle, ReadOp, ReadOptions, Target};
 
     fn check<C: Vfsi + VfsiExt>(fs: &C) {
         fs.write("/object", b"payload").unwrap();
@@ -1000,7 +1000,7 @@ fn object_identity_and_open_instances_are_distinct_concepts() {
 fn canonical_open_descriptors_and_operands_preserve_ownership() {
     use vfsi_core::{AttrMask, FileOperand, Target};
     use vnfs::directory::AttrsOptions;
-    use vnfs::files::OpenFd;
+    use vnfs::files::FileHandle;
 
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("file"), b"retained").unwrap();
@@ -1008,10 +1008,10 @@ fn canonical_open_descriptors_and_operands_preserve_ownership() {
     let mut file: vfsi_sync::OpenFile<_> = fs.open("/file").unwrap();
 
     // Canonical import paths expose the same borrowed descriptor contract.
-    let canonical: &dyn vnfs::files::OpenFd = &file;
-    let canonical: &dyn vfsi_core::OpenFd = canonical;
-    let canonical: &dyn vfsi_core::api::OpenFd = canonical;
-    let canonical: &dyn vfsi_core::api::prelude::OpenFd = canonical;
+    let canonical: &dyn vnfs::files::FileHandle = &file;
+    let canonical: &dyn vfsi_core::FileHandle = canonical;
+    let canonical: &dyn vfsi_core::api::FileHandle = canonical;
+    let canonical: &dyn vfsi_core::api::prelude::FileHandle = canonical;
     assert_eq!(canonical.path(), std::path::Path::new("/file"));
 
     let attrs = fs
@@ -1029,10 +1029,10 @@ fn canonical_open_descriptors_and_operands_preserve_ownership() {
     assert_eq!(operand.fd(), Some(7));
 
     // Borrowing through the trait does not acquire another cleanup owner.
-    OpenFd::try_close(&mut file).unwrap();
-    assert!(OpenFd::is_closed(&file));
+    FileHandle::try_close(&mut file).unwrap();
+    assert!(FileHandle::is_closed(&file));
     let error = fs.attrs(Target::file(&file)).unwrap_err();
-    assert_eq!(error.err_no(), libc::EBADF as u32);
+    assert_eq!(error.raw_code(), libc::EBADF as u32);
 }
 
 #[cfg(all(feature = "posix", unix))]

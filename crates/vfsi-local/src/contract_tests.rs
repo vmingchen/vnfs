@@ -30,7 +30,7 @@ mod tests {
                 (Some(expected), Ok(actual)) => prop_assert_eq!(actual, expected),
                 (None, Err(error)) => {
                     prop_assert_eq!(error.index(), Some(index));
-                    prop_assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
+                    prop_assert_eq!(error.raw_code(), libc::EOVERFLOW as u32);
                 }
                 (expected, actual) => prop_assert!(false, "expected {expected:?}, got {actual:?}"),
             }
@@ -192,7 +192,7 @@ mod tests {
         let error = LocalBackend::new(not_a_directory.clone(), ())
             .err()
             .unwrap();
-        assert_eq!(error.err_no(), libc::ENOTDIR as u32);
+        assert_eq!(error.raw_code(), libc::ENOTDIR as u32);
         assert_eq!(error.path(), Some(not_a_directory.as_path()));
     }
 
@@ -271,7 +271,7 @@ mod tests {
         // (pread beyond i64::MAX) or return an empty read, but never data
         // from the current position.
         match fs.vread_impl(&[ReadOp::new(fd.clone(), VfOffset::At(u64::MAX - 1), 8)]) {
-            Err(e) => assert!([ERR_INVAL, libc::EOVERFLOW as u32].contains(&e.err_no())),
+            Err(e) => assert!([ERR_INVAL, libc::EOVERFLOW as u32].contains(&e.raw_code())),
             Ok(r) => {
                 assert!(r[0].data.is_empty());
                 assert!(r[0].eof);
@@ -450,7 +450,7 @@ mod tests {
         assert_eq!(
             fs.seek_raw_impl(&fd, -100, SeekFrom::Set)
                 .unwrap_err()
-                .err_no(),
+                .raw_code(),
             ERR_INVAL
         );
         fs.close_impl(&fd).unwrap();
@@ -470,14 +470,14 @@ mod tests {
                 b"xx".to_vec(),
             )]))
             .unwrap_err();
-        assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
+        assert_eq!(error.raw_code(), libc::EOVERFLOW as u32);
         assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur).unwrap(), 1);
         assert_eq!(std::fs::metadata(root.0.join("f")).unwrap().len(), 1);
         assert_eq!(std::fs::read(root.0.join("f")).unwrap(), b"x");
 
         fs.seek_raw_impl(&fd, i64::MAX, SeekFrom::Set).unwrap();
         let error = fs.seek_raw_impl(&fd, 1, SeekFrom::Cur).unwrap_err();
-        assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
+        assert_eq!(error.raw_code(), libc::EOVERFLOW as u32);
         assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur).unwrap(), i64::MAX);
         assert_eq!(std::fs::metadata(root.0.join("f")).unwrap().len(), 1);
         assert_eq!(std::fs::read(root.0.join("f")).unwrap(), b"x");
@@ -489,7 +489,7 @@ mod tests {
         let (_root, mut fs) = fs("adb-overflow");
         let pattern = Adb::blocknum_only("/overflow", u64::MAX, 2, 2, 0, 0);
         let error = fs.vwrite_adb_impl(&[pattern]).unwrap_err();
-        assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
+        assert_eq!(error.raw_code(), libc::EOVERFLOW as u32);
         assert!(!fs.exists_impl(Path::new("/overflow")).unwrap());
     }
 
@@ -509,7 +509,7 @@ mod tests {
         // The file was removed from sub/, not from the root.
         assert!(!fs.exists_impl(Path::new("a")).unwrap());
         assert_eq!(
-            fs.lstat_impl(Path::new("/a")).unwrap_err().err_no(),
+            fs.lstat_impl(Path::new("/a")).unwrap_err().raw_code(),
             ERR_NOENT
         );
     }
@@ -554,7 +554,7 @@ mod tests {
     fn no_replace_empty_vector_is_a_noop() {
         let (_root, mut fs) = fs("rename-noreplace-empty");
         assert!(
-            fs.vrename_with_options_impl(&[], vfsi_core::api::RenameOptions::NoReplace)
+            fs.vrename_with_options_impl(&[], vfsi_core::api::RenameMode::NoReplace)
                 .is_ok()
         );
     }
@@ -606,10 +606,10 @@ mod tests {
                     FileOperand::from_path("/source"),
                     FileOperand::from_path("/source/child/moved"),
                 )],
-                vfsi_core::api::RenameOptions::NoReplace,
+                vfsi_core::api::RenameMode::NoReplace,
             )
             .unwrap_err();
-        assert_eq!(error.err_no(), libc::EINVAL as u32);
+        assert_eq!(error.raw_code(), libc::EINVAL as u32);
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -617,7 +617,7 @@ mod tests {
     fn no_replace_empty_vector_is_a_noop() {
         let (_root, mut fs) = fs("rename-noreplace-empty");
         assert!(
-            fs.vrename_with_options_impl(&[], vfsi_core::api::RenameOptions::NoReplace)
+            fs.vrename_with_options_impl(&[], vfsi_core::api::RenameMode::NoReplace)
                 .is_ok()
         );
     }
@@ -627,7 +627,7 @@ mod tests {
         let (_root, mut fs) = fs("vf-path");
         write(&mut fs, "/f", b"x");
         let fd = fs.open_raw_impl(Path::new("/f"), 0, 0).unwrap();
-        assert_eq!(fs.vf_path(&fd).unwrap_err().err_no(), ERR_INVAL);
+        assert_eq!(fs.vf_path(&fd).unwrap_err().raw_code(), ERR_INVAL);
         fs.close_impl(&fd).unwrap();
     }
 
@@ -661,7 +661,7 @@ mod tests {
         assert_eq!(
             fs.vread_impl(&[ReadOp::new(FileOperand::cwd(), VfOffset::At(0), 1)])
                 .unwrap_err()
-                .err_no(),
+                .raw_code(),
             ERR_ISDIR
         );
     }
@@ -748,7 +748,7 @@ mod tests {
         assert_eq!(
             fs.vread_impl(&[ReadOp::at(FileOperand::from_path("/evil"), 0, 8)])
                 .unwrap_err()
-                .err_no(),
+                .raw_code(),
             ERR_NOENT,
             "resolves inside the root where nothing exists yet"
         );
@@ -793,7 +793,7 @@ mod tests {
             )
             .with_creation()]))
                 .unwrap_err()
-                .err_no(),
+                .raw_code(),
             ERR_NOENT,
             "the chroot-relative target's parent does not exist"
         );
@@ -843,7 +843,7 @@ mod tests {
                 .unwrap_err(),
             fs.lstat_impl(Path::new("/pivot/victim")).unwrap_err(),
         ] {
-            assert!([ERR_ACCES, ERR_NOENT].contains(&error.err_no()));
+            assert!([ERR_ACCES, ERR_NOENT].contains(&error.raw_code()));
         }
         assert_eq!(std::fs::read(outside.0.join("victim")).unwrap(), b"outside");
         assert!(!root.0.join("renamed").exists());
@@ -946,7 +946,7 @@ mod tests {
         // absolute target outside the configured client root.
         std::os::unix::fs::symlink(&victim, &missing).unwrap();
         let error = LocalBackend::chown_path(&update, &anchored, true, 3).unwrap_err();
-        assert_eq!(error.err_no(), ERR_NOENT);
+        assert_eq!(error.raw_code(), ERR_NOENT);
         assert_eq!(error.index(), Some(3));
         let after = std::fs::metadata(&victim).unwrap();
         assert_eq!((after.uid(), after.gid()), (before.uid(), before.gid()));
@@ -1156,7 +1156,7 @@ mod tests {
                     CopyOptions::new(),
                 )
                 .unwrap_err();
-            assert_eq!(error.err_no(), ERR_INVAL);
+            assert_eq!(error.raw_code(), ERR_INVAL);
             assert_eq!(
                 std::fs::read(root.0.join("source")).unwrap(),
                 b"bounded-source"
@@ -1208,7 +1208,7 @@ mod tests {
             )])
             .unwrap_err();
         assert_eq!(error.index(), Some(0));
-        assert_eq!(error.err_no(), ERR_INVAL);
+        assert_eq!(error.raw_code(), ERR_INVAL);
         assert_eq!(std::fs::read(root.0.join("source")).unwrap(), original);
     }
 
@@ -1226,7 +1226,7 @@ mod tests {
             )
             .unwrap_err();
 
-        assert_eq!(error.err_no(), libc::EEXIST as u32);
+        assert_eq!(error.raw_code(), libc::EEXIST as u32);
         assert!(std::fs::symlink_metadata(root.0.join("dangling")).is_ok());
         assert!(!root.0.join("missing-target").exists());
     }
@@ -1270,7 +1270,7 @@ mod tests {
             let error = fs
                 .vgetattrs_impl(std::slice::from_mut(&mut attrs))
                 .unwrap_err();
-            assert_eq!(error.err_no(), libc::EACCES as u32);
+            assert_eq!(error.raw_code(), libc::EACCES as u32);
             assert_eq!(error.index(), Some(0));
             assert!(!attrs.returned.contains(AttrMask::NAMED_ATTR));
         }
@@ -1396,7 +1396,7 @@ mod tests {
             assert_eq!(
                 fs.vsetattrs_raw_impl(std::slice::from_ref(&a))
                     .unwrap_err()
-                    .err_no(),
+                    .raw_code(),
                 VF_ERR_UNSUPPORTED
             );
             let metadata = std::fs::metadata(&path).unwrap();
@@ -1468,7 +1468,7 @@ mod tests {
         assert_eq!(
             fs.vsetattrs_raw_nofollow_impl(std::slice::from_ref(&a))
                 .unwrap_err()
-                .err_no(),
+                .raw_code(),
             VF_ERR_UNSUPPORTED
         );
         let metadata = std::fs::metadata(&target).unwrap();
@@ -1534,7 +1534,7 @@ mod tests {
             &[0o644],
         )
         .unwrap_err();
-        assert_eq!((e.index(), e.err_no()), (Some(0), ERR_INVAL));
+        assert_eq!((e.index(), e.raw_code()), (Some(0), ERR_INVAL));
     }
 
     #[test]
@@ -1642,7 +1642,7 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.index(), Some(1));
-        assert_eq!(error.err_no(), libc::EEXIST as u32);
+        assert_eq!(error.raw_code(), libc::EEXIST as u32);
         // Following a dangling link fails, while preserving it succeeds above.
         let error = fs
             .vcopy_impl(
@@ -1650,7 +1650,7 @@ mod tests {
                 CopyOptions::new(),
             )
             .unwrap_err();
-        assert_eq!(error.err_no(), libc::ENOENT as u32);
+        assert_eq!(error.raw_code(), libc::ENOENT as u32);
         fs.vcopy_impl(&[], options).unwrap();
     }
 

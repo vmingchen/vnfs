@@ -45,7 +45,7 @@ fn measured<T>(run: impl FnOnce() -> T) -> (T, usize) {
     (output, count)
 }
 struct File;
-impl OpenFd for File {
+impl FileHandle for File {
     fn path(&self) -> &Path {
         Path::new("/file")
     }

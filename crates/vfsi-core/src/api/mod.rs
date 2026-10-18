@@ -23,7 +23,7 @@ pub use crate::{
 };
 /// Per-pair rename semantics requested by [`Vfsi::vrename`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum RenameOptions {
+pub enum RenameMode {
     /// Replace a destination according to ordinary filesystem rename semantics.
     #[default]
     Replace,
@@ -41,7 +41,7 @@ pub use io::SyncMode;
 mod builders;
 pub use builders::OpenOptions;
 mod handles;
-pub use handles::{DirHandle, OpenFd};
+pub use handles::{DirHandle, FileHandle};
 mod vfsi;
 pub use vfsi::Vfsi;
 mod extensions;
@@ -92,9 +92,9 @@ pub mod internal {
 /// Common imports for backend-independent application code.
 pub mod prelude {
     pub use super::{
-        AsTarget, Attributes, AttrsOptions, ControlFlow, CopyOptions, DirHandle, ListDirOptions,
-        MkDirOp, OpenFd, OpenFlags, OpenOp, ReadOp, ReadOptions, ReadResult, RemoveMode,
-        RemoveOptions, RenameOptions, ResourceLimits, SetAttrsOp, StreamOptions, SyncMode, Target,
+        AsTarget, Attributes, AttrsOptions, ControlFlow, CopyOptions, DirHandle, FileHandle,
+        ListDirOptions, MkDirOp, OpenFlags, OpenOp, ReadOp, ReadOptions, ReadResult, RemoveMode,
+        RemoveOptions, RenameMode, ResourceLimits, SetAttrsOp, StreamOptions, SyncMode, Target,
         Vfsi, VfsiExt, WriteOp, WriteOptions,
     };
 }

@@ -62,8 +62,8 @@ pub mod files {
         StreamOptions, SyncMode, WriteOp, WriteOptions, WriteResult,
     };
     pub use vfsi_core::{
-        AsTarget, Capabilities, CopyOptions, FilesystemStats, OpenFd, OpenFlags, OpenOp, Target,
-        Vfsi, VfsiExt,
+        AsTarget, Capabilities, CopyOptions, FileHandle, FilesystemStats, OpenFlags, OpenOp,
+        Target, Vfsi, VfsiExt,
     };
 }
 
@@ -77,7 +77,7 @@ pub mod directory {
     pub use std::ops::ControlFlow;
     pub use vfsi_core::api::{
         AttrsOptions, DepthLimit, DirHandle, DirectoryListing, ListDirOptions, MkDirOp, RemoveMode,
-        RemoveOptions, RenameOptions, SetAttrsOp, TraversalCompletion, WalkControl, WalkEvent,
+        RemoveOptions, RenameMode, SetAttrsOp, TraversalCompletion, WalkControl, WalkEvent,
         WalkEventKind,
     };
     pub use vfsi_core::{
@@ -108,7 +108,7 @@ mod application;
 // Other public types have one canonical path under files, directory, error,
 // or a backend-specific namespace. Crate-private aliases keep implementation
 // modules concise without expanding the external API.
-pub(crate) use vfsi_core::{DirHandle, OpenFd, Target};
+pub(crate) use vfsi_core::{DirHandle, FileHandle, Target};
 pub use vfsi_core::{Vfsi, VfsiExt};
 #[cfg(any(
     feature = "nfs",
@@ -121,8 +121,8 @@ pub(crate) use read::ReadRequest;
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use vfsi_core::api::internal::OwnedReadResult;
 pub(crate) use vfsi_core::api::{
-    AttrsOptions, ListDirOptions, ReadOp, ReadOptions, ReadResult, RenameOptions, SyncMode,
-    WriteOp, WriteOptions,
+    AttrsOptions, ListDirOptions, ReadOp, ReadOptions, ReadResult, RenameMode, SyncMode, WriteOp,
+    WriteOptions,
 };
 
 // Keep negative API-contract doctests without presenting unsupported calls

@@ -1,7 +1,7 @@
 # Rust workflow helpers
 
 `vnfs::helpers` contains high-level workflows built only on the public `Vfsi`
-and `OpenFd` contracts. It is part of `vnfs`, not a separate dependency.
+and `FileHandle` contracts. It is part of `vnfs`, not a separate dependency.
 
 ## Application bridges
 
@@ -174,13 +174,11 @@ first, preserving exclusive conflict checks. Failure, cancellation, or skipped
 entries retains the source (which can leave two copies). No ambiguous write or
 rename is replayed by these helpers.
 
-`Vfsi::vrename_with_options` also offers `RenameOptions::NoReplace` for callers
-that need an atomic absent-destination check. The Linux `Posix` backend uses
-`renameat2`; direct NFS and SMB backends currently return `Unsupported` because
-their exposed rename operations cannot promise that guarantee. `move_items`
-falls back to its copy/delete path only after an explicit Unsupported, EEXIST, or
-EXDEV response and reconciles every source/destination pair first. A lost
-transport reply is never retried. Exchange rename semantics are not exposed yet.
+`Vfsi::vrename` accepts `RenameMode::NoReplace` for an atomic
+absent-destination check and `RenameMode::Exchange` to exchange two existing
+names atomically. The Linux local backends use `renameat2`; direct NFS and SMB
+backends return `Unsupported` for these modes because their exposed rename
+operations cannot promise those guarantees. A lost transport reply is never retried.
 
 These are nontransactional workflows over **trusted, stable namespaces**. They
 do not sandbox ancestor symlinks or concurrent namespace changes, snapshot files,

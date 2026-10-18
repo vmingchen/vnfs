@@ -40,7 +40,7 @@ pub fn check<C: Vfsi>(fs: &C, other: &C, namespace: &impl Vfsi, verify: &impl Vf
         .vremove_dir_contents(&[&dirs[0], &dirs[1]], RemoveOptions::default())
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.err_no(), libc::EBADF as u32);
+    assert_eq!(error.raw_code(), libc::EBADF as u32);
     assert_eq!(verify.read("/moved/file").unwrap(), b"original");
     let second = fs.vopen_dirs(&["/b"]).unwrap().remove(0);
     fs.vremove_dir_contents(

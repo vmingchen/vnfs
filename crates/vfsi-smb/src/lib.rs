@@ -2113,7 +2113,7 @@ impl VectorBackend for SmbVecFs {
         let path = self.local_path_string(path)?;
         match self.client_stat(&path) {
             Ok(_) => Ok(true),
-            Err(error) if error.err_no() == ERR_NOENT => Ok(false),
+            Err(error) if error.raw_code() == ERR_NOENT => Ok(false),
             Err(error) => Err(error),
         }
     }
@@ -3336,13 +3336,7 @@ fn smb_error(error: SmbError, index: usize) -> VfError {
         Some(err_no) => VfError::failure(index, err_no),
         None => match status {
             Some(status) => VfError::smb(index, status.0),
-            None => VfError::Transport {
-                index: Some(index),
-                kind: vfsi_core::TransportKind::Other,
-                message: error.to_string(),
-                operation: None,
-                path: None,
-            },
+            None => VfError::transport(index, error.to_string()),
         },
     }
 }
@@ -3556,7 +3550,7 @@ mod tests {
                 (Some(expected), Ok(actual)) => prop_assert_eq!(actual, expected),
                 (None, Err(error)) => {
                     prop_assert_eq!(error.index(), Some(index));
-                    prop_assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
+                    prop_assert_eq!(error.raw_code(), libc::EOVERFLOW as u32);
                 }
                 (expected, actual) => prop_assert!(false, "expected {expected:?}, got {actual:?}"),
             }
@@ -3572,7 +3566,7 @@ mod tests {
         let modes = [0o666, 0o600];
         let error = validate_open_modes(&flags, &modes).unwrap_err();
         assert_eq!(error.index(), Some(1));
-        assert_eq!(error.err_no(), vfsi_core::VF_ERR_UNSUPPORTED);
+        assert_eq!(error.raw_code(), vfsi_core::VF_ERR_UNSUPPORTED);
         assert!(validate_create_mode(libc::O_WRONLY, 0o600, 0).is_ok());
 
         // Conventional defaults intentionally delegate permissions to the
@@ -3601,7 +3595,7 @@ mod tests {
         ];
         let error = validate_mkdir_modes(&dirs).unwrap_err();
         assert_eq!(error.index(), Some(1));
-        assert_eq!(error.err_no(), vfsi_core::VF_ERR_UNSUPPORTED);
+        assert_eq!(error.raw_code(), vfsi_core::VF_ERR_UNSUPPORTED);
     }
 
     #[test]
@@ -3689,7 +3683,7 @@ mod tests {
                 SmbVecFs::connect_with_options("unused.invalid", "share", "", "", "", options)
                     .err()
                     .expect("zero timeout must fail before network I/O");
-            assert_eq!(error.err_no(), ERR_INVAL);
+            assert_eq!(error.raw_code(), ERR_INVAL);
         }
     }
 
@@ -3732,7 +3726,7 @@ mod tests {
     fn checked_offsets_preserve_request_index_on_overflow() {
         let error = checked_offset(u64::MAX, 1, 7).unwrap_err();
         assert_eq!(error.index(), Some(7));
-        assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
+        assert_eq!(error.raw_code(), libc::EOVERFLOW as u32);
     }
 
     #[test]
@@ -3805,7 +3799,7 @@ mod tests {
     fn smb_transport_failures_preserve_the_message() {
         let error = smb_error(SmbError::Disconnected, 3);
         assert_eq!(error.index(), Some(3));
-        assert_eq!(error.err_no(), crate::vecfs::VF_ERR_RPC);
+        assert_eq!(error.raw_code(), crate::vecfs::VF_ERR_RPC);
         assert!(error.to_string().contains("Disconnected"));
     }
 

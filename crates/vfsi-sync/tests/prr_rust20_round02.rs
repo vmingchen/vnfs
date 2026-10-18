@@ -74,7 +74,7 @@ fn fixture() -> (FsClient<ReadBackend>, Arc<AtomicUsize>) {
     (FsClient::new(backend), dispatches)
 }
 fn assert_closed(error: VfError, index: usize, operation: &str) {
-    assert_eq!(error.err_no(), vfsi_sync::ERR_EBADF);
+    assert_eq!(error.raw_code(), vfsi_sync::ERR_EBADF);
     assert_eq!(error.index(), Some(index));
     assert_eq!(error.path(), Some(Path::new("/closed")));
     assert_eq!(error.operation(), Some(operation));

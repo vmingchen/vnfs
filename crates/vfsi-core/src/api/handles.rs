@@ -1,7 +1,7 @@
 use super::Result;
 use std::path::Path;
 
-/// Owned File Descriptor interface to one open file instance.
+/// Owned handle to one open file instance.
 ///
 /// A descriptor is the handle to the instance; this contract does not require
 /// exposing a numeric OS descriptor. [`crate::Fd`] is a backend-assigned numeric
@@ -15,7 +15,7 @@ use std::path::Path;
 /// Clients validate ownership before I/O and report positional progress.
 /// Standard-I/O adapters manage their own independent cursors. `ReadOp` borrows handles directly; constructing it does no I/O.
 /// A backend must retain ownership of live descriptors through cleanup failures.
-pub trait OpenFd {
+pub trait FileHandle {
     /// Diagnostic name captured at open; not current path or object identity.
     fn path(&self) -> &Path;
     /// Close without surrendering cleanup ownership on failure. After an

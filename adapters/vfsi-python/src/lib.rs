@@ -200,15 +200,13 @@ fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
     let what = path
         .map(|p| format!(": '{}'", p.display()))
         .unwrap_or_default();
-    let error = match e {
-        error if error.kind() == std::io::ErrorKind::Unsupported => {
-            let context = if error.path() == path { "" } else { &what };
-            PyErr::new::<PyNotImplementedError, _>(format!("{error}{context}"))
-        }
-        VfError::Transport { message, .. } => {
-            PyErr::new::<PyConnectionError, _>(format!("{}{}", message, what))
-        }
-        VfError::Op { err_no, .. } | VfError::OpUnattributed { err_no, .. } => match err_no {
+    let error = if e.kind() == std::io::ErrorKind::Unsupported {
+        let context = if e.path() == path { "" } else { &what };
+        PyErr::new::<PyNotImplementedError, _>(format!("{e}{context}"))
+    } else if let Some(message) = e.transport_message() {
+        PyErr::new::<PyConnectionError, _>(format!("{message}{what}"))
+    } else {
+        match e.raw_code() {
             ERR_NOENT => {
                 PyErr::new::<PyFileNotFoundError, _>((2, "No such file or directory", filename))
             }
@@ -218,8 +216,7 @@ fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
             ERR_ISDIR => PyErr::new::<PyIsADirectoryError, _>((21, "Is a directory", filename)),
             ERR_INVAL => PyErr::new::<PyOSError, _>((22, "Invalid argument", filename)),
             other => PyErr::new::<PyOSError, _>((other, "op failed", filename)),
-        },
-        _ => PyErr::new::<PyOSError, _>("unknown vnfs error"),
+        }
     };
     if let Some(index) = index {
         Python::attach(|py| {
@@ -534,7 +531,7 @@ fn attrs_many_impl(
                     return Err(e);
                 }
                 let orig = remaining[bi];
-                errors.insert(orig, e.err_no());
+                errors.insert(orig, e.raw_code());
                 remaining.remove(bi);
             }
         }
@@ -576,7 +573,7 @@ fn read_allv_impl(
                     return Err(e);
                 }
                 let orig = remaining[bi];
-                errors.insert(orig, e.err_no());
+                errors.insert(orig, e.raw_code());
                 remaining.remove(bi);
             }
         }
@@ -697,7 +694,7 @@ fn mount_error(error: VfError, path: &Path) -> PyErr {
     if error.is_transport() {
         to_py_err(error, Some(path))
     } else {
-        PyOSError::new_err((error.err_no(), error.to_string(), path.to_path_buf()))
+        PyOSError::new_err((error.raw_code(), error.to_string(), path.to_path_buf()))
     }
 }
 
@@ -1201,7 +1198,7 @@ impl NfsClient {
                             return Err(to_py_err(error, None));
                         }
                         let original_index = remaining.remove(batch_index);
-                        errors.insert(original_index, error.err_no());
+                        errors.insert(original_index, error.raw_code());
                     }
                 }
             }
@@ -1568,7 +1565,7 @@ impl NfsClient {
                             return Err(to_py_err(e, None));
                         }
                         let orig = remaining[bi];
-                        errors.insert(orig, e.err_no());
+                        errors.insert(orig, e.raw_code());
                         results[orig] = None;
                         remaining.remove(bi);
                     }
@@ -2102,7 +2099,7 @@ impl NfsClient {
                             data[index] = None;
                         }
                         let original_index = write_remaining[batch_index];
-                        errors.insert(original_index, error.err_no());
+                        errors.insert(original_index, error.raw_code());
                         data[original_index] = None;
                         write_remaining.drain(..=batch_index);
                     }
@@ -2215,7 +2212,7 @@ impl NfsClient {
                             return Err(to_py_err(e, None));
                         }
                         let failed = remaining[bi];
-                        errors.insert(failed, e.err_no());
+                        errors.insert(failed, e.raw_code());
                         let mut next = Vec::new();
                         for (batch_index, (&index, &length)) in
                             remaining.iter().zip(&chunks).enumerate()
@@ -2705,7 +2702,7 @@ mod aggregate_listdir_error_tests {
         };
         let error = aggregate_listdirs(&mut backend, &paths, 2, 100).unwrap_err();
         assert_eq!(
-            (error.err_no(), error.index()),
+            (error.raw_code(), error.index()),
             (libc::EFBIG as u32, Some(0))
         );
         assert_eq!(backend.vector_entries, 3);
@@ -2722,7 +2719,7 @@ mod aggregate_listdir_error_tests {
         };
         let error = aggregate_listdirs(&mut backend, &paths, 100, 1).unwrap_err();
         assert_eq!(
-            (error.err_no(), error.index()),
+            (error.raw_code(), error.index()),
             (libc::EFBIG as u32, Some(0))
         );
         assert_eq!(backend.vector_entries, 1);
@@ -2755,7 +2752,7 @@ mod aggregate_listdir_error_tests {
         };
         let error = aggregate_listdirs(&mut backend, &paths, 1, 100).unwrap_err();
         assert_eq!(
-            (error.err_no(), error.index()),
+            (error.raw_code(), error.index()),
             (libc::EFBIG as u32, Some(0))
         );
         assert_eq!(backend.vector_entries, 2);

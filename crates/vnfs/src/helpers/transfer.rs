@@ -1109,7 +1109,7 @@ fn move_run<P: AsRef<Path>>(
                 .iter()
                 .map(|task| (&task.source, &task.destination))
                 .collect();
-            match fs.vrename(&pairs, crate::RenameOptions::NoReplace) {
+            match fs.vrename(&pairs, crate::RenameMode::NoReplace) {
                 Ok(()) => summary.roots_renamed += renames.len() as u64,
                 Err(error) if !error.is_transport() => {
                     // A strict batch may have renamed a prefix. Do not infer that

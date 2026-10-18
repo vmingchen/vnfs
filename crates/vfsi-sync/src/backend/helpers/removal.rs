@@ -195,7 +195,7 @@ pub fn ensure_empty_dir_impl_default<F: VectorBackend + ?Sized>(
 ) -> VfRes {
     match backend.mkdir_raw_impl(dir, 0o777) {
         Ok(()) => Ok(()),
-        Err(error) if error.err_no() == ERR_EXIST => {
+        Err(error) if error.raw_code() == ERR_EXIST => {
             let mut attrs = VfAttrs {
                 file: FileOperand::from_os_path(dir),
                 masks: AttrMask::default(),

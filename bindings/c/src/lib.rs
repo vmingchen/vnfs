@@ -306,35 +306,18 @@ impl vfsi_result {
     }
 
     fn from_error(error: VfError) -> Self {
-        match error {
-            VfError::Op { index, err_no, .. } => Self::base(
-                index,
-                if err_no == VF_ERR_UNSUPPORTED {
-                    VFSI_ERROR_UNSUPPORTED
-                } else {
-                    VFSI_ERROR_FILESYSTEM
-                },
-                err_no,
-                "",
-            ),
-            VfError::OpUnattributed { err_no, .. } => Self::base(
-                C_INDEX_UNKNOWN,
-                if err_no == VF_ERR_UNSUPPORTED {
-                    VFSI_ERROR_UNSUPPORTED
-                } else {
-                    VFSI_ERROR_FILESYSTEM
-                },
-                err_no,
-                "",
-            ),
-            VfError::Transport { index, message, .. } => Self::base(
-                index.unwrap_or(C_INDEX_UNKNOWN),
-                VFSI_ERROR_TRANSPORT,
-                vfsi_sync::VF_ERR_RPC,
-                &message,
-            ),
-            _ => Self::base(0, VFSI_ERROR_TRANSPORT, libc::EIO as u32, "unknown error"),
-        }
+        Self::base(
+            error.index().unwrap_or(C_INDEX_UNKNOWN),
+            if error.is_transport() {
+                VFSI_ERROR_TRANSPORT
+            } else if error.raw_code() == VF_ERR_UNSUPPORTED {
+                VFSI_ERROR_UNSUPPORTED
+            } else {
+                VFSI_ERROR_FILESYSTEM
+            },
+            error.raw_code(),
+            error.transport_message().unwrap_or(""),
+        )
     }
 }
 
@@ -946,10 +929,10 @@ fn collect_bounded_entries(
 }
 
 fn vf_code(e: &VfError) -> c_int {
-    match e {
-        VfError::Op { err_no, .. } | VfError::OpUnattributed { err_no, .. } => *err_no as c_int,
-        VfError::Transport { .. } => libc::EIO,
-        _ => e.err_no() as c_int,
+    if e.is_transport() {
+        libc::EIO
+    } else {
+        e.raw_code() as c_int
     }
 }
 
@@ -1062,7 +1045,7 @@ pub unsafe extern "C" fn vfsi_dummy_open(root: *const c_char, out: *mut *mut vfs
         };
         let fs = match vfsi_posix::backend(root) {
             Ok(fs) => Box::new(fs) as Box<dyn BindingBackend>,
-            Err(error) => return error.err_no() as c_int,
+            Err(error) => return error.raw_code() as c_int,
         };
         // SAFETY: out was checked for null; the caller provides writable storage for this
         // returned handle.
@@ -1098,7 +1081,7 @@ pub unsafe extern "C" fn vfsi_dummy_open_mount(
         };
         let fs = match vfsi_posix::backend(root) {
             Ok(fs) => Box::new(fs) as Box<dyn BindingBackend>,
-            Err(error) => return error.err_no() as c_int,
+            Err(error) => return error.raw_code() as c_int,
         };
         // SAFETY: out was checked for null; the caller provides writable storage for this
         // returned handle.
@@ -4825,7 +4808,7 @@ mod tests {
                 Ok(())
             })
             .unwrap_err();
-            assert_eq!(error.err_no(), libc::EFBIG as u32);
+            assert_eq!(error.raw_code(), libc::EFBIG as u32);
             assert_eq!(
                 visited, 1,
                 "overflow must stop enumeration at the first oversized entry"
@@ -4857,7 +4840,7 @@ mod tests {
                 Ok(())
             })
             .unwrap_err();
-            assert_eq!(error.err_no(), libc::EFBIG as u32);
+            assert_eq!(error.raw_code(), libc::EFBIG as u32);
             assert_eq!(visited, if count == 1 && bytes == 4 { 2 } else { 1 });
         }
         let error = collect_bounded_entries(10, 100, |cb| {
@@ -4866,7 +4849,7 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(
-            error.err_no(),
+            error.raw_code(),
             libc::EIO as u32,
             "backend errors must not become successful prefixes"
         );

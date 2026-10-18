@@ -21,7 +21,7 @@ fn vector_position_overrides_a_stale_backend_error_index() {
     );
     let error = results.try_collect().unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.err_no(), libc::EACCES as u32);
+    assert_eq!(error.raw_code(), libc::EACCES as u32);
 }
 
 #[test]
@@ -140,7 +140,7 @@ fn concurrent_failures_report_the_lowest_request_position() {
         })
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.err_no(), libc::EACCES as u32);
+    assert_eq!(error.raw_code(), libc::EACCES as u32);
     assert_eq!(closed, [(0, 10), (2, 30), (4, 50)]);
 }
 
@@ -154,7 +154,7 @@ fn cleanup_failure_does_not_mask_primary_error() {
         .try_collect_with_cleanup(2, |_, _| Err(VfError::transport(None, "close failed")))
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.err_no(), libc::ENOENT as u32);
+    assert_eq!(error.raw_code(), libc::ENOENT as u32);
 }
 
 #[test]

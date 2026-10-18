@@ -314,7 +314,7 @@ mod mount_tests {
             let error = supplied
                 .configure_for_mount(path, |_| replacement)
                 .unwrap_err();
-            assert_eq!(error.err_no(), libc::EINVAL as u32);
+            assert_eq!(error.raw_code(), libc::EINVAL as u32);
             assert_eq!(error.path(), Some(path));
             assert!(error.to_string().contains("supplied builder"));
         }
@@ -360,13 +360,13 @@ mod mount_tests {
         };
         let error = crate::nfs::mount::NfsMountSession::from_discovered_with(mount, replacement)
             .unwrap_err();
-        assert_eq!(error.err_no(), libc::EINVAL as u32);
+        assert_eq!(error.raw_code(), libc::EINVAL as u32);
         assert!(error.to_string().contains("supplied builder"));
 
         let error =
             crate::nfs::mount::NfsMountSession::from_mount_with(directory.path(), replacement)
                 .unwrap_err();
-        assert_eq!(error.err_no(), libc::EINVAL as u32);
+        assert_eq!(error.raw_code(), libc::EINVAL as u32);
         assert!(error.to_string().contains("supplied builder"));
     }
 
@@ -439,7 +439,7 @@ mod mount_tests {
             fs.rename("/marker", "/.other-forbidden"),
         ];
         for result in results {
-            assert_eq!(result.unwrap_err().err_no(), libc::EROFS as u32);
+            assert_eq!(result.unwrap_err().raw_code(), libc::EROFS as u32);
         }
         assert_eq!(
             fs.vread(

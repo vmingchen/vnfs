@@ -223,7 +223,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
     Ok(completed)
 }
 
-impl<F: crate::backend::HandleBackend> OpenFd for crate::OpenFile<F> {
+impl<F: crate::backend::HandleBackend> FileHandle for crate::OpenFile<F> {
     crate::__vfsi_file_methods!(crate::OpenFile<F>);
 }
 
@@ -505,10 +505,10 @@ mod traversal_tests {
             );
             match outcome {
                 0 => assert_eq!(result.unwrap(), [crate::TraversalCompletion::Stopped]),
-                1 => assert_eq!(result.unwrap_err().err_no(), libc::EIO as u32),
+                1 => assert_eq!(result.unwrap_err().raw_code(), libc::EIO as u32),
                 _ => {
                     let error = result.unwrap_err();
-                    assert_eq!(error.err_no(), libc::EFBIG as u32);
+                    assert_eq!(error.raw_code(), libc::EFBIG as u32);
                     assert_eq!(error.path(), Some(Path::new("/tree/entry-2")));
                     if outcome == 3 {
                         assert!(live_budget_page);

@@ -68,7 +68,7 @@ pub fn check_many(fs: &impl Vfsi, directory: &str) {
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.err_no(), libc::ENOENT as u32);
+    assert_eq!(error.raw_code(), libc::ENOENT as u32);
     check_mixed_policies(fs, directory);
 }
 
@@ -114,13 +114,13 @@ fn check_mixed_policies(fs: &impl Vfsi, directory: &str) {
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.err_no(), libc::EINVAL as u32);
+    assert_eq!(error.raw_code(), libc::EINVAL as u32);
     assert_eq!(fs.attrs(&first).unwrap().len().unwrap(), 7);
 }
 
 /// Open objects remain targets even when their original names are reused.
 pub fn check_handles(fs: &impl Vfsi, directory: &str) {
-    use vnfs::files::{OpenFd, OpenFlags, OpenOp, Target};
+    use vnfs::files::{FileHandle, OpenFlags, OpenOp, Target};
     let paths: Vec<_> = (0..64).map(|i| format!("{directory}/handle-{i}")).collect();
     fs.write_files(
         &paths
@@ -137,7 +137,7 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
     let renamed: Vec<_> = paths.iter().map(|path| format!("{path}-moved")).collect();
     fs.vrename(
         &paths.iter().zip(&renamed).collect::<Vec<_>>(),
-        vnfs::directory::RenameOptions::Replace,
+        vnfs::directory::RenameMode::Replace,
     )
     .unwrap();
     fs.write_files(
@@ -200,7 +200,7 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.err_no(), libc::EBADF as u32);
+    assert_eq!(error.raw_code(), libc::EBADF as u32);
     assert_eq!(
         fs.attrs(Target::file(&files[0])).unwrap().len().unwrap(),
         19
@@ -213,7 +213,7 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
 }
 
 pub fn check_foreign<F: Vfsi>(fs: &F, other: &F, path: &str) {
-    use vnfs::files::{OpenFd, OpenFlags, OpenOp, Target};
+    use vnfs::files::{FileHandle, OpenFlags, OpenOp, Target};
     fs.write_files(&[(path, b"original".as_slice())]).unwrap();
     let mut own = fs
         .vopen(&[OpenOp::new(path, OpenFlags::READ | OpenFlags::WRITE)])
@@ -230,7 +230,7 @@ pub fn check_foreign<F: Vfsi>(fs: &F, other: &F, path: &str) {
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.err_no(), libc::EINVAL as u32);
+    assert_eq!(error.raw_code(), libc::EINVAL as u32);
     assert_eq!(fs.attrs(Target::file(&own)).unwrap().len().unwrap(), 8);
     own.try_close().unwrap();
     foreign.try_close().unwrap();
@@ -287,11 +287,8 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
         )
         .unwrap();
     let moved = format!("{directory}/owner-moved");
-    fs.vrename(
-        &[(&paths[0], &moved)],
-        vnfs::directory::RenameOptions::Replace,
-    )
-    .unwrap();
+    fs.vrename(&[(&paths[0], &moved)], vnfs::directory::RenameMode::Replace)
+        .unwrap();
     fs.write_files(&[(&paths[0], b"replacement".as_slice())])
         .unwrap();
     let updates: Vec<_> = files
@@ -348,7 +345,7 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.err_no(), libc::EINVAL as u32);
+    assert_eq!(error.raw_code(), libc::EINVAL as u32);
     assert_eq!(fs.attrs(Target::file(&files[0])).unwrap().len().unwrap(), 9);
     let missing = format!("{directory}/owner-missing");
     let error = fs
@@ -358,7 +355,7 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.err_no(), libc::ENOENT as u32);
+    assert_eq!(error.raw_code(), libc::ENOENT as u32);
     if !privileged {
         let error = fs.chown(&paths[0], Some(0), None).unwrap_err();
         assert_eq!(error.index(), Some(0));

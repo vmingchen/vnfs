@@ -1002,6 +1002,6 @@ mod path_write_tests {
         })
         .unwrap_err();
         assert_eq!(attempts, 1);
-        assert_eq!(error.err_no(), ERR_IO);
+        assert_eq!(error.raw_code(), ERR_IO);
     }
 }

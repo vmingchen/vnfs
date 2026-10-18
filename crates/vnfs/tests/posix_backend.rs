@@ -178,7 +178,7 @@ fn one_shot_file_vectors_roundtrip_and_bound_returned_bytes() {
             ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(9).unwrap()),
         )
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
     assert_eq!(error.path(), Some(Path::new("/file-2")));
     // The failed bounded read leaves the client usable.
     assert_eq!(
@@ -244,7 +244,7 @@ fn application_directory_vectors_preserve_fields_and_limits() {
                 .with_max_entries(1),
         )
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
     let repeated = client
         .read_dirs_with_options(&["/a", "/a"], ListDirOptions::new().with_fields(fields))
         .unwrap();
@@ -287,7 +287,7 @@ fn application_directory_vectors_preserve_fields_and_limits() {
         )
         .map(|mut trees| trees.remove(0))
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
 }
 
 #[test]
@@ -440,7 +440,7 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
     let error = client
         .read_stream("/stream", |_, _| Err(VfError::client(0, libc::EIO as u32)))
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EIO as u32);
+    assert_eq!(error.raw_code(), libc::EIO as u32);
 
     client.write("/empty", &[]).unwrap();
     let mut empty_callbacks = 0;
@@ -472,12 +472,12 @@ fn read_allv_default_rejects_more_than_sixteen_mibibytes() {
 
     let error = fs.vread_all_impl(&[path]).unwrap_err();
     assert_eq!(error.index(), Some(0));
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
 
     assert_eq!(DEFAULT_READ_MAX_BYTES, DEFAULT_READ_ALLV_MAX_TOTAL_BYTES);
     let client = FsClient::new(fs);
     let error = client.read("/too-large").unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
     assert_eq!(error.operation(), Some("read"));
 }
 
@@ -491,7 +491,7 @@ fn dummy_errors_on_missing_file() {
     match res {
         Err(e) => {
             assert_eq!(e.index(), Some(0));
-            assert_eq!(e.err_no(), 2, "ENOENT");
+            assert_eq!(e.raw_code(), 2, "ENOENT");
         }
         Ok(_) => panic!("readv of missing file must fail"),
     }
@@ -720,7 +720,7 @@ fn owned_directory_handle_refuses_path_only_backend() {
     client.create_dir("/d").unwrap();
     client.write("/d/keep", b"x").unwrap();
     let error = client.vopen_dirs(&["/d"]).unwrap_err();
-    assert_eq!(error.err_no(), vfsi_sync::VF_ERR_UNSUPPORTED);
+    assert_eq!(error.raw_code(), vfsi_sync::VF_ERR_UNSUPPORTED);
     assert_eq!(client.read("/d/keep").unwrap(), b"x");
 
     let options = RemoveOptions::new().with_continue_on_error(true);
@@ -822,7 +822,7 @@ fn closed_handle_rejects_standard_io() {
                 .unwrap()
                 .downcast_ref::<VfError>()
                 .unwrap()
-                .err_no(),
+                .raw_code(),
             libc::EBADF as u32
         );
     }
@@ -903,7 +903,7 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
         other_client
             .vread_native(&[first.read_request_at(0, 1)])
             .unwrap_err()
-            .err_no(),
+            .raw_code(),
         vfsi_sync::ERR_INVAL
     );
     let mut first_io = client.std_io(&first);
@@ -1030,11 +1030,11 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
         client
             .remove_dir("/tree/nested/hardlink")
             .unwrap_err()
-            .err_no(),
+            .raw_code(),
         vfsi_sync::ERR_NOTDIR
     );
     assert_eq!(
-        client.remove_file("/tree/nested").unwrap_err().err_no(),
+        client.remove_file("/tree/nested").unwrap_err().raw_code(),
         vfsi_sync::ERR_ISDIR
     );
     client.remove_dir_all("/tree").unwrap();
@@ -1186,7 +1186,7 @@ fn openv_cleanup_fault_does_not_mask_primary_error_or_leak_handles() {
     )
     .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.err_no(), libc::EEXIST as u32);
+    assert_eq!(error.raw_code(), libc::EEXIST as u32);
     assert!(
         script.is_consumed(),
         "unused faults: {:?}",
@@ -1231,7 +1231,7 @@ fn create_mode_failure_is_reported_instead_of_ignored() {
     let error = fs
         .open_raw_impl(Path::new("/created"), libc::O_CREAT | libc::O_RDWR, 0o600)
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EPERM as u32);
+    assert_eq!(error.raw_code(), libc::EPERM as u32);
     assert!(script.is_consumed());
     assert_eq!(fs.test_open_handle_count(), 0);
 }
@@ -1248,7 +1248,7 @@ fn mkdir_mode_failure_is_reported_instead_of_ignored() {
     let error = fs
         .mkdir_raw_impl(Path::new("/created-dir"), 0o700)
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EPERM as u32);
+    assert_eq!(error.raw_code(), libc::EPERM as u32);
     assert!(script.is_consumed());
 }
 
@@ -1330,7 +1330,7 @@ fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
             &mut |_, _| {},
         )
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
 
     let error = fs
         .walk_with_options_impl(
@@ -1342,18 +1342,18 @@ fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
             &mut |_, _| {},
         )
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
 
     let client = FsClient::new(fs);
     let error = client
         .read_dir_with_options("/tree", ListDirOptions::new().with_max_entries(1))
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
 
     let error = client
         .read_dir_with_options("/tree", ListDirOptions::new().with_max_path_bytes(1))
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
 
     assert_eq!(client.read_dir("/tree").unwrap().len(), 3);
 }

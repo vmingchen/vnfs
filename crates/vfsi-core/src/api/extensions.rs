@@ -1,7 +1,7 @@
 use crate::api::{Attrs, CopyOptions, DirectoryListing, MkDirOp, OpenOp, Result, SetAttrsOp};
 use std::path::Path;
 
-use super::{OpenFd, Vfsi};
+use super::{FileHandle, Vfsi};
 
 /// Scalar operations and convenience workflows alongside the [`Vfsi`] vectors.
 ///
@@ -55,7 +55,7 @@ pub trait VfsiExt: Vfsi {
     /// lifecycle only; use vectors or [`std_io`](VfsiExt::std_io) for I/O.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{Vfsi, VfsiExt, OpenFd, WriteOp};
+    /// use vfsi_core::api::{Vfsi, VfsiExt, FileHandle, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let file = fs.open("/config")?;
     /// let mut header = [0_u8; 128];
@@ -79,7 +79,7 @@ pub trait VfsiExt: Vfsi {
     /// use [`open_with`](VfsiExt::open_with) with `WRITE | CREATE_NEW` instead.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{Vfsi, VfsiExt, OpenFd, WriteOp};
+    /// use vfsi_core::api::{Vfsi, VfsiExt, FileHandle, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let file = fs.create("/output")?;
     /// let result = fs.vwrite(&[WriteOp::at(&file, 0, b"complete contents")], vfsi_core::api::WriteOptions::new().with_write_all(true));
@@ -108,7 +108,7 @@ pub trait VfsiExt: Vfsi {
     /// symlink resolution and independently opened handles for singleton vectors.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{Vfsi, VfsiExt, OpenFd, OpenFlags, OpenOp, WriteOp};
+    /// use vfsi_core::api::{Vfsi, VfsiExt, FileHandle, OpenFlags, OpenOp, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let file = fs.open_with(OpenOp::new(
     ///     "/new-file", OpenFlags::WRITE | OpenFlags::CREATE_NEW,
@@ -957,7 +957,7 @@ pub trait VfsiExt: Vfsi {
             }
             match self.vmkdir(&[MkDirOp::new(&current, 0o777)]) {
                 Ok(()) => {}
-                Err(error) if error.err_no() == crate::ERR_EXIST => {
+                Err(error) if error.raw_code() == crate::ERR_EXIST => {
                     if !self.attrs(&current)?.is_dir() {
                         return Err(crate::api::Error::client(0, crate::ERR_NOTDIR)
                             .with_context("create_dir_all", &current));
@@ -985,7 +985,7 @@ pub trait VfsiExt: Vfsi {
     /// # }
     /// ```
     fn rename(&self, source: impl AsRef<Path>, destination: impl AsRef<Path>) -> Result<()> {
-        self.vrename(&[(source, destination)], crate::api::RenameOptions::Replace)
+        self.vrename(&[(source, destination)], crate::api::RenameMode::Replace)
     }
 
     /// Single-target convenience. For multiple file pairs, prefer [`Vfsi::vcopy`].

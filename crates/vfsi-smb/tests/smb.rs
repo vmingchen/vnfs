@@ -163,7 +163,7 @@ fn recursive_copy_uses_share_defaults_for_every_destination_directory() {
     // Only implicit defaults change: explicit unsupported Unix modes still fail.
     let private = root.join("private");
     assert_eq!(
-        fs.mkdir_raw_impl(&private, 0o700).unwrap_err().err_no(),
+        fs.mkdir_raw_impl(&private, 0o700).unwrap_err().raw_code(),
         VF_ERR_UNSUPPORTED
     );
     assert!(!fs.exists_impl(&private).unwrap());
@@ -334,7 +334,7 @@ fn recursive_remove_requires_no_follow_metadata() {
         .unwrap();
 
     let error = fs.remove_paths_impl(&[root.as_path()], true).unwrap_err();
-    assert_eq!(error.err_no(), VF_ERR_UNSUPPORTED);
+    assert_eq!(error.raw_code(), VF_ERR_UNSUPPORTED);
     assert!(
         fs.exists_impl(&child).unwrap(),
         "unsupported removal must not mutate"
@@ -732,7 +732,7 @@ fn samba_round_trip_and_copy() {
         b"hello SMB3 smb"
     );
     assert_eq!(
-        fs.lstat_impl(&copied).unwrap_err().err_no(),
+        fs.lstat_impl(&copied).unwrap_err().raw_code(),
         VF_ERR_UNSUPPORTED
     );
     let no_follow_mode = VfAttrs {
@@ -744,7 +744,7 @@ fn samba_round_trip_and_copy() {
     assert_eq!(
         fs.vsetattrs_raw_nofollow_impl(&[no_follow_mode])
             .unwrap_err()
-            .err_no(),
+            .raw_code(),
         VF_ERR_UNSUPPORTED
     );
 
@@ -893,7 +893,7 @@ fn listing_walk_and_tree_copy_do_not_follow_directory_reparse_points() {
     let error = fs
         .copy_tree_impl(&source, &preserve_destination, true, false)
         .expect_err("requested symlink preservation must not be ignored");
-    assert_eq!(error.err_no(), VF_ERR_UNSUPPORTED);
+    assert_eq!(error.raw_code(), VF_ERR_UNSUPPORTED);
 
     // Isolate a regular-file link: ignoring `symlinks=true` would silently
     // create a regular destination file containing the link target's bytes.
@@ -905,7 +905,7 @@ fn listing_walk_and_tree_copy_do_not_follow_directory_reparse_points() {
     let error = fs
         .copy_tree_impl(&file_source, &file_destination, true, false)
         .expect_err("file-symlink preservation must not copy through silently");
-    assert_eq!(error.err_no(), VF_ERR_UNSUPPORTED);
+    assert_eq!(error.raw_code(), VF_ERR_UNSUPPORTED);
     assert!(!fs.exists_impl(&file_destination.join("alias")).unwrap());
     cleanup_test_tree(&root);
 }
@@ -996,6 +996,6 @@ fn copy_options_reject_unsupported_symlink_preservation_before_lookup() {
             options,
         )
         .unwrap_err();
-    assert_eq!(error.err_no(), VF_ERR_UNSUPPORTED);
+    assert_eq!(error.raw_code(), VF_ERR_UNSUPPORTED);
     assert_eq!(error.index(), Some(0));
 }

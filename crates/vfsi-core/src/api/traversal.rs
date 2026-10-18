@@ -198,7 +198,7 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert_eq!(error.err_no(), libc::EFBIG as u32);
+        assert_eq!(error.raw_code(), libc::EFBIG as u32);
         assert!(strict_entries.contains(&PathBuf::from("/file")));
 
         let mut truncated_events = Vec::new();
@@ -272,7 +272,7 @@ mod tests {
                     |_| Ok(WalkControl::Continue)
                 )
                 .unwrap_err()
-                .err_no(),
+                .raw_code(),
                 libc::EFBIG as u32
             );
         }

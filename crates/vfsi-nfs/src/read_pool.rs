@@ -919,7 +919,7 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert_eq!(error.err_no(), libc::EIO as u32);
+        assert_eq!(error.raw_code(), libc::EIO as u32);
         assert!(closed.get());
     }
 

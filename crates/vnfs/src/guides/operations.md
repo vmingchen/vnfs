@@ -91,7 +91,7 @@ values are scoped to a backend identity namespace, not globally unique across
 unrelated servers or clients, and can be reused after deletion. A backend that cannot report both parts returns
 no `FsObjId`.
 
-`OpenFd` is the owned File Descriptor handle to one open instance. The
+`FileHandle` is the owned File Descriptor handle to one open instance. The
 generic concrete type is `vfsi_sync::OpenFile<F>`; `Fd` is a numeric backend
 slot, and `FileOperand::Fd` references that slot without owning cleanup. Opening the same
 object twice produces the same `FsObjId` and separate handles; closing one does

@@ -18,7 +18,7 @@ impl CopyBatchFailure {
 
 impl From<VfError> for CopyBatchFailure {
     fn from(error: VfError) -> Self {
-        let fallback_safe = is_server_copy_fallback_status(error.err_no());
+        let fallback_safe = is_server_copy_fallback_status(error.raw_code());
         Self {
             error,
             fallback_safe,
@@ -52,7 +52,7 @@ fn open_destination_with_create_fallback<C, T>(
 ) -> VfResult<T> {
     let destination = match open(client, crate::client::OpenCreate::NoCreate) {
         Ok(destination) => return Ok(destination),
-        Err(error) if error.err_no() == ERR_NOENT => {
+        Err(error) if error.raw_code() == ERR_NOENT => {
             open(client, crate::client::OpenCreate::Guarded)
         }
         Err(error) => Err(error),
@@ -445,7 +445,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(error.err_no(), nfsstat4_NFS4ERR_EXIST);
+        assert_eq!(error.raw_code(), nfsstat4_NFS4ERR_EXIST);
         assert_eq!(
             client.attempts,
             [
@@ -533,7 +533,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(error.err_no(), ERR_IO);
+        assert_eq!(error.raw_code(), ERR_IO);
         assert_eq!(writes, 0);
     }
 
@@ -554,7 +554,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(error.err_no(), ERR_IO);
+        assert_eq!(error.raw_code(), ERR_IO);
         assert_eq!(writes, 1);
     }
 }

@@ -105,7 +105,7 @@ macro_rules! owned_client {
             pub(crate) fn vrename_impl<P: AsRef<Path>, Q: AsRef<Path>>(
                 &self,
                 pairs: &[(P, Q)],
-                options: RenameOptions,
+                options: RenameMode,
             ) -> Result<()> {
                 self.inner.vrename(pairs, options)
             }

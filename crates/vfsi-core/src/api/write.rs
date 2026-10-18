@@ -55,12 +55,8 @@ impl<H> std::fmt::Debug for WriteOp<'_, H> {
 }
 impl<'a, H> WriteOp<'a, H> {
     /// Borrow a handle and payload at an absolute byte offset.
-    pub fn new(file: &'a H, offset: u64, data: &'a [u8]) -> Self {
-        Self(crate::internal::WriteRequest::new(file, offset, data))
-    }
-    /// Borrow a handle and payload at an absolute byte offset.
     pub fn at(file: &'a H, offset: u64, data: &'a [u8]) -> Self {
-        Self::new(file, offset, data)
+        Self(crate::internal::WriteRequest::new(file, offset, data))
     }
     pub fn file(&self) -> &'a H {
         self.0.file()

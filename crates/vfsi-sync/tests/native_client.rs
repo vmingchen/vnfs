@@ -865,7 +865,7 @@ fn shared_native_attribute_batches_preflight_and_remap_policy_run_errors() {
         assert_eq!(backend.calls.len(), 2);
         if failure.index() == Some(1) {
             assert_eq!(error.index(), Some(2));
-            assert_eq!(error.err_no(), libc::ENOENT as u32);
+            assert_eq!(error.raw_code(), libc::ENOENT as u32);
         } else {
             assert!(error.is_transport());
             assert_eq!(error.index(), None);
@@ -1217,7 +1217,7 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
     );
     assert_eq!(
         backend
-            .vrename_with_options_impl(&paths, vfsi_core::api::RenameOptions::NoReplace)
+            .vrename_with_options_impl(&paths, vfsi_core::api::RenameMode::NoReplace)
             .unwrap_err()
             .kind(),
         std::io::ErrorKind::Unsupported
@@ -1511,7 +1511,7 @@ fn setattrs_ops_batch_policy_runs_in_order_and_preflight_before_dispatch() {
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.err_no(), libc::EINVAL as u32);
+    assert_eq!(error.raw_code(), libc::EINVAL as u32);
     assert!(calls.lock().unwrap().is_empty());
 }
 
@@ -1544,7 +1544,7 @@ fn setattrs_ops_remap_later_run_failures_without_replaying_or_dispatching_suffix
         assert_eq!(calls.lock().unwrap().len(), 2);
         if failure.index() == Some(1) {
             assert_eq!(error.index(), Some(2));
-            assert_eq!(error.err_no(), libc::ENOENT as u32);
+            assert_eq!(error.raw_code(), libc::ENOENT as u32);
             assert_eq!(error.path(), Some(std::path::Path::new("/c")));
         } else {
             assert!(error.is_transport());
@@ -1589,7 +1589,7 @@ fn std_io_rejects_backend_results_that_violate_io_contracts() {
     let file = client.open("/file").unwrap();
     let error = client.std_io(&file).read(&mut [0; 4]).unwrap_err();
     let error = error.get_ref().unwrap().downcast_ref::<VfError>().unwrap();
-    assert_eq!(error.err_no(), vfsi_sync::ERR_IO);
+    assert_eq!(error.raw_code(), vfsi_sync::ERR_IO);
 
     let client = FsClient::new(ScalarOnly {
         oversized_write_count: true,
@@ -1626,7 +1626,7 @@ fn convenience_string_errors_retain_operation_and_path_context() {
         ..ScalarOnly::default()
     });
     let error = client.read_to_string("/not-utf8").unwrap_err();
-    assert_eq!(error.err_no(), vfsi_sync::ERR_INVAL);
+    assert_eq!(error.raw_code(), vfsi_sync::ERR_INVAL);
     assert_eq!(error.operation(), Some("read_to_string"));
     assert_eq!(error.path(), Some(std::path::Path::new("/not-utf8")));
 }
@@ -1643,7 +1643,7 @@ fn allocating_whole_file_reads_enforce_a_configurable_limit() {
             ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(3).unwrap()),
         )
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
     assert_eq!(error.operation(), Some("read"));
     assert_eq!(error.path(), Some(std::path::Path::new("/file")));
 
@@ -1758,14 +1758,14 @@ fn owned_vector_reads_reject_oversized_batches_before_backend_io() {
         .vread_with_limit_native(&[file.read_request_at(0, 3), file.read_request_at(3, 3)], 5)
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
     assert_eq!(error.path(), Some(std::path::Path::new("/file")));
     assert_eq!(read_calls.load(Ordering::SeqCst), 0);
 
     let error = client
         .vread_native(&[file.read_request_at(0, vfsi_sync::DEFAULT_READV_MAX_TOTAL_BYTES + 1)])
         .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
     assert_eq!(read_calls.load(Ordering::SeqCst), 0);
 
     let results = client
@@ -2152,7 +2152,7 @@ fn write_allv_rejects_zero_progress() {
     let error = client
         .vwrite_all_native(&[file.write_request_at(0, b"data")])
         .unwrap_err();
-    assert_eq!(error.err_no(), vfsi_sync::ERR_IO);
+    assert_eq!(error.raw_code(), vfsi_sync::ERR_IO);
     assert_eq!(error.index(), Some(0));
 }
 
@@ -2279,7 +2279,7 @@ fn successfully_closed_handle_returns_ebadf_instead_of_panicking() {
         client.std_io(&file).write(b"x").unwrap_err(),
     ] {
         let error = error.get_ref().unwrap().downcast_ref::<VfError>().unwrap();
-        assert_eq!(error.err_no(), vfsi_sync::ERR_EBADF);
+        assert_eq!(error.raw_code(), vfsi_sync::ERR_EBADF);
     }
 }
 
@@ -2345,7 +2345,7 @@ fn directory_visit_starts_with_one_entry_and_respects_tight_limits() {
         )
         .unwrap_err();
     assert_eq!(seen, 3);
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.raw_code(), libc::EFBIG as u32);
     assert_eq!(*page_sizes.lock().unwrap(), [1, 3]);
 
     page_sizes.lock().unwrap().clear();

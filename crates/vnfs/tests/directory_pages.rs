@@ -77,7 +77,7 @@ fn recursive_roots_and_entries_never_allow_symlink_componentss() {
     fs.write("/target/file", b"x").unwrap();
     fs.symlink("/target", "/link").unwrap();
     let error = collect(&fs, &["/link"], true).unwrap_err();
-    assert_eq!(error.err_no(), libc::ENOTDIR as u32);
+    assert_eq!(error.raw_code(), libc::ENOTDIR as u32);
     assert_eq!(error.index(), Some(0));
     let listings = collect(&fs, &["/"], true).unwrap();
     assert!(
@@ -264,7 +264,7 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
                 })
                 .unwrap_err();
             assert_eq!(error.kind(), fault.kind(), "{name}");
-            assert_eq!(error.err_no(), fault.err_no(), "{name}");
+            assert_eq!(error.raw_code(), fault.raw_code(), "{name}");
             assert_eq!(calls, 1, "{name}: callbacks must not replay");
         }
         if recursive {
@@ -344,7 +344,7 @@ fn buffered_local_walk_never_follows_replaced_children_or_ancestors() {
             assert!(changed);
             assert!(!escaped, "{options:?}, {name}");
             let error = result.unwrap_err();
-            assert_eq!(error.err_no(), libc::ELOOP as u32);
+            assert_eq!(error.raw_code(), libc::ELOOP as u32);
         }
     }
 }

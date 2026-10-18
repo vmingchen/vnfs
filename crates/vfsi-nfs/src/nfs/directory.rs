@@ -425,7 +425,7 @@ impl NfsVecFs {
                     if error.is_transport() {
                         RpcError::transport(error.to_string())
                     } else {
-                        RpcError::op(0, error.err_no())
+                        RpcError::op(0, error.raw_code())
                     }
                 })?;
         }

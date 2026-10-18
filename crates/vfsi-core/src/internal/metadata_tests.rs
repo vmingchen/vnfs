@@ -13,7 +13,7 @@ fn metadata_validation_rejects_reserved_ids_and_preserves_absent_times() {
         SetAttrsOp::new("/file").gid(u32::MAX),
     ] {
         assert_eq!(
-            validate_setattrs(&op).unwrap_err().err_no(),
+            validate_setattrs(&op).unwrap_err().raw_code(),
             crate::ERR_INVAL
         );
     }
@@ -35,7 +35,7 @@ fn timestamp_normalization_handles_both_sides_of_epoch() {
         assert_eq!(
             validate_setattrs(&SetAttrsOp::new("/file").modified(time))
                 .unwrap_err()
-                .err_no(),
+                .raw_code(),
             libc::EOVERFLOW as u32
         );
     }

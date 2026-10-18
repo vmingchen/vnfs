@@ -67,13 +67,13 @@ fn reject_final_symlink(target_exists: bool, looping: bool) {
     };
     fs.remove_paths_impl(&[Path::new(&root)], true).unwrap();
 
-    assert_eq!(result.unwrap_err().err_no(), libc::EEXIST as u32);
+    assert_eq!(result.unwrap_err().raw_code(), libc::EEXIST as u32);
     assert_eq!(link_type, VfType::Symlink);
     if target_exists {
         assert_eq!(contents.unwrap(), b"keep");
         assert_eq!(target_result.unwrap().mode & 0o777, 0o640);
     } else {
-        assert_eq!(target_result.unwrap_err().err_no(), libc::ENOENT as u32);
+        assert_eq!(target_result.unwrap_err().raw_code(), libc::ENOENT as u32);
     }
     #[cfg(feature = "test-faults")]
     assert!(
@@ -232,7 +232,7 @@ fn grouped_remove_error(prefix: bool, earlier_in_group: bool, missing_parent: bo
     let result = fs.vremove_impl(&files);
     fs.remove_paths_impl(&[Path::new(&root)], true).unwrap();
     let error = result.unwrap_err();
-    assert_eq!(error.err_no(), libc::ENOENT as u32);
+    assert_eq!(error.raw_code(), libc::ENOENT as u32);
     assert_eq!(
         error.index(),
         Some(expected),

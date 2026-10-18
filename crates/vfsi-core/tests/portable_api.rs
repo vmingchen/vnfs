@@ -8,7 +8,7 @@ use vfsi_core::{Vfsi, VfsiExt};
 
 #[derive(Debug)]
 struct TestFile;
-impl OpenFd for TestFile {
+impl FileHandle for TestFile {
     fn path(&self) -> &Path {
         Path::new("/file")
     }
@@ -88,7 +88,7 @@ impl Vfsi for PortableFs {
                 tree_entry(
                     match path.as_target() {
                         Target::Path(path) => path,
-                        Target::File(file) => OpenFd::path(file),
+                        Target::File(file) => FileHandle::path(file),
                     },
                     true,
                 )
@@ -148,11 +148,7 @@ impl Vfsi for PortableFs {
     ) -> Result<()> {
         panic!("unexpected copy")
     }
-    fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
-        &self,
-        _: &[(P, Q)],
-        _: RenameOptions,
-    ) -> Result<()> {
+    fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, _: &[(P, Q)], _: RenameMode) -> Result<()> {
         panic!("unexpected rename")
     }
     fn vremove<P: AsRef<Path>>(
@@ -592,16 +588,16 @@ fn consuming_reads_release_caller_buffers_and_owned_counts_are_derived() {
 
 impl DirHandle for TestFile {
     fn path(&self) -> &Path {
-        OpenFd::path(self)
+        FileHandle::path(self)
     }
     fn try_close(&mut self) -> Result<()> {
-        OpenFd::try_close(self)
+        FileHandle::try_close(self)
     }
     fn is_closed(&self) -> bool {
-        OpenFd::is_closed(self)
+        FileHandle::is_closed(self)
     }
     fn close(self) -> Result<()> {
-        OpenFd::close(self)
+        FileHandle::close(self)
     }
 }
 

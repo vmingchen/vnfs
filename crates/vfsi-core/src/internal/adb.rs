@@ -88,7 +88,7 @@ mod tests {
             match adb_layout(&p, 4) {
                 Ok(layout) => { prop_assert!(valid); prop_assert_eq!(layout, expected); }
                 Err(error) => { prop_assert!(!valid); prop_assert_eq!(error.index(), Some(4));
-                    prop_assert_eq!(error.err_no(), libc::EOVERFLOW as u32); }
+                    prop_assert_eq!(error.raw_code(), libc::EOVERFLOW as u32); }
             }
         }
     }
