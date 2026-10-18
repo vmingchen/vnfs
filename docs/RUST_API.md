@@ -440,7 +440,10 @@ Use `with_enter_leave(true)` for lifecycle events and `with_sort_by_name(true)` 
 siblings; those modes retain bounded directory buffers. The default entry-only
 mode stays paged and retains native anchored child cursors and batching. With
 lifecycle events enabled, `SkipSubtree` on Enter prevents descent.
-`visit_dirs_ordered` still supplies custom ordering and complete listings.
+`visit_dirs_ordered` still supplies custom ordering and complete listings. Sorting and enter/leave options
+belong to listdir; page primitives and collecting helpers reject them before I/O.
+The shallow read_dir_with_options helper also rejects recursive options; use
+read_dirs_with_options for recursive collection.
 `vgetattrs` accepts paths and retained handles through `AsTarget`, including
 mixed vectors of `Target::path(...)` and `Target::file(...)`. Handle queries
 retain object identity; unsupported backends return an error instead of

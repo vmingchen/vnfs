@@ -24,6 +24,9 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
     ) -> Result<Vec<crate::DirectoryPage>>,
     mut callback: impl FnMut(usize, DirectoryListing) -> Result<std::ops::ControlFlow<()>>,
 ) -> Result<Vec<crate::TraversalCompletion>> {
+    if policy.enter_leave() || policy.sort_by_name() {
+        return Err(vfsi_core::api::Error::client(0, libc::EINVAL as u32));
+    }
     let directory = policy.directory_options(limits);
     let walk = policy.walk_options(limits);
     let mut budget = TraversalBudget::new(directory.max_entries(), directory.max_path_bytes());

@@ -425,6 +425,8 @@ pub trait Vfsi {
     /// whole vector. The returned prefix covers every root whose pages reached
     /// the callback; unfinished roots are Stopped. Pages may interleave between roots.
     ///
+    /// Sorting and enter/leave options are rejected before I/O; use VfsiExt::listdir
+    /// for those policies.
     /// Metadata is selected on directory pages, not through per-entry stat
     /// calls. Entry symlinks are never followed during recursive descent.
     /// Each page owns its entries; collection can transfer them without cloning.

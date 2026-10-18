@@ -374,9 +374,13 @@ fn scalar_collectors_select_named_scope_and_respect_visit_budgets() {
     let options = ListDirOptions::new()
         .with_max_entries(3)
         .with_fields(vnfs::directory::Attributes::MODE);
-    let shallow = fs
-        .read_dir_with_options("/tree", options.with_recursive(true))
-        .unwrap();
+    assert_eq!(
+        fs.read_dir_with_options("/tree", options.with_recursive(true))
+            .unwrap_err()
+            .kind(),
+        vnfs::error::ErrorKind::InvalidInput
+    );
+    let shallow = fs.read_dir_with_options("/tree", options).unwrap();
     assert_eq!(shallow.len(), 2);
     assert!(
         !shallow
@@ -404,4 +408,24 @@ fn scalar_collectors_select_named_scope_and_respect_visit_budgets() {
         .kind(),
         vnfs::error::ErrorKind::FileTooLarge
     );
+}
+
+#[test]
+fn vector_pages_reject_presentation_flags_before_resolving_any_root() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Posix::new(root.path()).unwrap();
+    for options in [
+        ListDirOptions::new().with_enter_leave(true),
+        ListDirOptions::new().with_sort_by_name(true),
+        ListDirOptions::new()
+            .with_enter_leave(true)
+            .with_sort_by_name(true),
+    ] {
+        let error = fs
+            .vlistdirs(&["/missing"], options, |_, _| {
+                panic!("callback must not run")
+            })
+            .unwrap_err();
+        assert_eq!(error.kind(), vnfs::error::ErrorKind::InvalidInput);
+    }
 }

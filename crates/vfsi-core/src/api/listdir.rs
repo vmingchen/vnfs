@@ -147,6 +147,9 @@ fn buffered<F: Vfsi + ?Sized>(
             fs.read_dir_with_options(
                 path,
                 remaining
+                    .with_recursive(false)
+                    .with_enter_leave(false)
+                    .with_sort_by_name(false)
                     .with_max_path_bytes(bytes)
                     .with_fields(fields)
                     // Reopening a path is not anchored to the original page.

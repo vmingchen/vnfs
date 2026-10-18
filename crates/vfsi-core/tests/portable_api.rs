@@ -641,3 +641,53 @@ fn directory_defaults_match_with_or_without_explicit_options() {
         selected | Attributes::MODE
     );
 }
+
+#[test]
+fn collecting_and_page_adapters_reject_unhandled_policies_before_io() {
+    let fs = PortableFs::default();
+    for options in [
+        ListDirOptions::new().with_enter_leave(true),
+        ListDirOptions::new().with_sort_by_name(true),
+    ] {
+        assert_eq!(
+            fs.read_dir_with_options("/missing", options)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            fs.read_dirs_with_options(&["/missing"], options)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            fs.visit_entries_with_options(&["/missing"], options, |_, _| panic!(
+                "callback must not run"
+            ))
+            .unwrap_err()
+            .kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            fs.visit_dirs_ordered(
+                "/missing",
+                options,
+                |_, _| std::cmp::Ordering::Equal,
+                |_| true,
+                |_, _| panic!("callback must not run")
+            )
+            .unwrap_err()
+            .kind(),
+            ErrorKind::InvalidInput
+        );
+    }
+    assert_eq!(
+        fs.read_dir_with_options("/missing", ListDirOptions::new().with_recursive(true))
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(fs.listings.get(), 0);
+    assert_eq!(fs.metadata.get(), 0);
+}

@@ -550,7 +550,7 @@ pub trait VfsiExt: Vfsi {
     /// Single-target convenience. For multiple directories, prefer [`VfsiExt::read_dirs_with_options`] with one aggregate budget.
     ///
     /// Collect one shallow directory with selected metadata and entry/path-byte limits.
-    /// This helper forces shallow mode; use `read_dirs_with_options` with
+    /// Recursive options are rejected; use `read_dirs_with_options` with
     /// `ListDirOptions::with_recursive(true)` to collect a tree.
     ///
     /// ```no_run
@@ -567,7 +567,15 @@ pub trait VfsiExt: Vfsi {
         path: impl AsRef<Path>,
         options: crate::api::ListDirOptions,
     ) -> Result<Vec<crate::api::DirEntry>> {
-        let mut trees = self.read_dirs_with_options(&[path], options.with_recursive(false))?;
+        if options.recursive() {
+            return Err(
+                crate::api::Error::client(0, libc::EINVAL as u32).with_context(
+                    "read_dir_with_options requires shallow options",
+                    path.as_ref(),
+                ),
+            );
+        }
+        let mut trees = self.read_dirs_with_options(&[path], options)?;
         Ok(single_completion(single_tree(&mut trees)?, "read_dirs")?.entries)
     }
 
@@ -630,6 +638,7 @@ pub trait VfsiExt: Vfsi {
         paths: &[P],
         options: crate::api::ListDirOptions,
     ) -> Result<Vec<Vec<DirectoryListing>>> {
+        require_page_options(options)?;
         let mut trees: Vec<Vec<DirectoryListing>> = (0..paths.len()).map(|_| Vec::new()).collect();
         let mut positions: Vec<std::collections::HashMap<std::path::PathBuf, usize>> = (0..paths
             .len())
@@ -735,6 +744,7 @@ pub trait VfsiExt: Vfsi {
         options: crate::api::ListDirOptions,
         mut callback: impl FnMut(usize, &crate::api::DirEntry) -> Result<std::ops::ControlFlow<()>>,
     ) -> Result<Vec<crate::api::TraversalCompletion>> {
+        require_page_options(options)?;
         self.vlistdirs(paths, options, |index, page| {
             for entry in &page.entries {
                 if callback(index, entry)?.is_break() {
@@ -783,6 +793,7 @@ pub trait VfsiExt: Vfsi {
         mut descend: impl FnMut(&crate::api::DirEntry) -> bool,
         mut visitor: impl FnMut(DirectoryListing, usize) -> Result<crate::api::WalkControl>,
     ) -> Result<crate::api::TraversalCompletion> {
+        require_page_options(options)?;
         let options = options.walk_options(self.limits());
         let root = root.as_ref();
         let mut budget =
@@ -1186,4 +1197,12 @@ fn single_tree(trees: &mut Vec<Vec<DirectoryListing>>) -> Result<Vec<DirectoryLi
         ));
     }
     Ok(trees.remove(0))
+}
+
+fn require_page_options(options: crate::api::ListDirOptions) -> Result<()> {
+    if options.enter_leave() || options.sort_by_name() {
+        Err(crate::api::Error::client(0, libc::EINVAL as u32))
+    } else {
+        Ok(())
+    }
 }

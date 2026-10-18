@@ -61,14 +61,14 @@ impl ListDirOptions {
     /// Emit directory Enter/Leave events, including the root, in
     /// [`super::VfsiExt::listdir`]. Otherwise only child Entry events are emitted.
     /// Lifecycle traversal uses bounded directory buffers for depth-first order.
-    /// This does not change the page events produced by [`super::Vfsi::vlistdirs`].
+    /// Other directory methods reject this setting, including [`super::Vfsi::vlistdirs`].
     pub const fn with_enter_leave(mut self, value: bool) -> Self {
         self.flags.set_enter_leave(value);
         self
     }
     /// Sort siblings by filename in [`super::VfsiExt::listdir`]. Sorting
     /// requires a complete, bounded directory listing before delivering entries.
-    /// Page primitives and collecting helpers retain backend-defined ordering.
+    /// Other directory methods reject this setting; page order remains backend-defined.
     pub const fn with_sort_by_name(mut self, value: bool) -> Self {
         self.flags.set_sort_by_name(value);
         self
