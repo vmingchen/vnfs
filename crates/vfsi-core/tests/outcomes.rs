@@ -257,7 +257,7 @@ fn metadata_distinguishes_unavailable_fields_from_zero_and_false() {
 }
 
 #[test]
-fn metadata_exposes_returned_and_missing_attribute_masks() {
+fn metadata_exposes_present_and_absent_masks() {
     let requested = AttrMask::MODE | AttrMask::UID | AttrMask::MTIME;
     let metadata = vfsi_core::metadata_from_attrs(VfAttrs {
         returned: AttrMask::MODE | AttrMask::MTIME,
@@ -266,33 +266,39 @@ fn metadata_exposes_returned_and_missing_attribute_masks() {
         ..VfAttrs::default()
     });
 
-    assert_eq!(
-        metadata.returned_attributes(),
-        AttrMask::MODE | AttrMask::MTIME
-    );
-    assert_eq!(metadata.missing_attributes(requested), AttrMask::UID);
-    assert!(!metadata.has_attributes(requested));
-    assert!(metadata.has_attributes(AttrMask::MODE | AttrMask::MTIME));
+    assert_eq!(metadata.present_mask(), AttrMask::MODE | AttrMask::MTIME);
+    assert_eq!(metadata.absent_mask(requested), AttrMask::UID);
+    assert!(!metadata.contains(requested));
+    assert!(metadata.contains(AttrMask::MODE | AttrMask::MTIME));
+    assert!(metadata.contains(AttrMask::empty()));
+    assert!(metadata.absent_mask(AttrMask::empty()).is_empty());
+
+    let absent = vfsi_core::metadata_from_attrs(VfAttrs::default());
+    assert!(absent.present_mask().is_empty());
+    assert_eq!(absent.absent_mask(requested), requested);
+    assert!(!absent.contains(requested));
+    assert!(absent.contains(AttrMask::empty()));
 }
 
 #[test]
-fn metadata_missing_attributes_preserves_unknown_requested_bits() {
+fn metadata_absent_mask_preserves_unknown_requested_bits() {
     let unknown = AttrMask::from_bits_retain(1 << 31);
     let requested = AttrMask::MODE | unknown;
     let metadata = vfsi_core::metadata_from_attrs(VfAttrs {
         returned: AttrMask::MODE,
         ..VfAttrs::default()
     });
-    assert_eq!(metadata.missing_attributes(requested), unknown);
-    assert!(!metadata.has_attributes(requested));
-    assert!(!metadata.has_attributes(unknown));
+    assert_eq!(metadata.absent_mask(requested), unknown);
+    assert!(!metadata.contains(requested));
+    assert!(!metadata.contains(unknown));
 
     let returned = vfsi_core::metadata_from_attrs(VfAttrs {
         returned: requested,
         ..VfAttrs::default()
     });
-    assert!(returned.missing_attributes(requested).is_empty());
-    assert!(returned.has_attributes(requested));
+    assert_eq!(returned.present_mask(), requested);
+    assert!(returned.absent_mask(requested).is_empty());
+    assert!(returned.contains(requested));
 }
 
 #[test]

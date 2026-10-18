@@ -1202,18 +1202,20 @@ impl Attrs {
     /// Optional accessors remain `None` when a field was not requested or the
     /// backend could not provide it. Check this mask before projecting the
     /// metadata into an API that requires concrete values (such as `stat`).
-    pub fn returned_attributes(&self) -> AttrMask {
+    pub fn present_mask(&self) -> AttrMask {
         self.returned
     }
 
-    /// Requested fields that were not returned by the backend.
-    pub fn missing_attributes(&self, requested: AttrMask) -> AttrMask {
+    /// Fields in `requested` that are absent from [`Self::present_mask`].
+    /// Unknown requested bits are preserved in the result.
+    pub fn absent_mask(&self, requested: AttrMask) -> AttrMask {
         requested.difference(self.returned)
     }
 
-    /// Whether every field in `requested` was returned by the backend.
-    pub fn has_attributes(&self, requested: AttrMask) -> bool {
-        self.missing_attributes(requested).is_empty()
+    /// Whether every field in `requested` is present, not merely any field.
+    /// An empty mask is always contained.
+    pub fn contains(&self, requested: AttrMask) -> bool {
+        self.absent_mask(requested).is_empty()
     }
 
     /// Full POSIX mode, including the file type bits, when returned.
@@ -1942,7 +1944,7 @@ mod sparse_metadata_tests {
                         );
                     };
                 }
-                assert_eq!(attrs.returned_attributes(), returned);
+                assert_eq!(attrs.present_mask(), returned);
                 assert!(attrs.is_symlink());
                 check!(len, SIZE, value);
                 check!(is_empty, SIZE, value == 0);
@@ -2020,8 +2022,8 @@ mod sparse_metadata_tests {
         assert_eq!(attrs.accessed(), expected);
         assert_eq!(attrs.modified(), expected);
         assert_eq!(attrs.changed(), expected);
-        assert_eq!(attrs.returned_attributes(), returned);
-        assert!(attrs.has_attributes(returned));
+        assert_eq!(attrs.present_mask(), returned);
+        assert!(attrs.contains(returned));
         #[cfg(target_os = "linux")]
         assert_eq!(expected, None);
     }

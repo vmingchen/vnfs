@@ -60,7 +60,7 @@ let session = NfsMountSession::from_mount("/mnt/nfs/project")?;
 let path = session.map("/mnt/nfs/project/README", ResolvePath::Follow)?;
 let attrs = session.fs().vgetattrs(&[path], AttrsOptions::new()
     .with_fields(Attributes::MODE | Attributes::SIZE))?;
-assert!(attrs[0].has_attributes(Attributes::MODE | Attributes::SIZE));
+assert!(attrs[0].contains(Attributes::MODE | Attributes::SIZE));
 println!("NFS server: {}", session.mount().host());
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
