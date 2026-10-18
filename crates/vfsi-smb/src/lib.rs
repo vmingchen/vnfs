@@ -1568,6 +1568,17 @@ impl SmbVecFs {
 }
 
 impl HandleBackend for SmbVecFs {
+    fn close_deferred(&mut self, file: &FileOperand) -> VfResult<()> {
+        let fd = file.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+        if self.open_files.contains_key(&fd) {
+            self.close_impl(file)
+        } else {
+            // Failed scalar closes retain their remote FileId in this queue;
+            // successful vector closes have already retired their descriptor.
+            self.drain_deferred_closes()
+        }
+    }
+
     fn capabilities(&self) -> Capabilities {
         if self.server_copy_enabled {
             Capabilities::SERVER_COPY
