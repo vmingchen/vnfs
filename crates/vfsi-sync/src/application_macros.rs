@@ -76,7 +76,7 @@ macro_rules! __vfsi_client_methods {
                     }
                     Ok(())
                 },
-                |paths, cursors, page_size, max_entries| {
+                |paths, cursors, page_size, max_entries, follow_symlinks| {
                     <$client>::read_dir_pages_with_fields(
                         $receiver(self),
                         paths,
@@ -84,7 +84,7 @@ macro_rules! __vfsi_client_methods {
                         cursors,
                         page_size,
                         max_entries,
-                        options.allow_symlink_components(),
+                        follow_symlinks,
                     )
                 },
                 callback,

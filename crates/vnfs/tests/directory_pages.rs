@@ -455,3 +455,56 @@ fn presentation_policy_preserves_its_independent_listing_configuration() {
     assert!(walk.enter_leave());
     assert!(walk.sort_by_name());
 }
+
+#[test]
+fn recursive_paged_walk_rejects_swapped_ancestors() {
+    fn check(fs: &impl Vfsi, entry_visitor: bool) {
+        fs.create_dir_all("/tree/child").unwrap();
+        fs.create_dir_all("/outside/child").unwrap();
+        fs.write("/outside/child/secret", b"never traverse")
+            .unwrap();
+        let mut changed = false;
+        let mut escaped = false;
+        let mut entry = |entry: &vnfs::directory::DirEntry| -> vnfs::Result<()> {
+            if entry.path() == Path::new("/tree/child") && !changed {
+                fs.rename("/tree", "/saved")?;
+                fs.symlink("outside", "/tree")?;
+                changed = true;
+            }
+            escaped |= entry.path().ends_with("secret");
+            Ok(())
+        };
+        let options = ListDirOptions::new().with_recursive(true);
+        let result = if entry_visitor {
+            fs.listdir("/tree", options, |event| {
+                entry(&event.entry)?;
+                Ok(WalkControl::Continue)
+            })
+            .map(|_| ())
+        } else {
+            fs.vlistdirs(&["/tree"], options, |_, page| {
+                for item in &page.entries {
+                    entry(item)?;
+                }
+                Ok(ControlFlow::Continue(()))
+            })
+            .map(|_| ())
+        };
+        assert!(changed);
+        assert!(!escaped, "recursive traversal followed a swapped ancestor");
+        assert_eq!(result.unwrap_err().index(), Some(0));
+    }
+    for routed in [false, true] {
+        for entry_visitor in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            if routed {
+                check(
+                    &vnfs::mounted::Auto::new(root.path()).unwrap(),
+                    entry_visitor,
+                );
+            } else {
+                check(&Posix::new(root.path()).unwrap(), entry_visitor);
+            }
+        }
+    }
+}
