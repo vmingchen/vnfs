@@ -69,14 +69,13 @@ fn compound_preflight_survives_late_thread_local_client_cleanup() {
             let mut compound = Compound::new();
             compound.putrootfh();
             assert!(compound.encoded_len_up_to(1024).unwrap().is_some());
-            compound_stats_record(&compound.args);
+            compound_stats_record(&compound.args, None);
         }
     }
     thread_local! { static CLIENT: RefCell<Option<LateClient>> = const { RefCell::new(None) }; }
     std::thread::spawn(|| {
         CLIENT.with(|value| *value.borrow_mut() = Some(LateClient));
         SIZE_SCRATCH.with(|value| value.borrow_mut().resize(1024, 0));
-        STATS_XDR_BUFFER.with(|value| value.borrow_mut().resize(1024, 0));
     })
     .join()
     .unwrap();
@@ -87,10 +86,36 @@ fn compound_preflight_survives_late_thread_local_client_cleanup() {
 /// the operation so builders can preflight without mutating their compound.
 pub(crate) const SEQUENCE_XDR_BYTES: usize = 36;
 
+struct EncodedCompound {
+    args: *mut COMPOUND4args,
+    count_bytes: bool,
+    bytes: u64,
+}
+
 unsafe extern "C" fn wrap_compound4args(xdrs: *mut libntirpc_sys::XDR, objp: *mut c_void) -> bool {
+    // SAFETY: the synchronous RPC owns a live EncodedCompound until the codec
+    // finishes; the XDR stream and its operation table are initialized by ntirpc.
+    let (request, position) = unsafe {
+        let request = &mut *objp.cast::<EncodedCompound>();
+        let position = if request.count_bytes && (*xdrs).x_op == libntirpc_sys::xdr_op_XDR_ENCODE {
+            (*(*xdrs).x_ops).x_getpostn
+        } else {
+            None
+        };
+        (request, position)
+    };
+    // XDR_GETPOS works across scatter/gather segments, unlike pointer subtraction.
+    // SAFETY: the function pointer belongs to the initialized live stream.
+    let start = position.map(|get| unsafe { get(xdrs) });
     // SAFETY: RpcClient invokes this wrapper only with live objects of the matching
     // generated COMPOUND type and ABI-compatible XDR stream.
-    unsafe { xdr_wrap_COMPOUND4args(xdrs as *mut nfsv41_sys::XDR, objp as *mut COMPOUND4args) }
+    let encoded = unsafe { xdr_wrap_COMPOUND4args(xdrs.cast(), request.args) };
+    if encoded && let (Some(get), Some(start)) = (position, start) {
+        // SAFETY: the same initialized stream remains live after encoding.
+        let end = unsafe { get(xdrs) };
+        request.bytes += u64::from(end.saturating_sub(start));
+    }
+    encoded
 }
 
 unsafe extern "C" fn wrap_compound4res(xdrs: *mut libntirpc_sys::XDR, objp: *mut c_void) -> bool {
@@ -952,6 +977,13 @@ impl Compound {
         self.args.argarray.argarray_len = self.ops.len() as u_int;
         self.args.argarray.argarray_val = self.ops.as_mut_ptr();
         let mut res = empty_response(nfsstat4_NFS4_OK);
+        let count_bytes =
+            *BYTE_STATS_ENABLED.get_or_init(|| std::env::var("VNFS_STATS").as_deref() == Ok("1"));
+        let mut encoded = EncodedCompound {
+            args: &mut self.args,
+            count_bytes: count_bytes || rpc.telemetry.is_some(),
+            bytes: 0,
+        };
         let t0 = std::time::Instant::now();
         // SAFETY: the matching generated XDR routines receive live COMPOUND
         // structures, and self owns every argument allocation during the call.
@@ -959,17 +991,26 @@ impl Compound {
             rpc.call(
                 NFSPROC4_COMPOUND,
                 Some(wrap_compound4args),
-                &mut self.args as *mut _ as *mut c_void,
+                &mut encoded as *mut _ as *mut c_void,
                 Some(wrap_compound4res),
                 &mut res as *mut _ as *mut c_void,
             )
         };
         // Own partially decoded allocations before either error path returns.
         let response = CompoundRes { res };
+        let nanos = t0.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+        if let Some(telemetry) = &rpc.telemetry {
+            telemetry.record(
+                self.ops.len() as u64,
+                encoded.bytes,
+                nanos,
+                result.as_ref().ok().map(|_| response.res.status),
+            );
+        }
         result?;
-        RPC_TIME_US.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
+        RPC_TIME_US.fetch_add(nanos / 1000, Ordering::Relaxed);
         RPC_CALLS.fetch_add(1, Ordering::Relaxed);
-        compound_stats_record(&self.args);
+        compound_stats_record(&self.args, count_bytes.then_some(encoded.bytes));
         validate_response_ops(&self.ops, &response.res)?;
         Ok(response)
     }
@@ -1363,10 +1404,6 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 thread_local! {
-    /// Reused only when VNFS_STATS requests exact encoded byte counts.
-    static STATS_XDR_BUFFER: std::cell::RefCell<Vec<u8>> = const {
-        std::cell::RefCell::new(Vec::new())
-    };
     /// Per-thread counters let callers measure one synchronous operation even
     /// when other threads are issuing compounds concurrently.
     static THREAD_COMPOUND_STATS: std::cell::Cell<(u64, u64, u64, u64)> =
@@ -1743,7 +1780,7 @@ pub fn compound_byte_stats_enabled() -> bool {
     BYTE_STATS_ENABLED.get().copied().unwrap_or(false)
 }
 
-fn compound_stats_record(args: &COMPOUND4args) {
+fn compound_stats_record(args: &COMPOUND4args, encoded_bytes: Option<u64>) {
     let ops = args.argarray.argarray_len as u64;
     COMPOUND_COUNT.fetch_add(1, Ordering::Relaxed);
     COMPOUND_OPS.fetch_add(ops, Ordering::Relaxed);
@@ -1770,57 +1807,13 @@ fn compound_stats_record(args: &COMPOUND4args) {
         }
         eprintln!("[dump] compound ops={}: {}", ops, buf);
     }
-    // Exact size accounting requires a second XDR encode. Keep that expensive
-    // diagnostic out of the normal I/O path; VNFS_STATS is an opt-in process
-    // setting and must be present before the first compound is sent.
-    let byte_stats_enabled =
-        *BYTE_STATS_ENABLED.get_or_init(|| std::env::var("VNFS_STATS").as_deref() == Ok("1"));
-    if !byte_stats_enabled {
-        return;
+    if let Some(bytes) = encoded_bytes {
+        COMPOUND_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        THREAD_COMPOUND_STATS.with(|stats| {
+            let (count, ops, previous, max_ops) = stats.get();
+            stats.set((count, ops, previous + bytes, max_ops));
+        });
     }
-    // Teardown can send DESTROY_SESSION after this optional TLS buffer has
-    // gone away. Never let diagnostics abort otherwise valid cleanup.
-    let _ = STATS_XDR_BUFFER.try_with(|scratch| {
-        let mut buf = scratch.borrow_mut();
-        if buf.is_empty() {
-            buf.resize(4 * 1024 * 1024, 0);
-        }
-        loop {
-            // SAFETY: XDR is a C aggregate of integers, raw pointers and nullable
-            // callbacks, valid when zeroed before xdrmem_ncreate initializes it.
-            let mut xdr: XDR = unsafe { std::mem::zeroed() };
-            // SAFETY: the word-aligned scratch buffer stays allocated for the synchronous
-            // encoder; all argument payloads are owned by the live Compound builder.
-            let encoded = unsafe {
-                xdrmem_ncreate(
-                    &mut xdr,
-                    buf.as_mut_ptr() as *mut c_char,
-                    buf.len() as u32,
-                    xdr_op_XDR_ENCODE,
-                );
-                xdr_wrap_COMPOUND4args(&mut xdr, args as *const _ as *mut _)
-            };
-            if encoded {
-                // The initialized memory XDR stream keeps both cursor pointers
-                // within the same live scratch allocation.
-                let len = (xdr.x_data.addr() - xdr.x_v.vio_base.addr()) as u64;
-                COMPOUND_BYTES.fetch_add(len, Ordering::Relaxed);
-                THREAD_COMPOUND_STATS.with(|stats| {
-                    let (count, ops, bytes, max_ops) = stats.get();
-                    stats.set((count, ops, bytes + len, max_ops));
-                });
-                break;
-            }
-            // A diagnostic must not grow without bound if malformed input
-            // reaches the encoder. This is well above the configured request
-            // limit and only allocates when byte statistics are enabled.
-            if buf.len() >= 256 * 1024 * 1024 {
-                break;
-            }
-            let new_len = buf.len() * 2;
-            buf.resize(new_len, 0);
-        }
-    });
 }
 
 /// Aggregate compound statistics, resetting the counters.
@@ -1852,6 +1845,42 @@ pub fn rpc_stats() -> (u64, u64) {
 #[allow(clippy::undocumented_unsafe_blocks, unsafe_op_in_unsafe_fn)]
 mod request_size_tests {
     use super::*;
+
+    #[test]
+    fn rpc_codec_counts_only_actual_argument_bytes_without_reencoding() {
+        let mut compound = Compound::new();
+        compound.tag(b"telemetry");
+        compound.putrootfh();
+        compound.lookup(b"child");
+        let expected = compound.encoded_len_up_to(4096).unwrap().unwrap() as u64;
+        compound.args.argarray.argarray_len = compound.ops.len() as u32;
+        compound.args.argarray.argarray_val = compound.ops.as_mut_ptr();
+        for count_bytes in [false, true] {
+            let mut words = vec![0u32; 1024];
+            let mut xdr: XDR = unsafe { std::mem::zeroed() };
+            unsafe { xdrmem_ncreate(&mut xdr, words.as_mut_ptr().cast(), 4096, xdr_op_XDR_ENCODE) };
+            // An unrelated RPC prefix must not be counted as COMPOUND bytes.
+            let mut prefix = 123u32;
+            assert!(unsafe { xdr_u_int(&mut xdr, &mut prefix) });
+            let mut encoded = EncodedCompound {
+                args: &mut compound.args,
+                count_bytes,
+                bytes: 0,
+            };
+            for attempt in 1..=2 {
+                assert!(unsafe {
+                    wrap_compound4args(
+                        (&mut xdr as *mut XDR).cast(),
+                        (&mut encoded as *mut EncodedCompound).cast(),
+                    )
+                });
+                assert_eq!(
+                    encoded.bytes,
+                    if count_bytes { expected * attempt } else { 0 }
+                );
+            }
+        }
+    }
 
     #[test]
     fn safe_create_union_initializes_each_wire_payload() {

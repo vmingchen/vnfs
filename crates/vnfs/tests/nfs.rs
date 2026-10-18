@@ -302,6 +302,119 @@ fn builder_observer_receives_lifecycle_events() {
 }
 
 #[test]
+fn telemetry_is_client_scoped_counts_payloads_and_survives_reconnect() {
+    use vnfs::files::{Vfsi, WriteOp};
+    use vnfs::nfs::Telemetry;
+    let minor = std::env::var("VNFS_TEST_MINOR")
+        .ok()
+        .map(|s| s.parse::<u32>().unwrap())
+        .unwrap_or(2);
+    let version = if minor == 1 {
+        vnfs::nfs::NfsVersion::V4_1
+    } else {
+        vnfs::nfs::NfsVersion::V4_2
+    };
+    let metrics = Telemetry::default();
+    let isolated = Telemetry::default();
+    let fs = Nfs::builder(test_host())
+        .version(version)
+        .telemetry(metrics.clone())
+        .connect()
+        .unwrap();
+    let other = Nfs::builder(test_host())
+        .version(version)
+        .telemetry(isolated.clone())
+        .connect()
+        .unwrap();
+    assert_eq!(metrics.snapshot().calls, 0, "handshake excluded");
+    fs.attrs("/").unwrap();
+    let before = metrics.snapshot();
+    assert!(before.calls > 0 && before.operations > 0 && before.request_bytes > 0);
+    other.attrs("/").unwrap();
+    assert_eq!(
+        metrics.snapshot(),
+        before,
+        "independent clients cannot drain or contaminate counters"
+    );
+    assert!(isolated.snapshot().calls > 0);
+    let dir = setup_dir("scoped-telemetry");
+    assert!(fs.attrs(format!("{dir}/missing")).is_err());
+    assert!(
+        metrics.snapshot().nfs_errors >= 1,
+        "count RPC errors, not logical calls"
+    );
+    let file = fs.create(format!("{dir}/data")).unwrap();
+    let before_write = metrics.snapshot();
+    fs.vwrite(
+        &[WriteOp::at(&file, 0, &vec![7; 128 * 1024])],
+        Default::default(),
+    )
+    .unwrap();
+    let written = metrics.snapshot();
+    assert!(
+        written.request_bytes - before_write.request_bytes > 128 * 1024,
+        "count actual scatter/gather XDR payload, not just its first segment"
+    );
+    assert!(
+        written.request_bytes - before_write.request_bytes < 256 * 1024,
+        "no diagnostic second encode"
+    );
+    drop(file);
+    let pool_metrics = Telemetry::default();
+    let pool = Nfs::builder(test_host())
+        .version(version)
+        .telemetry(pool_metrics.clone())
+        .connect_pool(2)
+        .unwrap();
+    for i in 0..2 {
+        let before = pool_metrics.snapshot().calls;
+        pool.client(i).unwrap().attrs("/").unwrap();
+        assert!(pool_metrics.snapshot().calls > before);
+    }
+    let reconnect_metrics = Telemetry::default();
+    let mut raw = NfsVecFs::builder(test_host())
+        .minor_version(Some(minor))
+        .telemetry(reconnect_metrics.clone())
+        .connect()
+        .unwrap();
+    raw.exists_impl(Path::new("/")).unwrap();
+    let before = reconnect_metrics.snapshot().calls;
+    raw.reconnect().unwrap();
+    raw.exists_impl(Path::new("/")).unwrap();
+    assert!(reconnect_metrics.snapshot().calls > before);
+    client()
+        .remove_paths_impl(&[Path::new(&dir)], true)
+        .unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn telemetry_counts_rpc_attempts_with_real_lost_replies() {
+    let proxy = DropReplyProxy::start(reply_loss_target());
+    let metrics = vnfs::nfs::Telemetry::default();
+    let mut fs = NfsVecFs::builder(proxy.endpoint())
+        .telemetry(metrics.clone())
+        .minor_version(
+            std::env::var("VNFS_TEST_MINOR")
+                .ok()
+                .map(|s| s.parse().unwrap()),
+        )
+        .auto_reconnect(false)
+        .request_timeout(Duration::from_millis(500))
+        .connect()
+        .unwrap();
+    assert_eq!(metrics.snapshot().calls, 0);
+    proxy.arm();
+    assert!(fs.exists_impl(Path::new("/")).unwrap_err().is_transport());
+    proxy.wait_for_drop();
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.calls, 1);
+    assert_eq!(snapshot.transport_errors, 1);
+    assert_eq!(snapshot.nfs_errors, 0);
+    assert!(snapshot.request_bytes > 0 && snapshot.rpc_nanos > 0);
+}
+
+#[test]
 fn rust_native_client_workflow_on_nfs() {
     let dir = setup_dir("rust_native_client");
     let host = std::env::var("VNFS_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".into());

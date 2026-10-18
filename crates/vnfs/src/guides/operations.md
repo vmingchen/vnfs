@@ -137,7 +137,31 @@ page-cache reuse; coordinate caches explicitly when mixing direct and kernel I/O
 
 ## Diagnostics
 
+Use an opt-in handle for client-scoped, cumulative RPC counters:
+
+```no_run
+use vnfs::nfs::{Nfs, Telemetry};
+# fn main() -> vnfs::Result<()> {
+let telemetry = Telemetry::default();
+let fs = Nfs::builder("127.0.0.1").telemetry(telemetry.clone()).connect()?;
+// Perform operations through fs, then inspect without locking it.
+println!("{:?}", telemetry.snapshot());
+# Ok(())
+# }
+```
+
+Clones share counters; separate handles are isolated. One handle on a pool
+aggregates its members. Counters survive reconnect, include failed RPC attempts
+and teardown, but exclude connection/reconnect handshakes. RPC time excludes
+client lock wait, planning and handshakes. Snapshots are approximate during
+concurrent calls and never reset another consumer's view. Byte counts measure
+actual COMPOUND argument encodings, not RPC/auth/TCP overhead; authentication
+refresh can encode a call again. No second encode or request-sized diagnostic
+scratch allocation is needed. Telemetry is disabled by default.
+
 `diagnostics::take_and_reset` drains process-wide counters, not per-client
 statistics. Coordinate consumers; sampled fields are not an atomic snapshot.
 Exact compound byte telemetry requires `VNFS_STATS=1` before the first compound.
+These legacy counters count successful RPC completions only; the scoped handle
+also counts transport failures. Both reuse actual encoding for byte counts.
 Count actual RPCs when assessing batching—not API calls.

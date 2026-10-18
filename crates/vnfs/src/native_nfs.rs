@@ -237,6 +237,14 @@ impl NfsBuilder {
         self
     }
 
+    /// Attach opt-in RPC counters. Clone this handle to inspect cumulative
+    /// counters without locking the client or resetting other consumers.
+    /// Connecting pools with one handle aggregates their members.
+    pub fn telemetry(mut self, telemetry: crate::nfs::Telemetry) -> Self {
+        self.inner = self.inner.telemetry(telemetry);
+        self
+    }
+
     pub fn connect(self) -> VfResult<NfsClient> {
         self.inner.connect().map(|backend| NfsClient {
             inner: FsClient::new(backend).with_limits(self.limits),

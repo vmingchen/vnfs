@@ -1177,6 +1177,10 @@ impl NfsClient {
         self.session.minorversion
     }
 
+    pub(crate) fn set_telemetry(&mut self, telemetry: Option<crate::telemetry::Telemetry>) {
+        self.session.rpc.telemetry = telemetry;
+    }
+
     /// Set the configured per-compound payload cap. Zero restores the
     /// negotiated server maximum; callers can never exceed that maximum.
     pub fn set_max_compound_bytes(&mut self, bytes: usize) {

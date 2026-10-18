@@ -108,6 +108,7 @@ impl NfsVecFs {
     pub fn connect_with_options(host: &str, options: NfsConnectOptions) -> VfResult<NfsVecFs> {
         let root = path_from_bytes(&normalize_bytes(path_bytes(&options.root)));
         let connection = ConnectionConfig {
+            telemetry: None,
             host: Box::from(host),
             root,
             minorversion: options.minorversion,
@@ -143,7 +144,7 @@ impl NfsVecFs {
     }
 
     fn connect_client(connection: &ConnectionConfig) -> VfResult<NfsClient> {
-        match connection.minorversion {
+        let mut client = match connection.minorversion {
             Some(version) => NfsClient::connect_minor_with_identity(
                 &connection.host,
                 version,
@@ -162,7 +163,9 @@ impl NfsVecFs {
                 Some(connection.client_verifier),
             ),
         }
-        .map_err(|e| vfsi_core::error_from_rpc(e, 0))
+        .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
+        client.set_telemetry(connection.telemetry.clone());
+        Ok(client)
     }
 
     fn from_client(nfs: NfsClient, connection: ConnectionConfig) -> NfsVecFs {

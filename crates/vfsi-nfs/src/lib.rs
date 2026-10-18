@@ -17,6 +17,9 @@ pub mod rpc;
 #[cfg(feature = "ffi")]
 pub mod session;
 
+#[cfg(feature = "ffi")]
+pub mod telemetry;
+
 /// Stable entry points used by the out-of-tree libFuzzer targets.
 #[doc(hidden)]
 #[cfg(feature = "fuzzing")]

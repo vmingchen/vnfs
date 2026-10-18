@@ -247,6 +247,7 @@ pub struct RpcClient {
     clnt: *mut CLIENT,
     auth: *mut AUTH,
     request_timeout: timespec,
+    pub(crate) telemetry: Option<crate::telemetry::Telemetry>,
 }
 
 // SAFETY: the client owns its transport/authentication handles and can move between
@@ -394,6 +395,7 @@ impl RpcClient {
             )));
         }
         Ok(RpcClient {
+            telemetry: None,
             clnt,
             auth,
             request_timeout: timespec {

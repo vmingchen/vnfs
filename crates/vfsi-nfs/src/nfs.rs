@@ -71,6 +71,7 @@ fn resource_status(status: u32) -> bool {
 
 #[derive(Debug, Clone)]
 struct ConnectionConfig {
+    telemetry: Option<crate::telemetry::Telemetry>,
     host: Box<str>,
     root: PathBuf,
     minorversion: Option<u32>,
@@ -144,6 +145,7 @@ impl NfsConnectOptions {
 /// Builder for a completely configured NFS client.
 #[derive(Clone)]
 pub struct NfsClientBuilder {
+    telemetry: Option<crate::telemetry::Telemetry>,
     host: Box<str>,
     options: NfsConnectOptions,
     observer: Option<Arc<dyn NfsObserver>>,
@@ -166,6 +168,7 @@ impl NfsClientBuilder {
     pub fn new(host: impl Into<String>) -> Self {
         Self {
             host: host.into().into_boxed_str(),
+            telemetry: None,
             options: NfsConnectOptions::default(),
             observer: None,
             #[cfg(target_os = "linux")]
@@ -240,6 +243,14 @@ impl NfsClientBuilder {
         self
     }
 
+    /// Opt into client-scoped RPC counters. Separate handles stay isolated;
+    /// clones and pool members using the same handle aggregate. Initial and
+    /// reconnect handshakes are excluded. Disabled by default.
+    pub fn telemetry(mut self, telemetry: crate::telemetry::Telemetry) -> Self {
+        self.telemetry = Some(telemetry);
+        self
+    }
+
     /// Connect a reusable bounded pool for ordered pipelined large-file reads.
     pub fn connect_read_pool(self, options: NfsReadPoolOptions) -> VfResult<NfsReadPool> {
         self.validate()?;
@@ -274,6 +285,10 @@ impl NfsClientBuilder {
     pub fn connect(self) -> VfResult<NfsVecFs> {
         self.validate()?;
         let mut filesystem = NfsVecFs::connect_with_options(&self.host, self.options)?;
+        filesystem.connection.telemetry = self.telemetry;
+        filesystem
+            .nfs
+            .set_telemetry(filesystem.connection.telemetry.clone());
         #[cfg(target_os = "linux")]
         if let Some(mount) = &self.mount {
             let identity = mount.verify(&mut filesystem)?;

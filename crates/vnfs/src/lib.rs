@@ -17,6 +17,7 @@ pub mod nfs {
     pub use crate::native_nfs::{Nfs, NfsBuilder, NfsClientPool, NfsVersion};
     #[cfg(feature = "rpcsec-gss")]
     pub use vfsi_nfs::RpcsecGssProtection;
+    pub use vfsi_nfs::telemetry::{Snapshot as TelemetrySnapshot, Telemetry};
     pub use vfsi_nfs::{
         NfsAuth, NfsEvent, NfsObserver, NfsReadPool, NfsReadPoolOptions, NfsRecoveryPolicy,
     };
