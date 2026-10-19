@@ -150,13 +150,14 @@ def test_round_trip_bounds(nfs_fs):
     _, mv_count = _measured(fs, lambda: fs.mv(srcs, dsts))
     assert mv_count == 1, mv_count
 
-    # cp: batched read/write plus one bounded destination-parent listing to
-    # avoid per-file identity checks when all destinations are new.
+    # cp: one batched source-type safety probe, then the six-compound native
+    # read/write + bounded destination-parent listing path. The probe rejects
+    # FIFOs before COPY can block; neither phase may add per-file round trips.
     _, cp_count = _measured(
         fs,
         lambda: fs.cp(dsts, [_unique(nfs_fs, f"cp/{i}.txt") for i in range(n)]),
     )
-    assert cp_count <= 6, cp_count
+    assert cp_count <= 7, cp_count
 
     # Walk batches the 30-node tree: root resolution/type and READDIR/EOF (4),
     # then parent resolution/type, sibling LOOKUPs, and sibling READDIR (4).
