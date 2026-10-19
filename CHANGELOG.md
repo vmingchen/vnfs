@@ -5,6 +5,25 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+## Coordinated patch release — vnfs 0.0.25 / nfs4fs 0.3.10 (2026-10-18)
+
+- Publish Rust packages `vnfs 0.0.25`, `vfsi-core 0.1.13`,
+  `vfsi-sync 0.1.14`, `vfsi-local 0.1.12`, `vfsi-posix 0.1.4`,
+  `vfsi-uring 0.1.4`, `vfsi-nfs 0.1.13`, `vfsi-smb 0.1.11`,
+  `nfsv41-sys 0.1.14`, and `vfsi-c 0.3.9`. Advance internal dependency
+  minimums together; the external `libntirpc-sys` dependency remains at 0.3.2.
+- Publish `nfs4fs 0.3.10` with a `vfsi-fsspec>=0.1.10,<0.2` requirement.
+  The shared engine release includes copy-source classification and fail-closed
+  destination identity checks. Bump the private native build helper to 0.1.5;
+  the Python SMB distribution versions remain unchanged.
+- Harden callback error provenance, directory traversal anchoring, descriptor
+  cleanup, SMB copy/close behavior, and path timestamp updates. Preserve
+  zero-byte transfer budgets for operations that do not read file contents.
+- Reduce request projection and attribute allocation overhead; improve
+  io_uring overlapping-write scheduling without quadratic dependency storage.
+- Add opt-in, scoped NFS RPC telemetry and paired, reproducible benchmark
+  tooling. Telemetry remains disabled by default.
+
 ## Coordinated patch release - 2026-10-18
 
 - Rust: vnfs 0.0.24, vfsi-core 0.1.12, vfsi-sync 0.1.13,

@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-core"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "bitfields",
  "bitflags",
@@ -849,7 +849,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-python-native"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "libc",
  "pyo3",
@@ -860,7 +860,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-smb"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "bitfields",
  "futures-util",
@@ -873,7 +873,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-sync"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "libc",
  "vfsi-core",
