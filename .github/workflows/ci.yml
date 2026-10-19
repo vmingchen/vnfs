@@ -669,7 +669,16 @@ jobs:
           printf 'preserve\n' > "$nested_root/child/hidden"
           sudo mount --bind "$nested_source" "$nested_root/child"
           VFSI_AUTO_TEST_MOUNT=/mnt/vnfs-ci-auto VFSI_AUTO_TEST_BIND="$bind_target" VFSI_AUTO_TEST_NESTED_ROOT="$nested_root" \
-            cargo test -p vnfs --lib auto::tests::live_ -- --ignored --nocapture --test-threads=1
+            cargo test -p vnfs --lib auto::tests::live_ -- --ignored --nocapture --test-threads=1 \
+              --skip live_retained_directory_cursor_rechecks_filesystem_credentials
+          # This regression changes fsuid and must run alone as root; never
+          # elevate Cargo or the rest of the mount tests with it.
+          test_binary=$(cargo test -p vnfs --lib --no-run --message-format=json | \
+            jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable != null) | .executable')
+          test -x "$test_binary"
+          sudo env VFSI_NFS_SERVER=127.0.0.1 VFSI_NFS_MINOR=${{ matrix.minor-version }} \
+            "$test_binary" auto::tests::live_retained_directory_cursor_rechecks_filesystem_credentials \
+              --exact --ignored --nocapture --test-threads=1
           VFSI_NFS_TEST_MOUNT=/mnt/vnfs-ci-auto VFSI_NFS_TEST_MOUNT_RO=/mnt/vnfs-ci-discovery-ro \
             cargo test -p vnfs --lib native_nfs::mount_tests -- --ignored --nocapture --test-threads=1
           VFSI_NFS_TEST_MOUNT=/mnt/vnfs-ci-auto VFSI_NFS_TEST_MOUNT_RO=/mnt/vnfs-ci-discovery-ro \
