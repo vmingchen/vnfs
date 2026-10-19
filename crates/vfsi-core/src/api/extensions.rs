@@ -648,14 +648,14 @@ pub trait VfsiExt: Vfsi {
                 .get_mut(index)
                 .ok_or_else(|| crate::api::Error::transport(None, "invalid visitor root index"))?;
             let positions = &mut positions[index];
-            let slot = *positions.entry(page.path.clone()).or_insert_with(|| {
-                tree.push(DirectoryListing {
-                    path: page.path.clone(),
-                    entries: Vec::new(),
-                });
-                tree.len() - 1
-            });
-            tree[slot].entries.extend(page.entries);
+            if let Some(&slot) = positions.get(&page.path) {
+                tree[slot].entries.extend(page.entries);
+            } else {
+                positions.insert(page.path.clone(), tree.len());
+                // Keep the first page's path and entry storage; later pages
+                // need only a borrowed lookup to find this directory.
+                tree.push(page);
+            }
             Ok(std::ops::ControlFlow::Continue(()))
         })?;
         Ok(trees)

@@ -535,6 +535,7 @@ int vfsi_pread(struct vfsi_fs *fs, int fd, void *buf, size_t len, uint64_t offse
 
 /**
  * Write `len` bytes at `offset`; writes the actual count to `*wrote`.
+ * Handles opened with `O_APPEND` write at EOF regardless of `offset`.
  *
  * # Safety
  * All pointers, buffers and callbacks must satisfy the module-level C
@@ -717,6 +718,8 @@ struct vfsi_result vfsi_copyv(struct vfsi_fs *fs,
  * Stream several paths in bounded vectorized chunks. Returning `false` from
  * `cb` cancels successfully. The callback provides backpressure and must not
  * reenter the same filesystem handle.
+ * On success, `index` counts files whose EOF was delivered to the callback,
+ * including an EOF callback that cancels the stream.
  *
  * # Safety
  * All pointers, buffers and callbacks must satisfy the module-level C

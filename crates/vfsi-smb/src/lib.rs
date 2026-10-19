@@ -1014,7 +1014,9 @@ impl SmbVecFs {
         let ticks = (i128::from(seconds) + WINDOWS_EPOCH_SECONDS)
             .checked_mul(10_000_000)
             .and_then(|value| value.checked_add(i128::from(nanoseconds / 100)))
-            .filter(|value| (0..=i128::from(u64::MAX)).contains(value))
+            // FileBasicInformation timestamps are signed. Zero and the
+            // negative values select update policies rather than a date.
+            .filter(|value| (1..=i128::from(i64::MAX)).contains(value))
             .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
         Ok(ticks as u64)
     }
@@ -1566,6 +1568,17 @@ impl SmbVecFs {
 }
 
 impl HandleBackend for SmbVecFs {
+    fn close_deferred(&mut self, file: &FileOperand) -> VfResult<()> {
+        let fd = file.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+        if self.open_files.contains_key(&fd) {
+            self.close_impl(file)
+        } else {
+            // Failed scalar closes retain their remote FileId in this queue;
+            // successful vector closes have already retired their descriptor.
+            self.drain_deferred_closes()
+        }
+    }
+
     fn capabilities(&self) -> Capabilities {
         if self.server_copy_enabled {
             Capabilities::SERVER_COPY
@@ -3710,6 +3723,20 @@ mod tests {
         let mut no_failed_close = None;
         finish_compound_close(&mut no_failed_close, file_id, true, Ok(())).unwrap();
         assert_eq!(no_failed_close, None);
+    }
+
+    #[test]
+    fn timestamp_updates_reject_protocol_controls_and_negative_filetimes() {
+        for ticks in [0, u64::MAX, u64::MAX - 1, i64::MAX as u64 + 1] {
+            let (seconds, nanos) = filetime_parts(FileTime(ticks));
+            let error = SmbVecFs::filetime_value(seconds, nanos, 3).unwrap_err();
+            assert_eq!(error.raw_code(), ERR_INVAL);
+            assert_eq!(error.index(), Some(3));
+        }
+        for ticks in [1, 116_444_736_000_000_000, i64::MAX as u64] {
+            let (seconds, nanos) = filetime_parts(FileTime(ticks));
+            assert_eq!(SmbVecFs::filetime_value(seconds, nanos, 3).unwrap(), ticks);
+        }
     }
 
     #[test]

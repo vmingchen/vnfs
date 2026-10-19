@@ -640,6 +640,12 @@ impl Auto {
                     if !Arc::ptr_eq(&saved.owner, &self.owner) || saved.public_path != *path {
                         return Err(VfError::client(index, libc::EINVAL as u32));
                     }
+                    if let Route::Nfs(connection) = &saved.route
+                        && AuthSysIdentity::current().as_ref() != Some(&connection.credentials)
+                    {
+                        return Err(VfError::client(index, libc::EACCES as u32)
+                            .with_context("auto_auth", path));
+                    }
                     if child {
                         // Recheck the mount/identity before descent, but retain
                         // anchored lookup when the child still uses this backend.

@@ -134,6 +134,131 @@ fn child_seeds_recheck_routing_and_keep_owner_validation() {
 }
 
 #[test]
+#[ignore = "requires an isolated root child and VFSI_NFS_SERVER; no mount required"]
+fn live_retained_directory_cursor_rechecks_filesystem_credentials() {
+    use crate::{Attributes, NfsVersion};
+
+    struct RestoreFsuid(libc::uid_t);
+    impl Drop for RestoreFsuid {
+        fn drop(&mut self) {
+            // SAFETY: the isolated child retains euid 0 and restores its own fsuid.
+            unsafe { libc::setfsuid(self.0) };
+        }
+    }
+
+    // Credential changes are confined to the explicitly selected test child.
+    // SAFETY: geteuid is a credential query with no pointer arguments.
+    let euid = unsafe { libc::geteuid() };
+    assert_eq!(euid, 0, "run this test in a root child");
+    let server = std::env::var("VFSI_NFS_SERVER").expect("live NFS server required");
+    let export = std::env::var("VFSI_NFS_EXPORT").unwrap_or_else(|_| "/".into());
+    let minor = std::env::var("VFSI_NFS_MINOR")
+        .unwrap_or_else(|_| "2".into())
+        .parse()
+        .unwrap();
+    let telemetry = crate::nfs::Telemetry::default();
+    let remote = Nfs::builder(&server)
+        .root(&export)
+        .version(NfsVersion::try_from(Some(minor)).unwrap())
+        .telemetry(telemetry.clone())
+        .connect()
+        .unwrap();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = PathBuf::from(format!("/auto-cursor-auth-{}-{nonce}", std::process::id()));
+    remote.vmkdir(&[crate::MkDirOp::new(&path, 0o700)]).unwrap();
+    remote.write(path.join("first"), b"private").unwrap();
+    remote.write(path.join("second"), b"private").unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let client = Auto::new(local.path()).unwrap();
+    let credentials = AuthSysIdentity::current().unwrap();
+    let connection = Arc::new(routing::NfsConnectionState {
+        spec: MountSpec {
+            id: u64::MAX,
+            mount_point: local.path().to_path_buf(),
+            export: export.into(),
+            server: server.into_boxed_str(),
+            minor,
+        },
+        client: remote.inner.clone(),
+        identity: Arc::new(()),
+        credentials: credentials.clone(),
+    });
+    let mut outcomes = Vec::new();
+    for (changed, index, child) in [
+        (false, 0, false),
+        (true, 0, false),
+        (true, 1, false),
+        (true, 1, true),
+    ] {
+        let (_, next, _) = remote
+            .inner
+            .read_dir_pages_with_fields(&[&path], Attributes::MODE, vec![None], 1, 10, true)
+            .unwrap()
+            .remove(0);
+        let saved = RoutedDirectoryCursor {
+            route: Route::Nfs(connection.clone()),
+            backend_path: path.clone(),
+            public_path: path.clone(),
+            owner: client.owner.clone(),
+            cursor: next.expect("the live directory must have a second page"),
+        };
+        let cursor = if child {
+            vfsi_sync::DirPageCursor::new(RoutedChildDirectoryCursor(saved))
+        } else {
+            vfsi_sync::DirPageCursor::new(saved)
+        };
+        let before = telemetry.snapshot().calls;
+        let previous = changed.then(|| {
+            // SAFETY: setfsuid affects only this isolated calling thread; the
+            // guard restores the exact prior identity, including on unwind.
+            let previous = unsafe { libc::setfsuid(65534) };
+            RestoreFsuid(previous as libc::uid_t)
+        });
+        let mismatched = AuthSysIdentity::current().as_ref() != Some(&credentials);
+        let mut paths = Vec::new();
+        let mut cursors = Vec::new();
+        if index == 1 {
+            paths.push(Path::new("/unvisited"));
+            cursors.push(None);
+        }
+        paths.push(path.as_path());
+        cursors.push(Some(cursor));
+        let result =
+            client.read_dir_pages_with_fields(&paths, Attributes::MODE, cursors, 1, 10, true);
+        drop(previous);
+        outcomes.push((
+            changed,
+            index,
+            mismatched,
+            before,
+            telemetry.snapshot().calls,
+            result,
+        ));
+    }
+    // Remove only the successfully created remote fixture before assertions.
+    remote.remove_dir_all(&path).unwrap();
+    assert_eq!(AuthSysIdentity::current().as_ref(), Some(&credentials));
+    for (changed, index, mismatched, before, after, result) in outcomes {
+        assert_eq!(mismatched, changed);
+        if changed {
+            let error = result
+                .err()
+                .expect("stale credentials must reject the page");
+            assert_eq!(error.raw_code(), libc::EACCES as u32);
+            assert_eq!(error.index(), Some(index));
+            assert_eq!(error.operation(), Some("auto_auth"));
+            assert_eq!(error.path(), Some(path.as_path()));
+            assert_eq!(after, before, "reject before any retained-identity RPC");
+        } else {
+            assert_eq!(result.unwrap()[0].0.entries.len(), 1);
+        }
+    }
+}
+
+#[test]
 fn routed_pages_enforce_public_budgets_and_pin_cursor_ownership() {
     use crate::{Attributes, ListDirOptions, VfsiExt};
     let root = tempfile::tempdir().unwrap();

@@ -354,6 +354,43 @@ fn listdir_default_stops_before_next_page_without_metadata_or_root_events() {
 }
 
 #[test]
+fn listdir_preserves_callback_error_provenance_in_every_presentation_mode() {
+    for sort in [false, true] {
+        for lifecycle in [false, true] {
+            for expected in [
+                Error::client(3, libc::ENOSPC as u32),
+                Error::nfs(3, 13),
+                Error::smb(3, 0xc000_0022),
+                Error::transport_with_kind(
+                    Some(3),
+                    vfsi_core::TransportKind::Connection,
+                    "nested operation lost its reply",
+                ),
+                Error::transport(None, "unattributed nested failure"),
+            ] {
+                let fs = tree_fs();
+                let expected = expected.with_context("nested operation", "/nested/file");
+                let mut calls = 0;
+                let actual = fs
+                    .listdir(
+                        "/tree",
+                        WalkOptions::new(ListDirOptions::new())
+                            .with_sort_by_name(sort)
+                            .with_enter_leave(lifecycle),
+                        |_| {
+                            calls += 1;
+                            Err(expected.clone())
+                        },
+                    )
+                    .unwrap_err();
+                assert_eq!(actual, expected, "sort={sort}, lifecycle={lifecycle}");
+                assert_eq!(calls, 1, "stop immediately after the callback failure");
+            }
+        }
+    }
+}
+
+#[test]
 fn listdir_rejects_malformed_page_indices_parents_and_completions_without_replay() {
     for shape in 7..=11 {
         let fs = tree_fs();

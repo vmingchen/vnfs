@@ -1807,12 +1807,24 @@ pub unsafe extern "C" fn vfsi_pread(
 fn pwrite_impl(fs: &vfsi_fs, fd: i32, data: &[u8], offset: u64) -> Result<usize, VfError> {
     let file = lock_or_io(&fs.files)?
         .get(&fd)
-        .map(|file| file.file.clone())
+        .cloned()
         .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
-    lock_or_io(&fs.fs)?.write_raw_impl(&file, offset, data)
+    let offset = if file.append {
+        vfsi_sync::VfOffset::End
+    } else {
+        vfsi_sync::VfOffset::At(offset)
+    };
+    let request = WriteOp::new(&file.file, offset, data);
+    let result = lock_or_io(&fs.fs)?.write_impl(request)?;
+    validate_c_write_results(
+        std::slice::from_ref(&request),
+        std::slice::from_ref(&result),
+    )?;
+    Ok(result.bytes_written)
 }
 
 /// Write `len` bytes at `offset`; writes the actual count to `*wrote`.
+/// Handles opened with `O_APPEND` write at EOF regardless of `offset`.
 ///
 /// # Safety
 /// All pointers, buffers and callbacks must satisfy the module-level C
@@ -2921,6 +2933,8 @@ pub unsafe extern "C" fn vfsi_copyv(
 /// Stream several paths in bounded vectorized chunks. Returning `false` from
 /// `cb` cancels successfully. The callback provides backpressure and must not
 /// reenter the same filesystem handle.
+/// On success, `index` counts files whose EOF was delivered to the callback,
+/// including an EOF callback that cancels the stream.
 ///
 /// # Safety
 /// All pointers, buffers and callbacks must satisfy the module-level C
@@ -2978,11 +2992,13 @@ pub unsafe extern "C" fn vfsi_read_streamv(
             Ok(backend) => backend,
             Err(error) => return vfsi_result::from_error(error),
         };
+        let mut completed = 0;
         let result = backend.vstream_impl(
             &files,
             chunk_size,
             memory_limit,
             &mut |index, offset, data, eof| {
+                completed += usize::from(eof);
                 // SAFETY: the caller provides this callback; borrowed strings, attributes
                 // and bytes remain live until it returns.
                 unsafe {
@@ -2999,7 +3015,7 @@ pub unsafe extern "C" fn vfsi_read_streamv(
             },
         );
         match result {
-            Ok(()) => vfsi_result::success(count),
+            Ok(()) => vfsi_result::success(completed),
             Err(error) => vfsi_result::from_error(error),
         }
     })
@@ -4052,6 +4068,114 @@ mod tests {
             assert_eq!(calls.lock().unwrap().len(), 1);
             unsafe { vfsi_free(fs) };
         }
+    }
+
+    #[test]
+    fn cancelled_stream_reports_only_delivered_file_completions() {
+        struct Seen {
+            calls: usize,
+            stop_after: usize,
+            completed: usize,
+        }
+        unsafe extern "C" fn callback(
+            _: *const c_char,
+            _: usize,
+            _: u64,
+            _: *const u8,
+            _: usize,
+            eof: bool,
+            userdata: *mut c_void,
+        ) -> bool {
+            let seen = &mut *userdata.cast::<Seen>();
+            seen.calls += 1;
+            seen.completed += usize::from(eof);
+            seen.calls < seen.stop_after
+        }
+        for (first, stop_after, completed) in [
+            (b"abcdef".as_slice(), 1, 0),
+            (b"a".as_slice(), 1, 1),
+            (b"".as_slice(), 1, 1),
+            (b"a".as_slice(), 2, 1),
+            (b"abcdef".as_slice(), usize::MAX, 2),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(root.path().join("first"), first).unwrap();
+            std::fs::write(root.path().join("second"), b"second-file").unwrap();
+            let fs = make_fs(
+                Box::new(vfsi_posix::backend(root.path()).unwrap()),
+                PathBuf::from("/"),
+                PathBuf::from("/"),
+            );
+            let paths = [c"/first".as_ptr(), c"/second".as_ptr()];
+            let mut seen = Seen {
+                calls: 0,
+                stop_after,
+                completed: 0,
+            };
+            let result = unsafe {
+                vfsi_read_streamv(
+                    fs,
+                    paths.as_ptr(),
+                    paths.len(),
+                    3,
+                    3,
+                    Some(callback),
+                    (&mut seen as *mut Seen).cast(),
+                )
+            };
+            assert_eq!(result.category, VFSI_ERROR_NONE);
+            assert_eq!(seen.completed, completed);
+            assert_eq!(result.index, completed);
+            if stop_after != usize::MAX {
+                assert_eq!(seen.calls, stop_after);
+            }
+            unsafe { vfsi_free(fs) };
+        }
+    }
+
+    #[test]
+    fn c_scalar_writes_preserve_append_and_positional_handles() {
+        let root = tempfile::tempdir().unwrap();
+        let raw = make_fs(
+            Box::new(vfsi_posix::backend(root.path()).unwrap()),
+            PathBuf::from("/"),
+            PathBuf::from("/"),
+        );
+        for (path, append) in [(c"/append", true), (c"/positional", false)] {
+            let fd = unsafe {
+                vfsi_open(
+                    raw,
+                    path.as_ptr(),
+                    libc::O_WRONLY | libc::O_CREAT | if append { libc::O_APPEND } else { 0 },
+                    0o644,
+                )
+            };
+            assert!(fd >= 0);
+            for (payload, offset) in [(b"abc".as_slice(), 0), (b"XY".as_slice(), 1)] {
+                let mut wrote = usize::MAX;
+                assert_eq!(
+                    unsafe {
+                        vfsi_pwrite(
+                            raw,
+                            fd,
+                            payload.as_ptr().cast(),
+                            payload.len(),
+                            offset,
+                            &mut wrote,
+                        )
+                    },
+                    0
+                );
+                assert_eq!(wrote, payload.len());
+            }
+            assert_eq!(unsafe { vfsi_close(raw, fd) }, 0);
+        }
+        unsafe { vfsi_free(raw) };
+        assert_eq!(std::fs::read(root.path().join("append")).unwrap(), b"abcXY");
+        assert_eq!(
+            std::fs::read(root.path().join("positional")).unwrap(),
+            b"aXY"
+        );
     }
 
     #[test]

@@ -168,11 +168,13 @@ Descriptor copies stop at the initially observed file size; growth is ignored.
 
 `move_items` and its progress variant delete a root only after copying and
 explicit CLOSE succeed, without skips or cancellation. `Container + Replace`
-without progress or depth overrides can rename an absent destination; only an
-explicit cross-device error enables copy/delete fallback. Other modes copy
-first, preserving exclusive conflict checks. Failure, cancellation, or skipped
-entries retains the source (which can leave two copies). No ambiguous write or
-rename is replayed by these helpers.
+without progress or depth overrides attempts an atomic rename to an absent
+destination. Cross-device, existing-destination and unsupported-rename errors
+permit copy/delete fallback after checking which roots were already renamed.
+Other modes copy first, preserving exclusive conflict checks. Failure,
+cancellation, or skipped entries retain sources that have not already been
+renamed or removed; completed work is not rolled back. A failed copy can leave
+two copies. No ambiguous write or rename is replayed by these helpers.
 
 `Vfsi::vrename` accepts `RenameMode::NoReplace` for an atomic
 absent-destination check and `RenameMode::Exchange` to exchange two existing

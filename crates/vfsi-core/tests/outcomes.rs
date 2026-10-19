@@ -116,6 +116,33 @@ fn portable_error_kinds_preserve_protocol_status_and_source() {
 }
 
 #[test]
+fn protocol_cross_device_errors_keep_their_category_and_status_through_standard_io() {
+    for error in [
+        VfError::nfs(2, 18), // NFS4ERR_XDEV
+        vfsi_core::error_from_rpc(RpcError::op(7, 18), 2),
+        VfError::smb(2, 0xc000_00d4), // STATUS_NOT_SAME_DEVICE
+    ] {
+        let error = error.with_context("vrename", "/source");
+        let status = error.status();
+        assert_eq!(error.kind(), std::io::ErrorKind::CrossesDevices);
+        assert!(!error.is_transport());
+        let io: std::io::Error = error.clone().into();
+        assert_eq!(io.kind(), std::io::ErrorKind::CrossesDevices);
+        let source = io.get_ref().unwrap().downcast_ref::<VfError>().unwrap();
+        assert_eq!(source, &error);
+        assert_eq!(source.status(), status);
+        assert_eq!(source.index(), Some(2));
+        assert_eq!(source.path(), Some(Path::new("/source")));
+    }
+    // Raw codes are meaningful only within their original status domain.
+    assert_eq!(VfError::smb(2, 18).kind(), std::io::ErrorKind::Other);
+    assert_eq!(
+        VfError::nfs(2, 0xc000_00d4).kind(),
+        std::io::ErrorKind::Other
+    );
+}
+
+#[test]
 fn rpc_transport_placeholder_is_not_exposed_as_request_zero() {
     let error =
         vfsi_core::error_from_rpc_indexed(vfsi_core::RpcError::transport("connection reset"));

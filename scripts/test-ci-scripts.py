@@ -145,6 +145,45 @@ class RustQuickTests(unittest.TestCase):
         self.assertIn("Running local CI job: smoke", result.stdout)
         self.assertEqual(len(self.log.read_text().splitlines()), 3)
 
+    def test_python_jobs_select_their_virtualenv_for_native_builds(self):
+        template = self.root / "venv-template"
+        (template / "bin").mkdir(parents=True)
+        python = template / "bin/python"
+        python.write_text('#!/bin/sh\nexit 0\n')
+        python.chmod(0o755)
+        maturin = template / "bin/maturin"
+        maturin.write_text(
+            '#!/bin/sh\n'
+            'if [ "${VIRTUAL_ENV:-}/bin/maturin" != "$0" ]; then exit 29; fi\n'
+            'printf "native-build %s\\n" "$VIRTUAL_ENV" >> "$CALL_LOG"\n'
+        )
+        maturin.chmod(0o755)
+        bootstrap = self.bin / "python3"
+        bootstrap.write_text(
+            '#!/bin/sh\n'
+            '[ "$1 $2" = "-m venv" ] || exit 30\n'
+            'cp -R "$VENV_TEMPLATE" "$3"\n'
+        )
+        bootstrap.chmod(0o755)
+        for selection in ("temporary", "default", "configured"):
+            with self.subTest(selection=selection):
+                venv = self.root / (".venv" if selection == "default" else "configured")
+                if selection != "temporary":
+                    shutil.copytree(template, venv)
+                env = dict(VIRTUAL_ENV="/unrelated-active-environment",
+                           VENV_TEMPLATE=str(template), VFSI_LOCAL_CI_VENV="")
+                if selection == "configured":
+                    env["VFSI_LOCAL_CI_VENV"] = str(venv)
+                result = self.run_script("test-ci-local.sh", "python", **env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = self.log.read_text().splitlines()
+                self.assertEqual(len(calls), 2, calls)
+                self.assertEqual(calls[0], calls[1])
+                if selection != "temporary":
+                    self.assertEqual(calls[0], f"native-build {venv}")
+                    shutil.rmtree(venv)
+                self.log.unlink()
+
     def test_uring_dispatch_includes_benchmark_and_nfs_free_guide(self):
         uname = self.bin / "uname"
         uname.write_text('#!/bin/sh\nprintf "Linux\\n"\n')

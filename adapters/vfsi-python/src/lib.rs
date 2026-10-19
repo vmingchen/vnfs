@@ -2012,10 +2012,23 @@ impl NfsClient {
                     .iter()
                     .flat_map(|&index| [index, index])
                     .collect();
-                let (attrs, _identity_errors) =
+                let (attrs, identity_errors) =
                     attrs_many_impl(fs, &identity_paths, AttrMask::stat(), true)
                         .map_err(|e| to_py_err(remap_subset_error(e, &identity_positions), None))?;
                 for (pair_index, &index) in existing_candidates.iter().enumerate() {
+                    // An absent destination cannot alias its source. Other
+                    // identity failures must stop this pair before a truncating
+                    // WRITE rather than silently bypass the alias check.
+                    let identity_error = identity_errors.get(&(2 * pair_index)).or_else(|| {
+                        identity_errors
+                            .get(&(2 * pair_index + 1))
+                            .filter(|&&code| code != libc::ENOENT as u32)
+                    });
+                    if let Some(&code) = identity_error {
+                        data[index] = None;
+                        errors.insert(index, code);
+                        continue;
+                    }
                     let source = attrs[2 * pair_index].as_ref();
                     let destination = attrs[2 * pair_index + 1].as_ref();
                     if let (Some(source), Some(destination)) = (source, destination)
@@ -2786,3 +2799,6 @@ mod prr_oct14b_round10;
 
 #[cfg(all(test, feature = "dummy"))]
 mod prr_oct14c_round07;
+
+#[cfg(all(test, feature = "dummy"))]
+mod copy_identity_tests;

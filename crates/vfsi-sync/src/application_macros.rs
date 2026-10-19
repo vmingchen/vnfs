@@ -98,11 +98,21 @@ macro_rules! __vfsi_client_methods {
         ) -> Result<Vec<$crate::StreamCompletion>> {
             let mut output = Vec::new();
             for (index, path) in paths.iter().enumerate() {
+                let mut callback_error = None;
                 let completion =
                     ($stream_native)($receiver(self), path, options, |offset, data| {
-                        callback(index, offset, data)
+                        let result = callback(index, offset, data);
+                        if let Err(error) = &result {
+                            callback_error = Some(error.clone());
+                        }
+                        result
                     })
-                    .map_err(|error| $crate::application::vector_index(error, index))?;
+                    .map_err(|error| {
+                        // A callback may fail in a nested vector operation;
+                        // its index belongs to that operation, not this stream.
+                        callback_error
+                            .unwrap_or_else(|| $crate::application::vector_index(error, index))
+                    })?;
                 output.push(completion);
                 if matches!(completion, $crate::StreamCompletion::Stopped { .. }) {
                     break;

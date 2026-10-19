@@ -5083,6 +5083,8 @@ class VfsiFileSystem(AbstractFileSystem):
         dest_dirs = {dst}
         pairs = []
         symlink_pairs = []
+        followed_pairs = []
+        unclassified_pairs = []
         for dir_native, entries in tree:
             dir_int = self._internalize(dir_native)
             rel = posixpath.relpath(dir_int, src)
@@ -5096,10 +5098,26 @@ class VfsiFileSystem(AbstractFileSystem):
                     dest_dirs.add(dest)
                 elif e["type"] == "symlink" and symlinks:
                     symlink_pairs.append((child_int, dest))
-                else:
+                elif e["type"] == "symlink":
+                    followed_pairs.append((child_int, dest))
+                elif e["type"] == "file":
                     pairs.append((child_int, dest))
+                else:
+                    unclassified_pairs.append((child_int, dest))
 
-        callback.set_size(len(pairs) + len(symlink_pairs))
+        if followed_pairs:
+            stats, _ = self._client.stat_many(
+                [self._native_path(src) for src, _ in followed_pairs]
+            )
+            for pair, info in zip(followed_pairs, stats):
+                if info is not None and info["type"] not in ("file", "directory"):
+                    unclassified_pairs.append(pair)
+                else:
+                    # Retain native COPY's path errors and keep ordinary
+                    # followed file links in the same batch as other files.
+                    pairs.append(pair)
+
+        callback.set_size(len(pairs) + len(symlink_pairs) + len(unclassified_pairs))
         self._ensure_dirs(list(dest_dirs))
         self._copy_pairs(
             pairs,
@@ -5109,6 +5127,13 @@ class VfsiFileSystem(AbstractFileSystem):
             set_callback_size=False,
         )
         self._copy_symlink_pairs(symlink_pairs, on_error, callback)
+        self._copy_classified_pairs(
+            unclassified_pairs,
+            on_error,
+            callback,
+            symlinks=symlinks,
+            set_callback_size=False,
+        )
 
     def cp_file(self, path1, path2, callback=DEFAULT_CALLBACK, **kwargs):
         """Copy a single file (or create a directory) between two paths."""
@@ -5160,12 +5185,36 @@ class VfsiFileSystem(AbstractFileSystem):
                 (self._checked_strip_protocol(a), self._checked_strip_protocol(b))
                 for a, b in zip(path1, path2)
             ]
+            if not pairs:
+                callback.set_size(0)
+                return
             if preserve_links:
                 self._copy_classified_pairs(pairs, on_error, callback, symlinks=True)
             else:
-                self._copy_pairs(
-                    pairs, on_error, callback=callback, callback_is_parent=True
+                # Check special sources together before native COPY can open a
+                # FIFO. Native COPY retains its existing per-item path errors.
+                stats, _ = self._client.stat_many(
+                    [self._native_path(src) for src, _ in pairs]
                 )
+                callback.set_size(len(pairs))
+                pending = []
+                first_special = None
+                for pair, info in zip(pairs, stats):
+                    if info is not None and info["type"] not in ("file", "directory"):
+                        callback.relative_update()
+                        if first_special is None:
+                            first_special = pair[0]
+                    else:
+                        pending.append(pair)
+                self._copy_pairs(
+                    pending,
+                    on_error,
+                    callback=callback,
+                    callback_is_parent=True,
+                    set_callback_size=False,
+                )
+                if first_special is not None and on_error == "raise":
+                    raise FileNotFoundError(first_special)
             return
         # Batched tree copy for the plain "directory -> new name" case.
         if (
@@ -5258,8 +5307,13 @@ class VfsiFileSystem(AbstractFileSystem):
         ]
         self._copy_classified_pairs(pairs, on_error, callback, symlinks=preserve_links)
 
-    def _copy_classified_pairs(self, pairs, on_error, callback, symlinks=False):
-        callback.set_size(len(pairs))
+    def _copy_classified_pairs(
+        self, pairs, on_error, callback, symlinks=False, *, set_callback_size=True
+    ):
+        if set_callback_size:
+            callback.set_size(len(pairs))
+        if not pairs:
+            return
         metadata = self._client.lstat_many if symlinks else self._client.stat_many
         stats, errors = metadata([self._native_path(src) for src, _ in pairs])
         file_pairs = []
@@ -5279,7 +5333,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 symlink_pairs.append((src, dst))
             else:
                 callback.relative_update()
-                if first_error is None:
+                if on_error == "raise" and first_error is None:
                     first_error = FileNotFoundError(src)
         if dir_pairs:
             self._makedirs_batched([dst for _, dst in dir_pairs], exist_ok=True)

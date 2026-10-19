@@ -344,6 +344,48 @@ fn recursive_remove_requires_no_follow_metadata() {
 }
 
 #[test]
+fn timestamp_updates_reject_control_values_without_changing_the_file() {
+    let Some(mut fs) = connect() else { return };
+    let root = PathBuf::from(format!("/vfsi-smb-time-controls-{}", std::process::id()));
+    fs.create_dir_impl(&root, 0o777).unwrap();
+    let path = root.join("file");
+    let file = fs
+        .open_raw_impl(&path, libc::O_CREAT | libc::O_RDWR, 0o666)
+        .unwrap();
+    let baseline = VfAttrs {
+        file: file.clone(),
+        masks: AttrMask::ATIME | AttrMask::MTIME,
+        atime_sec: 1_700_000_000,
+        mtime_sec: 1_700_000_001,
+        ..VfAttrs::default()
+    };
+    fs.vsetattrs_raw_impl(std::slice::from_ref(&baseline))
+        .unwrap();
+    for target in [file.clone(), FileOperand::from_os_path(&path)] {
+        let update = VfAttrs {
+            file: target,
+            masks: AttrMask::ATIME | AttrMask::MTIME,
+            atime_sec: -11_644_473_600,
+            mtime_sec: -11_644_473_600,
+            ..VfAttrs::default()
+        };
+        let error = fs.vsetattrs_raw_impl(&[update]).unwrap_err();
+        assert_eq!(error.raw_code(), libc::EINVAL as u32);
+        assert_eq!(error.index(), Some(0));
+        let mut attrs = [VfAttrs {
+            file: file.clone(),
+            masks: AttrMask::ATIME | AttrMask::MTIME,
+            ..VfAttrs::default()
+        }];
+        fs.vgetattrs_impl(&mut attrs).unwrap();
+        assert_eq!(attrs[0].atime_sec, baseline.atime_sec);
+        assert_eq!(attrs[0].mtime_sec, baseline.mtime_sec);
+    }
+    fs.close_impl(&file).unwrap();
+    cleanup_test_tree(&root);
+}
+
+#[test]
 fn rust_native_file_workflow_on_smb() {
     let Some(fs) = connect() else {
         eprintln!("skipping SMB integration test: VFSI_SMB_SERVER/SHARE not set");
@@ -489,6 +531,69 @@ fn smb_failed_strict_open_quarantines_unconfirmed_cleanup() {
         .unwrap();
     assert_eq!(fs.test_deferred_close_count(), 0);
     fs.vclose_impl(&next).unwrap();
+    cleanup_test_tree(&root);
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn owned_scalar_close_failure_drains_backend_cleanup_before_extraction() {
+    let Some(mut fs) = connect() else { return };
+    let root = PathBuf::from(format!("/vfsi-smb-owned-close-{}", std::process::id()));
+    cleanup_test_tree(&root);
+    fs.mkdir_raw_impl(&root, 0o777).unwrap();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeCloseDispatch { index: 0 },
+        VfError::transport(None, "injected scalar close failure"),
+    ));
+    fs.set_fault_injector(script.clone());
+    let client = vfsi_sync::FsClient::new(fs);
+    let file = client.create(root.join("file")).unwrap();
+    assert!(file.close().unwrap_err().is_transport());
+    assert!(script.is_consumed());
+    client
+        .drain_cleanup()
+        .expect("failed scalar close must drain the retained remote handle");
+    let backend = client
+        .into_inner()
+        .expect("completed deferred cleanup must allow backend extraction");
+    assert_eq!(backend.test_open_handle_count(), 0);
+    assert_eq!(backend.test_deferred_close_count(), 0);
+    backend.shutdown().unwrap();
+    cleanup_test_tree(&root);
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn owned_partial_close_drains_live_and_already_closed_handles() {
+    let Some(mut fs) = connect() else { return };
+    let root = PathBuf::from(format!("/vfsi-smb-owned-closev-{}", std::process::id()));
+    cleanup_test_tree(&root);
+    fs.mkdir_raw_impl(&root, 0o777).unwrap();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeCloseItem { index: 1 },
+        VfError::failure(1, libc::EIO as u32),
+    ));
+    fs.set_fault_injector(script.clone());
+    let client = vfsi_sync::FsClient::new(fs);
+    let paths = [root.join("first"), root.join("second"), root.join("third")];
+    let requests: Vec<_> = paths
+        .iter()
+        .map(|path| OpenOp::new(path, OpenFlags::WRITE | OpenFlags::CREATE_NEW))
+        .collect();
+    let mut files = client.vopen(&requests).unwrap();
+    let error = client.vclose(&mut files).unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert!(script.is_consumed());
+    drop(files);
+    client
+        .drain_cleanup()
+        .expect("cleanup must accept confirmed closes and finish the remaining handle");
+    let backend = client
+        .into_inner()
+        .expect("partial vector close must not leave stale cleanup ownership");
+    assert_eq!(backend.test_open_handle_count(), 0);
+    assert_eq!(backend.test_deferred_close_count(), 0);
+    backend.shutdown().unwrap();
     cleanup_test_tree(&root);
 }
 

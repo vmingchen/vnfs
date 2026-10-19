@@ -281,9 +281,6 @@ fn roots<P: AsRef<Path>>(
     budget: &mut TraversalBudget,
     max_path_bytes: usize,
 ) -> Result<Vec<Task>> {
-    if fs.limits().max_read_bytes() == 0 {
-        return Err(invalid(0, destination));
-    }
     if sources.len() > budget.remaining_entries() {
         return Err(limit(0, destination));
     }
@@ -776,6 +773,14 @@ fn copy_batch(
         summary.bytes_copied = None;
         return Ok(());
     }
+    // Empty files need no payload storage. A zero read budget also permits
+    // native COPY and rename-only moves, but cannot make descriptor progress
+    // on a nonempty file. Reject before opening or replacing any file.
+    if chunk == 0
+        && let Some(task) = tasks.iter().find(|task| task.size != 0)
+    {
+        return Err(limit(task.root, &task.source));
+    }
     let requests: Vec<_> = tasks
         .iter()
         .map(|t| OpenOp::new(&t.source, OpenFlags::READ))
@@ -1017,10 +1022,12 @@ fn prepare_replace(fs: &impl Vfsi, tasks: &[Task]) -> Result<()> {
 }
 
 /// Move roots within the client's namespace. Rename is attempted only for
-/// Container+Replace without progress when the destination is absent. Only an
-/// explicit cross-device error triggers copy/delete fallback. Other modes copy
-/// first; source deletion occurs only after complete copying and successful
-/// explicit CLOSE, with no skipped entries. Cancellation/errors retain sources.
+/// Container+Replace without progress or a depth override, using an atomic
+/// absent-destination check. Cross-device, existing-destination and unsupported
+/// rename errors permit copy/delete fallback after reconciling partial progress.
+/// Other modes copy first; source deletion occurs only after complete copying
+/// and successful explicit CLOSE, with no skipped entries. Cancellation/errors
+/// retain sources that have not already been renamed or removed.
 /// Stable/quiescent source trees are required: this is not a snapshot or a
 /// transactional move. An error deleting a source can leave both copies.
 pub fn move_items<P: AsRef<Path>>(
@@ -1095,6 +1102,10 @@ fn move_run<P: AsRef<Path>>(
     } else {
         options.batch_size
     };
+    let can_rename = progress.is_none()
+        && options.layout == CopyLayout::Container
+        && options.existing == Existing::Replace
+        && options.depth.is_none();
     for batch in tasks.chunks(cohort) {
         let mut copies = Vec::new();
         let mut renames = Vec::new();
@@ -1103,10 +1114,6 @@ fn move_run<P: AsRef<Path>>(
                 summary.entries_skipped += 1;
                 continue;
             }
-            let can_rename = progress.is_none()
-                && options.layout == CopyLayout::Container
-                && options.existing == Existing::Replace
-                && options.depth.is_none();
             if can_rename {
                 renames.push(task.clone());
             } else {

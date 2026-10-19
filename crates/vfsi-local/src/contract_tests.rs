@@ -1447,6 +1447,159 @@ mod tests {
         assert_eq!(actual.size, 8);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn setattr_times_do_not_require_read_permission() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let (root, mut backend) = fs("setattr-times-permissions");
+        let path = root.0.join("file");
+        std::fs::write(&path, b"contents").unwrap();
+        for follow in [true, false] {
+            for mode in [0o000, 0o200, 0o600] {
+                for masks in [
+                    AttrMask::ATIME,
+                    AttrMask::MTIME,
+                    AttrMask::ATIME | AttrMask::MTIME,
+                    AttrMask::MODE | AttrMask::ATIME | AttrMask::MTIME,
+                ] {
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+                    let before = std::fs::metadata(&path).unwrap();
+                    let attrs = VfAttrs {
+                        file: FileOperand::from_path("/file"),
+                        masks,
+                        mode: 0,
+                        atime_sec: before.atime() - 1,
+                        atime_nsec: 123_456_789,
+                        mtime_sec: before.mtime() - 1,
+                        mtime_nsec: 987_654_321,
+                        ..VfAttrs::default()
+                    };
+                    if follow {
+                        backend.vsetattrs_raw_impl(std::slice::from_ref(&attrs))
+                    } else {
+                        backend.vsetattrs_raw_nofollow_impl(std::slice::from_ref(&attrs))
+                    }
+                    .unwrap();
+                    let actual = std::fs::metadata(&path).unwrap();
+                    assert_eq!(
+                        (actual.atime(), actual.atime_nsec()),
+                        if masks.contains(AttrMask::ATIME) {
+                            (attrs.atime_sec, i64::from(attrs.atime_nsec))
+                        } else {
+                            (before.atime(), before.atime_nsec())
+                        }
+                    );
+                    assert_eq!(
+                        (actual.mtime(), actual.mtime_nsec()),
+                        if masks.contains(AttrMask::MTIME) {
+                            (attrs.mtime_sec, i64::from(attrs.mtime_nsec))
+                        } else {
+                            (before.mtime(), before.mtime_nsec())
+                        }
+                    );
+                    assert_eq!(
+                        actual.mode() & 0o7777,
+                        if masks.contains(AttrMask::MODE) {
+                            0
+                        } else {
+                            mode
+                        }
+                    );
+                    assert_eq!(actual.len(), 8);
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn setattr_times_stay_with_the_pinned_target_after_replacement() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (root, mut backend) = fs("setattr-times-pinned-target");
+        let path = root.0.join("file");
+        std::fs::write(&path, b"original").unwrap();
+        let anchored = backend.real_path(&path).unwrap();
+        let original = root.0.join("original");
+        std::fs::rename(&path, &original).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        let attrs = VfAttrs {
+            file: FileOperand::from_path("/file"),
+            masks: AttrMask::ATIME | AttrMask::MTIME,
+            atime_sec: -10,
+            atime_nsec: 123_456_789,
+            mtime_sec: 1_700_000_002,
+            mtime_nsec: 987_654_321,
+            ..VfAttrs::default()
+        };
+        backend.setattr_path(&attrs, 0, &anchored, true).unwrap();
+        let actual = std::fs::metadata(&original).unwrap();
+        assert_eq!((actual.atime(), actual.atime_nsec()), (-10, 123_456_789));
+        assert_eq!(
+            (actual.mtime(), actual.mtime_nsec()),
+            (1_700_000_002, 987_654_321)
+        );
+        let replacement = std::fs::metadata(&path).unwrap();
+        assert_eq!(
+            (replacement.atime(), replacement.atime_nsec()),
+            (before.atime(), before.atime_nsec())
+        );
+        assert_eq!(
+            (replacement.mtime(), replacement.mtime_nsec()),
+            (before.mtime(), before.mtime_nsec())
+        );
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[test]
+    fn setattr_times_do_not_block_on_a_fifo_without_a_writer() {
+        const CHILD: &str = "VFSI_LOCAL_FIFO_TIMES_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            run_filtered_test_child(
+                "contract_tests::tests::setattr_times_do_not_block_on_a_fifo_without_a_writer",
+                CHILD,
+            );
+            return;
+        }
+
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+        let (root, mut backend) = fs("setattr-times-fifo");
+        let path = root.0.join("fifo");
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: name is a live NUL-terminated path for this synchronous syscall.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        for follow in [true, false] {
+            let attrs = VfAttrs {
+                file: FileOperand::from_path("/fifo"),
+                masks: AttrMask::ATIME | AttrMask::MTIME,
+                atime_sec: 1_700_000_001,
+                atime_nsec: 123_456_789,
+                mtime_sec: 1_700_000_002 + i64::from(follow),
+                mtime_nsec: 987_654_321,
+                ..VfAttrs::default()
+            };
+            if follow {
+                backend.vsetattrs_raw_impl(std::slice::from_ref(&attrs))
+            } else {
+                backend.vsetattrs_raw_nofollow_impl(std::slice::from_ref(&attrs))
+            }
+            .unwrap();
+            let metadata = std::fs::symlink_metadata(&path).unwrap();
+            assert!(metadata.file_type().is_fifo());
+            assert_eq!(
+                (metadata.atime(), metadata.atime_nsec()),
+                (attrs.atime_sec, i64::from(attrs.atime_nsec))
+            );
+            assert_eq!(
+                (metadata.mtime(), metadata.mtime_nsec()),
+                (attrs.mtime_sec, i64::from(attrs.mtime_nsec))
+            );
+        }
+    }
+
     #[test]
     fn lsetattrsv_does_not_follow_final_symlink() {
         use std::os::unix::fs::PermissionsExt;

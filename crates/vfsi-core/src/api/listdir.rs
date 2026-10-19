@@ -19,6 +19,7 @@ pub(super) fn listdir<F: Vfsi + ?Sized>(
     // Keep the native paging engine, including anchored child cursors, linear
     // deep-path traversal, sibling batching, recovery and aggregate budgets.
     let mut stopped = false;
+    let mut callback_error = None;
     let completions = fs
         .vlistdirs(&[root], options, |index, page| {
             if index != 0 {
@@ -42,7 +43,10 @@ pub(super) fn listdir<F: Vfsi + ?Sized>(
                     entry,
                     depth,
                 };
-                match visitor(&event)? {
+                let decision = visitor(&event).inspect_err(|error| {
+                    callback_error = Some(error.clone());
+                })?;
+                match decision {
                     WalkControl::Stop => {
                         stopped = true;
                         return Ok(ControlFlow::Break(()));
@@ -58,7 +62,10 @@ pub(super) fn listdir<F: Vfsi + ?Sized>(
             Ok(ControlFlow::Continue(()))
         })
         .map_err(|error| {
-            if error.index().is_some_and(|index| index != 0) {
+            if let Some(error) = callback_error {
+                // Nested callback work has its own operation indices.
+                error
+            } else if error.index().is_some_and(|index| index != 0) {
                 Error::transport(None, "invalid listdir backend error index")
             } else {
                 error

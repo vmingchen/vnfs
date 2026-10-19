@@ -252,6 +252,96 @@ fn payload() -> Vec<u8> {
 }
 
 #[test]
+fn zero_read_budget_allows_empty_transfer_batches_and_empty_files() {
+    let root = tempfile::tempdir().unwrap();
+    let mut fs = Harness::new(root.path());
+    fs.fs = fs
+        .fs
+        .with_limits(ResourceLimits::new().with_max_read_bytes(0));
+    let empty: [&str; 0] = [];
+    assert_eq!(
+        copy_items(&fs, &empty, "/unused", TransferOptions::new()).unwrap(),
+        TransferSummary::default()
+    );
+    assert_eq!(
+        move_items(&fs, &empty, "/unused", TransferOptions::new()).unwrap(),
+        TransferSummary::default()
+    );
+    assert!(!root.path().join("unused").exists());
+    fs.fs.write("/empty", b"").unwrap();
+    let copied = copy_items(&fs, &["/empty"], "/copy", TransferOptions::new()).unwrap();
+    assert_eq!(copied.files_copied, 1);
+    assert_eq!(copied.bytes_copied, Some(0));
+    assert_eq!(std::fs::read(root.path().join("copy/empty")).unwrap(), b"");
+    let moved = move_items(&fs, &["/empty"], "/move", TransferOptions::new()).unwrap();
+    assert_eq!(moved.files_copied, 1);
+    assert_eq!(moved.roots_removed, 1);
+    assert!(!root.path().join("empty").exists());
+    assert_eq!(std::fs::read(root.path().join("move/empty")).unwrap(), b"");
+    assert_eq!(fs.calls.borrow().max_bytes, 0);
+}
+
+#[test]
+fn zero_read_budget_allows_native_copies_and_rename_only_moves() {
+    let root = tempfile::tempdir().unwrap();
+    let mut fs = Harness::new(root.path());
+    fs.fs = fs
+        .fs
+        .with_limits(ResourceLimits::new().with_max_read_bytes(0));
+    fs.fs.write("/file", b"payload").unwrap();
+    let options = TransferOptions::new().with_existing(Existing::Replace);
+    let copied = copy_items(&fs, &["/file"], "/copy", options).unwrap();
+    assert_eq!(copied.files_copied, 1);
+    assert_eq!(copied.bytes_copied, None);
+    let moved = move_items(&fs, &["/file"], "/move", options).unwrap();
+    assert_eq!(moved.roots_renamed, 1);
+    assert_eq!(moved.files_copied, 0);
+    assert_eq!(moved.roots_removed, 0);
+    assert_eq!(
+        std::fs::read(root.path().join("copy/file")).unwrap(),
+        b"payload"
+    );
+    assert_eq!(
+        std::fs::read(root.path().join("move/file")).unwrap(),
+        b"payload"
+    );
+    assert!(!root.path().join("file").exists());
+    let calls = fs.calls.borrow();
+    assert_eq!(calls.read_attempts, 0);
+    assert_eq!(calls.writes, 0);
+    assert_eq!(calls.copies, 1);
+    assert_eq!(calls.renames, 1);
+}
+
+#[test]
+fn zero_read_budget_rejects_nonempty_descriptor_copies_before_file_mutation() {
+    for moving in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut fs = Harness::new(root.path());
+        fs.fs = fs
+            .fs
+            .with_limits(ResourceLimits::new().with_max_read_bytes(0));
+        fs.fs.write("/file", b"payload").unwrap();
+        let error = if moving {
+            move_items(&fs, &["/file"], "/dest", TransferOptions::new())
+        } else {
+            copy_items(&fs, &["/file"], "/dest", TransferOptions::new())
+        }
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge);
+        assert_eq!(error.index(), Some(0));
+        assert_eq!(error.path(), Some(Path::new("/file")));
+        assert_eq!(std::fs::read(root.path().join("file")).unwrap(), b"payload");
+        assert!(!root.path().join("dest/file").exists());
+        let calls = fs.calls.borrow();
+        assert_eq!(calls.opens, 0);
+        assert_eq!(calls.read_attempts, 0);
+        assert_eq!(calls.writes, 0);
+        assert_eq!(calls.removes, 0);
+    }
+}
+
+#[test]
 fn recursive_copy_is_bounded_and_short_reads_have_no_gaps() {
     let (t, fs) = fixture();
     fs.fault.set(Fault::ShortRead);

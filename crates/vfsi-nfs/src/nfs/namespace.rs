@@ -131,10 +131,17 @@ impl NfsVecFs {
                 match r {
                     Ok((fh, ftype)) => {
                         out[*i] = match resolve_lookup_result((fh, ftype), follow, || {
+                            #[cfg(feature = "test-faults")]
+                            self.inject_open_fault(OpenFaultPoint::BeforeFollowSymlink {
+                                index: *i,
+                            })?;
                             let full = self.server_vf_path(files[*i])?;
                             self.resolve_path_and_type(&full, true)
                         }) {
                             Ok(result) => Ok(result),
+                            Err(error) if error.is_transport() => {
+                                return Err(error.map_index(|_| *i));
+                            }
                             Err(error) => Err(error.raw_code()),
                         };
                     }

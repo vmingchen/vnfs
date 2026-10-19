@@ -2321,6 +2321,72 @@ fn stream_callback_can_reenter_client_and_drop_another_file() {
 }
 
 #[test]
+fn stream_callback_errors_keep_nested_operation_indices_and_close_the_stream() {
+    let backend = ScalarOnly {
+        data: b"payload".to_vec(),
+        ..Default::default()
+    };
+    let reads = Arc::clone(&backend.read_calls);
+    let closes = Arc::clone(&backend.close_observed);
+    let client = FsClient::new(backend);
+    let live = client.open("/nested-live").unwrap();
+    let mut closed = client.open("/nested-closed").unwrap();
+    closed.try_close().unwrap();
+    let nested = [
+        live.read_request_at(0, 1),
+        live.read_request_at(1, 1),
+        closed.read_request_at(0, 1),
+    ];
+    let expected = client.vread_native(&nested).unwrap_err();
+    assert_eq!(expected.index(), Some(2));
+    assert_eq!(
+        expected.path(),
+        Some(std::path::Path::new("/nested-closed"))
+    );
+    let closes_before = closes.load(Ordering::SeqCst);
+    let mut seen = Vec::new();
+    let actual = client
+        .vstream(
+            &["/first", "/second", "/never-started"],
+            vfsi_sync::StreamOptions::new(),
+            |index, _, _| {
+                seen.push(index);
+                if index == 1 {
+                    client.vread_native(&nested)?;
+                }
+                Ok(std::ops::ControlFlow::Continue(()))
+            },
+        )
+        .unwrap_err();
+    assert_eq!(actual, expected);
+    assert_eq!(seen, [0, 1]);
+    assert_eq!(reads.load(Ordering::SeqCst), 2);
+    assert_eq!(closes.load(Ordering::SeqCst) - closes_before, 2);
+}
+
+#[test]
+fn stream_callback_errors_preserve_indexed_and_unattributed_transport_failures() {
+    for index in [Some(7), None] {
+        let client = FsClient::new(ScalarOnly {
+            data: b"payload".to_vec(),
+            ..Default::default()
+        });
+        let expected = VfError::transport_with_kind(
+            index,
+            vfsi_sync::TransportKind::Connection,
+            "nested operation lost its reply",
+        )
+        .with_context("nested-operation", "/nested-file");
+        let actual = client
+            .read_stream("/file", |_, _| Err(expected.clone()))
+            .unwrap_err();
+        assert_eq!(actual, expected);
+        let backend = client.into_inner().unwrap();
+        assert_eq!(backend.close_calls, 1);
+    }
+}
+
+#[test]
 fn directory_visit_starts_with_one_entry_and_respects_tight_limits() {
     let page_sizes = Arc::new(Mutex::new(Vec::new()));
     let client = FsClient::new(ScalarOnly {
