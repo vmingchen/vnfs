@@ -218,6 +218,16 @@ pub struct Fixture {
     _temporary: Option<tempfile::TempDir>,
 }
 
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // Closing only our descriptor can leave the open-description lock
+        // held by a concurrent subprocess until its close-on-exec runs.
+        // SAFETY: the owned file remains open throughout this explicit unlock.
+        unsafe { libc::flock(self._lock.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
 impl Fixture {
     pub fn open(config: &Config) -> Result<Self> {
         use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
@@ -576,8 +586,15 @@ mod tests {
         let first = Fixture::open(&c).unwrap();
         let ids = first.identity.clone();
         assert!(Fixture::open(&c).is_err(), "must not race another process");
+        // A concurrent fork temporarily inherits this same open description
+        // until exec closes it. Simulate that deterministically with dup.
+        let inherited_lock = first._lock.try_clone().unwrap();
         drop(first);
-        assert_eq!(Fixture::open(&c).unwrap().identity, ids);
+        let reopened = Fixture::open(&c).unwrap();
+        assert_eq!(reopened.identity, ids);
+        drop(inherited_lock);
+        assert!(Fixture::open(&c).is_err(), "the new owner must stay locked");
+        drop(reopened);
         let mut changed = config(&args).unwrap();
         changed.small += 1;
         assert!(Fixture::open(&changed).is_err());
