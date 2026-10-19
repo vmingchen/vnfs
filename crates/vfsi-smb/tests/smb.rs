@@ -1125,6 +1125,11 @@ fn client_extent_copy_rejects_forward_aliases_before_mutation() {
         .map(|i| (i % 251) as u8)
         .collect();
     fs::write(local.join("source"), &data).unwrap();
+    // The CI runner creates this local fixture, but Samba maps access to a
+    // different user. Grant writes explicitly so the copy reaches the alias
+    // check rather than failing CREATE with EACCES under the runner's umask.
+    #[cfg(unix)]
+    fs::set_permissions(local.join("source"), fs::Permissions::from_mode(0o666)).unwrap();
     fs::hard_link(local.join("source"), local.join("alias")).unwrap();
     for destination in [&source, &alias] {
         for length in [Some(data.len() as u64 - 1), None] {
