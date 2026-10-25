@@ -12,7 +12,8 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 - Publish the current shared fsspec engine as `vfsi-fsspec 0.1.11`.
 - Publish `vsmbfs 0.1.4`, requiring `vsmb>=0.1.4,<0.2` and
   `vfsi-fsspec>=0.1.11,<0.2` so fresh installations use these releases.
-- The `nfs4fs` version and its compatible shared-engine requirement are unchanged.
+- Advance the `nfs4fs` source dependency floor to the current shared engine;
+  its published 0.3.11 artifacts are unchanged and are not republished.
 
 ## nfs4fs 0.3.11 (2026-10-25)
 
