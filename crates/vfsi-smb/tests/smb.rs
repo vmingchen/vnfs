@@ -931,6 +931,46 @@ fn path_reads_recover_after_server_restart() {
 
 #[cfg(unix)]
 #[test]
+fn path_metadata_follows_symlinks_for_scalar_and_vector_requests() {
+    let Some(mut fs) = connect() else { return };
+    let local_root = std::env::var("VFSI_SMB_LOCAL_ROOT")
+        .expect("this test needs a local Samba backing directory");
+    let root = PathBuf::from(format!("/vfsi-smb-follow-stat-{}", std::process::id()));
+    let local = Path::new(&local_root).join(root.strip_prefix("/").unwrap());
+    fs::create_dir_all(local.join("directory")).unwrap();
+    fs::set_permissions(&local, fs::Permissions::from_mode(0o777)).unwrap();
+    let contents = b"target contents, not the link";
+    fs::write(local.join("file"), contents).unwrap();
+    std::os::unix::fs::symlink("file", local.join("file-link")).unwrap();
+    std::os::unix::fs::symlink("directory", local.join("dir-link")).unwrap();
+    std::os::unix::fs::symlink("missing", local.join("dangling")).unwrap();
+
+    let file = root.join("file-link");
+    let dir = root.join("dir-link");
+    assert_eq!(fs.stat_impl(&file).unwrap().size, contents.len() as u64);
+    assert_eq!(fs.stat_impl(&dir).unwrap().ftype, VfType::Directory);
+    let mut attrs = [file.as_path(), dir.as_path()].map(|path| VfAttrs {
+        file: FileOperand::from_os_path(path),
+        masks: AttrMask::SIZE | AttrMask::MODE,
+        ..Default::default()
+    });
+    fs.vgetattrs_impl(&mut attrs).unwrap();
+    assert_eq!(attrs[0].size, contents.len() as u64);
+    assert_eq!(attrs[1].ftype, VfType::Directory);
+    assert!(!fs.exists_impl(&root.join("dangling")).unwrap());
+    assert_eq!(
+        fs.stat_impl(&root.join("dangling")).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    attrs[1].file = FileOperand::from_os_path(&root.join("dangling"));
+    let error = fs.vgetattrs_impl(&mut attrs).unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    cleanup_test_tree(&root);
+}
+
+#[cfg(unix)]
+#[test]
 fn listing_walk_and_tree_copy_do_not_follow_directory_reparse_points() {
     let Some(mut fs) = connect() else { return };
     let Ok(local_root) = std::env::var("VFSI_SMB_LOCAL_ROOT") else {

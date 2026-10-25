@@ -234,6 +234,7 @@ impl SmbVecFs {
             dfs_enabled: false,
             dfs_target_overrides: HashMap::new(),
             connect_options: None,
+            previous_session_id: None,
         };
         // `smb2` performs TCP connect, negotiate, and session setup in one
         // future. Give TCP its full connect budget plus one request budget for
@@ -1110,9 +1111,42 @@ impl SmbVecFs {
     }
 
     fn client_stat(&mut self, path: &str) -> VfResult<smb2::client::FileInfo> {
-        self.runtime
+        let info = self
+            .runtime
             .block_on(self.client.stat(&mut self.tree, path))
-            .map_err(|e| smb_error(e, 0))
+            .map_err(|e| smb_error(e, 0))?;
+        self.follow_stat_link(path, info)
+    }
+
+    fn follow_stat_link(
+        &mut self,
+        path: &str,
+        info: smb2::client::FileInfo,
+    ) -> VfResult<smb2::client::FileInfo> {
+        if info.attributes.0 & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+            return Ok(info);
+        }
+        // smb2 0.34's stat describes the final link. Our followed metadata
+        // contract needs its target instead. Only links pay for this fallback;
+        // ordinary files retain the concurrent, single-compound fast path.
+        let mut request = self.open_request(path, libc::O_RDONLY)?;
+        request.desired_access =
+            FileAccessMask::new(FileAccessMask::FILE_READ_ATTRIBUTES | FileAccessMask::SYNCHRONIZE);
+        request.create_options = 0; // Follow links, accepting files or directories.
+        let frame = self
+            .runtime
+            .block_on(self.client.connection_mut().execute(
+                Command::Create,
+                &request,
+                Some(self.tree.tree_id),
+            ))
+            .map_err(|error| smb_error(error, 0))?;
+        require_status(&frame, Command::Create, 0)?;
+        let opened = CreateResponse::unpack(&mut ReadCursor::new(&frame.body))
+            .map_err(|error| smb_error(error, 0))?;
+        let result = self.query_handle_info(opened.file_id);
+        let close = self.close_temporary_handle(opened.file_id);
+        result.and_then(|info| close.map(|()| info))
     }
 
     fn fill_attrs(a: &mut VfAttrs, info: &smb2::client::FileInfo) {
@@ -2147,6 +2181,16 @@ impl VectorBackend for SmbVecFs {
             }
             for (index, (attrs, result)) in attrs.iter_mut().zip(results).enumerate() {
                 let info = result.map_err(|error| smb_error(error, index))?;
+                let info = if info.attributes.0 & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    let path = self
+                        .file_path(&attrs.file)
+                        .and_then(|path| self.path_string(&path))
+                        .map_err(|error| error.with_index(index))?;
+                    self.follow_stat_link(&path, info)
+                        .map_err(|error| error.with_index(index))?
+                } else {
+                    info
+                };
                 Self::fill_attrs(attrs, &info);
             }
             return Ok(());
@@ -2182,8 +2226,9 @@ impl VectorBackend for SmbVecFs {
         if attrs.is_empty() {
             Ok(())
         } else {
-            // Standard SMB metadata follows reparse points. Reporting it as
-            // lstat data would silently violate VectorBackend's no-follow contract.
+            // Some Samba versions ignore FILE_OPEN_REPARSE_POINT. Until
+            // reliable no-follow support is established, never present
+            // followed metadata as lstat data.
             Err(VfError::unsupported(0))
         }
     }
@@ -3955,6 +4000,16 @@ mod tests {
         assert_eq!(error.index(), Some(3));
         assert_eq!(error.raw_code(), crate::vecfs::VF_ERR_RPC);
         assert!(error.to_string().contains("Disconnected"));
+        let error = smb_error(
+            SmbError::SendFailed {
+                command: Command::Write,
+                source: std::io::Error::from(std::io::ErrorKind::BrokenPipe),
+            },
+            7,
+        );
+        assert_eq!(error.index(), Some(7));
+        assert!(error.is_transport());
+        assert!(error.to_string().contains("Write"));
     }
 
     #[test]
