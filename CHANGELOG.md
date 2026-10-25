@@ -5,6 +5,15 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+## Python SMB/shared-engine patch release (2026-10-25)
+
+- Publish `vsmb 0.1.4` with SMB2 0.35 and its fixed constant-time signing
+  dependency, plus the current native metadata and referral handling fixes.
+- Publish the current shared fsspec engine as `vfsi-fsspec 0.1.11`.
+- Publish `vsmbfs 0.1.4`, requiring `vsmb>=0.1.4,<0.2` and
+  `vfsi-fsspec>=0.1.11,<0.2` so fresh installations use these releases.
+- The `nfs4fs` version and its compatible shared-engine requirement are unchanged.
+
 ## nfs4fs 0.3.11 (2026-10-25)
 
 - Bundle `libntirpc-sys 0.3.3`, including its transport cleanup and
