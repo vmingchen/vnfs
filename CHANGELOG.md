@@ -5,6 +5,12 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+## nfs4fs 0.3.11 (2026-10-25)
+
+- Bundle `libntirpc-sys 0.3.3`, including its transport cleanup and
+  RPCSEC_GSS deadlock/leak fixes, instead of the yanked 0.3.2 release.
+- Keep the Python API and the `vfsi-fsspec>=0.1.10,<0.2` requirement unchanged.
+
 ## vnfs 0.0.26 (2026-10-25)
 
 - Refresh dependency resolution and verify packaged NFS builds with
