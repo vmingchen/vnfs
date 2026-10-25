@@ -5,6 +5,13 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+## vnfs 0.0.26 (2026-10-25)
+
+- Refresh dependency resolution and verify packaged NFS builds with
+  `libntirpc-sys 0.3.3`, replacing the yanked 0.3.2 release.
+- Update Cargo examples and the C adapter's vNFS dependency reference.
+  Other Rust crate and Python package versions are unchanged.
+
 ## Coordinated patch release — vnfs 0.0.25 / nfs4fs 0.3.10 (2026-10-18)
 
 - Publish Rust packages `vnfs 0.0.25`, `vfsi-core 0.1.13`,
