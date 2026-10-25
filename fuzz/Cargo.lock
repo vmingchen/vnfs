@@ -31,7 +31,7 @@ dependencies = [
  "regex",
  "rustc-hash",
  "shlex",
- "syn 3.0.6",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -214,9 +214,9 @@ dependencies = [
 
 [[package]]
 name = "libntirpc-sys"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73dcebf725cfc5496e2c200c7aaba14f8c40ecc3c49b68f9339270b75ef49c92"
+checksum = "53598d8ac548008245e75c0c70370f8553aa882bd0dd9e6f75135fd6976fc5ff"
 dependencies = [
  "bindgen",
  "cc",
