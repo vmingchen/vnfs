@@ -5,6 +5,14 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+## Coordinated error-handling release (2026-10-28)
+
+Rust: `vfsi-core 0.1.14`, `vfsi-sync 0.1.15`, `vfsi-local 0.1.13`,
+`vfsi-posix 0.1.5`, `vfsi-uring 0.1.5`, `vfsi-nfs 0.1.14`,
+`vfsi-smb 0.1.12`, `vnfs 0.0.27`, and `vfsi-c 0.3.10`.
+Python: `vfsi-fsspec 0.1.12`, `nfs4fs 0.3.12`, `vsmb 0.1.5`,
+and `vsmbfs 0.1.5`.
+
 - Preserve SMB NTSTATUS and improve portable quota, stale-handle, busy, timeout,
   authentication, and malformed-response classification. Error categories never
   imply mutation replay safety.
@@ -18,8 +26,9 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 - Native Python timeout, authentication, and invalid-reply exceptions retain
   transport provenance for safe read recovery and write poisoning. C scalar
   errors use OS errno while structured C results retain native codes.
-- Stage `vfsi-fsspec 0.1.12` and require that shared-engine floor in `nfs4fs`
-  and `vsmbfs`; publish the engine before adapters carrying the new error maps.
+- Require `vfsi-fsspec>=0.1.12` in `nfs4fs` and `vsmbfs`, and
+  `vsmb>=0.1.5` in `vsmbfs`. Publish the shared engine and native SMB package
+  before their dependent adapters.
 
 ## Python SMB/shared-engine patch release (2026-10-25)
 

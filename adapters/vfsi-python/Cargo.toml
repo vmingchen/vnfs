@@ -1,6 +1,6 @@
 [package]
 name = "vfsi-python-native"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Shared native Python bindings for VFSI backends"
@@ -20,12 +20,12 @@ dummy = ["dep:vfsi-local", "dep:vfsi-posix"]
 [dependencies]
 libc = "0.2"
 pyo3 = { version = "0.30.1", features = ["abi3-py39", "abi3t"] }
-vfsi-core = { path = "../../crates/vfsi-core", version = "0.1.13" }
-vfsi-local = { path = "../../crates/vfsi-local", version = "0.1.12", optional = true }
-vfsi-posix = { path = "../../crates/vfsi-posix", version = "0.1.4", optional = true }
-vfsi-nfs = { path = "../../crates/vfsi-nfs", version = "0.1.13", optional = true }
-vfsi-sync = { path = "../../crates/vfsi-sync", version = "0.1.14" }
-vfsi-smb = { path = "../../crates/vfsi-smb", version = "0.1.11", optional = true }
+vfsi-core = { path = "../../crates/vfsi-core", version = "0.1.14" }
+vfsi-local = { path = "../../crates/vfsi-local", version = "0.1.13", optional = true }
+vfsi-posix = { path = "../../crates/vfsi-posix", version = "0.1.5", optional = true }
+vfsi-nfs = { path = "../../crates/vfsi-nfs", version = "0.1.14", optional = true }
+vfsi-sync = { path = "../../crates/vfsi-sync", version = "0.1.15" }
+vfsi-smb = { path = "../../crates/vfsi-smb", version = "0.1.12", optional = true }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
