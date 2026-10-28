@@ -440,7 +440,7 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
     assert_eq!(seen, 1234);
 
     let error = client
-        .read_stream("/stream", |_, _| Err(VfError::client(0, libc::EIO as u32)))
+        .read_stream("/stream", |_, _| Err(VfError::errno(0, libc::EIO as u32)))
         .unwrap_err();
     assert_eq!(error.raw_code(), libc::EIO as u32);
 
@@ -1227,7 +1227,7 @@ fn create_mode_failure_is_reported_instead_of_ignored() {
     let (_root, mut fs) = dummy();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeSetPermissions { index: 0 },
-        vnfs::Error::failure(0, libc::EPERM as u32),
+        vnfs::Error::errno(0, libc::EPERM as u32),
     ));
     fs.set_fault_injector(script.clone());
     let error = fs
@@ -1244,7 +1244,7 @@ fn mkdir_mode_failure_is_reported_instead_of_ignored() {
     let (_root, mut fs) = dummy();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeSetPermissions { index: 0 },
-        vnfs::Error::failure(0, libc::EPERM as u32),
+        vnfs::Error::errno(0, libc::EPERM as u32),
     ));
     fs.set_fault_injector(script.clone());
     let error = fs

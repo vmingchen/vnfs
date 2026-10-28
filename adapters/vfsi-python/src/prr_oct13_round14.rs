@@ -17,7 +17,7 @@ fn short_and_zero_copy_writes_are_errors_without_replay() {
                 .copy_many(py, vec![("/src".into(), "/dst".into())])
                 .unwrap();
             assert_eq!(copied, vec![None]);
-            assert_eq!(errors, HashMap::from([(0, libc::EIO as u32)]));
+            assert_eq!(error_codes(&errors), HashMap::from([(0, libc::EIO as u32)]));
             assert_eq!(calls.lock().unwrap().len(), 1);
             assert_eq!(
                 std::fs::read(root.0.join("dst")).unwrap(),
@@ -51,7 +51,7 @@ fn mixed_copy_completion_preserves_success_and_original_error_indices() {
             .unwrap();
         assert_eq!(copied, vec![None, Some(6), None]);
         assert_eq!(
-            errors,
+            error_codes(&errors),
             HashMap::from([(0, libc::EIO as u32), (2, libc::EIO as u32)])
         );
         assert_eq!(calls.lock().unwrap().len(), 1);
@@ -106,7 +106,7 @@ fn short_copy_errors_keep_indices_after_read_failure_filtering() {
             .unwrap();
         assert_eq!(copied, vec![None, None, Some(6)]);
         assert_eq!(
-            errors,
+            error_codes(&errors),
             HashMap::from([(0, libc::EIO as u32), (1, ERR_NOENT)])
         );
         assert_eq!(calls.lock().unwrap().len(), 1);

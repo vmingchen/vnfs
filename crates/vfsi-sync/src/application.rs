@@ -98,7 +98,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
             Err(error) => return Err(error.map_index(|i| cohort.get(i).map_or(i, |state| state.0))),
         };
         if pages.len() != cohort.len() {
-            return Err(vfsi_core::api::Error::transport(
+            return Err(vfsi_core::api::Error::invalid_reply(
                 None,
                 "invalid directory page result count",
             ));
@@ -118,7 +118,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
                     })?;
                 }
                 if page.path != path || (page.entries.is_empty() && next.is_some()) {
-                    return Err(vfsi_core::api::Error::transport(
+                    return Err(vfsi_core::api::Error::invalid_reply(
                         Some(index),
                         "invalid directory page parent or progress",
                     ));
@@ -139,7 +139,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
                         if depth >= walk.max_depth_or(Default::default()).get() {
                             if !walk.truncate_at_max_depth() {
                                 page_error = Some(
-                                    vfsi_core::api::Error::client(index, libc::EFBIG as u32)
+                                    vfsi_core::api::Error::errno(index, libc::EFBIG as u32)
                                         .with_context("visit_dirs", entry.path()),
                                 );
                                 break;
@@ -210,7 +210,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
                 error.map_index(|i| continuations.get(i).map_or(i, |state| state.0.0))
             })?;
             if pages.len() != continuations.len() {
-                return Err(vfsi_core::api::Error::transport(
+                return Err(vfsi_core::api::Error::invalid_reply(
                     None,
                     "invalid directory continuation count",
                 ));
@@ -518,7 +518,7 @@ mod traversal_tests {
                     callbacks += 1;
                     match outcome {
                         0 => Ok(std::ops::ControlFlow::Break(())),
-                        1 => Err(vfsi_core::api::Error::client(0, libc::EIO as u32)),
+                        1 => Err(vfsi_core::api::Error::errno(0, libc::EIO as u32)),
                         _ => Ok(std::ops::ControlFlow::Continue(())),
                     }
                 },

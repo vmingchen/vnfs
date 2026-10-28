@@ -5,7 +5,7 @@ type Block = (u64, Option<u64>, Option<u64>);
 /// Plan every block before opening a file. Offsets include checked field ends;
 /// payloads remain borrowed by each backend during execution.
 pub fn adb_layout(pattern: &Adb, index: usize) -> VfResult<Vec<Block>> {
-    let overflow = || VfError::failure(index, libc::EOVERFLOW as u32);
+    let overflow = || VfError::errno(index, libc::EOVERFLOW as u32);
     let pattern_len = u64::try_from(pattern.adb_pattern_data.len()).map_err(|_| overflow())?;
     let mut layout = Vec::with_capacity(pattern.adb_block_count);
     for block in 0..pattern.adb_block_count {

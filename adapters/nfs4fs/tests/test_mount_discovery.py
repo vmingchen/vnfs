@@ -97,9 +97,9 @@ def test_mount_configuration_is_reused_by_pool_and_reconnect(monkeypatch):
 def test_native_discovery_rejects_local_directory(tmp_path):
     if not os.path.exists("/proc/self/mountinfo"):
         pytest.skip("Linux mount discovery")
-    with pytest.raises(OSError, match="sec=sys") as error:
+    with pytest.raises(NotImplementedError, match="sec=sys") as error:
         fsspec.filesystem("nfs4", mount=str(tmp_path), skip_instance_cache=True)
-    assert error.value.errno == errno.EOPNOTSUPP
+    assert "unsupported" in str(error.value)
 
 
 def test_older_shared_engine_cannot_silently_drop_mount_configuration(monkeypatch):

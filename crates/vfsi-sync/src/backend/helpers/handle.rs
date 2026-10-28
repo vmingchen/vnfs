@@ -15,8 +15,10 @@ pub fn vf_path_default<F: HandleBackend + ?Sized>(
         }
         | FileOperand::CwdPath(path) => Ok(backend.abs_path(path)),
         FileOperand::Cwd => Ok(backend.abs_path(Path::new(""))),
-        FileOperand::Fd(_) | FileOperand::Saved => Err(VfError::failure(0, ERR_INVAL)),
-        _ => Err(VfError::failure(0, ERR_INVAL)),
+        FileOperand::Fd(_) | FileOperand::Saved => {
+            Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput))
+        }
+        _ => Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
     }
 }
 
@@ -81,14 +83,14 @@ pub fn native_seek_impl_default<F: HandleBackend + ?Sized>(
 ) -> VfResult<u64> {
     let (offset, whence) = match position {
         std::io::SeekFrom::Start(offset) => (
-            i64::try_from(offset).map_err(|_| VfError::failure(0, libc::EOVERFLOW as u32))?,
+            i64::try_from(offset).map_err(|_| VfError::errno(0, libc::EOVERFLOW as u32))?,
             SeekFrom::Set,
         ),
         std::io::SeekFrom::End(offset) => (offset, SeekFrom::End),
         std::io::SeekFrom::Current(offset) => (offset, SeekFrom::Cur),
     };
     u64::try_from(backend.seek_raw_impl(file, offset, whence)?)
-        .map_err(|_| VfError::failure(0, ERR_INVAL))
+        .map_err(|_| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))
 }
 
 pub fn native_set_attributes_impl_default<F: HandleBackend + ?Sized>(
@@ -126,10 +128,10 @@ pub fn read_file_impl_default<F: HandleBackend + ?Sized>(
             std::slice::from_ref(&result),
         )?;
         if result.data.len() > remaining {
-            return Err(VfError::client(0, libc::EFBIG as u32));
+            return Err(VfError::errno(0, libc::EFBIG as u32));
         }
         if result.data.is_empty() && !result.eof {
-            return Err(VfError::client(0, ERR_IO));
+            return Err(VfError::errno(0, ERR_IO));
         }
         output.extend_from_slice(&result.data);
         if result.eof {
@@ -144,11 +146,11 @@ pub fn read_into_impl_default<F: HandleBackend + ?Sized>(
     buffer: &mut [u8],
 ) -> VfResult<ReadIntoResult> {
     if request.length != buffer.len() {
-        return Err(VfError::client(0, ERR_INVAL));
+        return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
     }
     let result = backend.read_impl(request)?;
     if result.data.len() > buffer.len() {
-        return Err(VfError::client(0, ERR_IO));
+        return Err(VfError::errno(0, ERR_IO));
     }
     validate_read_results(
         "read_into_impl",

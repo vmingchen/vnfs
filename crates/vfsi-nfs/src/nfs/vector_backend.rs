@@ -26,12 +26,12 @@ impl VectorBackend for NfsVecFs {
         modes: &[u32],
     ) -> VfResult<ManyResults<FileOperand>> {
         if paths.len() != flags.len() || paths.len() != modes.len() {
-            return Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL));
+            return Err(VfError::errno(0, nfsstat4_NFS4ERR_INVAL));
         }
         if self.read_only
             && let Some(index) = flags.iter().position(|flags| open_flags_mutate(*flags))
         {
-            return Err(VfError::client(index, libc::EROFS as u32));
+            return Err(VfError::errno(index, libc::EROFS as u32));
         }
         self.drain_deferred_descriptor_closes()?;
         if paths.is_empty() {
@@ -51,13 +51,13 @@ impl VectorBackend for NfsVecFs {
         let mut fds = Vec::with_capacity(files.len());
         for (i, f) in files.iter().enumerate() {
             if !f.is_fd() {
-                return Err(VfError::failure(i, nfsstat4_NFS4ERR_INVAL));
+                return Err(VfError::errno(i, nfsstat4_NFS4ERR_INVAL));
             }
             let fd = f.fd().unwrap();
             let open = self
                 .open_files
                 .get(&fd)
-                .ok_or_else(|| VfError::failure(i, ERR_EBADF))?;
+                .ok_or_else(|| VfError::errno(i, ERR_EBADF))?;
             fds.push(fd);
             ops.push(crate::client::CloseOp {
                 fh: open.fh.clone(),
@@ -125,22 +125,22 @@ impl VectorBackend for NfsVecFs {
                         .open_files
                         .get(&fd)
                         .map(|o| o.cur_offset)
-                        .ok_or_else(|| VfError::failure(i, ERR_EBADF))?,
-                    None => return Err(VfError::failure(i, ERR_INVAL)),
+                        .ok_or_else(|| VfError::errno(i, ERR_EBADF))?,
+                    None => return Err(VfError::from_kind(i, std::io::ErrorKind::InvalidInput)),
                 },
-                _ => return Err(VfError::failure(i, ERR_INVAL)),
+                _ => return Err(VfError::from_kind(i, std::io::ErrorKind::InvalidInput)),
             };
             let length =
-                u64::try_from(r.length).map_err(|_| VfError::failure(i, libc::EOVERFLOW as u32))?;
+                u64::try_from(r.length).map_err(|_| VfError::errno(i, libc::EOVERFLOW as u32))?;
             off.checked_add(length)
-                .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
+                .ok_or_else(|| VfError::errno(i, libc::EOVERFLOW as u32))?;
             offsets.push(off);
             let file = if r.file.is_fd() {
                 let fd = r.file.fd().unwrap();
                 let open = self
                     .open_files
                     .get(&fd)
-                    .ok_or_else(|| VfError::failure(i, ERR_EBADF))?;
+                    .ok_or_else(|| VfError::errno(i, ERR_EBADF))?;
                 crate::client::FileRef::Handle(open.fh.clone())
             } else {
                 crate::client::FileRef::Path(
@@ -171,7 +171,7 @@ impl VectorBackend for NfsVecFs {
                 let new = out[i]
                     .offset
                     .checked_add(out[i].data.len() as u64)
-                    .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
+                    .ok_or_else(|| VfError::errno(i, libc::EOVERFLOW as u32))?;
                 self.advance_offset(&r.file, new);
             }
         }
@@ -184,11 +184,11 @@ impl VectorBackend for NfsVecFs {
         buffers: &mut [&mut [u8]],
     ) -> VfResult<Vec<ReadIntoResult>> {
         if reads.len() != buffers.len() {
-            return Err(VfError::client(0, ERR_INVAL));
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
         for (index, (read, buffer)) in reads.iter().zip(buffers.iter()).enumerate() {
             if read.length != buffer.len() {
-                return Err(VfError::client(index, ERR_INVAL));
+                return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput));
             }
         }
         if !self.recovery_in_progress {
@@ -291,22 +291,22 @@ impl VectorBackend for NfsVecFs {
                         .open_files
                         .get(&fd)
                         .map(|o| o.cur_offset)
-                        .ok_or_else(|| VfError::failure(i, ERR_EBADF))?,
-                    None => return Err(VfError::failure(i, ERR_INVAL)),
+                        .ok_or_else(|| VfError::errno(i, ERR_EBADF))?,
+                    None => return Err(VfError::from_kind(i, std::io::ErrorKind::InvalidInput)),
                 },
-                _ => return Err(VfError::failure(i, ERR_INVAL)),
+                _ => return Err(VfError::from_kind(i, std::io::ErrorKind::InvalidInput)),
             };
             let length = u64::try_from(w.data().len())
-                .map_err(|_| VfError::failure(i, libc::EOVERFLOW as u32))?;
+                .map_err(|_| VfError::errno(i, libc::EOVERFLOW as u32))?;
             off.checked_add(length)
-                .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
+                .ok_or_else(|| VfError::errno(i, libc::EOVERFLOW as u32))?;
             offsets.push(off);
             let file = if w.file().is_fd() {
                 let fd = w.file().fd().unwrap();
                 let open = self
                     .open_files
                     .get(&fd)
-                    .ok_or_else(|| VfError::failure(i, ERR_EBADF))?;
+                    .ok_or_else(|| VfError::errno(i, ERR_EBADF))?;
                 crate::client::FileRef::Handle(open.fh.clone())
             } else {
                 crate::client::FileRef::Path(
@@ -339,7 +339,7 @@ impl VectorBackend for NfsVecFs {
                 let new = out[i]
                     .offset
                     .checked_add(out[i].bytes_written as u64)
-                    .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
+                    .ok_or_else(|| VfError::errno(i, libc::EOVERFLOW as u32))?;
                 self.advance_offset(w.file(), new);
             }
         }
@@ -397,7 +397,7 @@ impl VectorBackend for NfsVecFs {
         follow_symlinks: bool,
     ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
         if page_size == 0 {
-            return Err(VfError::client(0, ERR_INVAL));
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
         // Only a failed first page may be retried: after a page has reached
         // the application, a reconnect could invalidate the READDIR cookie.
@@ -466,7 +466,7 @@ impl VectorBackend for NfsVecFs {
         follow_symlinks: bool,
     ) -> VfResult<Vec<vfsi_sync::BackendDirectoryPage>> {
         if dirs.len() != cursors.len() || page_size == 0 {
-            return Err(VfError::client(0, ERR_INVAL));
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
         if dirs.is_empty() {
             return Ok(Vec::new());
@@ -732,7 +732,7 @@ impl VectorBackend for NfsVecFs {
                         level.push((fh.clone(), level_paths[i].clone(), owner));
                     }
                     Ok((_, _)) => {
-                        return Err(VfError::failure(owner, nfsstat4_NFS4ERR_NOTDIR));
+                        return Err(VfError::errno(owner, nfsstat4_NFS4ERR_NOTDIR));
                     }
                     Err(status) => return Err(VfError::nfs(owner, *status)),
                 }
@@ -1083,7 +1083,7 @@ impl VectorBackend for NfsVecFs {
         for (i, a) in dirs.iter().enumerate() {
             let path = self.server_vf_path(&a.file).map_err(|e| e.with_index(i))?;
             let (dir, name) =
-                split_path_bytes(path_bytes(&path)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
+                split_path_bytes(path_bytes(&path)).map_err(|_| VfError::errno(i, ERR_NOENT))?;
             parents.push(self.visible_path(&path_from_bytes(&dir)));
             names.push(name);
         }
@@ -1104,7 +1104,7 @@ impl VectorBackend for NfsVecFs {
                         linkdata: None,
                     });
                 }
-                Ok((_, _)) => return Err(VfError::failure(i, nfsstat4_NFS4ERR_NOTDIR)),
+                Ok((_, _)) => return Err(VfError::errno(i, nfsstat4_NFS4ERR_NOTDIR)),
                 Err(status) => return Err(VfError::nfs(i, *status)),
             }
         }
@@ -1123,7 +1123,7 @@ impl VectorBackend for NfsVecFs {
     fn vsymlink_impl(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
         self.ensure_writable(newpaths.len())?;
         if oldpaths.len() != newpaths.len() {
-            return Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL));
+            return Err(VfError::errno(0, nfsstat4_NFS4ERR_INVAL));
         }
         // Batch-resolve the destination parents, then CREATE in one compound.
         let mut parents: Vec<PathBuf> = Vec::with_capacity(newpaths.len());
@@ -1131,7 +1131,7 @@ impl VectorBackend for NfsVecFs {
         for (i, new) in newpaths.iter().enumerate() {
             let full = self.server_path(new);
             let (dir, name) =
-                split_path_bytes(path_bytes(&full)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
+                split_path_bytes(path_bytes(&full)).map_err(|_| VfError::errno(i, ERR_NOENT))?;
             parents.push(self.visible_path(&path_from_bytes(&dir)));
             names.push(name);
         }
@@ -1152,7 +1152,7 @@ impl VectorBackend for NfsVecFs {
                         linkdata: Some(path_bytes(old).to_vec()),
                     })
                 }
-                Ok((_, _)) => return Err(VfError::failure(i, nfsstat4_NFS4ERR_NOTDIR)),
+                Ok((_, _)) => return Err(VfError::errno(i, nfsstat4_NFS4ERR_NOTDIR)),
                 Err(status) => return Err(VfError::nfs(i, *status)),
             }
         }
@@ -1188,7 +1188,7 @@ impl VectorBackend for NfsVecFs {
     fn vhardlink_impl(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
         self.ensure_writable(newpaths.len())?;
         if oldpaths.len() != newpaths.len() {
-            return Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL));
+            return Err(VfError::errno(0, nfsstat4_NFS4ERR_INVAL));
         }
         if oldpaths.is_empty() {
             return Ok(());
@@ -1206,7 +1206,7 @@ impl VectorBackend for NfsVecFs {
         for (i, new) in newpaths.iter().enumerate() {
             let full = self.server_path(new);
             let (dir, name) =
-                split_path_bytes(path_bytes(&full)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
+                split_path_bytes(path_bytes(&full)).map_err(|_| VfError::errno(i, ERR_NOENT))?;
             parents.push(self.visible_path(&path_from_bytes(&dir)));
             names.push(name);
         }
@@ -1233,7 +1233,7 @@ impl VectorBackend for NfsVecFs {
                     });
                 }
                 (Ok((_, _)), Ok((_, _))) => {
-                    return Err(VfError::failure(i, nfsstat4_NFS4ERR_NOTDIR));
+                    return Err(VfError::errno(i, nfsstat4_NFS4ERR_NOTDIR));
                 }
                 (Err(status), _) => return Err(VfError::nfs(i, *status)),
                 (_, Err(status)) => return Err(VfError::nfs(i, *status)),
@@ -1449,7 +1449,7 @@ impl VectorBackend for NfsVecFs {
                 .lookup_getattr(&parent, &name)
                 .map_err(|error| vfsi_core::error_from_rpc(error, 0))?;
             if ftype != nfs_ftype4_NF4DIR {
-                return Err(VfError::failure(0, ERR_NOTDIR));
+                return Err(VfError::errno(0, ERR_NOTDIR));
             }
             fh
         };
@@ -1464,12 +1464,12 @@ impl VectorBackend for NfsVecFs {
         match dir {
             VfDir::Descriptor { fd, owner } if *owner == self.dir_owner => {
                 if !self.open_dirs.contains_key(fd) {
-                    return Err(VfError::failure(0, ERR_EBADF));
+                    return Err(VfError::errno(0, ERR_EBADF));
                 }
                 self.open_dirs.remove(fd);
                 Ok(())
             }
-            _ => Err(VfError::failure(0, ERR_EBADF)),
+            _ => Err(VfError::errno(0, ERR_EBADF)),
         }
     }
 
@@ -1484,8 +1484,8 @@ impl VectorBackend for NfsVecFs {
                 .open_dirs
                 .get(fd)
                 .cloned()
-                .ok_or_else(|| VfError::failure(0, ERR_EBADF))?,
-            _ => return Err(VfError::failure(0, ERR_EBADF)),
+                .ok_or_else(|| VfError::errno(0, ERR_EBADF))?,
+            _ => return Err(VfError::errno(0, ERR_EBADF)),
         };
         let mut first_error: Option<VfError> = None;
         // The directory itself is kept, so there is no parent entry to remove.
@@ -1512,7 +1512,7 @@ impl VectorBackend for NfsVecFs {
             let full = self.server_path(&p.path);
             let (dir, name) = match split_path_bytes(path_bytes(&full)) {
                 Ok(x) => x,
-                Err(_) => return Err(VfError::failure(i, ERR_NOENT)),
+                Err(_) => return Err(VfError::errno(i, ERR_NOENT)),
             };
             let dirfh = match self.resolve_path(&path_from_bytes(&dir), true) {
                 Ok(fh) => fh,

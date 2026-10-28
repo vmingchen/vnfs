@@ -49,7 +49,7 @@ fn ranged_read_semantic_failure_still_recovers_unaffected_paths() {
         for name in ["a", "b", "c"] {
             std::fs::write(root.0.join(name), name.as_bytes()).unwrap();
         }
-        let backend = FaultBackend::new(&root.0, Some(VfError::failure(index, ERR_NOENT)));
+        let backend = FaultBackend::new(&root.0, Some(VfError::errno(index, ERR_NOENT)));
         let calls = backend.read_calls.clone();
         let client = client(backend);
         Python::attach(|py| {
@@ -61,7 +61,7 @@ fn ranged_read_semantic_failure_still_recovers_unaffected_paths() {
                     Some(vec![Some(1); 3]),
                 )
                 .unwrap();
-            assert_eq!(errors, HashMap::from([(index, ERR_NOENT)]));
+            assert_eq!(error_codes(&errors), HashMap::from([(index, ERR_NOENT)]));
             for (position, name) in ["a", "b", "c"].iter().enumerate() {
                 assert_eq!(
                     data[position],

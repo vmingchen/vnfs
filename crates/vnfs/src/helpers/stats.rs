@@ -30,7 +30,7 @@ impl TreeStats {
     }
 }
 fn overflow() -> crate::Error {
-    crate::Error::client(0, libc::EOVERFLOW as u32)
+    crate::Error::errno(0, libc::EOVERFLOW as u32)
 }
 /// Fold bounded directory pages without collecting a tree or issuing per-entry stat.
 /// `options` supplies depth/entry/path budgets; recursive visiting is enabled.

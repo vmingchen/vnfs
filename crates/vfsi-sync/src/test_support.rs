@@ -122,7 +122,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         .vread_all_with_options_impl(&whole_files, ReadAllOptions::new().with_max_total_bytes(5))
         .unwrap_err();
     assert_eq!(
-        (error.index(), error.raw_code()),
+        (error.index(), error.to_errno() as u32),
         (Some(1), libc::EFBIG as u32)
     );
     assert_eq!(
@@ -382,7 +382,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
             file_mode
         )
         .unwrap_err()
-        .raw_code(),
+        .to_errno() as u32,
         ERR_EXIST
     );
     let tfd = fs
@@ -403,7 +403,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
             1
         )])
         .unwrap_err()
-        .raw_code(),
+        .to_errno() as u32,
         ERR_INVAL
     );
 
@@ -434,7 +434,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
             ReadOp::new(bad, VfOffset::At(0), 1),
         ])
         .unwrap_err();
-    assert_eq!((e.index(), e.raw_code()), (Some(1), ERR_EBADF));
+    assert_eq!((e.index(), e.to_errno() as u32), (Some(1), ERR_EBADF));
 
     // readlink/hardlink error paths.
     assert!(
@@ -560,7 +560,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
 
     // chdir onto a regular file is refused (NOTDIR) by both backends.
     assert_eq!(
-        fs.chdir(Path::new(&renamed)).unwrap_err().raw_code(),
+        fs.chdir(Path::new(&renamed)).unwrap_err().to_errno() as u32,
         ERR_NOTDIR,
         "chdir to a file"
     );
@@ -648,15 +648,15 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         assert_eq!(
             fs.vsetattrs_raw_nofollow_impl(&[lsa])
                 .unwrap_err()
-                .raw_code(),
-            VF_ERR_UNSUPPORTED,
+                .to_errno() as u32,
+            libc::EOPNOTSUPP as u32,
             "lsetattrsv on a symlink"
         );
     }
 
     // Closing an already-closed descriptor reports EBADF on both backends.
     assert_eq!(
-        fs.close_impl(&tf).unwrap_err().raw_code(),
+        fs.close_impl(&tf).unwrap_err().to_errno() as u32,
         ERR_EBADF,
         "close of a closed descriptor"
     );
@@ -698,7 +698,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         )
         .with_creation()]))
             .unwrap_err()
-            .raw_code(),
+            .to_errno() as u32,
         ERR_ISDIR,
         "write to Current(None)"
     );
@@ -767,8 +767,8 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         assert_eq!(
             fs.remove_paths_impl(&[Path::new(&dir)], true)
                 .unwrap_err()
-                .raw_code(),
-            VF_ERR_UNSUPPORTED
+                .to_errno() as u32,
+            libc::EOPNOTSUPP as u32
         );
         assert!(fs.exists_impl(Path::new(&dir)).unwrap());
     }

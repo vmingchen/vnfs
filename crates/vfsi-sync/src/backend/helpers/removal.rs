@@ -117,7 +117,7 @@ pub fn open_dir_impl_default<F: VectorBackend + ?Sized>(
     };
     backend.vgetattrs_nofollow_impl(std::slice::from_mut(&mut attrs))?;
     if attrs.ftype != VfType::Directory {
-        return Err(VfError::failure(0, ERR_NOTDIR));
+        return Err(VfError::errno(0, ERR_NOTDIR));
     }
     Ok(VfDir::Path(path.to_path_buf()))
 }
@@ -195,7 +195,7 @@ pub fn ensure_empty_dir_impl_default<F: VectorBackend + ?Sized>(
 ) -> VfRes {
     match backend.mkdir_raw_impl(dir, 0o777) {
         Ok(()) => Ok(()),
-        Err(error) if error.raw_code() == ERR_EXIST => {
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let mut attrs = VfAttrs {
                 file: FileOperand::from_os_path(dir),
                 masks: AttrMask::default(),
@@ -203,7 +203,7 @@ pub fn ensure_empty_dir_impl_default<F: VectorBackend + ?Sized>(
             };
             backend.vgetattrs_nofollow_impl(std::slice::from_mut(&mut attrs))?;
             if attrs.ftype != VfType::Directory {
-                return Err(VfError::failure(0, ERR_NOTDIR));
+                return Err(VfError::errno(0, ERR_NOTDIR));
             }
             backend.remove_dir_contents_path_impl(dir)
         }

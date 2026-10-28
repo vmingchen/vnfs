@@ -79,7 +79,7 @@ fn zero_progress_without_eof_is_an_indexed_error() {
             .read_many(py, vec!["/a".into()], vec![0], Some(vec![Some(3)]))
             .unwrap();
         assert_eq!(data, vec![None]);
-        assert_eq!(errors, HashMap::from([(0, libc::EIO as u32)]));
+        assert_eq!(error_codes(&errors), HashMap::from([(0, libc::EIO as u32)]));
         assert_eq!(calls.lock().unwrap().len(), 1);
     });
 }
@@ -89,7 +89,7 @@ fn continuation_semantic_errors_use_original_indices_and_discard_partial_data() 
     Python::initialize();
     let root = TestRoot::new();
     std::fs::write(root.0.join("a"), b"abcdef").unwrap();
-    let mut backend = FaultBackend::new(&root.0, Some(VfError::failure(0, ERR_NOENT)));
+    let mut backend = FaultBackend::new(&root.0, Some(VfError::errno(0, ERR_NOENT)));
     backend.read_error_on_call = 1;
     backend.read_limit = Some(2);
     let calls = backend.read_calls.clone();
@@ -103,7 +103,7 @@ fn continuation_semantic_errors_use_original_indices_and_discard_partial_data() 
             )
             .unwrap();
         assert_eq!(data, vec![Some(b"ab".to_vec()), None]);
-        assert_eq!(errors, HashMap::from([(1, ERR_NOENT)]));
+        assert_eq!(error_codes(&errors), HashMap::from([(1, ERR_NOENT)]));
         assert_eq!(calls.lock().unwrap().len(), 2);
     });
 }

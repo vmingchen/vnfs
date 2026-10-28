@@ -41,19 +41,19 @@ pub struct NfsMount {
 impl NfsMount {
     pub fn discover(path: impl AsRef<Path>) -> VfResult<Self> {
         if !path.as_ref().is_absolute() {
-            return Err(VfError::client(0, libc::EINVAL as u32)
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)
                 .with_context("mount path must be absolute", path.as_ref()));
         }
         let path = fs::canonicalize(path.as_ref()).map_err(|error| {
-            VfError::client(0, error.raw_os_error().unwrap_or(libc::EIO) as u32)
+            VfError::errno(0, error.raw_os_error().unwrap_or(libc::EIO) as u32)
                 .with_context("from_mount", path.as_ref())
         })?;
         let metadata = fs::metadata(&path).map_err(|error| {
-            VfError::client(0, error.raw_os_error().unwrap_or(libc::EIO) as u32)
+            VfError::errno(0, error.raw_os_error().unwrap_or(libc::EIO) as u32)
                 .with_context("from_mount", &path)
         })?;
         if !metadata.is_dir() {
-            return Err(VfError::client(0, libc::ENOTDIR as u32).with_context("from_mount", &path));
+            return Err(VfError::errno(0, libc::ENOTDIR as u32).with_context("from_mount", &path));
         }
         let id = path_mount_id(&path).ok_or_else(|| unsupported(&path))?;
         let table = fs::read("/proc/self/mountinfo").map_err(|_| unsupported(&path))?;
@@ -117,7 +117,7 @@ impl NfsMount {
 
     pub(crate) fn check_credentials(&self) -> VfResult<()> {
         if AuthSysIdentity::current().as_ref() != Some(&self.credentials) {
-            return Err(VfError::client(0, libc::EACCES as u32));
+            return Err(VfError::errno(0, libc::EACCES as u32));
         }
         Ok(())
     }
@@ -163,7 +163,7 @@ impl NfsMount {
             || options.minorversion != Some(self.minor_version())
             || options.authentication != NfsAuth::AuthSys
         {
-            return Err(VfError::client(0, libc::EINVAL as u32)
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)
                 .with_context("conflicting mount connection options", &self.local_path));
         }
         if self.resolved_root.is_some() {
@@ -196,7 +196,7 @@ impl NfsMount {
     }
 
     fn stale(&self) -> VfError {
-        VfError::client(0, libc::ESTALE as u32).with_context(
+        VfError::errno(0, libc::ESTALE as u32).with_context(
             "mount directory identity changed or remote root differs",
             &self.local_path,
         )
@@ -204,7 +204,7 @@ impl NfsMount {
 }
 
 fn unsupported(path: &Path) -> VfError {
-    VfError::client(0, libc::EOPNOTSUPP as u32).with_context(
+    VfError::errno(0, libc::EOPNOTSUPP as u32).with_context(
         "from_mount requires an unambiguous NFSv4.1/4.2 TCP sec=sys mount without nested mounts",
         path,
     )

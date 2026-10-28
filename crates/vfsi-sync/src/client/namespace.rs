@@ -28,7 +28,9 @@ impl<F: VectorBackend> FsClient<F> {
             Some(index) if index < pairs.len() => {
                 error.with_context("vrename", pairs[index].0.as_ref())
             }
-            Some(_) => VfError::transport(None, "rename backend returned an invalid error index"),
+            Some(_) => {
+                VfError::invalid_reply(None, "rename backend returned an invalid error index")
+            }
             None => error,
         })
     }
@@ -41,9 +43,8 @@ impl<F: VectorBackend> FsClient<F> {
         let mut seen = HashSet::with_capacity(directories.len());
         for (index, op) in directories.iter().enumerate() {
             if !seen.insert(op.path()) {
-                return Err(
-                    VfError::client(index, crate::ERR_INVAL).with_context("vmkdir", op.path())
-                );
+                return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput)
+                    .with_context("vmkdir", op.path()));
             }
         }
         if directories.is_empty() {
@@ -63,7 +64,9 @@ impl<F: VectorBackend> FsClient<F> {
             Some(index) if index < directories.len() => {
                 error.with_context("vmkdir", directories[index].path())
             }
-            Some(_) => VfError::transport(None, "mkdir backend returned an invalid error index"),
+            Some(_) => {
+                VfError::invalid_reply(None, "mkdir backend returned an invalid error index")
+            }
             None => error,
         })
     }
@@ -94,7 +97,7 @@ impl<F: VectorBackend> FsClient<F> {
             .vreadlink_impl(&paths)
             .map_err(|error| link_error(error, &paths, "vreadlink"))?;
         if targets.len() != paths.len() {
-            return Err(VfError::transport(
+            return Err(VfError::invalid_reply(
                 None,
                 "readlink backend returned an invalid result count",
             ));

@@ -273,7 +273,7 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
         );
         assert_eq!(calls, 1, "{name}");
         for fault in [
-            vnfs::Error::client(0, libc::ECANCELED as u32),
+            vnfs::Error::errno(0, libc::ECANCELED as u32),
             vnfs::Error::transport(None, "callback failure"),
         ] {
             calls = 0;

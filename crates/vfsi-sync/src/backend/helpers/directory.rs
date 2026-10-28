@@ -14,7 +14,7 @@ pub fn listdir_page_impl_default<F: VectorBackend + ?Sized>(
         return Err(VfError::unsupported(0));
     }
     if page_size == 0 {
-        return Err(VfError::client(0, ERR_INVAL));
+        return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
     }
     let mut remaining = match cursor {
         Some(cursor) => cursor.into_state::<std::vec::IntoIter<VfAttrs>>()?,
@@ -45,7 +45,7 @@ pub fn vlistdir_pages_impl_default<F: VectorBackend + ?Sized>(
     follow_symlinks: bool,
 ) -> VfResult<Vec<BackendDirectoryPage>> {
     if dirs.len() != cursors.len() || page_size == 0 {
-        return Err(VfError::client(0, ERR_INVAL));
+        return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
     }
     dirs.iter()
         .zip(cursors)
@@ -97,20 +97,18 @@ pub fn walk_with_options_impl_default<F: VectorBackend + ?Sized>(
         let request_count = remaining.saturating_add(1);
         let mut entries = backend.listdir_impl(&dir, masks, request_count, false)?;
         if entries.len() > remaining {
-            return Err(
-                VfError::failure(entry_count, libc::EFBIG as u32).with_context("walk", &dir)
-            );
+            return Err(VfError::errno(entry_count, libc::EFBIG as u32).with_context("walk", &dir));
         }
         for entry in &entries {
             let bytes = entry.file.path().map_or(0, |path| path.as_os_str().len());
             path_bytes = path_bytes.checked_add(bytes).ok_or_else(|| {
-                VfError::failure(entry_count, libc::EFBIG as u32).with_context("walk", &dir)
+                VfError::errno(entry_count, libc::EFBIG as u32).with_context("walk", &dir)
             })?;
             if path_bytes
                 > options.max_path_bytes_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES)
             {
                 return Err(
-                    VfError::failure(entry_count, libc::EFBIG as u32).with_context("walk", &dir)
+                    VfError::errno(entry_count, libc::EFBIG as u32).with_context("walk", &dir)
                 );
             }
             entry_count += 1;
@@ -125,9 +123,7 @@ pub fn walk_with_options_impl_default<F: VectorBackend + ?Sized>(
             && depth >= options.max_depth_or(Default::default()).get()
             && !options.truncate_at_max_depth()
         {
-            return Err(
-                VfError::failure(entry_count, libc::EFBIG as u32).with_context("walk", &dir)
-            );
+            return Err(VfError::errno(entry_count, libc::EFBIG as u32).with_context("walk", &dir));
         }
         if depth < options.max_depth_or(Default::default()).get() {
             for s in subdirs.into_iter().rev() {
@@ -223,7 +219,7 @@ pub fn native_read_dir_impl_default<F: VectorBackend + ?Sized>(
         .listdir_impl(path, metadata_mask(), requested, false)
         .map_err(|error| error.with_context("read_dir", path))?;
     if entries.len() > options.max_entries_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_ENTRIES) {
-        return Err(VfError::failure(
+        return Err(VfError::errno(
             options.max_entries_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_ENTRIES),
             libc::EFBIG as u32,
         )
@@ -238,17 +234,17 @@ pub fn native_read_dir_impl_default<F: VectorBackend + ?Sized>(
                 .file
                 .path()
                 .map(std::path::Path::to_path_buf)
-                .ok_or_else(|| VfError::client(index, ERR_IO).with_context("read_dir", path))?;
+                .ok_or_else(|| VfError::errno(index, ERR_IO).with_context("read_dir", path))?;
             path_bytes = path_bytes
                 .checked_add(entry_path.as_os_str().len())
                 .ok_or_else(|| {
-                    VfError::failure(index, libc::EFBIG as u32).with_context("read_dir", path)
+                    VfError::errno(index, libc::EFBIG as u32).with_context("read_dir", path)
                 })?;
             if path_bytes
                 > options.max_path_bytes_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES)
             {
                 return Err(
-                    VfError::failure(index, libc::EFBIG as u32).with_context("read_dir", path)
+                    VfError::errno(index, libc::EFBIG as u32).with_context("read_dir", path)
                 );
             }
             Ok(DirEntry::new(
@@ -288,7 +284,7 @@ pub fn native_read_dir_page_with_fields_impl_default<F: VectorBackend + ?Sized>(
         )
         .map_err(|error| error.with_context("visit_dir", path))?;
     if attributes.len() > page_size {
-        return Err(VfError::transport(
+        return Err(VfError::invalid_reply(
             None,
             "listdir_page_impl returned more entries than requested",
         ));
@@ -301,7 +297,7 @@ pub fn native_read_dir_page_with_fields_impl_default<F: VectorBackend + ?Sized>(
                 .file
                 .path()
                 .map(std::path::Path::to_path_buf)
-                .ok_or_else(|| VfError::client(index, ERR_IO).with_context("visit_dir", path))?;
+                .ok_or_else(|| VfError::errno(index, ERR_IO).with_context("visit_dir", path))?;
             Ok(DirEntry::new(
                 entry_path,
                 vfsi_core::metadata_from_attrs(attributes),

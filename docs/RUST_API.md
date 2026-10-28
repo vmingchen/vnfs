@@ -370,6 +370,15 @@ authentication categories. Unclassified causes remain `Other`, without
 guessing from message text. `raw_code()` is a raw compatibility accessor;
 prefer `kind()` and `status()` for interpretation.
 
+Use `Error::errno(index, code)` for actual errno failures,
+`Error::from_kind(index, kind)` for client failures without a native status,
+and `Error::from_io(index, source)` to retain an I/O error and its source.
+All constructors accept an optional index; connection-wide failures should use
+`None`. `with_message()` adds diagnostics to semantic errors as well as transport
+failures. Language/legacy adapters use the lossy `to_errno()` conversion, while
+`status()` always retains the original native status. Client-only errors have no
+native status; synthetic compatibility codes are not stored as errno values.
+
 Prefer `try_close()` and `vclose(&mut files)` when cleanup errors matter.
 They retain ownership on failure. `is_closed() == false` only means local
 cleanup ownership remains, not that a remotely ambiguous close failed to take

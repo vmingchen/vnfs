@@ -23,18 +23,18 @@ pub(super) fn listdir<F: Vfsi + ?Sized>(
     let completions = fs
         .vlistdirs(&[root], options, |index, page| {
             if index != 0 {
-                return Err(Error::transport(None, "invalid listdir page index"));
+                return Err(Error::invalid_reply(None, "invalid listdir page index"));
             }
             let relative = page
                 .path
                 .strip_prefix(root)
-                .map_err(|_| Error::transport(None, "invalid listdir page parent"))?;
+                .map_err(|_| Error::invalid_reply(None, "invalid listdir page parent"))?;
             if (!options.recursive() && page.path != root)
                 || relative
                     .components()
                     .any(|component| !matches!(component, std::path::Component::Normal(_)))
             {
-                return Err(Error::transport(None, "invalid listdir page parent"));
+                return Err(Error::invalid_reply(None, "invalid listdir page parent"));
             }
             let depth = relative.components().count() + 1;
             for entry in page.entries {
@@ -66,7 +66,7 @@ pub(super) fn listdir<F: Vfsi + ?Sized>(
                 // Nested callback work has its own operation indices.
                 error
             } else if error.index().is_some_and(|index| index != 0) {
-                Error::transport(None, "invalid listdir backend error index")
+                Error::invalid_reply(None, "invalid listdir backend error index")
             } else {
                 error
             }
@@ -77,18 +77,21 @@ pub(super) fn listdir<F: Vfsi + ?Sized>(
         TraversalCompletion::Complete
     };
     if completions.as_slice() != [expected] {
-        return Err(Error::transport(None, "invalid listdir completion count"));
+        return Err(Error::invalid_reply(
+            None,
+            "invalid listdir completion count",
+        ));
     }
     Ok(expected)
 }
 
 fn pruning_error(path: &Path) -> Error {
-    Error::client(0, libc::EINVAL as u32)
+    Error::from_kind(0, std::io::ErrorKind::InvalidInput)
         .with_context("listdir: set enter_leave(true) for SkipSubtree", path)
 }
 
 fn limit_error(path: &Path) -> Error {
-    Error::client(0, libc::EFBIG as u32).with_context("listdir", path)
+    Error::errno(0, libc::EFBIG as u32).with_context("listdir", path)
 }
 
 fn buffered<F: Vfsi + ?Sized>(
@@ -118,7 +121,7 @@ fn buffered<F: Vfsi + ?Sized>(
         })
     };
     if !lifecycle && !attrs.is_dir() {
-        return Err(Error::client(0, libc::ENOTDIR as u32).with_context("listdir", root));
+        return Err(Error::errno(0, libc::ENOTDIR as u32).with_context("listdir", root));
     }
     let walk = options.walk_options(fs.limits());
     // The shared event walker charges the root. Entry-only listing excludes it

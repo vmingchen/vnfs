@@ -300,7 +300,7 @@ impl VectorBackend for ScalarOnly {
         buffers: &mut [&mut [u8]],
     ) -> VfResult<Vec<ReadIntoResult>> {
         if requests.len() != buffers.len() {
-            return Err(VfError::client(0, libc::EINVAL as u32));
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
         let limit = self
             .vector_result_limit
@@ -635,7 +635,7 @@ fn shared_write_operations_keep_storage_borrowed_through_dynamic_vector_dispatch
 fn consolidated_write_dispatch_retries_only_successful_short_writes_without_copying() {
     for failure in [
         None,
-        Some(VfError::client(1, libc::ENOSPC as u32)),
+        Some(VfError::errno(1, libc::ENOSPC as u32)),
         Some(VfError::transport(None, "lost write reply")),
     ] {
         let backend = WriteBoundaryProbe {
@@ -855,8 +855,8 @@ fn shared_native_attribute_batches_preflight_and_remap_policy_run_errors() {
         assert!(backend.calls.is_empty());
     }
     for failure in [
-        VfError::client(1, libc::ENOENT as u32),
-        VfError::client(2, libc::ENOENT as u32),
+        VfError::errno(1, libc::ENOENT as u32),
+        VfError::errno(2, libc::ENOENT as u32),
         VfError::transport(None, "reply lost"),
     ] {
         backend.failure = Some((2, failure.clone()));
@@ -1287,7 +1287,7 @@ impl HandleBackend for ScalarOnly {
     fn vstatfs_impl(&mut self, files: &[FileOperand]) -> VfResult<Vec<vfsi_sync::FilesystemStats>> {
         self.stats_calls.fetch_add(1, Ordering::SeqCst);
         if let Some(index) = self.stats_error_index {
-            return Err(VfError::client(index, libc::ENOENT as u32));
+            return Err(VfError::errno(index, libc::ENOENT as u32));
         }
         Ok(vec![
             vfsi_sync::FilesystemStats::default();
@@ -1347,7 +1347,7 @@ impl HandleBackend for ScalarOnly {
         self.read_calls.fetch_add(1, Ordering::SeqCst);
         assert!(!self.direct_into_only, "owned read path must not run");
         if self.read_failure {
-            return Err(VfError::failure(0, libc::EACCES as u32));
+            return Err(VfError::errno(0, libc::EACCES as u32));
         }
         if self.oversized_read {
             return Ok(ReadResult {
@@ -1379,7 +1379,7 @@ impl HandleBackend for ScalarOnly {
         if !self.direct_into_only {
             let result = self.read_impl(request)?;
             if result.data.len() > buffer.len() {
-                return Err(VfError::client(0, vfsi_sync::ERR_IO));
+                return Err(VfError::errno(0, vfsi_sync::ERR_IO));
             }
             buffer[..result.data.len()].copy_from_slice(&result.data);
             return Ok(ReadIntoResult {
@@ -1390,7 +1390,7 @@ impl HandleBackend for ScalarOnly {
             });
         }
         if request.length != buffer.len() {
-            return Err(VfError::client(0, libc::EINVAL as u32));
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
         self.into_calls.fetch_add(1, Ordering::SeqCst);
         let offset = match request.offset {
@@ -1415,7 +1415,7 @@ impl HandleBackend for ScalarOnly {
     fn write_impl(&mut self, request: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult> {
         let call = self.write_calls.fetch_add(1, Ordering::SeqCst);
         if self.interrupt_write_call == Some(call) {
-            return Err(VfError::client(0, libc::EINTR as u32));
+            return Err(VfError::errno(0, libc::EINTR as u32));
         }
         if self.oversized_write_count {
             return Ok(WriteResult {
@@ -1454,7 +1454,7 @@ impl HandleBackend for ScalarOnly {
             SeekFrom::End(value) => self.data.len() as i128 + value as i128,
         };
         if next < 0 || next > u64::MAX as i128 {
-            return Err(VfError::failure(0, libc::EINVAL as u32));
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
         self.cursor = next as u64;
         Ok(self.cursor)
@@ -1519,8 +1519,8 @@ fn setattrs_ops_batch_policy_runs_in_order_and_preflight_before_dispatch() {
 fn setattrs_ops_remap_later_run_failures_without_replaying_or_dispatching_suffix() {
     use vfsi_core::SetAttrsOp;
     for failure in [
-        VfError::client(1, libc::ENOENT as u32),
-        VfError::client(2, libc::ENOENT as u32),
+        VfError::errno(1, libc::ENOENT as u32),
+        VfError::errno(2, libc::ENOENT as u32),
         VfError::transport(None, "lost attribute reply"),
     ] {
         let backend = ScalarOnly {
@@ -2028,8 +2028,8 @@ fn write_allv_dependency_schedule_matches_reference_waves() {
 #[test]
 fn write_allv_dependency_schedule_maps_later_wave_errors_without_replay() {
     for error in [
-        VfError::client(0, libc::ENOSPC as u32),
-        VfError::client(1, libc::ENOSPC as u32),
+        VfError::errno(0, libc::ENOSPC as u32),
+        VfError::errno(1, libc::ENOSPC as u32),
         VfError::transport(None, "lost write reply"),
     ] {
         let backend = WriteBoundaryProbe {
@@ -2815,7 +2815,7 @@ fn sync_errors_preserve_valid_indices_and_reject_invalid_backend_indices() {
     for index in [None, Some(1), Some(2)] {
         let error = index.map_or_else(
             || VfError::transport(None, "lost sync reply"),
-            |i| VfError::client(i, libc::EIO as u32),
+            |i| VfError::errno(i, libc::EIO as u32),
         );
         let fs = FsClient::new(DefaultBackend {
             scalar: ScalarOnly {
@@ -2984,7 +2984,7 @@ fn complete_append_vectors_order_short_writes_and_never_replay_failures() {
     assert_eq!(client.into_inner().unwrap().data, b"abcAAAABBBB");
     for failure_after in [0, 1] {
         for error in [
-            VfError::client(0, libc::ENOSPC as u32),
+            VfError::errno(0, libc::ENOSPC as u32),
             VfError::transport(None, "lost append reply"),
         ] {
             let backend = WriteBoundaryProbe {
@@ -3032,7 +3032,7 @@ impl VectorBackend for DirectoryProbe {
             .unwrap()
             .trim_start_matches('/')
             .parse::<i32>()
-            .map_err(|_| VfError::client(0, libc::ENOENT as u32))?;
+            .map_err(|_| VfError::errno(0, libc::ENOENT as u32))?;
         Ok(vfsi_sync::VfDir::Descriptor { fd, owner: 1 })
     }
     fn remove_dir_contents_handle_with_options_impl(
@@ -3117,7 +3117,7 @@ fn directory_vector_errors_preserve_index_and_do_not_replay_transport_failures()
                 if transport {
                     VfError::transport(Some(0), "reply lost")
                 } else {
-                    VfError::client(0, libc::EACCES as u32)
+                    VfError::errno(0, libc::EACCES as u32)
                 },
             )),
             ..Default::default()
@@ -3261,7 +3261,7 @@ fn write_allv_orders_aliases_and_unknown_objects_across_short_writes() {
 #[test]
 fn indexed_write_frontier_stops_at_late_short_write_failure_without_replay() {
     for error in [
-        VfError::client(0, libc::ENOSPC as u32),
+        VfError::errno(0, libc::ENOSPC as u32),
         VfError::transport(None, "lost indexed write reply"),
     ] {
         let backend = WriteBoundaryProbe {
@@ -3353,7 +3353,7 @@ fn projected_io_errors_allow_client_reentry() {
         return;
     }
     let fs = FsClient::new(WriteBoundaryProbe {
-        failure: Some(VfError::client(0, libc::ENOSPC as u32)),
+        failure: Some(VfError::errno(0, libc::ENOSPC as u32)),
         ..Default::default()
     });
     let file = fs.open("/file").unwrap();

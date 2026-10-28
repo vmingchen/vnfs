@@ -18,7 +18,7 @@ fn small_copy_identity_failures_prevent_mutation_and_keep_original_indices() {
         let mut backend = FaultBackend::new(&root.0, None);
         backend
             .attrs_errors
-            .push_back(Some(VfError::failure(position, code)));
+            .push_back(Some(VfError::errno(position, code)));
         let writes = backend.write_calls.clone();
         Python::attach(|py| {
             let (copied, errors) = client(backend)
@@ -32,7 +32,10 @@ fn small_copy_identity_failures_prevent_mutation_and_keep_original_indices() {
                 )
                 .unwrap();
             assert_eq!(copied, vec![None, None, Some(7)]);
-            assert_eq!(errors, HashMap::from([(0, ERR_NOENT), (1, code)]));
+            assert_eq!(
+                error_codes(&errors),
+                HashMap::from([(0, ERR_NOENT), (1, code)])
+            );
         });
         assert_eq!(*writes.lock().unwrap(), vec![vec![PathBuf::from("/new")]]);
         assert_eq!(std::fs::read(&source).unwrap(), b"protected");
@@ -60,7 +63,7 @@ fn small_copy_allows_missing_destinations_but_still_rejects_aliases() {
             )
             .unwrap();
         assert_eq!(copied, vec![None, Some(9)]);
-        assert_eq!(errors, HashMap::from([(0, ERR_SAME_FILE)]));
+        assert_eq!(error_codes(&errors), HashMap::from([(0, ERR_SAME_FILE)]));
     });
     assert_eq!(*writes.lock().unwrap(), vec![vec![PathBuf::from("/new")]]);
     assert_eq!(std::fs::read(root.0.join("new")).unwrap(), b"protected");

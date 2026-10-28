@@ -99,7 +99,7 @@ impl<F: HandleBackend> OpenFile<F> {
     pub(super) fn raw(&self) -> VfResult<&FileOperand> {
         self.file
             .as_ref()
-            .ok_or_else(|| VfError::client(0, crate::ERR_EBADF))
+            .ok_or_else(|| VfError::errno(0, crate::ERR_EBADF))
     }
 
     pub fn read_request_at(&self, offset: u64, length: usize) -> FsRead<'_, F> {

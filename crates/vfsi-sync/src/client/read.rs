@@ -35,9 +35,9 @@ impl<F: HandleBackend> FsClient<F> {
                 let length = result.data.len();
                 if !result.data.is_empty() && callback(offset, &result.data)?.is_break() {
                     return Ok(StreamCompletion::Stopped {
-                        next_offset: offset
-                            .checked_add(length as u64)
-                            .ok_or_else(|| VfError::client(0, crate::ERR_INVAL))?,
+                        next_offset: offset.checked_add(length as u64).ok_or_else(|| {
+                            VfError::from_kind(0, std::io::ErrorKind::InvalidInput)
+                        })?,
                     });
                 }
                 if result.eof {
@@ -45,7 +45,7 @@ impl<F: HandleBackend> FsClient<F> {
                 }
                 offset = offset
                     .checked_add(length as u64)
-                    .ok_or_else(|| VfError::client(0, libc::EOVERFLOW as u32))?;
+                    .ok_or_else(|| VfError::errno(0, libc::EOVERFLOW as u32))?;
             }
         })();
         let close = file.close();
@@ -91,9 +91,9 @@ impl<F: VectorBackend> FsClient<F> {
         for (index, request) in requests.iter().map(&project).enumerate() {
             requested = requested
                 .checked_add(request.length)
-                .ok_or_else(|| VfError::client(index, libc::EFBIG as u32))?;
+                .ok_or_else(|| VfError::errno(index, libc::EFBIG as u32))?;
             if requested > max_total_bytes {
-                return Err(VfError::client(index, libc::EFBIG as u32)
+                return Err(VfError::errno(index, libc::EFBIG as u32)
                     .with_context("vread_native", request.file.path()));
             }
         }
@@ -176,9 +176,9 @@ impl<F: VectorBackend> FsClient<F> {
             self.validate_owner(request.file, index)?;
             requested = requested
                 .checked_add(request.buffer.len())
-                .ok_or_else(|| VfError::client(index, libc::EFBIG as u32))?;
+                .ok_or_else(|| VfError::errno(index, libc::EFBIG as u32))?;
             if requested > max_bytes {
-                return Err(VfError::client(index, libc::EFBIG as u32));
+                return Err(VfError::errno(index, libc::EFBIG as u32));
             }
             reads.push(ReadOp::new(
                 request

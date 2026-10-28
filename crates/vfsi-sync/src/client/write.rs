@@ -251,13 +251,13 @@ impl<F: VectorBackend> FsClient<F> {
                     .with_context("vwrite_all_native", request.file().path())
             })?;
             let VfOffset::At(offset) = request.offset() else {
-                return Err(VfError::client(index, crate::ERR_INVAL)
+                return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput)
                     .with_context("vwrite_all_native", request.file().path()));
             };
             offset
                 .checked_add(request.data().len() as u64)
                 .ok_or_else(|| {
-                    VfError::client(index, libc::EOVERFLOW as u32)
+                    VfError::errno(index, libc::EOVERFLOW as u32)
                         .with_context("vwrite_all_native", request.file().path())
                 })?;
             // Reuse the offset allocation to retain the cheap borrowed request.
@@ -391,11 +391,11 @@ impl<F: VectorBackend> FsClient<F> {
                 .map(|&index| {
                     let request = prepared[index].0;
                     let VfOffset::At(offset) = request.offset() else {
-                        return Err(VfError::client(index, crate::ERR_INVAL)
+                        return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput)
                             .with_context("vwrite_all_native", request.file().path()));
                     };
                     let offset = offset.checked_add(totals[index] as u64).ok_or_else(|| {
-                        VfError::client(index, libc::EOVERFLOW as u32)
+                        VfError::errno(index, libc::EOVERFLOW as u32)
                             .with_context("vwrite_all_native", request.file().path())
                     })?;
                     Ok(FsWrite::new(
@@ -411,7 +411,7 @@ impl<F: VectorBackend> FsClient<F> {
             for (&index, result) in wave_indices.iter().zip(results) {
                 let request = prepared[index].0;
                 if result.bytes_written == 0 {
-                    return Err(VfError::client(index, crate::ERR_IO)
+                    return Err(VfError::errno(index, crate::ERR_IO)
                         .with_context("vwrite_all_native", request.file().path()));
                 }
                 totals[index] += result.bytes_written;

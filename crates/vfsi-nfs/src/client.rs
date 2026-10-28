@@ -872,9 +872,12 @@ fn path_io_chunk_end(
 }
 
 fn first_failed_range(res: &CompoundRes, map: &ExecutionMap) -> RpcResult<Option<(usize, u32)>> {
-    let report = map
-        .analyze(res)
-        .map_err(|error| RpcError::transport(format!("malformed NFS COMPOUND reply: {error}")))?;
+    let report = map.analyze(res).map_err(|error| {
+        RpcError::transport_with_kind(
+            vfsi_core::TransportKind::InvalidReply,
+            format!("malformed NFS COMPOUND reply: {error}"),
+        )
+    })?;
     if let Some(status) = report.compound_failure {
         return Err(RpcError::op(0, status));
     }
@@ -1567,7 +1570,10 @@ impl NfsClient {
             max_items = usize::MAX;
             let res = self.call_compound_with_safety(&mut c, RequestSafety::ReadOnly)?;
             let report = map.analyze(&res).map_err(|error| {
-                RpcError::transport(format!("malformed lookup_typev COMPOUND reply: {error}"))
+                RpcError::transport_with_kind(
+                    vfsi_core::TransportKind::InvalidReply,
+                    format!("malformed lookup_typev COMPOUND reply: {error}"),
+                )
             })?;
 
             if let Some(status) = report.compound_failure {
@@ -1663,7 +1669,10 @@ impl NfsClient {
             max_items = usize::MAX;
             let res = self.call_compound_with_safety(&mut c, RequestSafety::ReadOnly)?;
             let report = map.analyze(&res).map_err(|error| {
-                RpcError::transport(format!("malformed lookupv COMPOUND reply: {error}"))
+                RpcError::transport_with_kind(
+                    vfsi_core::TransportKind::InvalidReply,
+                    format!("malformed lookupv COMPOUND reply: {error}"),
+                )
             })?;
 
             if let Some(status) = report.compound_failure {
@@ -1785,7 +1794,8 @@ impl NfsClient {
 
     fn validate_read_length(actual: usize, requested: usize) -> RpcResult<()> {
         if actual > requested {
-            Err(RpcError::transport(
+            Err(RpcError::transport_with_kind(
+                vfsi_core::TransportKind::InvalidReply,
                 "NFS READ reply exceeded requested count",
             ))
         } else {
@@ -2887,7 +2897,10 @@ impl NfsClient {
                 }
             };
             let report = map.analyze(&res).map_err(|error| {
-                RpcError::transport(format!("malformed writev COMPOUND reply: {error}"))
+                RpcError::transport_with_kind(
+                    vfsi_core::TransportKind::InvalidReply,
+                    format!("malformed writev COMPOUND reply: {error}"),
+                )
             })?;
             let range_failed = report
                 .failure
@@ -3183,7 +3196,10 @@ impl NfsClient {
                 }
             };
             let report = map.analyze(&res).map_err(|error| {
-                RpcError::transport(format!("malformed readv COMPOUND reply: {error}"))
+                RpcError::transport_with_kind(
+                    vfsi_core::TransportKind::InvalidReply,
+                    format!("malformed readv COMPOUND reply: {error}"),
+                )
             })?;
             let range_failed = report
                 .failure

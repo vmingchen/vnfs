@@ -28,7 +28,7 @@ fn completed_copy_prefix_is_not_replayed_after_later_error() {
         );
         assert_eq!(copied, vec![None, None, Some(6)]);
         assert_eq!(
-            errors,
+            error_codes(&errors),
             HashMap::from([(0, libc::EIO as u32), (1, ERR_NOENT)])
         );
         assert_eq!(
@@ -64,7 +64,7 @@ fn unreported_short_prefix_is_not_assumed_complete_or_replayed() {
         assert_eq!(std::fs::read(root.0.join("x")).unwrap(), b"ab");
         assert_eq!(copied, vec![None, None, Some(6)]);
         assert_eq!(
-            errors,
+            error_codes(&errors),
             HashMap::from([(0, libc::EIO as u32), (1, ERR_NOENT)])
         );
     });
@@ -90,7 +90,10 @@ fn copy_prefix_errors_remap_after_source_read_filtering() {
             )
             .unwrap();
         assert_eq!(copied, vec![None, Some(6), None, Some(6)]);
-        assert_eq!(errors, HashMap::from([(0, ERR_NOENT), (2, ERR_NOENT)]));
+        assert_eq!(
+            error_codes(&errors),
+            HashMap::from([(0, ERR_NOENT), (2, ERR_NOENT)])
+        );
         assert_eq!(std::fs::read(root.0.join("x")).unwrap(), b"abcdef");
     });
 }
@@ -113,7 +116,7 @@ fn first_copy_error_retries_only_unattempted_suffix() {
             )
             .unwrap();
         assert_eq!(copied, vec![None, Some(6)]);
-        assert_eq!(errors, HashMap::from([(0, ERR_NOENT)]));
+        assert_eq!(error_codes(&errors), HashMap::from([(0, ERR_NOENT)]));
     });
 }
 
@@ -127,7 +130,7 @@ fn prefix_verification_semantic_error_is_not_success_or_mutation_retry() {
     let mut backend = FaultBackend::new(&root.0, None);
     backend
         .read_all_errors_after_write
-        .push_back(VfError::client(0, libc::EACCES as u32));
+        .push_back(VfError::errno(0, libc::EACCES as u32));
     let calls = backend.write_calls.clone();
     Python::attach(|py| {
         let (copied, errors) = client(backend)
@@ -142,7 +145,7 @@ fn prefix_verification_semantic_error_is_not_success_or_mutation_retry() {
             .unwrap();
         assert_eq!(copied, vec![None, None, Some(6)]);
         assert_eq!(
-            errors,
+            error_codes(&errors),
             HashMap::from([(0, libc::EIO as u32), (1, ERR_NOENT)])
         );
         assert_eq!(calls.lock().unwrap()[1], vec![PathBuf::from("/z")]);
@@ -195,7 +198,7 @@ fn prefix_verification_transport_index_survives_semantic_filtering() {
     }
     let mut backend = FaultBackend::new(&root.0, None);
     backend.read_all_errors_after_write.extend([
-        VfError::client(0, libc::EACCES as u32),
+        VfError::errno(0, libc::EACCES as u32),
         VfError::transport(Some(0), "verification disconnected after semantic failure"),
     ]);
     let calls = backend.write_calls.clone();

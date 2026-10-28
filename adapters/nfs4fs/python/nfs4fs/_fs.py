@@ -11,6 +11,7 @@ from functools import partial
 from vfsi_fsspec import VfsiFile
 from vfsi_fsspec import VfsiFileSystem as _VfsiFileSystem
 from vfsi_fsspec._fs import (
+    _can_reconnect,
     _close_reader_on_exit,
     _handle_identity,
     _RawVfsiFile,
@@ -166,15 +167,17 @@ class Nfs4FileSystem(_VfsiFileSystem):
                 fd = reader._ensure_open()
                 try:
                     attrs = self._client.fstat(fd)
-                except ConnectionError:
-                    if not self.auto_reconnect:
+                except OSError as error:
+                    if not self.auto_reconnect or not _can_reconnect(error):
                         raise
                     try:
                         # A dropped reply may leave the original descriptor usable.
                         # Retry metadata on that descriptor before deciding that
                         # its identity cannot be recovered.
                         attrs = self._client.fstat(fd)
-                    except ConnectionError:
+                    except OSError as error:
+                        if not _can_reconnect(error):
+                            raise
                         self._client.reconnect_descriptor(fd)
                         # OPEN pinned an object before metadata failed. Since its
                         # identity still could not be captured, reopening by path

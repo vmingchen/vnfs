@@ -10,20 +10,20 @@ pub(super) fn write_all_at<C>(
     mut write: impl FnMut(&mut C, u64, &[u8]) -> VfResult<usize>,
 ) -> VfResult<()> {
     let data_len =
-        u64::try_from(data.len()).map_err(|_| VfError::failure(index, libc::EOVERFLOW as u32))?;
+        u64::try_from(data.len()).map_err(|_| VfError::errno(index, libc::EOVERFLOW as u32))?;
     offset
         .checked_add(data_len)
-        .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))?;
+        .ok_or_else(|| VfError::errno(index, libc::EOVERFLOW as u32))?;
 
     let mut progress = 0usize;
     while progress < data.len() {
         let current = offset
             .checked_add(progress as u64)
-            .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))?;
+            .ok_or_else(|| VfError::errno(index, libc::EOVERFLOW as u32))?;
         let remaining = &data[progress..];
         let written = write(client, current, remaining)?;
         if written == 0 || written > remaining.len() {
-            return Err(VfError::client(index, ERR_IO));
+            return Err(VfError::errno(index, ERR_IO));
         }
         progress += written;
     }
@@ -111,12 +111,12 @@ pub(super) fn merge_read_allv_round(
         *total = total
             .checked_add(result.data.len())
             .filter(|size| *size <= max_total_bytes)
-            .ok_or_else(|| VfError::failure(original, libc::EFBIG as u32))?;
+            .ok_or_else(|| VfError::errno(original, libc::EFBIG as u32))?;
         out[original].extend_from_slice(&result.data);
         offsets[original] = result
             .offset
             .checked_add(result.data.len() as u64)
-            .ok_or_else(|| VfError::failure(original, libc::EOVERFLOW as u32))?;
+            .ok_or_else(|| VfError::errno(original, libc::EOVERFLOW as u32))?;
         if !result.eof {
             next.push(original);
         }
@@ -138,7 +138,7 @@ impl NfsVecFs {
         mut on_data: impl FnMut(&[u8]),
     ) -> VfResult<(usize, bool)> {
         if received > op.count as usize || (op.count != 0 && received == 0 && !eof) {
-            return Err(VfError::client(index, ERR_IO));
+            return Err(VfError::errno(index, ERR_IO));
         }
         while received < op.count as usize && !eof {
             #[cfg(feature = "test-faults")]
@@ -150,7 +150,7 @@ impl NfsVecFs {
                 offset: op
                     .offset
                     .checked_add(received as u64)
-                    .ok_or_else(|| VfError::client(index, libc::EOVERFLOW as u32))?,
+                    .ok_or_else(|| VfError::errno(index, libc::EOVERFLOW as u32))?,
                 count: remaining as u32,
             };
             let mut result = self
@@ -165,7 +165,7 @@ impl NfsVecFs {
             }
             let (data, end) = result.pop().expect("one result validated");
             if data.len() > remaining || (data.is_empty() && !end) {
-                return Err(VfError::client(index, ERR_IO));
+                return Err(VfError::errno(index, ERR_IO));
             }
             on_data(&data);
             received += data.len();
@@ -189,20 +189,20 @@ impl NfsVecFs {
                     .get(i)
                     .is_none_or(|buffer| buffer.len() != op.length)
             }) {
-                return Err(VfError::client(i, ERR_INVAL));
+                return Err(VfError::from_kind(i, std::io::ErrorKind::InvalidInput));
             }
             let off = self
                 .resolve_offset(&op.file, op.offset)
                 .map_err(|e| e.with_index(i))?;
-            let length = u64::try_from(op.length)
-                .map_err(|_| VfError::failure(i, libc::EOVERFLOW as u32))?;
+            let length =
+                u64::try_from(op.length).map_err(|_| VfError::errno(i, libc::EOVERFLOW as u32))?;
             off.checked_add(length)
-                .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
+                .ok_or_else(|| VfError::errno(i, libc::EOVERFLOW as u32))?;
             let o = self
                 .open_files
                 .get(&op.file.fd().unwrap())
                 .cloned()
-                .ok_or_else(|| VfError::failure(i, ERR_EBADF))?;
+                .ok_or_else(|| VfError::errno(i, ERR_EBADF))?;
             let mut remaining = op.length;
             let mut chunk_off = 0u64;
             loop {
@@ -212,7 +212,7 @@ impl NfsVecFs {
                     stateid: o.stateid,
                     offset: off
                         .checked_add(chunk_off)
-                        .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?,
+                        .ok_or_else(|| VfError::errno(i, libc::EOVERFLOW as u32))?,
                     count: n as u32,
                 });
                 owner.push(i);
@@ -222,7 +222,7 @@ impl NfsVecFs {
                 }
                 chunk_off = chunk_off
                     .checked_add(n as u64)
-                    .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
+                    .ok_or_else(|| VfError::errno(i, libc::EOVERFLOW as u32))?;
             }
             offsets.push(off);
         }
@@ -299,7 +299,7 @@ impl NfsVecFs {
                 ci += 1;
             }
             off.checked_add(data.len() as u64)
-                .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
+                .ok_or_else(|| VfError::errno(i, libc::EOVERFLOW as u32))?;
             out.push(ReadResult {
                 file: op.file.clone(),
                 offset: off,
@@ -427,7 +427,7 @@ impl NfsVecFs {
             }
             offset
                 .checked_add(length as u64)
-                .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))?;
+                .ok_or_else(|| VfError::errno(index, libc::EOVERFLOW as u32))?;
             results.push(ReadIntoResult {
                 file: read.file.clone(),
                 offset,
@@ -451,13 +451,13 @@ impl NfsVecFs {
             VfOffset::At(offset) => Ok(offset),
             VfOffset::Cur => match file.fd() {
                 Some(fd) => Ok(self.open_files.get(&fd).map(|o| o.cur_offset).unwrap_or(0)),
-                None => Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL)),
+                None => Err(VfError::errno(0, nfsstat4_NFS4ERR_INVAL)),
             },
             VfOffset::End => {
                 let fh = self.resolve_tcfile(file, true)?;
                 self.file_size(&fh)
             }
-            _ => Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL)),
+            _ => Err(VfError::errno(0, nfsstat4_NFS4ERR_INVAL)),
         }
     }
 
@@ -509,11 +509,11 @@ impl NfsVecFs {
                 .map_err(|error| error.with_index(index))?;
             offset
                 .checked_add(request.data().len() as u64)
-                .ok_or_else(|| VfError::client(index, libc::EOVERFLOW as u32))?;
+                .ok_or_else(|| VfError::errno(index, libc::EOVERFLOW as u32))?;
             let open = self
                 .open_files
                 .get(&request.file().fd().unwrap())
-                .ok_or_else(|| VfError::client(index, ERR_EBADF))?;
+                .ok_or_else(|| VfError::errno(index, ERR_EBADF))?;
             predecessors.push(!seen_handles.insert(open.fh.clone()));
             positional.push(matches!(request.offset(), VfOffset::At(_)) && !open.append);
             handles.push(open.fh.clone());
@@ -575,7 +575,7 @@ impl NfsVecFs {
                     };
                     offset
                         .checked_add(request.data().len() as u64)
-                        .ok_or_else(|| VfError::client(index, libc::EOVERFLOW as u32))?;
+                        .ok_or_else(|| VfError::errno(index, libc::EOVERFLOW as u32))?;
                     offsets[index] = offset;
                     let mut part = 0;
                     for wire in ranges[index].clone() {
@@ -633,7 +633,7 @@ impl NfsVecFs {
             {
                 let remaining = ops[wire].data.len() - progress[wire];
                 if count as usize > remaining || (count == 0 && remaining != 0) {
-                    return Err(VfError::client(index, ERR_IO));
+                    return Err(VfError::errno(index, ERR_IO));
                 }
                 progress[wire] += count as usize;
                 complete[wire] = progress[wire] == ops[wire].data.len();
@@ -696,7 +696,7 @@ impl NfsVecFs {
                 needs_open = true;
                 if r.offset == VfOffset::Cur {
                     // "current position" only exists for open descriptors.
-                    return Err(VfError::failure(i, ERR_INVAL));
+                    return Err(VfError::from_kind(i, std::io::ErrorKind::InvalidInput));
                 }
             }
         }
@@ -854,7 +854,7 @@ impl NfsVecFs {
             if !w.file().is_fd() {
                 needs_open = true;
                 if w.offset() == VfOffset::Cur {
-                    return Err(VfError::failure(i, ERR_INVAL));
+                    return Err(VfError::from_kind(i, std::io::ErrorKind::InvalidInput));
                 }
             }
         }

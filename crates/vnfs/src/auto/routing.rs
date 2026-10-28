@@ -73,11 +73,11 @@ impl Auto {
     pub(super) fn public_path(&self, connection: &NfsConnection, path: &Path) -> VfResult<PathBuf> {
         let suffix = path
             .strip_prefix("/")
-            .map_err(|_| VfError::client(0, libc::EIO as u32))?;
+            .map_err(|_| VfError::errno(0, libc::EIO as u32))?;
         let host = connection.spec.mount_point.join(suffix);
         let relative = host
             .strip_prefix(&self.root)
-            .map_err(|_| VfError::client(0, libc::EIO as u32))?;
+            .map_err(|_| VfError::errno(0, libc::EIO as u32))?;
         Ok(Path::new("/").join(relative))
     }
 

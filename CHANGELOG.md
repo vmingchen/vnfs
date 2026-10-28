@@ -5,6 +5,22 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+- Preserve SMB NTSTATUS and improve portable quota, stale-handle, busy, timeout,
+  authentication, and malformed-response classification. Error categories never
+  imply mutation replay safety.
+- Replace Rust `Error::failure`/`Error::client` with explicit `errno`,
+  `from_kind`, and source-preserving `from_io` constructors. Client-only errors
+  no longer invent native status codes. Error/context storage shrinks from
+  88 to 32 bytes on 64-bit Linux, keeping status-only errors allocation-free.
+- Preserve native status/domain, request indices, and diagnostics in Python
+  bulk exceptions. The private native error maps now contain exceptions rather
+  than integers; fsspec continues accepting legacy/mock integer maps.
+- Native Python timeout, authentication, and invalid-reply exceptions retain
+  transport provenance for safe read recovery and write poisoning. C scalar
+  errors use OS errno while structured C results retain native codes.
+- Stage `vfsi-fsspec 0.1.12` and require that shared-engine floor in `nfs4fs`
+  and `vsmbfs`; publish the engine before adapters carrying the new error maps.
+
 ## Python SMB/shared-engine patch release (2026-10-25)
 
 - Publish `vsmb 0.1.4` with SMB2 0.35 and its fixed constant-time signing

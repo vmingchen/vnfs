@@ -6,11 +6,11 @@ pub fn vread_into_impl_default<F: VectorBackend + ?Sized>(
     buffers: &mut [&mut [u8]],
 ) -> VfResult<Vec<ReadIntoResult>> {
     if reads.len() != buffers.len() {
-        return Err(VfError::client(0, ERR_INVAL));
+        return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
     }
     for (index, (request, buffer)) in reads.iter().zip(buffers.iter()).enumerate() {
         if request.length != buffer.len() {
-            return Err(VfError::client(index, ERR_INVAL));
+            return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput));
         }
     }
     let results = backend.vread_impl(reads)?;
@@ -37,7 +37,7 @@ pub fn vopen_outcomes_impl_default<F: VectorBackend + ?Sized>(
     modes: &[u32],
 ) -> VfResult<ManyResults<FileOperand>> {
     if paths.len() != flags.len() || paths.len() != modes.len() {
-        return Err(VfError::failure(0, ERR_INVAL));
+        return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
     }
     let mut results = Vec::with_capacity(paths.len());
     for ((path, flag), mode) in paths.iter().zip(flags).zip(modes) {

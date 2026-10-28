@@ -19,14 +19,14 @@ pub fn copy_to_writer(
     let completion = source.read_stream_with_options(path, options, |_, data| {
         if let Err(error) = writer.write_all(data) {
             write_error = Some(
-                Error::client(0, error.raw_os_error().unwrap_or(libc::EIO) as u32)
+                Error::errno(0, error.raw_os_error().unwrap_or(libc::EIO) as u32)
                     .with_context("copy_to_writer", path),
             );
             return Ok(std::ops::ControlFlow::Break(()));
         }
         written = written
             .checked_add(data.len() as u64)
-            .ok_or_else(|| Error::client(0, libc::EOVERFLOW as u32))?;
+            .ok_or_else(|| Error::errno(0, libc::EOVERFLOW as u32))?;
         Ok(std::ops::ControlFlow::Continue(()))
     });
     if let Some(error) = write_error {

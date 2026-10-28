@@ -1050,38 +1050,51 @@ impl Drop for CompoundRes {
 pub(crate) fn validate_response_ops(request: &[nfs_argop4], res: &COMPOUND4res) -> RpcResult<()> {
     let count = res.resarray.resarray_len as usize;
     if count > request.len() {
-        return Err(RpcError::transport(format!(
-            "malformed NFS COMPOUND reply: returned {count} operations for {} requests",
-            request.len()
-        )));
+        return Err(RpcError::transport_with_kind(
+            vfsi_core::TransportKind::InvalidReply,
+            format!(
+                "malformed NFS COMPOUND reply: returned {count} operations for {} requests",
+                request.len()
+            ),
+        ));
     }
     if count != 0 && res.resarray.resarray_val.is_null() {
-        return Err(RpcError::transport(
+        return Err(RpcError::transport_with_kind(
+            vfsi_core::TransportKind::InvalidReply,
             "malformed NFS COMPOUND reply: non-empty operation array has a null pointer",
         ));
     }
     if res.status == nfsstat4_NFS4_OK && count != request.len() {
-        return Err(RpcError::transport(format!(
-            "malformed NFS COMPOUND reply: successful reply returned {count} operations for {} requests",
-            request.len()
-        )));
+        return Err(RpcError::transport_with_kind(
+            vfsi_core::TransportKind::InvalidReply,
+            format!(
+                "malformed NFS COMPOUND reply: successful reply returned {count} operations for {} requests",
+                request.len()
+            ),
+        ));
     }
     for (index, expected) in request.iter().enumerate().take(count) {
         // SAFETY: the decoder allocated count result operations, and count/null were
         // checked above; index is strictly below count.
         let actual = unsafe { &*res.resarray.resarray_val.add(index) };
         if actual.resop != expected.argop {
-            return Err(RpcError::transport(format!(
-                "malformed NFS COMPOUND reply: operation {index} is {}, expected {}",
-                actual.resop, expected.argop
-            )));
+            return Err(RpcError::transport_with_kind(
+                vfsi_core::TransportKind::InvalidReply,
+                format!(
+                    "malformed NFS COMPOUND reply: operation {index} is {}, expected {}",
+                    actual.resop, expected.argop
+                ),
+            ));
         }
         let status = response_op_status(actual);
         if status == u32::MAX {
-            return Err(RpcError::transport(format!(
-                "malformed NFS COMPOUND reply: operation {index} has unsupported opcode {}",
-                actual.resop
-            )));
+            return Err(RpcError::transport_with_kind(
+                vfsi_core::TransportKind::InvalidReply,
+                format!(
+                    "malformed NFS COMPOUND reply: operation {index} has unsupported opcode {}",
+                    actual.resop
+                ),
+            ));
         }
         let is_last = index + 1 == count;
         let expected_status = if is_last {
@@ -1090,10 +1103,13 @@ pub(crate) fn validate_response_ops(request: &[nfs_argop4], res: &COMPOUND4res) 
             nfsstat4_NFS4_OK
         };
         if status != expected_status {
-            return Err(RpcError::transport(format!(
-                "malformed NFS COMPOUND reply: operation {index} status {status} does not match compound status {}",
-                res.status
-            )));
+            return Err(RpcError::transport_with_kind(
+                vfsi_core::TransportKind::InvalidReply,
+                format!(
+                    "malformed NFS COMPOUND reply: operation {index} status {status} does not match compound status {}",
+                    res.status
+                ),
+            ));
         }
         // SAFETY: the decoder initialized the union selected by resop; success payload
         // fields are read only after their status is checked.
@@ -1139,9 +1155,12 @@ pub(crate) fn validate_response_ops(request: &[nfs_argop4], res: &COMPOUND4res) 
             }
         };
         if null_payload {
-            return Err(RpcError::transport(format!(
-                "malformed NFS COMPOUND reply: operation {index} has a null payload pointer"
-            )));
+            return Err(RpcError::transport_with_kind(
+                vfsi_core::TransportKind::InvalidReply,
+                format!(
+                    "malformed NFS COMPOUND reply: operation {index} has a null payload pointer"
+                ),
+            ));
         }
     }
     Ok(())

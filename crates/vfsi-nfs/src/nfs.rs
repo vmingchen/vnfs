@@ -263,7 +263,7 @@ impl NfsClientBuilder {
     pub fn connect_pool(self, size: usize) -> VfResult<Vec<NfsVecFs>> {
         self.validate()?;
         if !(1..=64).contains(&size) {
-            return Err(VfError::client(0, ERR_INVAL)
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)
                 .with_context("connect_pool", Path::new(self.host.as_ref())));
         }
         let pool_id = NEXT_CLIENT_POOL_ID.fetch_add(1, Ordering::Relaxed);
@@ -317,7 +317,7 @@ impl NfsClientBuilder {
             .as_ref()
             .is_some_and(|owner| owner.is_empty() || owner.len() > 1024)
         {
-            return Err(VfError::client(0, ERR_INVAL)
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)
                 .with_context("connect", Path::new(self.host.as_ref())));
         }
         Ok(())
@@ -487,7 +487,7 @@ enum MergedIoMode {
 
 fn check_mount_write(read_only: bool, count: usize) -> VfResult<()> {
     if read_only && count != 0 {
-        Err(VfError::client(0, libc::EROFS as u32))
+        Err(VfError::errno(0, libc::EROFS as u32))
     } else {
         Ok(())
     }

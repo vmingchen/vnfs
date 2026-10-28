@@ -65,13 +65,13 @@ macro_rules! __vfsi_client_methods {
                             .with_follow_final_symlink(false),
                     )?;
                     if metadata.len() != 1 {
-                        return Err(vfsi_core::api::Error::transport(
+                        return Err(vfsi_core::api::Error::invalid_reply(
                             None,
                             "invalid directory root metadata count",
                         ));
                     }
                     if !metadata[0].is_dir() {
-                        return Err(vfsi_core::api::Error::client(0, libc::ENOTDIR as u32)
+                        return Err(vfsi_core::api::Error::errno(0, libc::ENOTDIR as u32)
                             .with_context("visit_dirs", path));
                     }
                     Ok(())

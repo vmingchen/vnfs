@@ -42,11 +42,11 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
         }
         let length = buffer.len().min(budget);
         if !buffer.is_empty() && length == 0 {
-            return Err(Error::client(0, libc::EFBIG as u32));
+            return Err(Error::errno(0, libc::EFBIG as u32));
         }
         self.position
             .checked_add(length as u64)
-            .ok_or_else(|| Error::client(0, libc::EOVERFLOW as u32))?;
+            .ok_or_else(|| Error::errno(0, libc::EOVERFLOW as u32))?;
         let values = self.client.vread(
             [ReadOp::into(
                 self.file,
@@ -79,7 +79,7 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
     fn write_at(&mut self, buffer: &[u8]) -> Result<usize> {
         self.position
             .checked_add(buffer.len() as u64)
-            .ok_or_else(|| Error::client(0, libc::EOVERFLOW as u32))?;
+            .ok_or_else(|| Error::errno(0, libc::EOVERFLOW as u32))?;
         let values = self.client.vwrite(
             &[WriteOp::at(self.file, self.position, buffer)],
             WriteOptions::new(),
@@ -123,7 +123,7 @@ impl<C: Vfsi + ?Sized> Read for StdIo<'_, C> {
                 return if count == 0 {
                     Ok(added)
                 } else {
-                    Err(Error::client(0, libc::EFBIG as u32).into())
+                    Err(Error::errno(0, libc::EFBIG as u32).into())
                 };
             }
             // Reserve before I/O and fill caller storage directly. Reuse the

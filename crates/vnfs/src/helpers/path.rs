@@ -4,7 +4,7 @@ use crate::{Error, Result};
 use std::path::{Path, PathBuf};
 
 fn io_error(path: &Path, error: std::io::Error) -> Error {
-    Error::client(0, error.raw_os_error().unwrap_or(libc::EIO) as u32)
+    Error::errno(0, error.raw_os_error().unwrap_or(libc::EIO) as u32)
         .with_context("path mapper", path)
 }
 
@@ -30,7 +30,7 @@ impl PathMapper {
         let local_root =
             std::fs::canonicalize(requested).map_err(|error| io_error(requested, error))?;
         if !local_root.is_dir() {
-            return Err(Error::client(0, libc::ENOTDIR as u32));
+            return Err(Error::errno(0, libc::ENOTDIR as u32));
         }
         Ok(Self::from_validated_root(local_root))
     }
@@ -58,13 +58,13 @@ impl PathMapper {
                     || spelling.ends_with(b"/..")
                     || spelling.ends_with(b"/")
                 {
-                    return Err(Error::client(0, libc::EINVAL as u32));
+                    return Err(Error::from_kind(0, std::io::ErrorKind::InvalidInput));
                 }
                 let name = path
                     .file_name()
-                    .ok_or_else(|| Error::client(0, libc::EINVAL as u32))?;
+                    .ok_or_else(|| Error::from_kind(0, std::io::ErrorKind::InvalidInput))?;
                 if path.components().next_back() != Some(std::path::Component::Normal(name)) {
-                    return Err(Error::client(0, libc::EINVAL as u32));
+                    return Err(Error::from_kind(0, std::io::ErrorKind::InvalidInput));
                 }
                 let parent = path
                     .parent()
@@ -77,7 +77,7 @@ impl PathMapper {
         };
         let suffix = absolute
             .strip_prefix(&self.local_root)
-            .map_err(|_| Error::client(0, libc::EXDEV as u32))?;
+            .map_err(|_| Error::errno(0, libc::EXDEV as u32))?;
         Ok(Path::new("/").join(suffix))
     }
     /// Restore the absolute local spelling of a backend path. Does not stat it.
@@ -87,7 +87,7 @@ impl PathMapper {
             .components()
             .any(|c| matches!(c, std::path::Component::ParentDir))
         {
-            return Err(Error::client(0, libc::EINVAL as u32));
+            return Err(Error::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
         Ok(self.local_root.join(path.strip_prefix("/").unwrap_or(path)))
     }

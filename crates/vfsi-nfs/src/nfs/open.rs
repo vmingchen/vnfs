@@ -273,15 +273,15 @@ impl NfsVecFs {
                 continue;
             }
             match f {
-                FileOperand::Cwd => return Err(VfError::failure(i, ERR_ISDIR)),
-                FileOperand::Saved => return Err(VfError::failure(i, ERR_NOENT)),
+                FileOperand::Cwd => return Err(VfError::errno(i, ERR_ISDIR)),
+                FileOperand::Saved => return Err(VfError::errno(i, ERR_NOENT)),
                 FileOperand::Path { .. } | FileOperand::CwdPath(_) => {}
                 FileOperand::Fd(_) => unreachable!(),
                 _ => return Err(VfError::unsupported(i)),
             }
             let full = self.server_vf_path(f).map_err(|e| e.with_index(i))?;
             let (dir, name) =
-                split_path_bytes(path_bytes(&full)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
+                split_path_bytes(path_bytes(&full)).map_err(|_| VfError::errno(i, ERR_NOENT))?;
             let dirfh = match dir_cache.get(dir.as_slice()) {
                 Some(fh) => fh.clone(),
                 None => {
@@ -322,7 +322,7 @@ impl NfsVecFs {
                         .follow_target_path(full)
                         .map_err(|e| e.with_index(*orig))?;
                     let (dir, name2) = split_path_bytes(path_bytes(&full))
-                        .map_err(|_| VfError::failure(*orig, ERR_NOENT))?;
+                        .map_err(|_| VfError::errno(*orig, ERR_NOENT))?;
                     let dirfh2 = self
                         .resolve_path(&path_from_bytes(&dir), true)
                         .map_err(|e| e.with_index(*orig))?;
@@ -330,7 +330,7 @@ impl NfsVecFs {
                         Ok(_) => crate::client::OpenCreate::NoCreate,
                         Err(e) if e.status == nfsstat4_NFS4ERR_NOENT => {
                             if !creation[*orig] {
-                                return Err(VfError::failure(*orig, ERR_NOENT));
+                                return Err(VfError::errno(*orig, ERR_NOENT));
                             }
                             crate::client::OpenCreate::Guarded
                         }
@@ -361,7 +361,7 @@ impl NfsVecFs {
                 }
                 Err(status) if status == nfsstat4_NFS4ERR_NOENT => {
                     if !creation[*orig] {
-                        return Err(VfError::failure(*orig, ERR_NOENT));
+                        return Err(VfError::errno(*orig, ERR_NOENT));
                     }
                     opens.push((
                         *orig,

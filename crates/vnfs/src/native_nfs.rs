@@ -27,7 +27,7 @@ impl TryFrom<Option<u32>> for NfsVersion {
             None => Ok(Self::Auto),
             Some(1) => Ok(Self::V4_1),
             Some(2) => Ok(Self::V4_2),
-            _ => Err(crate::Error::client(0, libc::EINVAL as u32)),
+            _ => Err(crate::Error::from_kind(0, std::io::ErrorKind::InvalidInput)),
         }
     }
 }
@@ -158,7 +158,7 @@ impl NfsBuilder {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            Err(crate::Error::client(0, libc::EOPNOTSUPP as u32)
+            Err(crate::Error::errno(0, libc::EOPNOTSUPP as u32)
                 .with_context("from_mount requires Linux", path.as_ref()))
         }
     }
@@ -257,7 +257,7 @@ impl NfsBuilder {
     #[cfg(target_os = "linux")]
     pub fn connect_session(mut self) -> VfResult<crate::nfs::mount::NfsMountSession> {
         let mount = self.mount.take().ok_or_else(|| {
-            crate::Error::client(0, libc::EINVAL as u32)
+            crate::Error::from_kind(0, std::io::ErrorKind::InvalidInput)
                 .with_context("connect_session requires a discovered mount", Path::new(""))
         })?;
         let fs = self.connect()?;

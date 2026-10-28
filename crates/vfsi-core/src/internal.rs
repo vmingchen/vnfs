@@ -25,7 +25,7 @@ pub fn validate_open_requests(requests: &[crate::OpenOp]) -> VfResult<()> {
 /// The returned values let backend conversion reuse the checked timestamps.
 pub fn validate_setattrs<P>(op: &crate::SetAttrsOp<P>) -> VfResult<[Option<(i64, u32)>; 2]> {
     if op.requested_uid() == Some(u32::MAX) || op.requested_gid() == Some(u32::MAX) {
-        return Err(VfError::client(0, crate::ERR_INVAL));
+        return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
     }
     Ok([
         op.requested_accessed().map(system_time_parts).transpose()?,
@@ -37,19 +37,19 @@ fn system_time_parts(time: std::time::SystemTime) -> VfResult<(i64, u32)> {
     match time.duration_since(std::time::UNIX_EPOCH) {
         Ok(duration) => Ok((
             i64::try_from(duration.as_secs())
-                .map_err(|_| VfError::client(0, libc::EOVERFLOW as u32))?,
+                .map_err(|_| VfError::errno(0, libc::EOVERFLOW as u32))?,
             duration.subsec_nanos(),
         )),
         Err(error) => {
             let duration = error.duration();
             let seconds = i64::try_from(duration.as_secs())
-                .map_err(|_| VfError::client(0, libc::EOVERFLOW as u32))?;
+                .map_err(|_| VfError::errno(0, libc::EOVERFLOW as u32))?;
             if duration.subsec_nanos() == 0 {
                 Ok((-seconds, 0))
             } else {
                 let seconds = seconds
                     .checked_add(1)
-                    .ok_or_else(|| VfError::client(0, libc::EOVERFLOW as u32))?;
+                    .ok_or_else(|| VfError::errno(0, libc::EOVERFLOW as u32))?;
                 Ok((-seconds, 1_000_000_000 - duration.subsec_nanos()))
             }
         }
@@ -164,14 +164,14 @@ impl<T> ManyResults<T> {
 }
 
 fn declared_count_error(declared: usize, expected: usize) -> VfError {
-    VfError::transport(
+    VfError::invalid_reply(
         None,
         format!("backend declared {declared} requests for {expected} inputs"),
     )
 }
 
 fn result_count_error(reported: usize, requested: usize) -> VfError {
-    VfError::transport(
+    VfError::invalid_reply(
         None,
         format!("backend reported {reported} results for {requested} requests"),
     )

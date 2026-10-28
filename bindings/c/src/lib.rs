@@ -24,9 +24,10 @@ use std::sync::{Mutex, MutexGuard};
 use vfsi_local::LocalBackend;
 use vfsi_nfs::nfs::NfsVecFs;
 use vfsi_smb::SmbVecFs;
+#[cfg(test)]
+use vfsi_sync::VF_ERR_UNSUPPORTED;
 use vfsi_sync::{
     AttrMask, ExtentPair, FileOperand, ReadOp, VfAttrs, VfError, WriteOp, ERR_EBADF, ERR_NOENT,
-    VF_ERR_UNSUPPORTED,
 };
 
 /// ABI version implemented by this library.
@@ -325,13 +326,13 @@ impl vfsi_result {
             error.index().unwrap_or(C_INDEX_UNKNOWN),
             if error.is_transport() {
                 VFSI_ERROR_TRANSPORT
-            } else if error.raw_code() == VF_ERR_UNSUPPORTED {
+            } else if error.kind() == std::io::ErrorKind::Unsupported {
                 VFSI_ERROR_UNSUPPORTED
             } else {
                 VFSI_ERROR_FILESYSTEM
             },
             error.raw_code(),
-            error.transport_message().unwrap_or(""),
+            &error.to_string(),
         )
     }
 }
@@ -393,7 +394,7 @@ fn complete_results(results: &mut [vfsi_result]) {
     }
 }
 
-fn invalid_backend_reply(message: impl Into<String>) -> VfError {
+fn invalid_backend_reply(message: impl Into<std::borrow::Cow<'static, str>>) -> VfError {
     VfError::transport_with_kind(None, vfsi_sync::TransportKind::InvalidReply, message)
 }
 
@@ -938,23 +939,19 @@ fn collect_bounded_entries(
         true
     })?;
     if overflow {
-        return Err(VfError::client(0, libc::EFBIG as u32));
+        return Err(VfError::errno(0, libc::EFBIG as u32));
     }
     Ok(entries)
 }
 
 fn vf_code(e: &VfError) -> c_int {
-    if e.is_transport() {
-        libc::EIO
-    } else {
-        e.raw_code() as c_int
-    }
+    e.to_errno()
 }
 
 fn lock_or_io<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, VfError> {
     mutex
         .lock()
-        .map_err(|_| VfError::failure(0, libc::EIO as u32))
+        .map_err(|_| VfError::errno(0, libc::EIO as u32))
 }
 
 /// # Safety
@@ -1035,11 +1032,11 @@ fn insert_c_file(
             return Ok(fd);
         }
     }
-    Err(VfError::failure(0, libc::EMFILE as u32))
+    Err(VfError::errno(0, libc::EMFILE as u32))
 }
 
 fn vpath_for(fs: &vfsi_fs, path: &std::path::Path) -> Result<PathBuf, VfError> {
-    path_for(fs, path).ok_or_else(|| VfError::failure(0, ERR_NOENT))
+    path_for(fs, path).ok_or_else(|| VfError::errno(0, ERR_NOENT))
 }
 
 /// Create a local-directory vfsi backend rooted at `root`.
@@ -1060,7 +1057,7 @@ pub unsafe extern "C" fn vfsi_dummy_open(root: *const c_char, out: *mut *mut vfs
         };
         let fs = match vfsi_posix::backend(root) {
             Ok(fs) => Box::new(fs) as Box<dyn BindingBackend>,
-            Err(error) => return error.raw_code() as c_int,
+            Err(error) => return vf_code(&error),
         };
         // SAFETY: out was checked for null; the caller provides writable storage for this
         // returned handle.
@@ -1096,7 +1093,7 @@ pub unsafe extern "C" fn vfsi_dummy_open_mount(
         };
         let fs = match vfsi_posix::backend(root) {
             Ok(fs) => Box::new(fs) as Box<dyn BindingBackend>,
-            Err(error) => return error.raw_code() as c_int,
+            Err(error) => return vf_code(&error),
         };
         // SAFETY: out was checked for null; the caller provides writable storage for this
         // returned handle.
@@ -1296,7 +1293,7 @@ pub unsafe extern "C" fn vfsi_walk(
             };
             lock_or_io(&fs.fs)?.vgetattrs_nofollow_impl(std::slice::from_mut(&mut root_attrs))?;
             if !root_attrs.returned.contains(fields) {
-                return Err(VfError::failure(0, libc::ENOTSUP as u32));
+                return Err(VfError::errno(0, libc::ENOTSUP as u32));
             }
             let metadata = vfsi_sync::metadata_from_attrs(root_attrs);
             let walk_options = vnfs::directory::ListDirOptions::new()
@@ -1321,12 +1318,12 @@ pub unsafe extern "C" fn vfsi_walk(
                         .enumerate()
                         .map(|(index, attrs)| {
                             if !attrs.returned.contains(fields) {
-                                return Err(VfError::failure(index, libc::ENOTSUP as u32));
+                                return Err(VfError::errno(index, libc::ENOTSUP as u32));
                             }
                             let path = attrs
                                 .file
                                 .path()
-                                .ok_or_else(|| VfError::client(0, libc::EIO as u32))?
+                                .ok_or_else(|| VfError::errno(0, libc::EIO as u32))?
                                 .to_path_buf();
                             Ok(vnfs::directory::DirEntry::new(
                                 path,
@@ -1340,9 +1337,9 @@ pub unsafe extern "C" fn vfsi_walk(
                         .entry
                         .path()
                         .strip_prefix(&fs.backend_root)
-                        .map_err(|_| VfError::client(0, libc::EINVAL as u32))?;
+                        .map_err(|_| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
                     let path = CString::new(fs.mountpoint.join(relative).as_os_str().as_bytes())
-                        .map_err(|_| VfError::client(0, libc::EINVAL as u32))?;
+                        .map_err(|_| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
                     let attrs = attrs_from_metadata(event.entry.attrs());
                     let kind = match event.kind {
                         vnfs::directory::WalkEventKind::Enter => 0,
@@ -1355,7 +1352,7 @@ pub unsafe extern "C" fn vfsi_walk(
                         0 => Ok(vnfs::directory::WalkControl::Continue),
                         1 => Ok(vnfs::directory::WalkControl::SkipSubtree),
                         2 => Ok(vnfs::directory::WalkControl::Stop),
-                        _ => Err(VfError::client(0, libc::EINVAL as u32)),
+                        _ => Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
                     }
                 },
             )?;
@@ -1641,7 +1638,7 @@ fn stat_impl(fs: &vfsi_fs, path: &std::path::Path) -> Result<VfAttrs, VfError> {
     };
     lock_or_io(&fs.fs)?.vgetattrs_impl(std::slice::from_mut(&mut attrs))?;
     if !attrs.returned.contains(mask()) {
-        return Err(VfError::failure(0, libc::ENOTSUP as u32));
+        return Err(VfError::errno(0, libc::ENOTSUP as u32));
     }
     Ok(attrs)
 }
@@ -1730,7 +1727,7 @@ pub unsafe extern "C" fn vfsi_open(
 fn close_impl(fs: &vfsi_fs, fd: i32) -> Result<(), VfError> {
     let file = lock_or_io(&fs.files)?
         .remove(&fd)
-        .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
+        .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
     lock_or_io(&fs.fs)?.close_impl(&file.file)
 }
 
@@ -1758,7 +1755,7 @@ fn pread_impl(fs: &vfsi_fs, fd: i32, buffer: &mut [u8], offset: u64) -> Result<u
     let file = lock_or_io(&fs.files)?
         .get(&fd)
         .map(|file| file.file.clone())
-        .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
+        .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
     let request = ReadOp::at(file, offset, buffer.len());
     let result = lock_or_io(&fs.fs)?.read_into_impl(&request, buffer)?;
     Ok(result.bytes_read)
@@ -1808,7 +1805,7 @@ fn pwrite_impl(fs: &vfsi_fs, fd: i32, data: &[u8], offset: u64) -> Result<usize,
     let file = lock_or_io(&fs.files)?
         .get(&fd)
         .cloned()
-        .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
+        .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
     let offset = if file.append {
         vfsi_sync::VfOffset::End
     } else {
@@ -2180,7 +2177,7 @@ pub unsafe extern "C" fn vfsi_closev(
                 let Some(file) = table.get(fd).cloned() else {
                     fail_batch!(
                         results,
-                        vfsi_result::from_error(VfError::failure(index, ERR_EBADF)),
+                        vfsi_result::from_error(VfError::errno(index, ERR_EBADF)),
                         false
                     );
                 };
@@ -2455,7 +2452,7 @@ pub unsafe extern "C" fn vfsi_preadv(
             let Some(file) = table.get(&op.fd).cloned() else {
                 fail_batch!(
                     item_results,
-                    vfsi_result::from_error(VfError::failure(index, ERR_EBADF)),
+                    vfsi_result::from_error(VfError::errno(index, ERR_EBADF)),
                     false
                 );
             };
@@ -2565,7 +2562,7 @@ pub unsafe extern "C" fn vfsi_pwritev(
             let Some(file) = table.get(&op.fd).cloned() else {
                 fail_batch!(
                     item_results,
-                    vfsi_result::from_error(VfError::failure(index, ERR_EBADF)),
+                    vfsi_result::from_error(VfError::errno(index, ERR_EBADF)),
                     false
                 );
             };
@@ -2900,7 +2897,7 @@ pub unsafe extern "C" fn vfsi_copyv(
             let (Some(src), Some(dst)) = (path_for(fs, &src), path_for(fs, &dst)) else {
                 fail_batch!(
                     results,
-                    vfsi_result::from_error(VfError::failure(index, ERR_NOENT)),
+                    vfsi_result::from_error(VfError::errno(index, ERR_NOENT)),
                     false
                 );
             };
@@ -3078,7 +3075,7 @@ pub unsafe extern "C" fn vfsi_listdir_with_limits(
             let dir = vpath_for(fs, &dir)?;
             let entries = bounded_listdir(fs, &dir, mask(), max_entries, max_path_bytes)?;
             if entries.iter().any(|attrs| !attrs.returned.contains(mask())) {
-                return Err(VfError::failure(0, libc::ENOTSUP as u32));
+                return Err(VfError::errno(0, libc::ENOTSUP as u32));
             }
             for a in entries {
                 let name = a
@@ -3174,7 +3171,7 @@ pub unsafe extern "C" fn vfsi_listdirv(
                 .iter()
                 .any(|(attrs, _)| !attrs.returned.contains(mask()))
             {
-                return Err(VfError::failure(0, libc::ENOTSUP as u32));
+                return Err(VfError::errno(0, libc::ENOTSUP as u32));
             }
             for (attrs, dir) in rows {
                 let kernel_dir = match vpath_index.get(&dir) {
@@ -3182,7 +3179,7 @@ pub unsafe extern "C" fn vfsi_listdirv(
                     None => {
                         let rel = dir
                             .strip_prefix(&backend_root)
-                            .map_err(|_| VfError::client(0, libc::EINVAL as u32))?;
+                            .map_err(|_| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
                         mountpoint.join(rel)
                     }
                 };
@@ -3334,6 +3331,10 @@ impl BindingBackend for SmbVecFs {
 
 #[cfg(test)]
 #[allow(clippy::undocumented_unsafe_blocks, unsafe_op_in_unsafe_fn)]
+mod error_tests;
+
+#[cfg(test)]
+#[allow(clippy::undocumented_unsafe_blocks, unsafe_op_in_unsafe_fn)]
 mod tests {
     use super::*;
     use std::ffi::CString;
@@ -3459,7 +3460,7 @@ mod tests {
                 .close_failure_fd
                 .is_some_and(|fd| file.fd() == Some(fd))
             {
-                Err(VfError::failure(0, libc::EIO as u32))
+                Err(VfError::errno(0, libc::EIO as u32))
             } else {
                 Ok(())
             }
@@ -3698,7 +3699,7 @@ mod tests {
                 calls.len()
             };
             if self.fail_call == Some(call) {
-                return Err(VfError::client(0, libc::EIO as u32));
+                return Err(VfError::errno(0, libc::EIO as u32));
             }
             let mut delivered = 0;
             for dir in dirs {
@@ -4984,7 +4985,7 @@ mod tests {
         }
         let error = collect_bounded_entries(10, 100, |cb| {
             assert!(cb(&entry));
-            Err(VfError::client(0, libc::EIO as u32))
+            Err(VfError::errno(0, libc::EIO as u32))
         })
         .unwrap_err();
         assert_eq!(
@@ -5117,12 +5118,11 @@ mod tests {
 
     #[test]
     fn unattributed_status_keeps_its_errno_and_category_for_c_callers() {
-        // A compound-level NFS status with no per-op index must still surface
-        // its real errno through the scalar helpers and stay a filesystem
-        // error, not be downgraded to EIO/transport.
+        // A native NFS status is not an OS errno. Scalar helpers translate it;
+        // structured vector results retain its native value and attribution.
         let error = vfsi_sync::error_from_rpc(vfsi_sync::RpcError::op(0, 10005), None);
         assert_eq!(error.index(), None);
-        assert_eq!(vf_code(&error), 10005);
+        assert_eq!(vf_code(&error), libc::EIO);
         let failure = vfsi_result::from_error(error);
         assert_eq!(failure.index, C_INDEX_UNKNOWN);
         assert_eq!(failure.category, VFSI_ERROR_FILESYSTEM);
@@ -5132,7 +5132,7 @@ mod tests {
     #[test]
     fn close_failure_only_releases_a_confirmed_semantic_prefix() {
         assert_eq!(
-            confirmed_close_prefix(&VfError::failure(2, libc::EIO as u32), 4),
+            confirmed_close_prefix(&VfError::errno(2, libc::EIO as u32), 4),
             2
         );
         assert_eq!(

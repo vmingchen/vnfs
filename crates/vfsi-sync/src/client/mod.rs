@@ -47,7 +47,7 @@ fn write_result(result: WriteResult) -> FsWriteResult {
 }
 
 fn poisoned() -> VfError {
-    VfError::client(0, crate::ERR_IO)
+    VfError::errno(0, crate::ERR_IO)
 }
 
 fn wrong_result_count(operation: &str, expected: usize, actual: usize) -> VfError {
@@ -249,7 +249,7 @@ impl<F: VectorBackend> FsClient<F> {
         if Arc::ptr_eq(&self.inner, &file.inner) {
             Ok(())
         } else {
-            Err(VfError::client(index, crate::ERR_INVAL))
+            Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput))
         }
     }
 }
@@ -257,7 +257,7 @@ impl<F: VectorBackend> FsClient<F> {
 fn link_error(error: VfError, paths: &[&Path], operation: &'static str) -> VfError {
     match error.index() {
         Some(index) if index < paths.len() => error.with_context(operation, paths[index]),
-        Some(_) => VfError::transport(None, "link backend returned an invalid error index"),
+        Some(_) => VfError::invalid_reply(None, "link backend returned an invalid error index"),
         None => error,
     }
 }

@@ -76,7 +76,7 @@ impl NfsReadPoolOptions {
 
     fn effective(self) -> VfResult<(usize, usize)> {
         if self.max_buffered_bytes < self.chunk_size {
-            return Err(VfError::client(0, vfsi_core::ERR_INVAL));
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
         let in_flight = self
             .max_in_flight
@@ -361,7 +361,7 @@ impl NfsReadPool {
             {
                 let offset = next_job
                     .checked_mul(chunk_size as u64)
-                    .ok_or_else(|| VfError::failure(0, libc::EOVERFLOW as u32))?;
+                    .ok_or_else(|| VfError::errno(0, libc::EOVERFLOW as u32))?;
                 let length = (size - offset).min(chunk_size as u64) as usize;
                 let worker = (next_job as usize) % self.effective_workers;
                 if self.commands[worker]
@@ -714,7 +714,7 @@ fn worker_main(
             WorkerCommand::Start { stream_id, path } => {
                 let result = (|| {
                     if active.is_some() {
-                        return Err(VfError::client(0, libc::EBUSY as u32));
+                        return Err(VfError::errno(0, libc::EBUSY as u32));
                     }
                     let (file, size) = open_stream_file(
                         || client.open(&path),
@@ -752,7 +752,7 @@ fn worker_main(
                             error.with_index(usize::try_from(index).unwrap_or(usize::MAX))
                         })
                     }
-                    _ => Err(VfError::client(
+                    _ => Err(VfError::errno(
                         usize::try_from(index).unwrap_or(usize::MAX),
                         vfsi_core::ERR_EBADF,
                     )),
@@ -770,7 +770,7 @@ fn worker_main(
                     Some((active_id, file)) if active_id == stream_id => file.close(),
                     Some(active_file) => {
                         active = Some(active_file);
-                        Err(VfError::client(0, vfsi_core::ERR_INVAL))
+                        Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput))
                     }
                     None => Ok(()),
                 };
@@ -819,7 +819,7 @@ fn read_range(
     while filled < length {
         let current_offset = offset
             .checked_add(filled as u64)
-            .ok_or_else(|| VfError::client(0, libc::EOVERFLOW as u32))?;
+            .ok_or_else(|| VfError::errno(0, libc::EOVERFLOW as u32))?;
         let results = client.vread(
             [vfsi_core::api::ReadOp::into(
                 file,
@@ -832,7 +832,7 @@ fn read_range(
         let count = results[0].bytes_read();
         if count == 0 {
             return Err(
-                VfError::client(0, libc::EIO as u32).with_context("read_pipeline", file.path())
+                VfError::errno(0, libc::EIO as u32).with_context("read_pipeline", file.path())
             );
         }
         filled += count;
@@ -899,7 +899,7 @@ mod tests {
         let closed = Cell::new(false);
         let error = open_stream_file(
             || Ok::<_, vfsi_core::VfError>(42),
-            |_| Err(vfsi_core::VfError::failure(0, libc::EIO as u32)),
+            |_| Err(vfsi_core::VfError::errno(0, libc::EIO as u32)),
             |file| {
                 assert_eq!(file, 42);
                 closed.set(true);

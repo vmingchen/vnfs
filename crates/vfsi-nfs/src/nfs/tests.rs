@@ -168,16 +168,16 @@ fn descriptor_chunk_errors_report_the_original_vector_owner() {
     // The first caller was split into two wire chunks; chunk 1 still
     // belongs to caller 0, rather than caller 1.
     let owners = [0, 0, 1];
-    let error = remap_descriptor_chunk_error(VfError::failure(1, ERR_EBADF), 0, &owners);
+    let error = remap_descriptor_chunk_error(VfError::errno(1, ERR_EBADF), 0, &owners);
     assert_eq!(error.index(), Some(0));
 }
 
 #[test]
 fn read_all_round_remaps_failures_and_rejects_zero_progress() {
     let active = [2, 5];
-    let remapped = remap_active_error(VfError::failure(0, ERR_IO), &active);
+    let remapped = remap_active_error(VfError::errno(0, ERR_IO), &active);
     assert_eq!(remapped.index(), Some(2));
-    let remapped = remap_active_error(VfError::failure(1, ERR_IO), &active);
+    let remapped = remap_active_error(VfError::errno(1, ERR_IO), &active);
     assert_eq!(remapped.index(), Some(5));
 
     let mut out = vec![Vec::new(); 6];
@@ -325,6 +325,14 @@ fn malformed_readdir_attributes_are_transport_errors() {
 #[test]
 fn recovery_only_retries_transport_and_recoverable_session_statuses() {
     assert!(NfsVecFs::needs_recovery(&VfError::transport(None, "reset")));
+    for kind in [
+        vfsi_core::TransportKind::Auth,
+        vfsi_core::TransportKind::InvalidReply,
+    ] {
+        assert!(!NfsVecFs::needs_recovery(&VfError::transport_with_kind(
+            None, kind, "terminal"
+        )));
+    }
     for status in [
         nfsstat4_NFS4ERR_EXPIRED,
         nfsstat4_NFS4ERR_GRACE,
@@ -334,9 +342,10 @@ fn recovery_only_retries_transport_and_recoverable_session_statuses() {
         nfsstat4_NFS4ERR_BADSESSION,
         nfsstat4_NFS4ERR_DEADSESSION,
     ] {
-        assert!(NfsVecFs::needs_recovery(&VfError::failure(0, status)));
+        assert!(NfsVecFs::needs_recovery(&VfError::nfs(0, status)));
+        assert!(!NfsVecFs::needs_recovery(&VfError::errno(0, status)));
     }
-    assert!(!NfsVecFs::needs_recovery(&VfError::failure(
+    assert!(!NfsVecFs::needs_recovery(&VfError::errno(
         0,
         nfsstat4_NFS4ERR_NOENT,
     )));

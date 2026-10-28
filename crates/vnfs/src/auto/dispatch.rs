@@ -12,7 +12,7 @@ impl Auto {
         let clients: Vec<_> = self
             .connections
             .lock()
-            .map_err(|_| VfError::client(0, libc::EIO as u32))?
+            .map_err(|_| VfError::errno(0, libc::EIO as u32))?
             .values()
             .map(|connection| connection.client.clone())
             .collect();
@@ -75,14 +75,15 @@ impl Auto {
         let mut resolved = Vec::with_capacity(dirs.len());
         for (index, dir) in dirs.iter().enumerate() {
             if !Arc::ptr_eq(&self.owner, &dir.owner) || dir.is_closed() {
-                return Err(VfError::client(index, libc::EBADF as u32)
+                return Err(VfError::errno(index, libc::EBADF as u32)
                     .with_context("vremove_dir_contents", &dir.path));
             }
             if let Route::Nfs(connection) = &dir.route
                 && AuthSysIdentity::current().as_ref() != Some(&connection.credentials)
             {
-                return Err(VfError::client(index, libc::EACCES as u32)
-                    .with_context("auto_auth", &dir.path));
+                return Err(
+                    VfError::errno(index, libc::EACCES as u32).with_context("auto_auth", &dir.path)
+                );
             }
             resolved.push(Resolved {
                 route: dir.route.clone(),
@@ -170,7 +171,7 @@ impl Auto {
             .collect();
         for (index, (source, link)) in sources.iter().zip(&links).enumerate() {
             if !source.route.same_backend(&link.route) {
-                return Err(VfError::client(index, libc::EXDEV as u32)
+                return Err(VfError::errno(index, libc::EXDEV as u32)
                     .with_context("vhardlink", pairs[index].1.as_ref()));
             }
         }
@@ -214,7 +215,7 @@ impl Auto {
                 Target::File(file) => {
                     self.check_owner(file, index)?;
                     if file.is_closed() {
-                        return Err(VfError::client(index, libc::EBADF as u32)
+                        return Err(VfError::errno(index, libc::EBADF as u32)
                             .with_context("vstatfs", &file.path));
                     }
                     Resolved {
@@ -287,7 +288,7 @@ impl Auto {
                 Target::File(file) => {
                     self.check_owner(file, index)?;
                     if file.is_closed() {
-                        return Err(VfError::client(index, libc::EBADF as u32)
+                        return Err(VfError::errno(index, libc::EBADF as u32)
                             .with_context("vsetattrs", &file.path));
                     }
                     Resolved {
@@ -362,7 +363,7 @@ impl Auto {
                 Target::File(file) => {
                     self.check_owner(file, index)?;
                     if file.is_closed() {
-                        return Err(VfError::client(index, libc::EBADF as u32)
+                        return Err(VfError::errno(index, libc::EBADF as u32)
                             .with_context("vgetattrs", &file.path));
                     }
                     Resolved {
@@ -418,7 +419,7 @@ impl Auto {
             self.check_owner(file, index)?;
             if file.is_closed() {
                 return Err(
-                    VfError::client(index, libc::EBADF as u32).with_context("vfsync", &file.path)
+                    VfError::errno(index, libc::EBADF as u32).with_context("vfsync", &file.path)
                 );
             }
             resolved.push(Resolved {
@@ -466,9 +467,8 @@ impl Auto {
         for (index, op) in paths.iter().enumerate() {
             let path = op.path();
             if !seen.insert(path) {
-                return Err(
-                    VfError::client(index, libc::EINVAL as u32).with_context("vmkdir", path)
-                );
+                return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput)
+                    .with_context("vmkdir", path));
             }
         }
         let mounts = read_mounts(true);
@@ -611,7 +611,7 @@ impl Auto {
         follow_symlinks: bool,
     ) -> VfResult<Vec<vfsi_sync::DirectoryPage>> {
         if paths.len() != cursors.len() {
-            return Err(VfError::client(0, libc::EINVAL as u32));
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
         let mounts = if cursors.iter().any(|cursor| {
             cursor
@@ -638,12 +638,12 @@ impl Auto {
                             .map_err(|error| indexed(error, index))?
                     };
                     if !Arc::ptr_eq(&saved.owner, &self.owner) || saved.public_path != *path {
-                        return Err(VfError::client(index, libc::EINVAL as u32));
+                        return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput));
                     }
                     if let Route::Nfs(connection) = &saved.route
                         && AuthSysIdentity::current().as_ref() != Some(&connection.credentials)
                     {
-                        return Err(VfError::client(index, libc::EACCES as u32)
+                        return Err(VfError::errno(index, libc::EACCES as u32)
                             .with_context("auto_auth", path));
                     }
                     if child {
@@ -789,7 +789,7 @@ impl Auto {
             for buffer in buffers {
                 remaining = remaining
                     .checked_sub(buffer.len())
-                    .ok_or_else(|| VfError::client(start, libc::EFBIG as u32))?;
+                    .ok_or_else(|| VfError::errno(start, libc::EFBIG as u32))?;
                 output.push(buffer);
             }
             start = end;
@@ -898,7 +898,7 @@ impl Auto {
 
     fn check_owner(&self, file: &AutoFile, index: usize) -> VfResult<()> {
         if !Arc::ptr_eq(&self.owner, &file.owner) {
-            return Err(VfError::client(index, libc::EINVAL as u32));
+            return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput));
         }
         file.check_credentials()
             .map_err(|error| error.with_index(index))
@@ -963,9 +963,9 @@ impl Auto {
             self.check_owner(request.file, index)?;
             requested = requested
                 .checked_add(request.length)
-                .ok_or_else(|| VfError::client(index, libc::EFBIG as u32))?;
+                .ok_or_else(|| VfError::errno(index, libc::EFBIG as u32))?;
             if requested > max_bytes {
-                return Err(VfError::client(index, libc::EFBIG as u32));
+                return Err(VfError::errno(index, libc::EFBIG as u32));
             }
         }
         let mut output = Vec::with_capacity(requests.len());
@@ -1032,9 +1032,9 @@ impl Auto {
             self.check_owner(request.file, index)?;
             requested = requested
                 .checked_add(request.buffer.len())
-                .ok_or_else(|| VfError::client(index, libc::EFBIG as u32))?;
+                .ok_or_else(|| VfError::errno(index, libc::EFBIG as u32))?;
             if requested > max_bytes {
-                return Err(VfError::client(index, libc::EFBIG as u32));
+                return Err(VfError::errno(index, libc::EFBIG as u32));
             }
         }
         let mut output = Vec::with_capacity(requests.len());
@@ -1111,14 +1111,14 @@ impl Auto {
                 // locally detectable invalid requests before any cohort writes.
                 // Validate empty requests too, matching FsClient::vwrite_all_native.
                 if request.file().is_closed() {
-                    return Err(VfError::client(index, libc::EBADF as u32)
+                    return Err(VfError::errno(index, libc::EBADF as u32)
                         .with_context("vwrite_native", request.file().path()));
                 }
                 request
                     .offset()
                     .checked_add(request.data().len() as u64)
                     .ok_or_else(|| {
-                        VfError::client(index, libc::EOVERFLOW as u32)
+                        VfError::errno(index, libc::EOVERFLOW as u32)
                             .with_context("vwrite_native", request.file().path())
                     })?;
             }
@@ -1226,10 +1226,8 @@ impl Auto {
                 let a = self.resolve(source.as_ref(), &mounts);
                 let b = self.resolve(destination.as_ref(), &mounts);
                 if !matches!((&a.route, &b.route), (Route::Posix, Route::Posix)) {
-                    return Err(
-                        vfsi_sync::VfError::client(index, vfsi_core::VF_ERR_UNSUPPORTED)
-                            .with_context("vrename", source.as_ref()),
-                    );
+                    return Err(vfsi_sync::VfError::unsupported(index)
+                        .with_context("vrename", source.as_ref()));
                 }
             }
             return self.mounted.vrename(pairs, options);
@@ -1246,7 +1244,7 @@ impl Auto {
         let mut start = 0;
         while start < pairs.len() {
             if !sources[start].route.same_backend(&targets[start].route) {
-                return Err(VfError::client(start, libc::EXDEV as u32)
+                return Err(VfError::errno(start, libc::EXDEV as u32)
                     .with_context("vrename", pairs[start].0.as_ref()));
             }
             let mut end = start + 1;

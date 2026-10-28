@@ -20,7 +20,7 @@ impl DirPageCursor {
         self.0
             .downcast::<T>()
             .map(|state| *state)
-            .map_err(|_| VfError::client(0, ERR_INVAL))
+            .map_err(|_| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))
     }
 }
 
@@ -76,7 +76,7 @@ fn contract_error(
     index: Option<usize>,
     detail: impl std::fmt::Display,
 ) -> VfError {
-    VfError::transport(
+    VfError::invalid_reply(
         index,
         format!("{operation} backend contract violation: {detail}"),
     )

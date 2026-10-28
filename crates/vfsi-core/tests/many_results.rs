@@ -17,7 +17,7 @@ fn complete_results_collect_in_request_order() {
 fn vector_position_overrides_a_stale_backend_error_index() {
     let results = ManyResults::new(
         3,
-        vec![Ok(10), Err(VfError::failure(99, libc::EACCES as u32))],
+        vec![Ok(10), Err(VfError::errno(99, libc::EACCES as u32))],
     );
     let error = results.try_collect().unwrap_err();
     assert_eq!(error.index(), Some(1));
@@ -80,11 +80,7 @@ fn backend_cannot_override_the_callers_request_count() {
 fn strict_open_policy_cleans_successful_prefix_on_failure() {
     let results = ManyResults::new(
         4,
-        vec![
-            Ok(10),
-            Ok(20),
-            Err(VfError::failure(88, libc::ENOENT as u32)),
-        ],
+        vec![Ok(10), Ok(20), Err(VfError::errno(88, libc::ENOENT as u32))],
     );
     let mut closed = Vec::new();
     let error = results
@@ -104,7 +100,7 @@ fn strict_open_policy_cleans_successes_after_concurrent_failure() {
         4,
         vec![
             Ok(10),
-            Err(VfError::failure(91, libc::EACCES as u32)),
+            Err(VfError::errno(91, libc::EACCES as u32)),
             Ok(30),
             Ok(40),
         ],
@@ -126,9 +122,9 @@ fn concurrent_failures_report_the_lowest_request_position() {
         5,
         vec![
             Ok(10),
-            Err(VfError::failure(99, libc::EACCES as u32)),
+            Err(VfError::errno(99, libc::EACCES as u32)),
             Ok(30),
-            Err(VfError::failure(0, libc::ENOENT as u32)),
+            Err(VfError::errno(0, libc::ENOENT as u32)),
             Ok(50),
         ],
     );
@@ -146,10 +142,7 @@ fn concurrent_failures_report_the_lowest_request_position() {
 
 #[test]
 fn cleanup_failure_does_not_mask_primary_error() {
-    let results = ManyResults::new(
-        2,
-        vec![Ok(10), Err(VfError::failure(0, libc::ENOENT as u32))],
-    );
+    let results = ManyResults::new(2, vec![Ok(10), Err(VfError::errno(0, libc::ENOENT as u32))]);
     let error = results
         .try_collect_with_cleanup(2, |_, _| Err(VfError::transport(None, "close failed")))
         .unwrap_err();
@@ -199,7 +192,7 @@ proptest! {
         let failed = selector % requested;
         let mut outcomes: Vec<Result<usize, VfError>> =
             (0..failed).map(Ok).collect();
-        outcomes.push(Err(VfError::failure(usize::MAX, libc::ENOENT as u32)));
+        outcomes.push(Err(VfError::errno(usize::MAX, libc::ENOENT as u32)));
         let mut closed = Vec::new();
         let error = ManyResults::new(requested, outcomes)
             .try_collect_with_cleanup(requested, |_, handle| {
@@ -220,7 +213,7 @@ proptest! {
         let outcomes = (0..requested)
             .map(|index| {
                 if index == failed {
-                    Err(VfError::failure(usize::MAX, libc::EACCES as u32))
+                    Err(VfError::errno(usize::MAX, libc::EACCES as u32))
                 } else {
                     Ok(index)
                 }

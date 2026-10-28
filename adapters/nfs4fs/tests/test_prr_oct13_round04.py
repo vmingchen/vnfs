@@ -100,7 +100,8 @@ def test_symlink_copy_creation_failure_honors_error_policy(
     assert dummy_fs.cat_file(destination + "/file") == b"payload"
     attrs, errors = dummy_fs._client.lstat_many([failed_path])
     assert attrs == [None]
-    assert errors[0] == errno.ENOENT
+    assert isinstance(errors[0], FileNotFoundError)
+    assert errors[0].errno == errno.ENOENT
     assert dummy_fs.readlink("/source/link") == "file"
 
 

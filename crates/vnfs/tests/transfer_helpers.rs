@@ -127,10 +127,10 @@ impl Vfsi for Harness {
             && at == attempt
         {
             self.read_failure.set(None);
-            return Err(Error::client(0, errno));
+            return Err(Error::errno(0, errno));
         }
         if self.fault.get() == Fault::IndexedRead {
-            return Err(Error::client(1, libc::EIO as u32));
+            return Err(Error::errno(1, libc::EIO as u32));
         }
         let mut out = self.fs.vread(r, o)?;
         let mut c = self.calls.borrow_mut();
@@ -177,7 +177,7 @@ impl Vfsi for Harness {
         self.calls.borrow_mut().closes += f.len();
         self.fs.vclose(f)?;
         if self.fault.get() == Fault::Close {
-            return Err(Error::client(0, libc::EIO as u32));
+            return Err(Error::errno(0, libc::EIO as u32));
         }
         Ok(())
     }
@@ -206,7 +206,7 @@ impl Vfsi for Harness {
             Fault::PartialCrossDevice => {
                 self.fs
                     .vrename(&[(p[0].0.as_ref(), p[0].1.as_ref())], options)?;
-                Err(Error::client(1, libc::EXDEV as u32))
+                Err(Error::errno(1, libc::EXDEV as u32))
             }
             Fault::LostRename => {
                 self.fs.vrename(p, options)?;
@@ -216,8 +216,8 @@ impl Vfsi for Harness {
                     "lost rename reply",
                 ))
             }
-            Fault::CrossDevice => Err(Error::client(0, libc::EXDEV as u32)),
-            Fault::Rename => Err(Error::client(0, libc::EIO as u32)),
+            Fault::CrossDevice => Err(Error::errno(0, libc::EXDEV as u32)),
+            Fault::Rename => Err(Error::errno(0, libc::EIO as u32)),
             _ => self.fs.vrename(p, options),
         }
     }
@@ -604,7 +604,7 @@ fn skipped_move_and_callback_error_keep_source() {
     assert!(t.path().join("src/a").exists());
     assert!(
         move_items_with_progress(&fs, &["/src/a"], "/error", TransferOptions::new(), |_| Err(
-            Error::client(0, libc::ECANCELED as u32)
+            Error::errno(0, libc::ECANCELED as u32)
         ))
         .is_err()
     );

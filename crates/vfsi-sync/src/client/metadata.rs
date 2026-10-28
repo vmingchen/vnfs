@@ -32,9 +32,8 @@ impl<F: HandleBackend> FsClient<F> {
         for (index, file) in files.iter().enumerate() {
             let file = project(file);
             if !Arc::ptr_eq(&self.inner, &file.inner) {
-                return Err(
-                    VfError::client(index, crate::ERR_INVAL).with_context("vfsync", &file.path)
-                );
+                return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput)
+                    .with_context("vfsync", &file.path));
             }
             raw.push(
                 file.raw()
@@ -50,7 +49,9 @@ impl<F: HandleBackend> FsClient<F> {
             Some(index) if index < projected.len() => {
                 error.with_context("vfsync", &projected[index].path)
             }
-            Some(_) => VfError::transport(None, "fsync backend returned an invalid error index"),
+            Some(_) => {
+                VfError::invalid_reply(None, "fsync backend returned an invalid error index")
+            }
             None => error,
         })
     }
@@ -84,7 +85,7 @@ impl<F: HandleBackend> FsClient<F> {
                 Target::Path(path) => (FileOperand::from_os_path(path), path),
                 Target::File(file) => {
                     if !Arc::ptr_eq(&self.inner, &file.inner) {
-                        return Err(VfError::client(index, crate::ERR_INVAL)
+                        return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput)
                             .with_context("vstatfs", &file.path));
                     }
                     (
@@ -104,12 +105,12 @@ impl<F: HandleBackend> FsClient<F> {
             .map_err(|error| match error.index() {
                 Some(index) if index < paths.len() => error.with_context("vstatfs", paths[index]),
                 Some(_) => {
-                    VfError::transport(None, "statfs backend returned an invalid error index")
+                    VfError::invalid_reply(None, "statfs backend returned an invalid error index")
                 }
                 None => error,
             })?;
         if results.len() != targets.len() {
-            return Err(VfError::transport(
+            return Err(VfError::invalid_reply(
                 None,
                 "statfs backend returned an invalid result count",
             ));
@@ -147,7 +148,7 @@ impl<F: HandleBackend> FsClient<F> {
                 Target::Path(path) => (Target::Path(path), path),
                 Target::File(file) => {
                     if !Arc::ptr_eq(&self.inner, &file.inner) {
-                        return Err(VfError::client(index, crate::ERR_INVAL)
+                        return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput)
                             .with_context("vsetattrs", &file.path));
                     }
                     (
@@ -167,7 +168,9 @@ impl<F: HandleBackend> FsClient<F> {
             Some(index) if index < count => error
                 .with_index(start + index)
                 .with_context("vsetattrs", paths[start + index]),
-            Some(_) => VfError::transport(None, "setattrs backend returned an invalid error index"),
+            Some(_) => {
+                VfError::invalid_reply(None, "setattrs backend returned an invalid error index")
+            }
             None => error,
         };
         let mut backend = self.lock()?;
@@ -266,7 +269,7 @@ impl<F: VectorBackend> FsClient<F> {
                     .with_index(start + index)
                     .with_context("vgetattrs", paths[start + index]),
                 Some(_) => {
-                    VfError::transport(None, "metadata backend returned an invalid error index")
+                    VfError::invalid_reply(None, "metadata backend returned an invalid error index")
                 }
                 None => error,
             })?;

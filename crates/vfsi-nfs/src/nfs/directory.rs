@@ -152,7 +152,7 @@ pub(super) fn append_bounded_walk_page(
     for entry in page {
         let path = dir.join(path_from_bytes(&entry.name));
         budget.charge(&path).map_err(|_| {
-            VfError::failure(*entry_count, libc::EFBIG as u32).with_context("walk", dir)
+            VfError::errno(*entry_count, libc::EFBIG as u32).with_context("walk", dir)
         })?;
         let mut attrs = VfAttrs {
             file: FileOperand::from_os_path(&path),
@@ -171,7 +171,7 @@ pub(super) fn append_bounded_walk_page(
                 && !options.truncate_at_max_depth()
             {
                 return Err(
-                    VfError::failure(*entry_count, libc::EFBIG as u32).with_context("walk", dir)
+                    VfError::errno(*entry_count, libc::EFBIG as u32).with_context("walk", dir)
                 );
             }
         }
@@ -245,7 +245,7 @@ impl NfsVecFs {
     pub(super) fn remove_parent_handle(&mut self, path: &Path) -> VfResult<(NfsFh, Vec<u8>)> {
         let full = self.server_vf_path(&FileOperand::from_os_path(path))?;
         let (dir, name) =
-            split_path_bytes(path_bytes(&full)).map_err(|_| VfError::failure(0, ERR_NOENT))?;
+            split_path_bytes(path_bytes(&full)).map_err(|_| VfError::errno(0, ERR_NOENT))?;
         let parent = self.resolve_path(&path_from_bytes(&dir), true)?;
         Ok((parent, name))
     }
@@ -393,7 +393,7 @@ impl NfsVecFs {
                             }
                         }
                     } else {
-                        note_error(first_error, VfError::failure(root, ERR_ISDIR), options)?;
+                        note_error(first_error, VfError::errno(root, ERR_ISDIR), options)?;
                     }
                     return Ok(());
                 }

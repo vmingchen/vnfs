@@ -70,18 +70,44 @@ def _writable_byte_view(buffer):
     return view.cast("B")
 
 
-def _oserror(errno_code, path):
-    """Rebuild a Python exception from a native errno (for batched results)."""
-    if errno_code == _ERR_UNSUPPORTED:
-        return NotImplementedError(f"operation is unsupported: {path!r}")
-    # Constructing OSError with an errno lets Python select the appropriate
-    # subclass (FileNotFoundError, PermissionError, ...), and passing the path
-    # separately preserves the useful ``exception.filename`` attribute.
-    try:
-        message = os.strerror(errno_code)
-    except (OverflowError, ValueError):
-        message = f"errno {errno_code}"
-    return OSError(errno_code, message, path)
+def _is_transport_error(error):
+    return (
+        isinstance(error, (ConnectionError, TimeoutError))
+        or getattr(error, "transport_kind", None) is not None
+    )
+
+
+def _can_reconnect(error):
+    return _is_transport_error(error) and getattr(
+        error, "transport_kind", None
+    ) not in ("auth", "invalid_reply")
+
+
+def _errno(error):
+    """Read errno from structured failures or legacy/mock integer results."""
+    return getattr(error, "errno", error)
+
+
+def _oserror(errno_code, path, *, index=None):
+    """Preserve structured native exceptions; accept legacy/mock errno maps."""
+    if isinstance(errno_code, BaseException):
+        error = errno_code
+    elif errno_code == _ERR_UNSUPPORTED:
+        error = NotImplementedError(f"operation is unsupported: {path!r}")
+    else:
+        # OSError selects the appropriate subclass from an actual OS errno.
+        try:
+            message = os.strerror(errno_code)
+        except (OverflowError, ValueError):
+            message = f"errno {errno_code}"
+        error = OSError(errno_code, message, path)
+    if isinstance(error, OSError) and error.filename is None:
+        error.filename = path
+    # Native vectors can be subsets of a public request. Their callers supply
+    # the public position here, without losing the native status/diagnostics.
+    if index is not None:
+        error.index = index
+    return error
 
 
 def _info_dict(full_name, attrs):
@@ -577,8 +603,12 @@ class _ResilientClient:
             self.ensure_ready()
             try:
                 return getattr(self._native, name)(*args, **kwargs)
-            except ConnectionError:
-                if not self._auto_reconnect or name not in self._IDEMPOTENT:
+            except OSError as error:
+                if (
+                    not _can_reconnect(error)
+                    or not self._auto_reconnect
+                    or name not in self._IDEMPOTENT
+                ):
                     raise
                 self.reconnect()
                 return getattr(self._native, name)(*args, **kwargs)
@@ -718,16 +748,19 @@ class _ClientPool:
                     continue
                 try:
                     client.close_many([native_fd for _, native_fd in live])
-                except ConnectionError:
-                    if self._auto_reconnect:
-                        try:
-                            self._reconnect_client(owner)
-                        except BaseException:
-                            pass
                 except BaseException as error:
-                    completed = getattr(error, "index", 0)
-                    if isinstance(completed, int) and 0 <= completed <= len(live):
-                        self._discard_tokens([token for token, _ in live[:completed]])
+                    if _is_transport_error(error):
+                        if self._auto_reconnect and _can_reconnect(error):
+                            try:
+                                self._reconnect_client(owner)
+                            except BaseException:
+                                pass
+                    else:
+                        completed = getattr(error, "index", 0)
+                        if isinstance(completed, int) and 0 <= completed <= len(live):
+                            self._discard_tokens(
+                                [token for token, _ in live[:completed]]
+                            )
                 else:
                     self._discard_tokens([token for token, _ in live])
 
@@ -970,9 +1003,10 @@ class _ClientPool:
             with self._client_locks[owner]:
                 try:
                     return getattr(client, name)(*args, **kwargs)
-                except ConnectionError:
+                except OSError as error:
                     if (
-                        not self._auto_reconnect
+                        not _can_reconnect(error)
+                        or not self._auto_reconnect
                         or name not in _ResilientClient._IDEMPOTENT
                     ):
                         raise
@@ -1092,7 +1126,7 @@ class _RawVfsiFile(io.RawIOBase):
             return self.fs._client.pread(fd, length, offset)
         except (ConnectionError, OSError) as error:
             stale = not self.fs._client.descriptor_valid(fd)
-            if isinstance(error, OSError) and not isinstance(error, ConnectionError):
+            if isinstance(error, OSError) and not _is_transport_error(error):
                 if error.errno != errno.EBADF or not stale:
                     raise
             if self._writable:
@@ -1100,7 +1134,9 @@ class _RawVfsiFile(io.RawIOBase):
                 # switch its identity. Retain the descriptor only for cleanup.
                 self._broken = True
                 raise
-            if not self.fs.auto_reconnect:
+            if not self.fs.auto_reconnect or (
+                _is_transport_error(error) and not _can_reconnect(error)
+            ):
                 raise
             if not stale:
                 self.fs._client.reconnect_descriptor(fd)
@@ -1203,12 +1239,18 @@ class _RawVfsiFile(io.RawIOBase):
                 else:
                     n = self.fs._client.pwrite(fd, data, self._pos)
                     new_pos = self._pos + n
-            except ConnectionError:
+            except OSError as error:
+                if not _is_transport_error(error):
+                    raise
                 # A mutation may already have reached the server. Reconnect for
                 # future path operations, but never replay the write implicitly.
                 self._broken = True
                 try:
-                    if self.fs.auto_reconnect and self.fs._client.descriptor_valid(fd):
+                    if (
+                        self.fs.auto_reconnect
+                        and _can_reconnect(error)
+                        and self.fs._client.descriptor_valid(fd)
+                    ):
                         self.fs._client.reconnect_descriptor(fd)
                 except BaseException:
                     # Preserve the ambiguous mutation error; reconnect is cleanup.
@@ -1257,7 +1299,9 @@ class _RawVfsiFile(io.RawIOBase):
         with self.fs._cache_mutation([self.path], descriptors=[fd]):
             try:
                 self.fs._client.ftruncate(fd, size)
-            except ConnectionError:
+            except OSError as error:
+                if not _is_transport_error(error):
+                    raise
                 # The server may have applied the size change before the reply
                 # was lost. Never replay it on a potentially different handle.
                 self._broken = True
@@ -1503,7 +1547,7 @@ class VfsiFile(AbstractBufferedFile):
                 offset += written
         except BaseException as error:
             self._write_failed = True
-            if isinstance(error, OSError) and not isinstance(error, ConnectionError):
+            if isinstance(error, OSError) and not _is_transport_error(error):
                 self._write_failure_errno = error.errno
             self._raw._broken = True
             raise
@@ -2020,8 +2064,8 @@ class _BufferGroup:
         fds = [file._raw._ensure_open() for file in files]
         try:
             return self.fs._client.pread_many(fds, offsets, lengths)
-        except ConnectionError:
-            if not self.fs.auto_reconnect:
+        except OSError as error:
+            if not self.fs.auto_reconnect or not _can_reconnect(error):
                 raise
             self._reopen_readers()
             fds = [file._raw._ensure_open() for file in files]
@@ -2093,7 +2137,15 @@ class _BufferGroup:
             for index, (file, length, value) in enumerate(zip(files, lengths, data)):
                 if index in errors:
                     if file is current:
-                        raise _oserror(errors[index], current.path)
+                        raise _oserror(
+                            errors[index],
+                            current.path,
+                            index=next(
+                                i
+                                for i, file in enumerate(self.files)
+                                if file is current
+                            ),
+                        )
                     continue
                 value = value or b""
                 if file is current:
@@ -2150,7 +2202,15 @@ class _BufferGroup:
             for index, (file, length, value) in enumerate(zip(files, lengths, data)):
                 if index in errors:
                     if file is current:
-                        raise _oserror(errors[index], current.path)
+                        raise _oserror(
+                            errors[index],
+                            current.path,
+                            index=next(
+                                i
+                                for i, file in enumerate(self.files)
+                                if file is current
+                            ),
+                        )
                     continue
                 value = value or b""
                 if file is current:
@@ -3155,7 +3215,7 @@ class VfsiFileSystem(AbstractFileSystem):
                     selected = [missing[index] for index in batch]
                     attrs, errors = self._client.lstat_many(selected)
                     if any(
-                        code not in (errno.ENOENT, errno.ENOTDIR)
+                        _errno(code) not in (errno.ENOENT, errno.ENOTDIR)
                         for code in errors.values()
                     ):
                         return {}, True
@@ -3306,7 +3366,8 @@ class VfsiFileSystem(AbstractFileSystem):
             uncertain = any(
                 attr is not None and _handle_identity(attr) is None for attr in attrs
             ) or any(
-                code not in (errno.ENOENT, errno.ENOTDIR) for code in errors.values()
+                _errno(code) not in (errno.ENOENT, errno.ENOTDIR)
+                for code in errors.values()
             )
         except (OSError, ConnectionError):
             # Metadata permissions/availability must not prevent a permitted
@@ -3614,7 +3675,7 @@ class VfsiFileSystem(AbstractFileSystem):
                         found_directory = False
                         for index, native in enumerate(pending):
                             if index in errors:
-                                if errors[index] == errno.ENOENT:
+                                if _errno(errors[index]) == errno.ENOENT:
                                     missing.append(native)
                                     continue
                                 raise _oserror(
@@ -3644,7 +3705,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 existing.append((i, p))
             else:
                 code = lerrs.get(i)
-                if code is not None and code != errno.ENOENT:
+                if code is not None and _errno(code) != errno.ENOENT:
                     raise _oserror(code, p)
                 missing.append(p)
         if existing and not exist_ok:
@@ -3653,11 +3714,11 @@ class VfsiFileSystem(AbstractFileSystem):
             estats, eerrs = self._client.stat_many(
                 [self._native_path(p) for _, p in existing]
             )
-            for j, (_, p) in enumerate(existing):
+            for j, (i, p) in enumerate(existing):
                 if estats[j] is not None and estats[j]["type"] == "directory":
                     continue
-                if j in eerrs and eerrs[j] != errno.ENOENT:
-                    raise _oserror(eerrs[j], p)
+                if j in eerrs and _errno(eerrs[j]) != errno.ENOENT:
+                    raise _oserror(eerrs[j], p, index=i)
                 raise FileExistsError(errno.EEXIST, f"File exists: {p!r}")
         if missing:
             self._ensure_dirs(missing)
@@ -3818,7 +3879,8 @@ class VfsiFileSystem(AbstractFileSystem):
         stats, stat_errors = self._client.stat_many(native)
         data = [b""] * len(paths)
         failures = {
-            index: _oserror(code, paths[index]) for index, code in stat_errors.items()
+            index: _oserror(code, paths[index], index=index)
+            for index, code in stat_errors.items()
         }
         reported = set()
         valid = [index for index in range(len(paths)) if index not in failures]
@@ -3843,7 +3905,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 data[index] = value
                 retained += len(value)
             except OSError as exc:
-                failures[index] = exc
+                failures[index] = _oserror(exc, paths[index], index=index)
             callback.relative_update()
             reported.add(index)
 
@@ -3883,7 +3945,9 @@ class VfsiFileSystem(AbstractFileSystem):
             )
             for position, (index, _size) in enumerate(batch):
                 if position in batch_errors:
-                    failures[index] = _oserror(batch_errors[position], paths[index])
+                    failures[index] = _oserror(
+                        batch_errors[position], paths[index], index=index
+                    )
                     continue
                 value = dat[position] or b""
                 if retained + len(value) > limit:
@@ -4122,7 +4186,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 out.append(validation_errors[i])
                 callback.relative_update()
             elif i in errors:
-                exc = _oserror(errors[i], p)
+                exc = _oserror(errors[i], p, index=i)
                 if on_error == "return":
                     out.append(exc)
                     callback.relative_update()
@@ -5061,7 +5125,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 entries, errors = self._client.lstat_many([self._native_path(dst)])
                 if entries[0] is not None:
                     raise shutil.Error(f"Destination path {dst!r} already exists")
-                if 0 in errors and errors[0] != errno.ENOENT:
+                if 0 in errors and _errno(errors[0]) != errno.ENOENT:
                     raise _oserror(errors[0], dst)
             pairs = [(src, dst)]
         with self._cache_mutation(
@@ -5143,7 +5207,7 @@ class VfsiFileSystem(AbstractFileSystem):
         info = self.info(src)
         if info["type"] == "directory":
             dst_stats, dst_errors = self._client.stat_many([self._native_path(dst)])
-            if 0 in dst_errors and dst_errors[0] != errno.ENOENT:
+            if 0 in dst_errors and _errno(dst_errors[0]) != errno.ENOENT:
                 raise _oserror(dst_errors[0], dst) from None
             if dst_stats[0] is not None and dst_stats[0]["type"] != "directory":
                 raise FileExistsError(errno.EEXIST, "File exists", dst)
@@ -5198,20 +5262,23 @@ class VfsiFileSystem(AbstractFileSystem):
                 )
                 callback.set_size(len(pairs))
                 pending = []
+                positions = []
                 first_special = None
-                for pair, info in zip(pairs, stats):
+                for index, (pair, info) in enumerate(zip(pairs, stats)):
                     if info is not None and info["type"] not in ("file", "directory"):
                         callback.relative_update()
                         if first_special is None:
                             first_special = pair[0]
                     else:
                         pending.append(pair)
+                        positions.append(index)
                 self._copy_pairs(
                     pending,
                     on_error,
                     callback=callback,
                     callback_is_parent=True,
                     set_callback_size=False,
+                    positions=positions,
                 )
                 if first_special is not None and on_error == "raise":
                     raise FileNotFoundError(first_special)
@@ -5250,7 +5317,7 @@ class VfsiFileSystem(AbstractFileSystem):
             dst_is_dir = stats[1] is not None and stats[1]["type"] == "directory"
             if errors:
                 i = min(errors)
-                if errors[i] != errno.ENOENT:
+                if _errno(errors[i]) != errno.ENOENT:
                     raise _oserror(errors[i], (src, dst)[i])
             if src_is_dir and stats[1] is not None and not dst_is_dir:
                 raise FileExistsError(errno.EEXIST, "File exists", dst)
@@ -5317,6 +5384,7 @@ class VfsiFileSystem(AbstractFileSystem):
         metadata = self._client.lstat_many if symlinks else self._client.stat_many
         stats, errors = metadata([self._native_path(src) for src, _ in pairs])
         file_pairs = []
+        file_indices = []
         dir_pairs = []
         symlink_pairs = []
         first_error = None
@@ -5329,6 +5397,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 dir_pairs.append((src, dst))
             elif stat is not None and stat["type"] == "file":
                 file_pairs.append((src, dst))
+                file_indices.append(i)
             elif symlinks and stat is not None and stat["type"] == "symlink":
                 symlink_pairs.append((src, dst))
             else:
@@ -5345,6 +5414,7 @@ class VfsiFileSystem(AbstractFileSystem):
             callback=callback,
             callback_is_parent=True,
             set_callback_size=False,
+            positions=file_indices,
         )
         self._copy_symlink_pairs(symlink_pairs, on_error, callback)
         if first_error is not None:
@@ -5377,11 +5447,10 @@ class VfsiFileSystem(AbstractFileSystem):
                     self._ensure_dirs([parent])
                 with self._cache_mutation([dst], namespace=True):
                     self._client.symlink(target, self._native_path(dst))
-            except ConnectionError:
-                # Link creation may already have reached the server; never
-                # suppress an ambiguous transport failure or replay it.
-                raise
-            except (OSError, NotImplementedError, shutil.SameFileError):
+            except (OSError, NotImplementedError, shutil.SameFileError) as error:
+                # Never suppress or replay an ambiguous link creation.
+                if _is_transport_error(error):
+                    raise
                 callback.relative_update()
                 if on_error == "raise":
                     raise
@@ -5397,6 +5466,7 @@ class VfsiFileSystem(AbstractFileSystem):
         callback=None,
         callback_is_parent=False,
         set_callback_size=True,
+        positions=None,
     ):
         if callback is not None and set_callback_size and callback_is_parent:
             callback.set_size(len(pairs))
@@ -5408,7 +5478,7 @@ class VfsiFileSystem(AbstractFileSystem):
             ]
             copied, errors = self._client.copy_many(native_pairs)
             missing = sorted(
-                index for index, code in errors.items() if code == errno.ENOENT
+                index for index, code in errors.items() if _errno(code) == errno.ENOENT
             )
             if missing and self.auto_mkdir:
                 # Successful pairs may have overwritten another source in this
@@ -5425,7 +5495,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 try:
                     self._ensure_dirs(internal_parents)
                 except OSError as error:
-                    if isinstance(error, ConnectionError) or error.errno is None:
+                    if _is_transport_error(error) or error.errno is None:
                         raise
                     # Only a semantic failure needs parent-by-parent recovery.
                     # A bad parent must not block independent successful copies
@@ -5434,12 +5504,9 @@ class VfsiFileSystem(AbstractFileSystem):
                         try:
                             self._ensure_dirs([parent])
                         except OSError as failure:
-                            if (
-                                isinstance(failure, ConnectionError)
-                                or failure.errno is None
-                            ):
+                            if _is_transport_error(failure) or failure.errno is None:
                                 raise
-                            parent_errors[parent] = failure.errno
+                            parent_errors[parent] = failure
                 ready = []
                 for index in missing:
                     parent = self._internalize(
@@ -5474,11 +5541,13 @@ class VfsiFileSystem(AbstractFileSystem):
                         _complete_callback(callback, copied[i])
             if errors:
                 i = min(errors)
-                if errors[i] == _ERR_SAME_FILE:
+                index = i if positions is None else positions[i]
+                if _errno(errors[i]) == _ERR_SAME_FILE:
                     src, dst = pairs[i]
                     exc = shutil.SameFileError(f"{src!r} and {dst!r} are the same file")
+                    exc.index = index
                 else:
-                    exc = _oserror(errors[i], pairs[i][0])
+                    exc = _oserror(errors[i], pairs[i][0], index=index)
                 if on_error == "raise":
                     raise exc
 

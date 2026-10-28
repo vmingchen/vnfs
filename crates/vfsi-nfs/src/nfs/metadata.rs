@@ -243,7 +243,7 @@ fn read_u64(buf: &[u8], off: &mut usize) -> VfResult<u64> {
 }
 
 fn attr_decode_error() -> VfError {
-    VfError::transport(0, "malformed NFS attribute list")
+    VfError::invalid_reply(0, "malformed NFS attribute list")
 }
 
 /// Read an XDR `nfstime4`: `int64 seconds; uint32 nseconds` (12 bytes).
@@ -385,7 +385,7 @@ impl NfsVecFs {
                 let open = self
                     .open_files
                     .get(&fd)
-                    .ok_or_else(|| VfError::failure(i, ERR_EBADF))?;
+                    .ok_or_else(|| VfError::errno(i, ERR_EBADF))?;
                 crate::client::FileRef::Handle(open.fh.clone())
             } else {
                 crate::client::FileRef::Path(
@@ -543,7 +543,7 @@ impl NfsVecFs {
                 let open = self
                     .open_files
                     .get(&fd)
-                    .ok_or_else(|| VfError::failure(i, ERR_EBADF))?;
+                    .ok_or_else(|| VfError::errno(i, ERR_EBADF))?;
                 crate::client::FileRef::Handle(open.fh.clone())
             } else {
                 crate::client::FileRef::Path(

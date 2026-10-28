@@ -60,8 +60,10 @@ impl NfsVecFs {
             }
             | FileOperand::CwdPath(path) => Ok(self.server_path(path)),
             FileOperand::Cwd => Ok(self.server_path(Path::new(""))),
-            FileOperand::Fd(_) | FileOperand::Saved => Err(VfError::failure(0, ERR_INVAL)),
-            _ => Err(VfError::failure(0, ERR_INVAL)),
+            FileOperand::Fd(_) | FileOperand::Saved => {
+                Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput))
+            }
+            _ => Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
         }
     }
 
@@ -99,7 +101,7 @@ impl NfsVecFs {
             }
             let path_bytes = path_bytes(&path);
             let (dir, name) =
-                split_path_bytes(path_bytes).map_err(|_| VfError::failure(i, ERR_NOENT))?;
+                split_path_bytes(path_bytes).map_err(|_| VfError::errno(i, ERR_NOENT))?;
             groups
                 .entry(dir.into_boxed_slice())
                 .or_default()
@@ -194,7 +196,7 @@ impl NfsVecFs {
         let mut hops = 0usize;
         loop {
             if hops > 40 {
-                return Err(VfError::failure(0, nfsstat4_NFS4ERR_IO)); // symlink loop
+                return Err(VfError::errno(0, nfsstat4_NFS4ERR_IO)); // symlink loop
             }
             match self.nfs.resolve(&path) {
                 Ok(fh) => {
@@ -277,7 +279,7 @@ impl NfsVecFs {
                 .open_files
                 .get(fd)
                 .map(|o| o.fh.clone())
-                .ok_or_else(|| VfError::failure(0, ERR_EBADF)),
+                .ok_or_else(|| VfError::errno(0, ERR_EBADF)),
             FileOperand::Path { .. } | FileOperand::Cwd | FileOperand::CwdPath(_) => {
                 let path = self.server_vf_path(f)?;
                 if follow {
@@ -286,8 +288,8 @@ impl NfsVecFs {
                     self.resolve_path(&path, false)
                 }
             }
-            FileOperand::Saved => Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL)),
-            _ => Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL)),
+            FileOperand::Saved => Err(VfError::errno(0, nfsstat4_NFS4ERR_INVAL)),
+            _ => Err(VfError::errno(0, nfsstat4_NFS4ERR_INVAL)),
         }
     }
 
@@ -334,7 +336,7 @@ impl NfsVecFs {
                 return Ok(path_from_bytes(&current));
             }
             if hops >= 40 {
-                return Err(VfError::failure(0, nfsstat4_NFS4ERR_IO)); // symlink loop
+                return Err(VfError::errno(0, nfsstat4_NFS4ERR_IO)); // symlink loop
             }
             let target = self.readlink_raw_impl(&abs_path)?;
             current = self.resolve_target(&current, &target);
@@ -357,9 +359,9 @@ impl NfsVecFs {
             let s = self.server_vf_path(src).map_err(|e| e.with_index(i))?;
             let d = self.server_vf_path(dst).map_err(|e| e.with_index(i))?;
             let (sdir, sname) =
-                split_path_bytes(path_bytes(&s)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
+                split_path_bytes(path_bytes(&s)).map_err(|_| VfError::errno(i, ERR_NOENT))?;
             let (ddir, dname) =
-                split_path_bytes(path_bytes(&d)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
+                split_path_bytes(path_bytes(&d)).map_err(|_| VfError::errno(i, ERR_NOENT))?;
             let sdirfh = match src_cache.get(sdir.as_slice()) {
                 Some(fh) => fh.clone(),
                 None => {
@@ -405,7 +407,7 @@ impl NfsVecFs {
         for (i, f) in files.iter().enumerate() {
             let path = self.server_vf_path(f).map_err(|e| e.with_index(i))?;
             let (dir, name) =
-                split_path_bytes(path_bytes(&path)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
+                split_path_bytes(path_bytes(&path)).map_err(|_| VfError::errno(i, ERR_NOENT))?;
             let group = groups.entry(dir.into_boxed_slice()).or_default();
             group.indices.push(i);
             group.names.push(name);

@@ -561,36 +561,79 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn unsupported_noreplace_flag_is_distinguished_from_invalid_directory_move() {
-        let unsupported = std::io::Error::from_raw_os_error(libc::EINVAL);
-        assert_eq!(
-            crate::noreplace_error_code(
-                &unsupported,
+    fn unsupported_rename_flags_are_distinguished_from_invalid_directory_moves() {
+        use std::io::ErrorKind as K;
+        for (code, source_dir, dest_dir, source, destination, expected) in [
+            (
+                libc::ENOSYS,
                 false,
-                Path::new("/source"),
-                Path::new("/target")
+                false,
+                "/source",
+                "/target",
+                K::Unsupported,
             ),
-            VF_ERR_UNSUPPORTED,
-        );
-        assert_eq!(
-            crate::noreplace_error_code(
-                &unsupported,
+            (
+                libc::EOPNOTSUPP,
+                false,
+                false,
+                "/source",
+                "/target",
+                K::Unsupported,
+            ),
+            (
+                libc::EINVAL,
+                false,
+                false,
+                "/source",
+                "/target",
+                K::Unsupported,
+            ),
+            (
+                libc::EINVAL,
                 true,
-                Path::new("/source"),
-                Path::new("/source/child"),
-            ),
-            libc::EINVAL as u32,
-        );
-        let unsupported_operation = std::io::Error::from_raw_os_error(libc::EOPNOTSUPP);
-        assert_eq!(
-            crate::noreplace_error_code(
-                &unsupported_operation,
                 false,
-                Path::new("/source"),
-                Path::new("/target"),
+                "/source",
+                "/source/child",
+                K::InvalidInput,
             ),
-            VF_ERR_UNSUPPORTED,
-        );
+            (
+                libc::EINVAL,
+                false,
+                true,
+                "/target/child",
+                "/target",
+                K::InvalidInput,
+            ),
+            (
+                libc::EACCES,
+                false,
+                false,
+                "/source",
+                "/target",
+                K::PermissionDenied,
+            ),
+        ] {
+            let error = crate::rename_error(
+                std::io::Error::from_raw_os_error(code),
+                3,
+                source_dir,
+                dest_dir,
+                Path::new(source),
+                Path::new(destination),
+            );
+            assert_eq!(error.kind(), expected, "errno {code}");
+            assert_eq!(error.index(), Some(3));
+            if expected == K::Unsupported {
+                assert_eq!(error.status(), None);
+                assert_eq!(error.to_errno(), libc::EOPNOTSUPP);
+            } else {
+                assert_eq!(
+                    error.status(),
+                    Some(vfsi_core::StatusCode::Errno(code as u32))
+                );
+                assert!(std::error::Error::source(&error).is_some());
+            }
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -2253,9 +2296,9 @@ mod tests {
                 use std::os::unix::ffi::OsStrExt;
 
                 let path = CString::new(self.leaf.as_os_str().as_bytes())
-                    .map_err(|_| VfError::failure(0, ERR_INVAL))?;
+                    .map_err(|_| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
                 if unsafe { libc::mkfifo(path.as_ptr(), 0o600) } != 0 {
-                    return Err(VfError::client(
+                    return Err(VfError::errno(
                         0,
                         LocalBackend::errno(&std::io::Error::last_os_error()),
                     ));

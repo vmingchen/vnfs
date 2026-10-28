@@ -232,7 +232,7 @@ pub trait VectorBackend: HandleBackend {
     #[doc(hidden)]
     fn vopen_preflight_impl(&mut self, paths: &[&Path], flags: &[i32], modes: &[u32]) -> VfRes {
         if paths.len() != flags.len() || paths.len() != modes.len() {
-            return Err(VfError::failure(0, ERR_INVAL));
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
         Ok(())
     }
@@ -507,7 +507,7 @@ pub trait VectorBackend: HandleBackend {
                 Ok(())
             }
             vfsi_core::api::RenameMode::NoReplace | vfsi_core::api::RenameMode::Exchange => {
-                Err(VfError::client(0, vfsi_core::VF_ERR_UNSUPPORTED))
+                Err(VfError::unsupported(0))
             }
         }
     }

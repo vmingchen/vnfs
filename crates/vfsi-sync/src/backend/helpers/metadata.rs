@@ -45,7 +45,7 @@ pub fn exists_impl_default<F: VectorBackend + ?Sized>(
 ) -> VfResult<bool> {
     match backend.lstat_impl(path) {
         Ok(_) => Ok(true),
-        Err(e) if e.raw_code() == ERR_NOENT => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
     }
 }
@@ -185,7 +185,9 @@ pub fn vsetattrs_typed_default<F: VectorBackend + ?Sized>(
         };
         result.map_err(|error| match error.index() {
             Some(index) if index < count => error.with_index(start + index),
-            Some(_) => VfError::transport(None, "setattrs backend returned an invalid error index"),
+            Some(_) => {
+                VfError::invalid_reply(None, "setattrs backend returned an invalid error index")
+            }
             None => error,
         })?;
         start += count;

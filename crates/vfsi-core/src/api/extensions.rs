@@ -201,7 +201,7 @@ pub trait VfsiExt: Vfsi {
             options,
         )?;
         if results.len() != paths.len() {
-            return Err(crate::api::Error::transport(
+            return Err(crate::api::Error::invalid_reply(
                 None,
                 "vread_native returned an invalid result count",
             ));
@@ -212,13 +212,13 @@ pub trait VfsiExt: Vfsi {
             .map(|(index, result)| {
                 let complete = result.offset() == 0 && result.eof();
                 let data = result.into_data().ok_or_else(|| {
-                    crate::api::Error::transport(
+                    crate::api::Error::invalid_reply(
                         Some(index),
                         "whole-file vread_native omitted owned data",
                     )
                 })?;
                 if !complete {
-                    return Err(crate::api::Error::transport(
+                    return Err(crate::api::Error::invalid_reply(
                         Some(index),
                         "whole-file vread_native returned incomplete or invalid data",
                     ));
@@ -268,7 +268,8 @@ pub trait VfsiExt: Vfsi {
         let path = path.as_ref();
         let mut files = self.read_files_with_options(&[path], options)?;
         String::from_utf8(files.remove(0)).map_err(|_| {
-            crate::api::Error::client(0, crate::ERR_INVAL).with_context("read_to_string", path)
+            crate::api::Error::from_kind(0, std::io::ErrorKind::InvalidInput)
+                .with_context("read_to_string", path)
         })
     }
 
@@ -399,8 +400,10 @@ pub trait VfsiExt: Vfsi {
         let mut seen = std::collections::HashSet::with_capacity(entries.len());
         for (index, (path, _)) in entries.iter().enumerate() {
             if !seen.insert(path.as_ref()) {
-                return Err(crate::api::Error::client(index, crate::ERR_INVAL)
-                    .with_context("write_files", path.as_ref()));
+                return Err(
+                    crate::api::Error::from_kind(index, std::io::ErrorKind::InvalidInput)
+                        .with_context("write_files", path.as_ref()),
+                );
             }
         }
         let requests: Vec<_> = entries
@@ -416,7 +419,7 @@ pub trait VfsiExt: Vfsi {
             .collect();
         let files = self.vopen(&requests)?;
         if files.len() != entries.len() {
-            return Err(crate::api::Error::transport(
+            return Err(crate::api::Error::invalid_reply(
                 None,
                 "vopen returned an invalid result count",
             ));
@@ -569,7 +572,7 @@ pub trait VfsiExt: Vfsi {
     ) -> Result<Vec<crate::api::DirEntry>> {
         if options.recursive() {
             return Err(
-                crate::api::Error::client(0, libc::EINVAL as u32).with_context(
+                crate::api::Error::from_kind(0, std::io::ErrorKind::InvalidInput).with_context(
                     "read_dir_with_options requires shallow options",
                     path.as_ref(),
                 ),
@@ -601,7 +604,7 @@ pub trait VfsiExt: Vfsi {
     fn read_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<DirectoryListing>> {
         let trees = self.read_dirs_with_options(paths, crate::api::ListDirOptions::new())?;
         if trees.len() != paths.len() || trees.iter().any(|tree| tree.len() != 1) {
-            return Err(crate::api::Error::transport(
+            return Err(crate::api::Error::invalid_reply(
                 None,
                 "read_dirs returned an invalid result count",
             ));
@@ -644,9 +647,9 @@ pub trait VfsiExt: Vfsi {
             .map(|_| std::collections::HashMap::new())
             .collect();
         self.vlistdirs(paths, options, |index, page| {
-            let tree = trees
-                .get_mut(index)
-                .ok_or_else(|| crate::api::Error::transport(None, "invalid visitor root index"))?;
+            let tree = trees.get_mut(index).ok_or_else(|| {
+                crate::api::Error::invalid_reply(None, "invalid visitor root index")
+            })?;
             let positions = &mut positions[index];
             if let Some(&slot) = positions.get(&page.path) {
                 tree[slot].entries.extend(page.entries);
@@ -837,7 +840,7 @@ pub trait VfsiExt: Vfsi {
             }
             if depth >= options.max_depth_or(Default::default()).get() && !children.is_empty() {
                 if !options.truncate_at_max_depth() {
-                    return Err(crate::api::Error::client(0, libc::EFBIG as u32)
+                    return Err(crate::api::Error::errno(0, libc::EFBIG as u32)
                         .with_context("visit_dirs_ordered", &children[0]));
                 }
             } else {
@@ -915,7 +918,7 @@ pub trait VfsiExt: Vfsi {
     fn read_link(&self, path: impl AsRef<Path>) -> Result<std::path::PathBuf> {
         let mut targets = self.vreadlink(&[path])?;
         if targets.len() != 1 {
-            return Err(crate::api::Error::transport(
+            return Err(crate::api::Error::invalid_reply(
                 None,
                 "invalid readlink result count",
             ));
@@ -958,14 +961,17 @@ pub trait VfsiExt: Vfsi {
                     continue;
                 }
                 std::path::Component::Prefix(_) => {
-                    return Err(crate::api::Error::client(0, crate::ERR_INVAL));
+                    return Err(crate::api::Error::from_kind(
+                        0,
+                        std::io::ErrorKind::InvalidInput,
+                    ));
                 }
             }
             match self.vmkdir(&[MkDirOp::new(&current, 0o777)]) {
                 Ok(()) => {}
-                Err(error) if error.raw_code() == crate::ERR_EXIST => {
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     if !self.attrs(&current)?.is_dir() {
-                        return Err(crate::api::Error::client(0, crate::ERR_NOTDIR)
+                        return Err(crate::api::Error::errno(0, crate::ERR_NOTDIR)
                             .with_context("create_dir_all", &current));
                     }
                 }
@@ -1047,7 +1053,7 @@ pub trait VfsiExt: Vfsi {
         let path = path.as_ref();
         if self.symlink_attrs(path)?.is_dir() {
             return Err(
-                crate::api::Error::client(0, crate::ERR_ISDIR).with_context("remove_file", path)
+                crate::api::Error::errno(0, crate::ERR_ISDIR).with_context("remove_file", path)
             );
         }
         self.vremove(
@@ -1165,7 +1171,7 @@ impl<C: Vfsi + ?Sized> VfsiExt for C {}
 
 fn single_completion<T>(mut values: Vec<T>, operation: &'static str) -> Result<T> {
     if values.len() != 1 {
-        return Err(crate::api::Error::transport(
+        return Err(crate::api::Error::invalid_reply(
             None,
             format!("{operation} returned an invalid result count"),
         ));
@@ -1174,7 +1180,7 @@ fn single_completion<T>(mut values: Vec<T>, operation: &'static str) -> Result<T
 }
 fn require_directory<C: Vfsi + ?Sized>(fs: &C, path: &Path, operation: &'static str) -> Result<()> {
     if !fs.symlink_attrs(path)?.is_dir() {
-        return Err(crate::api::Error::client(0, crate::ERR_NOTDIR).with_context(operation, path));
+        return Err(crate::api::Error::errno(0, crate::ERR_NOTDIR).with_context(operation, path));
     }
     Ok(())
 }
@@ -1197,7 +1203,7 @@ fn attrs_query<C: Vfsi + ?Sized>(
 
 fn single_tree(trees: &mut Vec<Vec<DirectoryListing>>) -> Result<Vec<DirectoryListing>> {
     if trees.len() != 1 {
-        return Err(crate::api::Error::transport(
+        return Err(crate::api::Error::invalid_reply(
             None,
             "read_dirs returned an invalid root count",
         ));

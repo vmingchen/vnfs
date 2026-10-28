@@ -65,9 +65,9 @@ use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 
 use crate::path::{normalize_bytes, path_bytes, path_from_bytes};
 use crate::vecfs::{
-    Adb, AttrMask, CopyOptions, ERR_ACCES, ERR_EBADF, ERR_EXIST, ERR_INVAL, ERR_ISDIR, ERR_NOENT,
-    ERR_NOTDIR, ExtentPair, Fd, FileOperand, ReadOp, ReadResult, SeekFrom, SetAttrsOp, Target,
-    VfAttrs, VfError, VfOffset, VfPathBase, VfRes, VfResult, VfType, WriteOp, WriteResult,
+    Adb, AttrMask, CopyOptions, ERR_EBADF, ERR_NOTDIR, ExtentPair, Fd, FileOperand, ReadOp,
+    ReadResult, SeekFrom, SetAttrsOp, Target, VfAttrs, VfError, VfOffset, VfPathBase, VfRes,
+    VfResult, VfType, WriteOp, WriteResult,
 };
 
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
@@ -141,7 +141,7 @@ fn check_share_routing(is_dfs: bool, share: &str) -> VfRes {
 
 fn checked_offset(base: u64, delta: u64, index: usize) -> VfResult<u64> {
     base.checked_add(delta)
-        .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))
+        .ok_or_else(|| VfError::errno(index, libc::EOVERFLOW as u32))
 }
 
 #[derive(Debug, Clone)]
@@ -211,10 +211,10 @@ impl SmbVecFs {
         options: SmbConnectOptions,
     ) -> VfResult<Self> {
         if server.is_empty() || share.is_empty() {
-            return Err(VfError::failure(0, ERR_INVAL));
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
         if options.connect_timeout.is_zero() || options.request_timeout.is_zero() {
-            return Err(VfError::failure(0, ERR_INVAL));
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
         let runtime = Builder::new_multi_thread()
             .enable_all()
@@ -249,7 +249,13 @@ impl SmbVecFs {
             .block_on(async {
                 tokio::time::timeout(setup_timeout, SmbClient::connect(config)).await
             })
-            .map_err(|_| VfError::transport(None, "SMB session setup timed out"))?
+            .map_err(|_| {
+                VfError::transport_with_kind(
+                    None,
+                    vfsi_core::TransportKind::Timeout,
+                    "SMB session setup timed out",
+                )
+            })?
             .map_err(|e| smb_error(e, 0))?;
         client
             .connection_mut()
@@ -264,7 +270,13 @@ impl SmbVecFs {
             .block_on(async {
                 tokio::time::timeout(options.request_timeout, client.connect_share(share)).await
             })
-            .map_err(|_| VfError::transport(None, "SMB share connection timed out"))?
+            .map_err(|_| {
+                VfError::transport_with_kind(
+                    None,
+                    vfsi_core::TransportKind::Timeout,
+                    "SMB share connection timed out",
+                )
+            })?
             .map_err(|e| smb_error(e, 0))?;
         check_share_routing(tree.is_dfs || tree.dfs_origin.is_some(), share)?;
         Ok(Self {
@@ -368,7 +380,7 @@ impl SmbVecFs {
     fn path_string(&self, path: &Path) -> VfResult<String> {
         std::str::from_utf8(path_bytes(path))
             .map(str::to_owned)
-            .map_err(|_| VfError::failure(0, libc::EILSEQ as u32))
+            .map_err(|_| VfError::errno(0, libc::EILSEQ as u32))
     }
 
     fn file_path(&self, file: &FileOperand) -> VfResult<PathBuf> {
@@ -377,7 +389,7 @@ impl SmbVecFs {
                 .open_files
                 .get(fd)
                 .map(|open| open.path.clone())
-                .ok_or_else(|| VfError::failure(0, ERR_EBADF)),
+                .ok_or_else(|| VfError::errno(0, ERR_EBADF)),
             FileOperand::Saved => Err(VfError::unsupported(0)),
             _ => self.vf_path(file),
         }
@@ -416,7 +428,7 @@ impl SmbVecFs {
         let readable = access_mode != libc::O_WRONLY;
         let writable = access_mode != libc::O_RDONLY;
         if flags & libc::O_TRUNC != 0 && !writable {
-            return Err(VfError::failure(0, ERR_INVAL));
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
         let mut access = FileAccessMask::FILE_READ_ATTRIBUTES | FileAccessMask::SYNCHRONIZE;
         if readable {
@@ -524,7 +536,7 @@ impl SmbVecFs {
             return Ok(Vec::new());
         }
         let length_u64 =
-            u64::try_from(length).map_err(|_| VfError::failure(0, libc::EOVERFLOW as u32))?;
+            u64::try_from(length).map_err(|_| VfError::errno(0, libc::EOVERFLOW as u32))?;
         checked_offset(offset, length_u64, 0)?;
         let max_read = self
             .client
@@ -589,7 +601,7 @@ impl SmbVecFs {
             return Ok(0);
         }
         let length =
-            u64::try_from(data.len()).map_err(|_| VfError::failure(0, libc::EOVERFLOW as u32))?;
+            u64::try_from(data.len()).map_err(|_| VfError::errno(0, libc::EOVERFLOW as u32))?;
         checked_offset(offset, length, 0)?;
         let max_write = self
             .client
@@ -629,20 +641,20 @@ impl SmbVecFs {
                 .map_err(|e| smb_error(e, 0))?;
             let count = response.count as usize;
             if count == 0 {
-                return Err(VfError::transport(
+                return Err(VfError::invalid_reply(
                     None,
                     "SMB server reported a zero-byte successful write",
                 ));
             }
             if count > chunk.len() {
-                return Err(VfError::transport(
+                return Err(VfError::invalid_reply(
                     None,
                     "SMB server reported writing more bytes than requested",
                 ));
             }
             written = written
                 .checked_add(count)
-                .ok_or_else(|| VfError::failure(0, libc::EOVERFLOW as u32))?;
+                .ok_or_else(|| VfError::errno(0, libc::EOVERFLOW as u32))?;
             progress(written);
             #[cfg(feature = "test-faults")]
             self.inject_open_fault(OpenFaultPoint::AfterWriteChunk { chunk: chunk_index })?;
@@ -894,7 +906,7 @@ impl SmbVecFs {
                         .map_err(|error| smb_error(error, 0))
                         .and_then(|count| {
                             if count > data.len() {
-                                Err(VfError::transport(
+                                Err(VfError::invalid_reply(
                                     None,
                                     "SMB server reported writing more bytes than requested",
                                 ))
@@ -942,7 +954,7 @@ impl SmbVecFs {
         let response = QueryInfoResponse::unpack(&mut ReadCursor::new(&frame.body))
             .map_err(|e| smb_error(e, 0))?;
         if response.output_buffer.len() < 16 {
-            return Err(VfError::transport(
+            return Err(VfError::invalid_reply(
                 None,
                 "short SMB FileStandardInformation response",
             ));
@@ -1009,7 +1021,7 @@ impl SmbVecFs {
 
     fn filetime_value(seconds: i64, nanoseconds: u32, index: usize) -> VfResult<u64> {
         if nanoseconds >= 1_000_000_000 {
-            return Err(VfError::failure(index, ERR_INVAL));
+            return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput));
         }
         const WINDOWS_EPOCH_SECONDS: i128 = 11_644_473_600;
         let ticks = (i128::from(seconds) + WINDOWS_EPOCH_SECONDS)
@@ -1018,7 +1030,7 @@ impl SmbVecFs {
             // FileBasicInformation timestamps are signed. Zero and the
             // negative values select update policies rather than a date.
             .filter(|value| (1..=i128::from(i64::MAX)).contains(value))
-            .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
+            .ok_or_else(|| VfError::from_kind(index, std::io::ErrorKind::InvalidInput))?;
         Ok(ticks as u64)
     }
 
@@ -1342,8 +1354,10 @@ impl SmbVecFs {
             let offset = match op.offset {
                 VfOffset::At(offset) => offset,
                 VfOffset::End => self.client_stat(&path)?.size,
-                VfOffset::Cur => return Err(VfError::failure(0, ERR_INVAL)),
-                _ => return Err(VfError::failure(0, ERR_INVAL)),
+                VfOffset::Cur => {
+                    return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+                }
+                _ => return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
             };
             let data = match self.compound_read_path(&path, offset, op.length) {
                 Ok(data) => data,
@@ -1371,9 +1385,9 @@ impl SmbVecFs {
                 let open = self
                     .open_files
                     .get(fd)
-                    .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
+                    .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
                 if !open.readable {
-                    return Err(VfError::failure(0, ERR_EBADF));
+                    return Err(VfError::errno(0, ERR_EBADF));
                 }
                 (open.file_id, false, Some(*fd))
             }
@@ -1419,8 +1433,10 @@ impl SmbVecFs {
             let offset = match op.offset() {
                 VfOffset::At(offset) => offset,
                 VfOffset::End => self.client_stat(&path)?.size,
-                VfOffset::Cur => return Err(VfError::failure(0, ERR_INVAL)),
-                _ => return Err(VfError::failure(0, ERR_INVAL)),
+                VfOffset::Cur => {
+                    return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+                }
+                _ => return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
             };
             let written =
                 self.compound_write_path(&path, offset, op.data(), op.creates(), op.truncates())?;
@@ -1436,9 +1452,9 @@ impl SmbVecFs {
                 let open = self
                     .open_files
                     .get(fd)
-                    .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
+                    .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
                 if !open.writable {
-                    return Err(VfError::failure(0, ERR_EBADF));
+                    return Err(VfError::errno(0, ERR_EBADF));
                 }
                 (open.file_id, false, Some(*fd), open.append)
             }
@@ -1495,8 +1511,8 @@ impl SmbVecFs {
             VfOffset::End => Ok(size),
             VfOffset::Cur => fd
                 .and_then(|fd| self.open_files.get(&fd).map(|open| open.cur_offset))
-                .ok_or_else(|| VfError::failure(0, ERR_INVAL)),
-            _ => Err(VfError::failure(0, ERR_INVAL)),
+                .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
+            _ => Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
         }
     }
 
@@ -1540,12 +1556,12 @@ impl SmbVecFs {
                         .map_err(|error| smb_error(error, 0))
                 })
                 .collect::<VfResult<_>>()?;
-            let index = buffers[0]
-                .get(..8)
-                .ok_or_else(|| VfError::transport(None, "short SMB copy file-index response"))?;
+            let index = buffers[0].get(..8).ok_or_else(|| {
+                VfError::invalid_reply(None, "short SMB copy file-index response")
+            })?;
             let volume = buffers[1]
                 .get(8..12)
-                .ok_or_else(|| VfError::transport(None, "short SMB copy volume response"))?;
+                .ok_or_else(|| VfError::invalid_reply(None, "short SMB copy volume response"))?;
             if index == [0; 8] || volume == [0; 4] {
                 return Err(VfError::unsupported(0));
             }
@@ -1579,7 +1595,7 @@ impl SmbVecFs {
             {
                 // Forward chunking would overwrite bytes a later read still
                 // needs. Reject before writing, flushing or truncating either alias.
-                return Err(VfError::failure(0, ERR_INVAL));
+                return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
             }
             while copied < length {
                 let wanted = (length - copied).min(1 << 20) as usize;
@@ -1603,7 +1619,9 @@ impl SmbVecFs {
 
 impl HandleBackend for SmbVecFs {
     fn close_deferred(&mut self, file: &FileOperand) -> VfResult<()> {
-        let fd = file.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+        let fd = file
+            .fd()
+            .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
         if self.open_files.contains_key(&fd) {
             self.close_impl(file)
         } else {
@@ -1668,11 +1686,13 @@ impl HandleBackend for SmbVecFs {
     }
 
     fn close_impl(&mut self, file: &FileOperand) -> VfResult<()> {
-        let fd = file.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+        let fd = file
+            .fd()
+            .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
         let open = self
             .open_files
             .remove(&fd)
-            .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
+            .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
         let file_id = open.file_id;
         #[cfg(feature = "test-faults")]
         if let Err(error) = self.inject_open_fault(OpenFaultPoint::BeforeCloseDispatch { index: 0 })
@@ -1690,11 +1710,13 @@ impl HandleBackend for SmbVecFs {
     }
 
     fn sync_data(&mut self, file: &FileOperand) -> VfResult<()> {
-        let fd = file.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+        let fd = file
+            .fd()
+            .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
         let file_id = self
             .open_files
             .get(&fd)
-            .ok_or_else(|| VfError::failure(0, ERR_EBADF))?
+            .ok_or_else(|| VfError::errno(0, ERR_EBADF))?
             .file_id;
         self.raw_flush(file_id)
     }
@@ -1702,7 +1724,7 @@ impl HandleBackend for SmbVecFs {
     fn chdir(&mut self, path: &Path) -> VfResult<()> {
         let attrs = self.stat_impl(path)?;
         if attrs.ftype != VfType::Directory {
-            return Err(VfError::failure(0, ERR_NOTDIR));
+            return Err(VfError::errno(0, ERR_NOTDIR));
         }
         self.cwd = self.abs_path(path);
         Ok(())
@@ -1718,20 +1740,22 @@ impl HandleBackend for SmbVecFs {
         offset: i64,
         whence: SeekFrom,
     ) -> VfResult<i64> {
-        let fd = file.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+        let fd = file
+            .fd()
+            .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
         let open = self
             .open_files
             .get(&fd)
-            .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
+            .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
         let base = match whence {
             SeekFrom::Set => 0i128,
             SeekFrom::Cur => open.cur_offset as i128,
             SeekFrom::End => self.query_size(open.file_id)? as i128,
-            _ => return Err(VfError::failure(0, ERR_INVAL)),
+            _ => return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
         };
         let new = base + offset as i128;
         if !(0..=i64::MAX as i128).contains(&new) {
-            return Err(VfError::failure(0, ERR_INVAL));
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
         self.open_files
             .get_mut(&fd)
@@ -1778,7 +1802,7 @@ impl HandleBackend for SmbVecFs {
 impl VectorBackend for SmbVecFs {
     fn vopen_preflight_impl(&mut self, paths: &[&Path], flags: &[i32], modes: &[u32]) -> VfRes {
         if paths.len() != flags.len() || paths.len() != modes.len() {
-            return Err(VfError::failure(0, ERR_INVAL));
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
         validate_open_modes(flags, modes)
     }
@@ -1917,11 +1941,11 @@ impl VectorBackend for SmbVecFs {
         for (index, file) in files.iter().enumerate() {
             let fd = file
                 .fd()
-                .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
+                .ok_or_else(|| VfError::from_kind(index, std::io::ErrorKind::InvalidInput))?;
             let open = self
                 .open_files
                 .get(&fd)
-                .ok_or_else(|| VfError::failure(index, ERR_EBADF))?;
+                .ok_or_else(|| VfError::errno(index, ERR_EBADF))?;
             fds.push(fd);
             file_ids.push(open.file_id);
         }
@@ -2200,7 +2224,7 @@ impl VectorBackend for SmbVecFs {
                 let file_id = self
                     .open_files
                     .get(&fd)
-                    .ok_or_else(|| VfError::failure(index, ERR_EBADF))?
+                    .ok_or_else(|| VfError::errno(index, ERR_EBADF))?
                     .file_id;
                 // No pathname reopen/retry: a lost handle must surface an error.
                 let info = self
@@ -2237,7 +2261,7 @@ impl VectorBackend for SmbVecFs {
         let path = self.local_path_string(path)?;
         match self.client_stat(&path) {
             Ok(_) => Ok(true),
-            Err(error) if error.raw_code() == ERR_NOENT => Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error),
         }
     }
@@ -2264,7 +2288,7 @@ impl VectorBackend for SmbVecFs {
                         let id = self
                             .open_files
                             .get(&fd)
-                            .ok_or_else(|| VfError::failure(index, ERR_EBADF))?
+                            .ok_or_else(|| VfError::errno(index, ERR_EBADF))?
                             .file_id;
                         self.set_size_handle(id, attrs.size)
                             .map_err(|e| e.with_index(index))?;
@@ -2292,7 +2316,7 @@ impl VectorBackend for SmbVecFs {
                         let id = self
                             .open_files
                             .get(&fd)
-                            .ok_or_else(|| VfError::failure(index, ERR_EBADF))?
+                            .ok_or_else(|| VfError::errno(index, ERR_EBADF))?
                             .file_id;
                         self.set_times_handle(id, atime, mtime, index)?;
                     }
@@ -2446,7 +2470,7 @@ impl VectorBackend for SmbVecFs {
 
     fn vsymlink_impl(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
         if oldpaths.len() != newpaths.len() {
-            return Err(VfError::failure(0, ERR_INVAL));
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
         if oldpaths.is_empty() {
             Ok(())
@@ -2465,7 +2489,7 @@ impl VectorBackend for SmbVecFs {
 
     fn vhardlink_impl(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
         if oldpaths.len() != newpaths.len() {
-            return Err(VfError::failure(0, ERR_INVAL));
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
         if oldpaths.is_empty() {
             Ok(())
@@ -2673,7 +2697,7 @@ fn paths_are_independent(paths: &[PathBuf]) -> bool {
 
 fn handle_info(basic: &[u8], standard: &[u8]) -> VfResult<smb2::client::FileInfo> {
     if basic.len() < 40 || standard.len() < 24 {
-        return Err(VfError::transport(
+        return Err(VfError::invalid_reply(
             None,
             "short SMB handle metadata response",
         ));
@@ -2963,7 +2987,7 @@ async fn concurrent_file_identity_inner(
                 .output_buffer
                 .get(..8)
                 .ok_or_else(|| {
-                    VfError::transport(None, "short SMB FileInternalInformation response")
+                    VfError::invalid_reply(None, "short SMB FileInternalInformation response")
                 })?
                 .try_into()
                 .expect("eight-byte slice");
@@ -3264,7 +3288,7 @@ async fn concurrent_compound_write_inner(
                     .map_err(|error| smb_error(error, 0))
                     .and_then(|count| {
                         if count > requested_length {
-                            Err(VfError::transport(
+                            Err(VfError::invalid_reply(
                                 None,
                                 "SMB server reported writing more bytes than requested",
                             ))
@@ -3410,7 +3434,7 @@ fn decode_open_compound_responses<T, E>(
 }
 
 fn compound_cardinality_error(actual: usize, expected: usize) -> VfError {
-    VfError::transport(
+    VfError::invalid_reply(
         None,
         format!("SMB compound returned {actual} responses, expected {expected}"),
     )
@@ -3436,39 +3460,29 @@ fn collect_compound(
         .collect()
 }
 
-fn smb_error(error: SmbError, index: usize) -> VfError {
+fn smb_error(error: SmbError, index: impl Into<Option<usize>>) -> VfError {
+    let index = index.into();
     if let SmbError::DfsReferralRequired { path } = &error {
         return VfError::smb(index, NtStatus::PATH_NOT_COVERED.0)
             .with_context("SMB DFS referral", path);
     }
-    let status = error.status();
-    let errno = match error.kind() {
-        SmbErrorKind::NotFound => Some(ERR_NOENT),
-        SmbErrorKind::AlreadyExists => Some(ERR_EXIST),
-        SmbErrorKind::AccessDenied | SmbErrorKind::AuthRequired | SmbErrorKind::SigningRequired => {
-            Some(ERR_ACCES)
-        }
-        SmbErrorKind::IsADirectory => Some(ERR_ISDIR),
-        SmbErrorKind::NotADirectory => Some(ERR_NOTDIR),
-        SmbErrorKind::DiskFull => Some(libc::ENOSPC as u32),
-        SmbErrorKind::SharingViolation => Some(libc::EBUSY as u32),
-        SmbErrorKind::InvalidName | SmbErrorKind::InvalidData => Some(ERR_INVAL),
-        SmbErrorKind::Unsupported => Some(crate::vecfs::VF_ERR_UNSUPPORTED),
-        SmbErrorKind::Other if error.status() == Some(NtStatus::DIRECTORY_NOT_EMPTY) => {
-            Some(libc::ENOTEMPTY as u32)
-        }
-        SmbErrorKind::Other if error.status() == Some(NtStatus::INVALID_PARAMETER) => {
-            Some(ERR_INVAL)
-        }
-        _ => None,
-    };
-    match errno {
-        Some(err_no) => VfError::failure(index, err_no),
-        None => match status {
-            Some(status) => VfError::smb(index, status.0),
-            None => VfError::transport(index, error.to_string()),
-        },
+    if let Some(status) = error.status() {
+        return VfError::smb(index, status.0).with_message(error.to_string());
     }
+    use vfsi_core::TransportKind as T;
+    let kind = match error.kind() {
+        SmbErrorKind::TimedOut => T::Timeout,
+        SmbErrorKind::ConnectionLost | SmbErrorKind::SessionExpired => T::Connection,
+        SmbErrorKind::AuthRequired
+        | SmbErrorKind::SigningRequired
+        | SmbErrorKind::SignatureInvalid => T::Auth,
+        SmbErrorKind::InvalidData => T::InvalidReply,
+        SmbErrorKind::Unsupported => {
+            return VfError::unsupported(index).with_message(error.to_string());
+        }
+        _ => T::Other,
+    };
+    VfError::transport_with_kind(index, kind, error.to_string())
 }
 
 fn validate_create_mode(flags: i32, mode: u32, index: usize) -> VfResult<()> {
@@ -3517,6 +3531,11 @@ fn filetime_parts(time: FileTime) -> (i64, u32) {
         }
     }
 }
+
+#[cfg(test)]
+use vfsi_core::ERR_INVAL;
+#[cfg(test)]
+mod error_tests;
 
 #[cfg(test)]
 mod tests {

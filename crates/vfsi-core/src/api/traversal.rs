@@ -65,7 +65,7 @@ pub fn walk_events(
                         pending.push(event);
                         continue;
                     }
-                    return Err(VfError::client(0, libc::EFBIG as u32)
+                    return Err(VfError::errno(0, libc::EFBIG as u32)
                         .with_context("walk_events", event.entry.path()));
                 }
                 let remaining = budget.remaining_options(ListDirOptions::new());
@@ -249,7 +249,7 @@ mod tests {
                 ListDirOptions::default().with_recursive(true),
                 false,
                 |_, _| panic!("callback failed"),
-                |_| Err(VfError::client(0, libc::EIO as u32))
+                |_| Err(VfError::errno(0, libc::EIO as u32))
             )
             .is_err()
         );

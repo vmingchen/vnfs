@@ -96,7 +96,7 @@ fn portable_error_kinds_preserve_protocol_status_and_source() {
         (VfError::smb(2, 0xc000_0034), K::NotFound),
         // Same numeric value in SMB is not an errno.
         (VfError::smb(2, 2), K::Other),
-        (VfError::client(2, libc::ENOENT as u32), K::NotFound),
+        (VfError::errno(2, libc::ENOENT as u32), K::NotFound),
         (VfError::unsupported(2), K::Unsupported),
     ] {
         assert_eq!(error.kind(), kind);
@@ -203,7 +203,7 @@ fn unsupported_referrals_preserve_protocol_status_indices_and_context() {
         );
     }
     // Numeric collisions in unrelated status domains must not become referrals.
-    assert!(!VfError::failure(0, moved).to_string().contains("referrals"));
+    assert!(!VfError::errno(0, moved).to_string().contains("referrals"));
     assert!(!VfError::smb(0, moved).to_string().contains("referrals"));
 }
 
@@ -212,7 +212,7 @@ fn index_mapping_preserves_unknown_transport_location() {
     let unknown = VfError::transport(None, "connection reset").map_index(|index| index + 10);
     assert_eq!(unknown.index(), None);
 
-    let known = VfError::failure(2, libc::ENOENT as u32).map_index(|index| index + 10);
+    let known = VfError::errno(2, libc::ENOENT as u32).map_index(|index| index + 10);
     assert_eq!(known.index(), Some(12));
 }
 
@@ -346,7 +346,6 @@ fn opaque_errors_keep_typed_status_context_and_optional_indices_consistent() {
             (StatusCode::Errno(code), ErrorDomain::Filesystem),
             (StatusCode::Nfs(code), ErrorDomain::Nfs),
             (StatusCode::Smb(code), ErrorDomain::Smb),
-            (StatusCode::Client(code), ErrorDomain::Client),
         ] {
             for index in [None, Some(0), Some(7)] {
                 let error = VfError::from_status(index, status).with_context("read", "/file");
@@ -378,7 +377,7 @@ fn opaque_errors_keep_typed_status_context_and_optional_indices_consistent() {
     assert!(!called);
     assert_eq!(unknown.index(), None);
     assert_eq!(
-        VfError::failure(3, 2),
+        VfError::errno(3, 2),
         VfError::from_status(3, StatusCode::Errno(2))
     );
     assert_eq!(
@@ -388,10 +387,6 @@ fn opaque_errors_keep_typed_status_context_and_optional_indices_consistent() {
     assert_eq!(
         VfError::smb(3, 2),
         VfError::from_status(3, StatusCode::Smb(2))
-    );
-    assert_eq!(
-        VfError::client(3, 2),
-        VfError::from_status(3, StatusCode::Client(2))
     );
 }
 

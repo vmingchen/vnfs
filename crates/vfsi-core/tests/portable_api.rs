@@ -191,7 +191,7 @@ impl Vfsi for PortableFs {
         }
         let mut results = Vec::new();
         if self.tree.get() && self.shape.get() == 11 {
-            return Err(Error::client(99, libc::EIO as u32));
+            return Err(Error::errno(99, libc::EIO as u32));
         }
         for (index, path) in paths.iter().enumerate() {
             let pages = if self.tree.get() {
@@ -358,7 +358,7 @@ fn listdir_preserves_callback_error_provenance_in_every_presentation_mode() {
     for sort in [false, true] {
         for lifecycle in [false, true] {
             for expected in [
-                Error::client(3, libc::ENOSPC as u32),
+                Error::errno(3, libc::ENOSPC as u32),
                 Error::nfs(3, 13),
                 Error::smb(3, 0xc000_0022),
                 Error::transport_with_kind(

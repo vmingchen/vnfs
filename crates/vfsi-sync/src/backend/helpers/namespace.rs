@@ -45,7 +45,7 @@ pub fn ensure_dir_impl_default<F: VectorBackend + ?Sized>(
             let full = Path::new("/").join(&so_far);
             match backend.mkdir_raw_impl(&full, mode) {
                 Ok(()) => {}
-                Err(e) if e.raw_code() == ERR_EXIST => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e),
             }
         }

@@ -231,17 +231,17 @@ struct Task {
     fresh_destination: bool,
 }
 fn invalid(root: usize, path: &Path) -> Error {
-    Error::client(root, libc::EINVAL as u32).with_context("transfer", path)
+    Error::from_kind(root, std::io::ErrorKind::InvalidInput).with_context("transfer", path)
 }
 fn limit(root: usize, path: &Path) -> Error {
-    Error::client(root, libc::EFBIG as u32).with_context("transfer", path)
+    Error::errno(root, libc::EFBIG as u32).with_context("transfer", path)
 }
-fn contract(message: &str) -> Error {
+fn contract(message: &'static str) -> Error {
     Error::transport_with_kind(None, TransportKind::InvalidReply, message)
 }
 fn normalize(path: &Path, max: usize) -> Result<PathBuf> {
     if path.as_os_str().len() > max {
-        return Err(Error::client(0, libc::EFBIG as u32));
+        return Err(Error::errno(0, libc::EFBIG as u32));
     }
     if path.as_os_str().is_empty() || path.as_os_str().as_encoded_bytes().contains(&0) {
         return Err(invalid(0, path));
@@ -340,14 +340,14 @@ fn roots<P: AsRef<Path>>(
         }
         for (task, metadata) in batch.iter_mut().zip(metadata) {
             if exact && !metadata.is_dir() {
-                return Err(Error::client(task.root, libc::ENOTDIR as u32)
+                return Err(Error::errno(task.root, libc::ENOTDIR as u32)
                     .with_context("transfer", &task.source));
             }
             if !metadata.is_dir()
                 && !metadata.is_file()
                 && options.unsupported == UnsupportedEntry::Error
             {
-                return Err(Error::client(task.root, libc::ENOTSUP as u32)
+                return Err(Error::errno(task.root, libc::ENOTSUP as u32)
                     .with_context("transfer", &task.source));
             }
             if options.layout == CopyLayout::Contents && metadata.is_file() && !exact {
@@ -672,7 +672,7 @@ fn dispatch(
             summary.entries_skipped += 1;
             skipped.insert(task.root);
         } else {
-            return Err(Error::client(task.root, libc::ENOTSUP as u32)
+            return Err(Error::errno(task.root, libc::ENOTSUP as u32)
                 .with_context("transfer", &task.source));
         }
     }
@@ -741,7 +741,7 @@ fn copy_batch(
     if options.flags.preserve_permissions() {
         for task in tasks {
             if task.metadata.mode().is_none() {
-                return Err(Error::client(task.root, vfsi_core::VF_ERR_UNSUPPORTED)
+                return Err(Error::unsupported(task.root)
                     .with_context("transfer permissions", &task.source));
             }
         }

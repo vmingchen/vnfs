@@ -139,7 +139,7 @@ fn singleton_preflight_and_backend_indices_do_not_replay_or_mutate() {
         0,
         |_, _, _| (),
         |_, _, _| (),
-        |_, _| Err(Error::client(1, 5)),
+        |_, _| Err(Error::errno(1, 5)),
         |_, _| panic!("no buffered request"),
     )
     .unwrap_err();

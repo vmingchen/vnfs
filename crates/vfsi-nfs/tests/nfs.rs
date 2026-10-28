@@ -648,7 +648,7 @@ fn short_write_failure_does_not_dispatch_a_later_file() {
             if transport {
                 VfError::transport(None, "injected lost reply after the repair wave")
             } else {
-                VfError::client(0, libc::ENOSPC as u32)
+                VfError::errno(0, libc::ENOSPC as u32)
             },
         ));
         fs.set_fault_injector(script.clone());

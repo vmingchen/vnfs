@@ -223,7 +223,8 @@ def test_pipelined_stream_does_not_retry_callback_connection_error(fs, monkeypat
     assert reconnects == []
 
 
-def test_pipelined_stream_recovers_size_probe(fs, monkeypatch):
+@pytest.mark.parametrize("failure_type", [ConnectionError, TimeoutError])
+def test_pipelined_stream_recovers_size_probe(fs, monkeypatch, failure_type):
     fs.pipe_file("/data", b"abcdefgh")
     original = fs._client.fstat
     attempts = []
@@ -231,7 +232,7 @@ def test_pipelined_stream_recovers_size_probe(fs, monkeypatch):
     def drop_first_probe(fd):
         attempts.append(fd)
         if len(attempts) == 1:
-            raise ConnectionError("dropped size reply")
+            raise failure_type("dropped size reply")
         return original(fd)
 
     monkeypatch.setattr(fs._client, "fstat", drop_first_probe)
@@ -248,6 +249,30 @@ def test_pipelined_stream_recovers_size_probe(fs, monkeypatch):
     assert len(attempts) == 4
     assert attempts[0] == attempts[1]
     assert len(set(attempts[1:])) == 3
+
+
+@pytest.mark.parametrize("kind", ["auth", "invalid_reply"])
+def test_pipelined_size_probe_does_not_retry_terminal_transport(fs, monkeypatch, kind):
+    fs.pipe_file("/data", b"abcdefgh")
+    error = OSError("terminal size probe failure")
+    error.transport_kind = kind
+    attempts = []
+
+    def fail_probe(fd):
+        attempts.append(fd)
+        raise error
+
+    monkeypatch.setattr(fs._client, "fstat", fail_probe)
+    monkeypatch.setattr(
+        fs._client,
+        "reconnect_descriptor",
+        lambda fd: pytest.fail("must not reconnect"),
+    )
+    with pytest.raises(OSError) as caught:
+        fs.read_stream_pipelined("/data", lambda *_: pytest.fail("no data expected"))
+    assert caught.value is error
+    assert len(attempts) == 1
+    assert not fs._client._fds
 
 
 def test_pipelined_stream_respects_disabled_reconnect(fs, monkeypatch):

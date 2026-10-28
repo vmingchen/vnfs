@@ -571,7 +571,7 @@ fn owned_partial_close_drains_live_and_already_closed_handles() {
     fs.mkdir_raw_impl(&root, 0o777).unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeCloseItem { index: 1 },
-        VfError::failure(1, libc::EIO as u32),
+        VfError::errno(1, libc::EIO as u32),
     ));
     fs.set_fault_injector(script.clone());
     let client = vfsi_sync::FsClient::new(fs);
@@ -649,7 +649,7 @@ fn smb_closev_removes_successes_on_both_sides_of_a_failure() {
     .unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeCloseItem { index: 1 },
-        VfError::failure(1, libc::EIO as u32),
+        VfError::errno(1, libc::EIO as u32),
     ));
     fs.set_fault_injector(script.clone());
     let error = fs.vclose_impl(&files).unwrap_err();

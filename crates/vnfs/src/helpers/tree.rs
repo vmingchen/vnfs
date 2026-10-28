@@ -133,14 +133,14 @@ impl TreeBuilder {
         }
         let index = self.declarations;
         let Some(next) = self.declarations.checked_add(1) else {
-            self.error = Some(Error::client(index, libc::EOVERFLOW as u32));
+            self.error = Some(Error::errno(index, libc::EOVERFLOW as u32));
             return self;
         };
         self.declarations = next;
         let result = (|| {
             // Do not copy an oversized caller-owned path into error context.
             if path.as_os_str().len() > self.max_total_bytes {
-                return Err(Error::client(index, libc::EFBIG as u32));
+                return Err(Error::errno(index, libc::EFBIG as u32));
             }
             let normalized = relative_path(path).map_err(|()| error(index, libc::EINVAL, path))?;
             // Repeated directory spellings are one planned object. Suppress
@@ -185,7 +185,7 @@ impl TreeBuilder {
             return Err(error);
         }
         if root.as_os_str().len() > self.max_total_bytes {
-            return Err(Error::client(0, libc::EFBIG as u32));
+            return Err(Error::errno(0, libc::EFBIG as u32));
         }
         if root.as_os_str().is_empty()
             || root.as_os_str().as_encoded_bytes().contains(&0)
@@ -318,7 +318,7 @@ fn relative_path(path: &Path) -> std::result::Result<PathBuf, ()> {
 }
 
 fn error(index: usize, errno: i32, path: &Path) -> Error {
-    Error::client(index, errno as u32).with_context("create_tree", path)
+    Error::errno(index, errno as u32).with_context("create_tree", path)
 }
 
 fn entry_error(error: Error, batch: &[(PathBuf, usize)], entries: &[Entry]) -> Error {
@@ -406,7 +406,7 @@ mod tests {
         let mut backend = vfsi_posix::backend(root.path()).unwrap();
         let script = Arc::new(FaultScript::one(
             OpenFaultPoint::BeforeSetPermissions { index: 1 },
-            Error::client(1, libc::EACCES as u32),
+            Error::errno(1, libc::EACCES as u32),
         ));
         backend.set_fault_injector(script.clone());
         let client = crate::Posix {

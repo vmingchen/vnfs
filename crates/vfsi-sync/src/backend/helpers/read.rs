@@ -38,7 +38,7 @@ pub fn vread_all_with_options_impl_default<F: VectorBackend + ?Sized>(
         },
     )?;
     if let Some(index) = limit_error {
-        return Err(VfError::failure(index, libc::EFBIG as u32));
+        return Err(VfError::errno(index, libc::EFBIG as u32));
     }
     Ok(out)
 }
@@ -53,7 +53,7 @@ pub fn vstream_impl_default<F: VectorBackend + ?Sized>(
     use std::collections::VecDeque;
 
     if chunk_size == 0 || memory_limit == 0 {
-        return Err(VfError::failure(0, ERR_INVAL));
+        return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
     }
     let mut pending: VecDeque<usize> = (0..files.len()).collect();
     let mut offsets = vec![0u64; files.len()];
@@ -79,7 +79,7 @@ pub fn vstream_impl_default<F: VectorBackend + ?Sized>(
             let eof = result.eof;
             offsets[index] = offset
                 .checked_add(result.data.len() as u64)
-                .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))?;
+                .ok_or_else(|| VfError::errno(index, libc::EOVERFLOW as u32))?;
             if !cb(index, offset, &result.data, eof) {
                 return Ok(());
             }
@@ -103,14 +103,14 @@ pub fn native_read_file_impl_default<F: VectorBackend + ?Sized>(
         )
         .and_then(|mut results| {
             if results.len() != 1 {
-                return Err(VfError::transport(
+                return Err(VfError::invalid_reply(
                     None,
                     "read_file backend returned an invalid result count",
                 ));
             }
             let data = results.pop().expect("validated result count");
             if data.len() > max_bytes {
-                return Err(VfError::client(0, libc::EFBIG as u32));
+                return Err(VfError::errno(0, libc::EFBIG as u32));
             }
             Ok(data)
         })

@@ -43,7 +43,7 @@ impl<F: VectorBackend> FsClient<F> {
             follow_symlinks,
         )?;
         if pages.len() != paths.len() {
-            return Err(VfError::transport(
+            return Err(VfError::invalid_reply(
                 None,
                 "directory pages returned an invalid result count",
             ));
@@ -57,7 +57,7 @@ impl<F: VectorBackend> FsClient<F> {
                     || attrs.len() > page_size
                     || (attrs.is_empty() && next.is_some())
                 {
-                    return Err(VfError::transport(
+                    return Err(VfError::invalid_reply(
                         Some(index),
                         "invalid directory page progress",
                     ));
@@ -71,11 +71,11 @@ impl<F: VectorBackend> FsClient<F> {
                             .file
                             .path()
                             .ok_or_else(|| {
-                                VfError::transport(Some(index), "directory entry has no path")
+                                VfError::invalid_reply(Some(index), "directory entry has no path")
                             })?
                             .to_path_buf();
                         if entry_path.parent() != Some(*path) {
-                            return Err(VfError::transport(
+                            return Err(VfError::invalid_reply(
                                 Some(index),
                                 "directory entry is outside its parent",
                             ));
@@ -122,7 +122,7 @@ impl<F: VectorBackend> FsClient<F> {
             .is_dir()
         {
             return Err(
-                VfError::client(0, crate::ERR_NOTDIR).with_context("remove_dir_contents", path)
+                VfError::errno(0, crate::ERR_NOTDIR).with_context("remove_dir_contents", path)
             );
         }
         self.lock()?
@@ -167,7 +167,7 @@ impl<F: VectorBackend> FsClient<F> {
     ) -> VfResult<()> {
         for (index, dir) in dirs.iter().enumerate() {
             if !Arc::ptr_eq(&self.inner, &dir.inner) || dir.is_closed() {
-                return Err(VfError::client(index, crate::ERR_EBADF)
+                return Err(VfError::errno(index, crate::ERR_EBADF)
                     .with_context("vremove_dir_contents", &dir.path));
             }
         }

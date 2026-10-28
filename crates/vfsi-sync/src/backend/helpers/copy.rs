@@ -72,7 +72,7 @@ pub fn copy_tree_with_listdir<F: VectorBackend + ?Sized>(
                 .file
                 .path()
                 .and_then(Path::file_name)
-                .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+                .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
             let source_child = source.join(name);
             let destination_child = destination.join(name);
             if entry.ftype == VfType::Directory {

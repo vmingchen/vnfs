@@ -81,29 +81,29 @@ fn copy_extent_data<C>(
         let chunk_len = remaining.min(1 << 20) as u32;
         let (chunk, eof) = read(client, so, chunk_len)?;
         if chunk.len() > chunk_len as usize {
-            return Err(VfError::client(0, ERR_IO));
+            return Err(VfError::errno(0, ERR_IO));
         }
         if chunk.is_empty() {
             return if eof {
                 Ok(doff)
             } else {
-                Err(VfError::client(0, ERR_IO))
+                Err(VfError::errno(0, ERR_IO))
             };
         }
         let chunk_size =
-            u64::try_from(chunk.len()).map_err(|_| VfError::failure(0, libc::EOVERFLOW as u32))?;
+            u64::try_from(chunk.len()).map_err(|_| VfError::errno(0, libc::EOVERFLOW as u32))?;
         super::io::write_all_at(client, 0, doff, &chunk, |client, offset, suffix| {
             write(client, offset, suffix)
         })?;
         so = so
             .checked_add(chunk_size)
-            .ok_or_else(|| VfError::failure(0, libc::EOVERFLOW as u32))?;
+            .ok_or_else(|| VfError::errno(0, libc::EOVERFLOW as u32))?;
         doff = doff
             .checked_add(chunk_size)
-            .ok_or_else(|| VfError::failure(0, libc::EOVERFLOW as u32))?;
+            .ok_or_else(|| VfError::errno(0, libc::EOVERFLOW as u32))?;
         copied = copied
             .checked_add(chunk_size)
-            .ok_or_else(|| VfError::failure(0, libc::EOVERFLOW as u32))?;
+            .ok_or_else(|| VfError::errno(0, libc::EOVERFLOW as u32))?;
         if eof {
             return Ok(doff);
         }
@@ -117,10 +117,10 @@ impl NfsVecFs {
         dst_root_rel: &Path,
         p: &ExtentPair,
     ) -> VfResult<()> {
-        let (sdir, sname) = split_path_bytes(path_bytes(src_root_rel))
-            .map_err(|_| VfError::failure(0, ERR_NOENT))?;
-        let (ddir, dname) = split_path_bytes(path_bytes(dst_root_rel))
-            .map_err(|_| VfError::failure(0, ERR_NOENT))?;
+        let (sdir, sname) =
+            split_path_bytes(path_bytes(src_root_rel)).map_err(|_| VfError::errno(0, ERR_NOENT))?;
+        let (ddir, dname) =
+            split_path_bytes(path_bytes(dst_root_rel)).map_err(|_| VfError::errno(0, ERR_NOENT))?;
         let sdirfh = self
             .resolve_path(&path_from_bytes(&sdir), true)
             .map_err(|e| e.with_index(0))?;
@@ -339,15 +339,15 @@ impl NfsVecFs {
                 for (&i, n) in pending.iter().zip(counts) {
                     totals[i] = totals[i]
                         .checked_add(n)
-                        .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
+                        .ok_or_else(|| VfError::errno(i, libc::EOVERFLOW as u32))?;
                     copies[i].src_offset = copies[i]
                         .src_offset
                         .checked_add(n)
-                        .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
+                        .ok_or_else(|| VfError::errno(i, libc::EOVERFLOW as u32))?;
                     copies[i].dst_offset = copies[i]
                         .dst_offset
                         .checked_add(n)
-                        .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
+                        .ok_or_else(|| VfError::errno(i, libc::EOVERFLOW as u32))?;
                     // A zero-byte continuation means EOF. For an explicit
                     // count this matches vcopy_data_impl's short-at-EOF behavior; for a
                     // count of zero it confirms that a possibly partial COPY
@@ -367,7 +367,7 @@ impl NfsVecFs {
                 let size = p
                     .dst_offset
                     .checked_add(n)
-                    .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
+                    .ok_or_else(|| VfError::errno(i, libc::EOVERFLOW as u32))?;
                 attrs.push(crate::client::SetattrOp {
                     fh: copies[i].dst_fh.clone(),
                     mode: None,

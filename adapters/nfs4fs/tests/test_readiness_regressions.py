@@ -367,7 +367,7 @@ def test_recovery_policy_controls_native_rpc_reconnects(nfs_fs, reconnect, opera
                     assert calls[operation]() == (4 if operation == "stat" else b"data")
                     assert len(accepted) == 2
                 else:
-                    with pytest.raises(ConnectionError):
+                    with pytest.raises(TimeoutError):
                         calls[operation]()
                     assert len(accepted) == 1
                 assert nfs_fs.cat_file("/recovery") == b"data"

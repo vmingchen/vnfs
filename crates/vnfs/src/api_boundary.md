@@ -739,10 +739,10 @@ use vnfs::nfs::mount::ResolvePath;
 Error representation is opaque; inspect typed status and context through methods:
 
 ```compile_fail,E0616
-let mut error = vnfs::Error::failure(0, 2);
+let mut error = vnfs::Error::errno(0, 2);
 error.index = Some(9);
 ```
 
 ```compile_fail,E0599
-let _ = vnfs::Error::failure(0, 2).err_no();
+let _ = vnfs::Error::errno(0, 2).err_no();
 ```

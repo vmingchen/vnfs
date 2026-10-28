@@ -48,7 +48,7 @@ impl TraversalBudget {
 }
 
 fn limit_error() -> VfError {
-    VfError::client(0, libc::EFBIG as u32)
+    VfError::errno(0, libc::EFBIG as u32)
 }
 
 #[cfg(test)]

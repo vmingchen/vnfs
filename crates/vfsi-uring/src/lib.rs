@@ -108,10 +108,8 @@ pub fn connect_with_telemetry(
     root: impl AsRef<Path>,
     options: Options,
 ) -> VfResult<(vfsi_sync::FsClient<vfsi_local::LocalBackend>, Telemetry)> {
-    let (engine, telemetry) = engine::Engine::new(options).map_err(|e| {
-        VfError::client(0, e.raw_os_error().unwrap_or(libc::EIO) as u32)
-            .with_context("io_uring_setup", root.as_ref())
-    })?;
+    let (engine, telemetry) = engine::Engine::new(options)
+        .map_err(|e| VfError::from_io(None, e).with_context("io_uring_setup", root.as_ref()))?;
     let backend = vfsi_local::LocalBackend::new(root.as_ref().to_path_buf(), engine)?;
     Ok((vfsi_sync::FsClient::new(backend), telemetry))
 }

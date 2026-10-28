@@ -52,7 +52,7 @@ fn page_faults_do_not_replay_transport_failures_and_reject_malformed_shapes() {
         |paths, _, _, _, _| {
             calls += 1;
             if paths.len() == 2 {
-                return Err(crate::Error::client(1, libc::ENOENT as u32));
+                return Err(crate::Error::errno(1, libc::ENOENT as u32));
             }
             Ok(vec![(
                 DirectoryListing {
@@ -313,7 +313,7 @@ fn unified_visiting_preserves_depth_defaults_fields_and_failures() {
     let error = fs
         .visit_entries_with_options(&["/other", "/tree"], recursive, |index, _| {
             if index == 1 {
-                Err(crate::Error::client(0, libc::EIO as u32))
+                Err(crate::Error::errno(0, libc::EIO as u32))
             } else {
                 Ok(ControlFlow::Continue(()))
             }

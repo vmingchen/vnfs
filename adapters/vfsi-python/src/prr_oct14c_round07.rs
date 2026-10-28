@@ -56,7 +56,7 @@ fn copy_write_transport_maps_again_after_an_earlier_semantic_failure() {
     }
     let mut backend = FaultBackend::new(&root.0, None);
     backend.write_errors.extend([
-        VfError::failure(0, ERR_ACCES),
+        VfError::errno(0, ERR_ACCES),
         VfError::transport(Some(0), "later write disconnected"),
     ]);
     let calls = backend.write_calls.clone();
@@ -89,7 +89,7 @@ fn descriptor_read_transport_maps_after_semantic_filtering() {
     let root = TestRoot::new();
     let mut backend = FaultBackend::new(&root.0, None);
     backend.read_errors.extend([
-        VfError::failure(0, ERR_NOENT),
+        VfError::errno(0, ERR_NOENT),
         VfError::transport(Some(1), "read disconnected"),
     ]);
     let calls = backend.read_calls.clone();
@@ -108,7 +108,7 @@ fn attribute_transport_maps_after_semantic_filtering_for_both_follow_modes() {
     for follow in [false, true] {
         let mut backend = FaultBackend::new(&root.0, None);
         backend.attrs_errors.extend([
-            Some(VfError::failure(0, ERR_NOENT)),
+            Some(VfError::errno(0, ERR_NOENT)),
             Some(VfError::transport(Some(1), "attrs disconnected")),
         ]);
         let error = attrs_many_impl(
@@ -130,7 +130,7 @@ fn range_size_lookup_transport_uses_original_path_index() {
     let root = TestRoot::new();
     let mut backend = FaultBackend::new(&root.0, None);
     backend.attrs_errors.extend([
-        Some(VfError::failure(0, ERR_NOENT)),
+        Some(VfError::errno(0, ERR_NOENT)),
         Some(VfError::transport(Some(0), "range attrs disconnected")),
     ]);
     let reads = backend.read_calls.clone();
@@ -152,7 +152,7 @@ fn copy_identity_transport_maps_flattened_and_filtered_attribute_indices() {
     }
     let mut backend = FaultBackend::new(&root.0, None);
     backend.attrs_errors.extend([
-        Some(VfError::failure(0, ERR_NOENT)),
+        Some(VfError::errno(0, ERR_NOENT)),
         Some(VfError::transport(Some(1), "copy identity disconnected")),
     ]);
     let writes = backend.write_calls.clone();
@@ -249,7 +249,7 @@ fn oversized_extent_transport_maps_again_after_semantic_filtering() {
     let mut backend = oversized_backend(&root);
     std::fs::write(root.0.join("other"), vec![43; 2048]).unwrap();
     backend.extent_errors.extend([
-        VfError::failure(0, ERR_ACCES),
+        VfError::errno(0, ERR_ACCES),
         VfError::transport(Some(0), "later extent disconnected"),
     ]);
     let calls = backend.extent_calls.clone();

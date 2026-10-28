@@ -93,7 +93,7 @@ impl AutoFile {
             && AuthSysIdentity::current().as_ref() != Some(&connection.credentials)
         {
             return Err(
-                VfError::client(0, libc::EACCES as u32).with_context("auto_auth", &self.path)
+                VfError::errno(0, libc::EACCES as u32).with_context("auto_auth", &self.path)
             );
         }
         Ok(())

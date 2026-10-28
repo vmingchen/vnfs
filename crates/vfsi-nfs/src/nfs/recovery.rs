@@ -130,7 +130,7 @@ impl NfsVecFs {
         if !filesystem.connection.root.as_os_str().is_empty() {
             let root_attrs = filesystem.stat_impl(Path::new("/"))?;
             if root_attrs.ftype != VfType::Directory {
-                return Err(VfError::failure(0, ERR_NOTDIR));
+                return Err(VfError::errno(0, ERR_NOTDIR));
             }
         }
         Ok(filesystem)
@@ -206,9 +206,16 @@ impl NfsVecFs {
     }
 
     pub(super) fn needs_recovery(error: &VfError) -> bool {
-        error.is_transport()
-            || matches!(
-                error.raw_code(),
+        matches!(
+            error.transport_kind(),
+            Some(
+                vfsi_core::TransportKind::Timeout
+                    | vfsi_core::TransportKind::Connection
+                    | vfsi_core::TransportKind::Other
+            )
+        ) || matches!(
+            error.status(),
+            Some(vfsi_core::StatusCode::Nfs(
                 nfsstat4_NFS4ERR_EXPIRED
                     | nfsstat4_NFS4ERR_GRACE
                     | nfsstat4_NFS4ERR_STALE_CLIENTID
@@ -216,7 +223,8 @@ impl NfsVecFs {
                     | nfsstat4_NFS4ERR_BAD_STATEID
                     | nfsstat4_NFS4ERR_BADSESSION
                     | nfsstat4_NFS4ERR_DEADSESSION
-            )
+            ))
+        )
     }
 
     fn reconnect_once(&mut self) -> VfResult<()> {

@@ -10,7 +10,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::{RpcError, TransportKind};
 #[cfg(unix)]
 use crate::path::path_from_bytes;
 
@@ -47,365 +46,9 @@ pub const NF4FIFO: u32 = 7;
 // Result types
 // ---------------------------------------------------------------------------
 
-/// The failure of one operation in a vectorized call.
-///
-/// Either a filesystem status failure attributable to a specific operation
-/// index, or a transport / client-side failure (where the index is optional
-/// because some failures cannot be attributed to one request).
-/// An indexed failure does not roll back an already-completed prefix, and a
-/// transport failure can make the outcome of an in-flight mutation ambiguous.
-///
-/// Construct errors through the typed factories and inspect them through methods;
-/// status domains and transport provenance cannot be modified independently.
-///
-/// ```compile_fail
-/// let mut error = vfsi_core::VfError::failure(0, 2);
-/// error.index = Some(9);
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VfError {
-    index: Option<usize>,
-    detail: ErrorDetail,
-    operation: Option<&'static str>,
-    path: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ErrorDetail {
-    Status(StatusCode),
-    Transport {
-        kind: TransportKind,
-        message: String,
-    },
-}
-
-/// Namespace in which a status code is meaningful.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ErrorDomain {
-    Filesystem,
-    Nfs,
-    Smb,
-    Transport,
-    Client,
-}
-
-/// Typed protocol/filesystem status. Transport failures have no status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum StatusCode {
-    Errno(u32),
-    Nfs(u32),
-    Smb(u32),
-    Client(u32),
-}
-
-impl VfError {
-    /// A typed status, with an optional logical request index.
-    pub fn from_status(index: impl Into<Option<usize>>, status: StatusCode) -> Self {
-        Self {
-            index: index.into(),
-            detail: ErrorDetail::Status(status),
-            operation: None,
-            path: None,
-        }
-    }
-
-    pub fn failure(index: usize, err_no: u32) -> VfError {
-        Self::from_status(index, StatusCode::Errno(err_no))
-    }
-
-    pub fn client(index: usize, code: u32) -> VfError {
-        Self::from_status(index, StatusCode::Client(code))
-    }
-
-    /// A status returned by an NFS server.
-    pub fn nfs(index: usize, status: u32) -> VfError {
-        Self::from_status(index, StatusCode::Nfs(status))
-    }
-
-    /// A status returned by an SMB server.
-    pub fn smb(index: usize, status: u32) -> VfError {
-        Self::from_status(index, StatusCode::Smb(status))
-    }
-
-    /// A transport / client-side failure. `index` is best-effort; pass `None`
-    /// when the failure cannot be attributed to a specific operation.
-    pub fn transport(index: impl Into<Option<usize>>, message: impl Into<String>) -> VfError {
-        Self::transport_with_kind(index, TransportKind::Other, message)
-    }
-
-    pub fn transport_with_kind(
-        index: impl Into<Option<usize>>,
-        kind: TransportKind,
-        message: impl Into<String>,
-    ) -> VfError {
-        Self {
-            index: index.into(),
-            detail: ErrorDetail::Transport {
-                kind,
-                message: message.into(),
-            },
-            operation: None,
-            path: None,
-        }
-    }
-
-    pub fn unsupported(index: usize) -> VfError {
-        VfError::failure(index, VF_ERR_UNSUPPORTED)
-    }
-
-    /// Logical request index, or `None` when a failure cannot be attributed.
-    /// An index is not a completion boundary: this item can itself contain
-    /// completed chunks, and other requests can already have changed state.
-    pub fn index(&self) -> Option<usize> {
-        self.index
-    }
-
-    /// Raw code in the error's status domain, or [`VF_ERR_RPC`] for transport.
-    /// Application code should use [`kind`](Self::kind) or typed
-    /// [`status`](Self::status), not compare this value to errno constants.
-    pub fn raw_code(&self) -> u32 {
-        match self.status() {
-            Some(
-                StatusCode::Errno(code)
-                | StatusCode::Nfs(code)
-                | StatusCode::Smb(code)
-                | StatusCode::Client(code),
-            ) => code,
-            None => VF_ERR_RPC,
-        }
-    }
-
-    /// Whether this is a transport failure with no filesystem status.
-    pub fn is_transport(&self) -> bool {
-        matches!(&self.detail, ErrorDetail::Transport { .. })
-    }
-
-    /// Transport provenance only; this never authorizes mutation replay.
-    pub fn transport_kind(&self) -> Option<TransportKind> {
-        match &self.detail {
-            ErrorDetail::Transport { kind, .. } => Some(*kind),
-            _ => None,
-        }
-    }
-
-    /// The backend's transport diagnostic, without formatted index/path context.
-    pub fn transport_message(&self) -> Option<&str> {
-        match &self.detail {
-            ErrorDetail::Transport { message, .. } => Some(message),
-            _ => None,
-        }
-    }
-
-    /// Re-attribute this error to a different operation index.
-    pub fn with_index(mut self, index: usize) -> VfError {
-        self.index = Some(index);
-        self
-    }
-
-    /// Transform a known request index while preserving an unattributable
-    /// failure as `None`.
-    pub fn map_index(mut self, map: impl FnOnce(usize) -> usize) -> VfError {
-        self.index = self.index.map(map);
-        self
-    }
-
-    /// Attach operation and path context without string parsing.
-    pub fn with_context(mut self, operation: &'static str, path: impl Into<PathBuf>) -> Self {
-        self.operation = Some(operation);
-        self.path = Some(path.into());
-        self
-    }
-
-    pub fn domain(&self) -> ErrorDomain {
-        match self.status() {
-            Some(StatusCode::Errno(_)) => ErrorDomain::Filesystem,
-            Some(StatusCode::Nfs(_)) => ErrorDomain::Nfs,
-            Some(StatusCode::Smb(_)) => ErrorDomain::Smb,
-            Some(StatusCode::Client(_)) => ErrorDomain::Client,
-            None => ErrorDomain::Transport,
-        }
-    }
-
-    pub fn status(&self) -> Option<StatusCode> {
-        match &self.detail {
-            ErrorDetail::Status(status) => Some(*status),
-            ErrorDetail::Transport { .. } => None,
-        }
-    }
-
-    pub fn operation(&self) -> Option<&'static str> {
-        self.operation
-    }
-
-    pub fn path(&self) -> Option<&Path> {
-        self.path.as_deref()
-    }
-}
-
-impl std::fmt::Display for VfError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.index {
-            Some(index) => {
-                write!(f, "op {index}")?;
-                if let Some(operation) = self.operation {
-                    write!(f, " ({operation})")?;
-                }
-                if let Some(path) = &self.path {
-                    write!(f, " for {}", path.display())?;
-                }
-            }
-            None if self.is_transport() => {
-                if let Some(operation) = self.operation {
-                    write!(f, "{operation} ")?;
-                }
-                if let Some(path) = &self.path {
-                    write!(f, "for {} ", path.display())?;
-                }
-            }
-            None => {
-                write!(f, "{}", self.operation.unwrap_or("operation"))?;
-                if let Some(path) = &self.path {
-                    write!(f, " for {}", path.display())?;
-                }
-            }
-        }
-        if let Some(message) = self.transport_message() {
-            if self.index.is_some() {
-                write!(f, " ")?;
-            }
-            write!(f, "transport error: {message}")?;
-        } else {
-            write!(
-                f,
-                " failed: {} ({:?} status {}",
-                std::io::Error::from(self.kind()),
-                self.domain(),
-                self.raw_code(),
-            )?;
-            if self.index.is_none() {
-                write!(f, "; operation index unknown")?;
-            }
-            write!(f, ")")?;
-        }
-        match self.status() {
-            Some(StatusCode::Nfs(10019)) => {
-                write!(f, "; {}", crate::error::NFS_REFERRAL_UNSUPPORTED)
-            }
-            Some(StatusCode::Smb(0xc000_0257)) => write!(
-                f,
-                "; SMB DFS referrals are unsupported; connect directly to the destination server/share"
-            ),
-            _ => Ok(()),
-        }
-    }
-}
-
-impl std::error::Error for VfError {}
-
-/// Convert an RPC error using an explicitly chosen logical request index.
-/// `None` keeps the failure unattributed; it never invents index zero.
-/// Transport errors retain their transport category rather than becoming a
-/// filesystem status. The RPC's wire-operation index is not used here.
-pub fn error_from_rpc(e: RpcError, index: impl Into<Option<usize>>) -> VfError {
-    if e.is_transport() {
-        VfError::transport_with_kind(
-            index,
-            e.transport_kind.unwrap_or(TransportKind::Other),
-            e.message,
-        )
-    } else {
-        VfError::from_status(index, StatusCode::Nfs(e.status))
-    }
-}
-
-/// Convert a semantic RPC failure using its wire-operation index.
-/// Transport failures have no trustworthy operation index and remain
-/// unattributed. Callers mapping compound operations to logical requests
-/// should instead use `error_from_rpc` with their mapped index.
-pub fn error_from_rpc_indexed(e: RpcError) -> VfError {
-    if e.is_transport() {
-        return crate::error_from_rpc(e, None);
-    }
-    let idx = e.op_index;
-    crate::error_from_rpc(e, Some(idx))
-}
-
-impl From<VfError> for std::io::Error {
-    fn from(error: VfError) -> Self {
-        std::io::Error::new(error.kind(), error)
-    }
-}
-
-pub type VfResult<T> = Result<T, VfError>;
-/// Result of a compound-style operation: `()` on success, or the index and
-/// error of the first failing operation.
-pub type VfRes = VfResult<()>;
-
-impl VfError {
-    /// Portable category; [`Self::status`] retains the original status.
-    ///
-    /// This is deliberately not retry guidance. Even a semantic failure can
-    /// follow successful chunks of the same logical mutation. Reconcile state
-    /// before replaying a mutation unless its idempotence is established.
-    pub fn kind(&self) -> std::io::ErrorKind {
-        use std::io::ErrorKind as K;
-        // A general Connection failure does not identify a specific I/O
-        // errno; retain Other rather than fabricate Refused/Reset/Aborted.
-        if self.transport_kind() == Some(TransportKind::Timeout) {
-            return K::TimedOut;
-        }
-        if self.transport_kind() == Some(TransportKind::InvalidReply) {
-            return K::InvalidData;
-        }
-        if self.transport_kind() == Some(TransportKind::Auth) {
-            return K::PermissionDenied;
-        }
-        if matches!(
-            self.status(),
-            Some(StatusCode::Errno(VF_ERR_UNSUPPORTED) | StatusCode::Client(VF_ERR_UNSUPPORTED))
-        ) {
-            return K::Unsupported;
-        }
-        match self.status() {
-            Some(StatusCode::Errno(code) | StatusCode::Client(code)) => {
-                std::io::Error::from_raw_os_error(code as i32).kind()
-            }
-            Some(StatusCode::Nfs(code)) => match code {
-                1 | 13 => K::PermissionDenied,
-                2 => K::NotFound,
-                17 => K::AlreadyExists,
-                18 => K::CrossesDevices,
-                20 => K::NotADirectory,
-                21 => K::IsADirectory,
-                22 => K::InvalidInput,
-                27 => K::FileTooLarge,
-                28 => K::StorageFull,
-                30 => K::ReadOnlyFilesystem,
-                63 => K::InvalidFilename,
-                66 => K::DirectoryNotEmpty,
-                10004 | 10019 => K::Unsupported,
-                10008 => K::WouldBlock,
-                _ => K::Other,
-            },
-            Some(StatusCode::Smb(code)) => match code {
-                0xc000_0022 => K::PermissionDenied,
-                0xc000_0034 | 0xc000_003a => K::NotFound,
-                0xc000_0035 => K::AlreadyExists,
-                0xc000_000d => K::InvalidInput,
-                0xc000_007f => K::StorageFull,
-                0xc000_00bb | 0xc000_0257 => K::Unsupported,
-                0xc000_0101 => K::DirectoryNotEmpty,
-                0xc000_0103 => K::NotADirectory,
-                0xc000_00ba => K::IsADirectory,
-                0xc000_00d4 => K::CrossesDevices,
-                _ => K::Other,
-            },
-            None => K::Other,
-        }
-    }
-}
+pub use crate::error::{
+    ErrorDomain, StatusCode, VfError, VfRes, VfResult, error_from_rpc, error_from_rpc_indexed,
+};
 
 /// Callback used by vectorized streaming reads.
 pub type ReadStreamCallback<'a> = dyn FnMut(usize, u64, &[u8], bool) -> bool + 'a;
@@ -433,20 +76,20 @@ bitflags::bitflags! {
 /// Translate the typed flags for compatibility backends.
 pub fn open_flags_to_libc(flags: OpenFlags) -> VfResult<i32> {
     if flags.bits() & !OpenFlags::all().bits() != 0 {
-        return Err(VfError::failure(0, ERR_INVAL));
+        return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
     }
     let writable = flags.intersects(OpenFlags::WRITE | OpenFlags::APPEND);
     let mut raw = match (flags.contains(OpenFlags::READ), writable) {
         (true, true) => libc::O_RDWR,
         (true, false) => libc::O_RDONLY,
         (false, true) => libc::O_WRONLY,
-        (false, false) => return Err(VfError::failure(0, ERR_INVAL)),
+        (false, false) => return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
     };
     if flags.contains(OpenFlags::TRUNCATE) && !writable {
-        return Err(VfError::failure(0, ERR_INVAL));
+        return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
     }
     if flags.intersects(OpenFlags::CREATE | OpenFlags::CREATE_NEW) && !writable {
-        return Err(VfError::failure(0, ERR_INVAL));
+        return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
     }
     if flags.contains(OpenFlags::APPEND) {
         raw |= libc::O_APPEND;
@@ -528,7 +171,7 @@ pub fn insert_fd<T>(
             return Ok(candidate);
         }
     }
-    Err(VfError::failure(0, libc::EMFILE as u32))
+    Err(VfError::errno(0, libc::EMFILE as u32))
 }
 
 // ---------------------------------------------------------------------------
