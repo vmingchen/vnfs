@@ -53,6 +53,106 @@ fn measured<T>(f: impl FnOnce() -> T) -> (T, (usize, usize)) {
 }
 
 #[test]
+fn stream_bookkeeping_allocations_do_not_scale_with_rounds() {
+    use vfsi_sync::backend::{HandleBackend, VectorBackend};
+    let root = tempfile::tempdir().unwrap();
+    let mut backend = vfsi_posix::backend(root.path()).unwrap();
+    let mut overhead = Vec::new();
+    for length in [8, 128] {
+        std::fs::write(root.path().join("file"), vec![0x5a; length]).unwrap();
+        let file = backend
+            .open_impl(&vfsi_sync::OpenOp::new("/file", OpenFlags::READ))
+            .unwrap();
+        let mut received = 0;
+        let (_, stream) = measured(|| {
+            backend
+                .vstream_impl(
+                    std::slice::from_ref(&file),
+                    1,
+                    1,
+                    &mut |index, offset, data, eof| {
+                        assert_eq!(index, 0);
+                        assert_eq!(offset as usize, received);
+                        assert_eq!(eof, data.is_empty());
+                        assert!(data.is_empty() || data == [0x5a]);
+                        received += data.len();
+                        true
+                    },
+                )
+                .unwrap();
+        });
+        assert_eq!(received, length);
+        // Subtract the same native result/payload allocations. Only the
+        // stream's queue, offsets, indices and request planning remain.
+        let (_, direct) = measured(|| {
+            for offset in 0..=length {
+                backend
+                    .vread_impl(&[vfsi_sync::ReadOp::at(file.clone(), offset as u64, 1)])
+                    .unwrap();
+            }
+        });
+        overhead.push(stream.0.checked_sub(direct.0).unwrap());
+        backend.close_impl(&file).unwrap();
+    }
+    assert!(
+        overhead[1] <= overhead[0],
+        "per-round planner allocations: {overhead:?}"
+    );
+    assert!(
+        overhead[1] <= 4,
+        "retain only four bounded bookkeeping allocations: {overhead:?}"
+    );
+}
+
+#[test]
+fn owned_collection_saves_only_right_sized_small_output_allocations() {
+    use vfsi_sync::{
+        ReadAllOptions,
+        backend::{HandleBackend, helpers},
+    };
+    let root = tempfile::tempdir().unwrap();
+    let mut backend = vfsi_posix::backend(root.path()).unwrap();
+    for (length, budget, saved_allocations) in [
+        (4096, 4096, 1),
+        (3073, 1024 * 1024, 0),
+        (1024 * 1024, 1024 * 1024, 0),
+    ] {
+        std::fs::write(root.path().join("file"), vec![0x5a; length]).unwrap();
+        let file = backend
+            .open_impl(&vfsi_sync::OpenOp::new("/file", OpenFlags::READ))
+            .unwrap();
+        let files = [file];
+        let options = ReadAllOptions::new().with_max_total_bytes(budget);
+        let (borrowed, before) = measured(|| {
+            helpers::vread_all_with_options_impl_default(&mut backend, &files, options).unwrap()
+        });
+        let (owned, after) = measured(|| {
+            helpers::vread_all_owned_impl_default(
+                &mut backend,
+                &files,
+                options,
+                std::num::NonZeroUsize::new(1).unwrap(),
+            )
+            .unwrap()
+        });
+        assert_eq!(owned, borrowed);
+        assert_eq!(owned[0], vec![0x5a; length]);
+        assert_eq!(
+            after.0 + saved_allocations,
+            before.0,
+            "output allocations for {length}-byte file"
+        );
+        assert_eq!(
+            after.1 + saved_allocations * length,
+            before.1,
+            "allocated bytes for {length}-byte file"
+        );
+        assert_eq!(owned[0].capacity(), length);
+        backend.close_impl(&files[0]).unwrap();
+    }
+}
+
+#[test]
 fn auto_range_only_reads_keep_the_legacy_routing_allocation_cost() {
     let root = tempfile::tempdir().unwrap();
     let auto = vnfs::mounted::Auto::new(root.path()).unwrap();

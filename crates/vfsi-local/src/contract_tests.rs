@@ -262,8 +262,34 @@ mod tests {
         calls: std::sync::Arc<std::sync::Mutex<Vec<Vec<std::sync::Weak<std::fs::File>>>>>,
         replace: Option<PathBuf>,
         fail_after: Option<usize>,
+        max_read: usize,
+        owned_pointer: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     }
     impl crate::io::DescriptorIo for PathReadExecutor {
+        fn owned_read_window(&self) -> Option<usize> {
+            self.owned_pointer.as_ref().map(|_| 1024 * 1024)
+        }
+        fn read_owned(
+            &mut self,
+            operations: Vec<crate::io::OwnedRead>,
+        ) -> Vec<std::io::Result<Vec<u8>>> {
+            let results = crate::io::read_owned_via_borrowed(self, operations);
+            if let Some(pointer) = &self.owned_pointer {
+                for data in results
+                    .iter()
+                    .filter_map(|result| result.as_ref().ok())
+                    .filter(|data| !data.is_empty())
+                {
+                    let _ = pointer.compare_exchange(
+                        0,
+                        data.as_ptr() as usize,
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
+            }
+            results
+        }
         fn path_read_batch_size(&self) -> Option<std::num::NonZeroUsize> {
             std::num::NonZeroUsize::new(2)
         }
@@ -288,7 +314,7 @@ mod tests {
                     if self.fail_after.is_some_and(|after| call >= after) {
                         return Err(std::io::Error::from_raw_os_error(libc::EIO));
                     }
-                    let length = op.buffer.len().min(2);
+                    let length = op.buffer.len().min(self.max_read);
                     op.file.read_at(&mut op.buffer[..length], op.offset)
                 })
                 .collect()
@@ -338,6 +364,8 @@ mod tests {
                         "late-read-error" => Some(3),
                         _ => None,
                     },
+                    max_read: 2,
+                    owned_pointer: None,
                 },
             )
             .unwrap();
@@ -413,6 +441,68 @@ mod tests {
                     "never replay failures or start the next cohort"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn whole_collection_reuses_full_chunks_without_retaining_oversized_buffers() {
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        };
+        const MIB: usize = 1024 * 1024;
+        for length in [0, 3073, 4096, 65536, MIB, MIB + 17] {
+            let root = TempRoot::new("owned-collection");
+            std::fs::create_dir(&root.0).unwrap();
+            let expected = vec![0x5a; length];
+            std::fs::write(root.0.join("file"), &expected).unwrap();
+            let pointer = Arc::new(AtomicUsize::new(0));
+            let mut fs = LocalBackend::new(
+                root.0.clone(),
+                PathReadExecutor {
+                    calls: Arc::new(Mutex::new(Vec::new())),
+                    replace: None,
+                    fail_after: None,
+                    max_read: usize::MAX,
+                    owned_pointer: Some(pointer.clone()),
+                },
+            )
+            .unwrap();
+            let mut results = fs
+                .vread_all_with_options_impl(
+                    &[FileOperand::from_path("/file")],
+                    if matches!(length, 4096 | 65536) {
+                        ReadAllOptions::new().with_max_total_bytes(length)
+                    } else {
+                        ReadAllOptions::new()
+                    },
+                )
+                .unwrap();
+            assert_eq!(results.len(), 1);
+            let data = results.pop().unwrap();
+            assert_eq!(data, expected);
+            if matches!(length, 4096 | 65536) {
+                assert_eq!(
+                    data.as_ptr() as usize,
+                    pointer.load(Ordering::Relaxed),
+                    "reuse the full first chunk instead of copying it"
+                );
+            } else if length == MIB {
+                assert_ne!(
+                    data.as_ptr() as usize,
+                    pointer.load(Ordering::Relaxed),
+                    "preserve large-chunk allocation/copy layout: unrestricted adoption regressed large reads"
+                );
+            } else if length < MIB {
+                assert_eq!(
+                    data.capacity(),
+                    length,
+                    "do not retain a 1 MiB prefetch allocation for a small/empty file"
+                );
+            } else {
+                assert!(data.capacity() <= 2 * length);
+            }
+            assert!(fs.open_files.is_empty());
         }
     }
 

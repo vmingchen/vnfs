@@ -19,7 +19,22 @@ struct Case {
     paths: Vec<String>,
     offsets: Vec<u64>,
     size: usize,
+    last_size: Option<usize>,
     mode: Mode,
+}
+#[cfg(target_os = "linux")]
+impl Case {
+    fn length(&self, index: usize) -> usize {
+        if index + 1 == self.offsets.len() {
+            self.last_size.unwrap_or(self.size)
+        } else {
+            self.size
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        self.size * self.offsets.len().saturating_sub(1) + self.last_size.unwrap_or(self.size)
+    }
 }
 #[cfg(target_os = "linux")]
 fn pattern_byte(file: usize, offset: u64, generation: u8) -> u8 {
@@ -78,11 +93,10 @@ fn run(config: support::Config) -> Result<(), Box<dyn std::error::Error>> {
         let Case {
             paths,
             offsets,
-            size,
             mode,
             ..
         } = case;
-        let size = *size;
+        let lengths: Vec<_> = (0..offsets.len()).map(|index| case.length(index)).collect();
         let write = matches!(mode, Mode::Write);
         let cold = matches!(
             mode,
@@ -104,9 +118,9 @@ fn run(config: support::Config) -> Result<(), Box<dyn std::error::Error>> {
                     .collect::<Vec<_>>(),
             )?
         };
-        let mut buffers = vec![vec![0u8; size]; offsets.len()];
-        let budget = ReadOptions::new()
-            .with_max_total_bytes(NonZeroUsize::new(size * offsets.len()).unwrap());
+        let mut buffers: Vec<_> = lengths.iter().map(|&length| vec![0u8; length]).collect();
+        let budget =
+            ReadOptions::new().with_max_total_bytes(NonZeroUsize::new(case.bytes()).unwrap());
         let mut samples = Vec::new();
         let mut cpu = 0.0;
         let mut before = report.snapshot();
@@ -123,23 +137,24 @@ fn run(config: support::Config) -> Result<(), Box<dyn std::error::Error>> {
         // preparation and validation never use the executor being measured.
         report.preparation_bytes = 0;
         if whole {
-            for file in &source {
+            for (file, &length) in source.iter().zip(&lengths) {
                 // A preceding write-shape case may have extended a small file.
                 // Whole-file phases must also validate/truncate its old tail.
-                if file.metadata()?.len() != size as u64 {
-                    file.set_len(size as u64)?;
+                if file.metadata()?.len() != length as u64 {
+                    file.set_len(length as u64)?;
                 }
             }
         }
-        let mut current = vec![0; size];
+        let mut current = Vec::new();
         for (i, (buffer, offset)) in buffers.iter_mut().zip(offsets).enumerate() {
+            current.resize(buffer.len(), 0);
             fill_pattern(buffer, i % file_count, *offset, 0);
             let source = &source[i % file_count];
             // Reused read fixtures must not be rewritten: that can change
             // physical extents on copy-on-write filesystems between binaries.
-            if source.read_at(&mut current, *offset)? != size || current != *buffer {
+            if source.read_at(&mut current, *offset)? != buffer.len() || current != *buffer {
                 source.write_all_at(buffer, *offset)?;
-                report.preparation_bytes += size as u64;
+                report.preparation_bytes += buffer.len() as u64;
             }
         }
         drop(current);
@@ -196,20 +211,30 @@ fn run(config: support::Config) -> Result<(), Box<dyn std::error::Error>> {
                     .collect();
                 let results = fs.vwrite(&ops, WriteOptions::new().with_write_all(true))?;
                 assert_eq!(results.len(), offsets.len());
-                assert!(results.iter().all(|result| result.bytes_written == size));
+                assert!(
+                    results
+                        .iter()
+                        .zip(&lengths)
+                        .all(|(result, &length)| result.bytes_written == length)
+                );
             } else if owned {
                 let results = if whole {
                     fs.vread(paths.iter().map(ReadOp::whole), budget)?
                 } else {
                     fs.vread(
                         offsets.iter().enumerate().map(|(i, offset)| {
-                            ReadOp::range(&files[i % file_count], *offset, size)
+                            ReadOp::range(&files[i % file_count], *offset, lengths[i])
                         }),
                         budget,
                     )?
                 };
                 assert_eq!(results.len(), offsets.len());
-                assert!(results.iter().all(|result| result.bytes_read() == size));
+                assert!(
+                    results
+                        .iter()
+                        .zip(&lengths)
+                        .all(|(result, &length)| result.bytes_read() == length)
+                );
                 buffers = results
                     .into_iter()
                     .map(|result| result.into_data().unwrap())
@@ -225,7 +250,12 @@ fn run(config: support::Config) -> Result<(), Box<dyn std::error::Error>> {
                     .collect();
                 let results = fs.vread(ops, budget)?;
                 assert_eq!(results.len(), offsets.len());
-                assert!(results.iter().all(|result| result.bytes_read() == size));
+                assert!(
+                    results
+                        .iter()
+                        .zip(&lengths)
+                        .all(|(result, &length)| result.bytes_read() == length)
+                );
             }
             let elapsed = start.elapsed().as_nanos() as u64;
             let used_cpu = support::cpu_seconds()? - cpu_start;
@@ -324,6 +354,81 @@ fn main() {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixed_size_cases_validate_each_file_and_report_actual_geometry() {
+        let parent = tempfile::tempdir().unwrap();
+        for files in [1, 3] {
+            let output = parent.path().join(format!("mixed-{files}.json"));
+            let config = support::Config::parse(
+                [
+                    "1",
+                    parent.path().to_str().unwrap(),
+                    "both",
+                    "whole-mixed-size-read",
+                    "4",
+                    "8192",
+                    "ring",
+                    "--files",
+                    &files.to_string(),
+                    "--small-bytes",
+                    "16",
+                    "--large-bytes",
+                    "8192",
+                    "--chunk-bytes",
+                    "4096",
+                    "--json",
+                    output.to_str().unwrap(),
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            )
+            .unwrap();
+            run(config).unwrap();
+            let report: serde_json::Value =
+                serde_json::from_reader(std::fs::File::open(output).unwrap()).unwrap();
+            for case in report["cases"].as_array().unwrap() {
+                assert_eq!(case["bytes_per_call"], 8192 + (files - 1) * 16);
+                assert_eq!(
+                    case["min_request_bytes"],
+                    if files == 1 { 8192 } else { 16 }
+                );
+                assert_eq!(case["max_request_bytes"], 8192);
+                if files == 1 {
+                    assert_eq!(case["request_bytes"], 8192);
+                } else {
+                    assert!(case["request_bytes"].is_null());
+                }
+            }
+        }
+        assert!(
+            support::Config::parse(
+                [
+                    "1",
+                    parent.path().to_str().unwrap(),
+                    "uring",
+                    "whole-mixed-size-read",
+                    "4",
+                    "8192",
+                    "ring",
+                    "--files",
+                    "2",
+                    "--small-bytes",
+                    "16",
+                    "--large-bytes",
+                    "8192",
+                    "--chunk-bytes",
+                    "4096",
+                    "--max-case-bytes",
+                    "8192",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+            )
+            .is_err(),
+            "include the large tail in the preflight byte budget"
+        );
+    }
 
     #[test]
     fn whole_file_benchmark_fits_preflight_descriptor_budget() {
@@ -517,7 +622,7 @@ mod tests {
         let report: serde_json::Value =
             serde_json::from_reader(std::fs::File::open(path).unwrap()).unwrap();
         let cases = report["cases"].as_array().unwrap();
-        assert_eq!(cases.len(), 36);
+        assert_eq!(cases.len(), 40);
         for pair in cases.chunks_exact(2) {
             assert_eq!(pair[0]["case"], pair[1]["case"]);
             assert_eq!(pair[0]["backend"], "uring");
@@ -527,6 +632,12 @@ mod tests {
                 assert_eq!(case["rounds"], 2);
                 assert_eq!(case["samples_ns"].as_array().unwrap().len(), 2);
                 assert!(case["p50_ns"].as_u64().unwrap() > 0);
+                if case["case"].as_str().unwrap().contains("mixed-size") {
+                    assert_eq!(case["bytes_per_call"], 7 * 4096 + 65536);
+                    assert!(case["request_bytes"].is_null());
+                    assert_eq!(case["min_request_bytes"], 4096);
+                    assert_eq!(case["max_request_bytes"], 65536);
+                }
                 if case["case"].as_str().unwrap().starts_with("whole-") {
                     assert_eq!(case["allocation"], "whole-file-owned");
                     assert_eq!(case["path_open_close_timing"], "included");

@@ -32,6 +32,8 @@ const WHOLE: &[&str] = &[
     "whole-cold-read",
     "whole-large-read",
     "whole-cold-large-read",
+    "whole-mixed-size-read",
+    "whole-cold-mixed-size-read",
 ];
 
 #[derive(Debug)]
@@ -198,7 +200,10 @@ impl Config {
                 name if name.contains("large") => (self.chunk, self.large / self.chunk, false),
                 _ => (self.small, self.files, true),
             };
-            let total = size.checked_mul(count).ok_or("case byte count overflow")?;
+            let last_size = name.contains("mixed-size").then_some(self.large);
+            let total = size.checked_mul(count.saturating_sub(1))
+                .and_then(|bytes| bytes.checked_add(last_size.unwrap_or(size)))
+                .ok_or("case byte count overflow")?;
             if total > self.max_case_bytes || count > 1_048_576 {
                 return Err("case exceeds --max-case-bytes or 1048576 requests; increase budget explicitly or reduce geometry".into());
             }
@@ -213,7 +218,7 @@ impl Config {
                 else if name == "mixed-read" { Mode::MixedRead }
                 else if name.contains("cold") { Mode::ColdRead }
                 else { Mode::Read };
-            Ok(Case { name, paths, offsets, size, mode })
+            Ok(Case { name, paths, offsets, size, last_size, mode })
         }).collect()
     }
 }
@@ -512,9 +517,17 @@ impl Report {
         let mut sorted = samples.clone();
         sorted.sort_unstable();
         let p50 = percentile(&sorted, 50);
-        let bytes = case.size * case.offsets.len();
+        let bytes = case.bytes();
         let throughput = bytes as f64 * 1e9 / (1024.0 * 1024.0 * p50.max(1) as f64);
         let operations = case.offsets.len();
+        let min_request_bytes = (0..operations)
+            .map(|index| case.length(index))
+            .min()
+            .unwrap_or(0);
+        let max_request_bytes = (0..operations)
+            .map(|index| case.length(index))
+            .max()
+            .unwrap_or(0);
         println!(
             "{backend}/{}: p50_us={:.1} p95_us={:.1} p99_us={:.1} MiB_s={throughput:.1}",
             case.name,
@@ -538,7 +551,10 @@ impl Report {
             "tail_estimates_low_sample_count": sorted.len() < 100,
             "mib_per_second_at_p50": throughput, "operations_per_second_at_p50": operations as f64 * 1e9 / p50.max(1) as f64,
             "process_cpu_seconds": cpu, "bytes_per_call": bytes, "requests_per_call": case.offsets.len(),
-            "request_bytes": case.size, "files": case.paths.len(),
+            "request_bytes": if min_request_bytes == max_request_bytes { Some(min_request_bytes) } else { None },
+            "min_request_bytes": min_request_bytes,
+            "max_request_bytes": max_request_bytes,
+            "files": case.paths.len(),
             "preparation_written_bytes": self.preparation_bytes,
             "directory_entries_per_call": if case.name == "directories" { Some(256) } else { None },
             "allocation": if case.name == "directories" { "listing" } else if matches!(case.mode, Mode::WholeRead(_)) { "whole-file-owned" } else if matches!(case.mode, Mode::OwnedRead(_)) { "owned" } else { "reused-caller-buffers" },
@@ -640,7 +656,7 @@ mod tests {
         let c = config(&[]).unwrap();
         let cases = c.cases().unwrap();
         let names: Vec<_> = cases.iter().map(|c| c.name).collect();
-        assert_eq!(names.len(), 18);
+        assert_eq!(names.len(), 20);
         assert_eq!(
             names.iter().collect::<std::collections::HashSet<_>>().len(),
             names.len()

@@ -665,3 +665,84 @@ aggregate limits, actual vector submissions, and preflight-before-allocation.
 The io_uring selection, smoke suite, native-client and public POSIX contracts,
 strict affected-target Clippy, formatting and patch checks passed. Live NFS/SMB
 suites were not rerun; no protocol code changed.
+
+## Streaming allocation follow-up (baseline `18443e9`)
+
+The shared stream driver now clears and reuses its request/index vectors for
+the duration of a call. It does not retain caller-sized metadata afterward.
+The bounded queue, offsets, validation, index remapping and cancellation order
+are unchanged. The default whole-file collector still dispatches through the
+backend's stream override; local retained-handle cohorts explicitly select an
+owned collector over the same private read loop.
+
+That collector adopts a full first chunk only when its capacity equals its
+length and it is at most 64 KiB. Partial and empty replies do not leave an
+oversized speculative allocation in the result. Large chunks retain the old
+copy/growth path. This conservative cutoff is deliberate: unrestricted first-
+chunk adoption repeatedly slowed single-16-MiB reads by about 3% warm and 5%
+advisory-cold despite copying fewer bytes. The precise low-level cause was not
+isolated; changing the output allocation/growth layout is not automatically a
+win. The unrestricted candidate was rejected and its binary/reports retained.
+
+Deterministic regressions establish the changes independently of wall time:
+
+- Subtracting native read allocations, planner overhead used to grow from 20
+  allocations for 8 one-byte rounds to 260 for 128 rounds. It is now bounded at
+  four in both cases; these deliberately tiny requests test bookkeeping, not
+  a speculative-prefetch policy.
+- A full, right-sized 4 KiB first chunk eliminates exactly one output allocation
+  and 4 KiB of allocated storage versus borrowed collection. Oversized partial
+  replies and 1 MiB chunks retain the original allocation cost and output capacity.
+- Pointer-identity tests cover 4/64 KiB adoption, the large-chunk guard, empty
+  files, oversized partial replies and multi-chunk contents. Existing short-read,
+  live-sibling batching, byte-budget, pinned identity, cleanup, callback and
+  transport-no-replay contracts remain enabled.
+
+The benchmark now has 20 cases, including `whole-mixed-size-read` and
+`whole-cold-mixed-size-read`: 255 small siblings and one large final sibling by
+default. Both backends validate every file's actual length and contents. The
+aggregate payload limit includes the large sibling. Reports expose minimum and
+maximum request bytes and use null for a nonuniform `request_bytes` value;
+singleton mixed-size cases report their actual uniform large request size.
+
+Matched release binaries used the same expanded harness, baseline `18443e9`,
+the same persistent fixtures, ring-only mode, queue depth 256 and a 2 MiB wave
+budget. Final runs alternated baseline/candidate/candidate/baseline and backend
+order, with five warmups, 200 warm samples and 40 advisory-cold samples. Builds,
+tests and profiling were not run concurrently. Values below are the mean of
+two per-binary run medians on the same ARM64 Linux/ext4 VM as the previous section.
+
+| io_uring workload | Baseline p50 | Guarded candidate p50 | Change |
+|---|---:|---:|---:|
+| Whole, 256 × 4 KiB warm | 1.208 ms | 1.181 ms | -2.3% |
+| Whole, one 16 MiB warm | 3.456 ms | 3.466 ms | +0.3% |
+| Whole, mixed sizes warm | 5.950 ms | 5.796 ms | -2.6% |
+| Whole, 256 × 4 KiB advisory-cold | 1.999 ms | 1.953 ms | -2.3% |
+| Whole, one 16 MiB advisory-cold | 3.476 ms | 3.496 ms | +0.6% |
+| Whole, mixed sizes advisory-cold | 7.970 ms | 8.107 ms | +1.7% |
+| Retained-handle owned small reads | 115.6 us | 114.6 us | -0.8% |
+| Large buffered writes | 2.409 ms | 2.334 ms | -3.1% |
+| Retained-handle mixed-cache reads | 737.5 us | 761.0 us | +3.2% |
+
+READ/write submissions, completions, waves, ring entries, peak transfer bytes
+and scratch-copy counts matched in every final baseline/candidate case. The
+collector copy reduction is separate from the engine's scratch-copy counter.
+POSIX controls varied too; changes on untouched range/write paths must not be
+attributed to this collector without further evidence. These modest timings
+do not establish universal speedup or all-workload non-regression. The stronger
+result is fewer allocations/copies with guarded large-file behavior.
+
+Raw reports, logs, immutable `baseline`, rejected `candidate`, final
+`candidate-bounded`, the common harness patch and exact candidate patches are
+retained at `/home/ubuntu/vnfs-stream-opt.WQeaUb`. Use `final-*.json` for the
+table; `repeat-*.json` records the longer rejection check for unrestricted
+adoption. Baseline and candidate binary hashes are distinct and recorded there.
+
+Final validation: `./scripts/test-ci-local.sh smoke` passed 218 Rust tests and
+37 script tests in 9 seconds; its 14 fixture-dependent tests remain ignored.
+`./scripts/test-ci-local.sh uring` passed 56 tests/doctests in 6 seconds.
+`./scripts/test-ci-local.sh check` passed in 25 seconds, including detached
+Python adapter formatting/lint checks. Focused native-client (75), local (70),
+public POSIX (42), and allocation-boundary (7) selections passed. NFS unit/fault
+tests passed 152 cases with four live cases ignored; SMB unit tests passed 29.
+Live NFS/SMB suites, Python runtime tests and full CI were not run for this change.

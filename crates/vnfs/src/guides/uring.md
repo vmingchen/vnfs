@@ -36,8 +36,15 @@ Whole-file path reads (`ReadOp::whole`) retain open handles in queue-sized
 cohorts and read their contents through the configured executor. Sharing the
 stream budget across live siblings preserves vector submissions; as siblings
 reach EOF, the remaining files grow toward the usual large chunks. Both temporary
-descriptors and transfer bytes are bounded,
-and handles close after success, read/open errors, or a byte-limit failure.
+descriptors and transfer bytes are bounded, and handles close after success,
+read/open errors, or a byte-limit failure.
+
+Streaming request/index vectors are reused within each call. Whole-file
+collection can take ownership of a full first chunk up to 64 KiB instead of
+copying it; partial replies still use right-sized output storage so a small file does not
+retain an oversized speculative buffer. Large chunks keep the existing copy
+path, since unrestricted adoption regressed large-file benchmarks. This reduces
+userspace copies, not kernel copies, and does not change the caller-facing API.
 
 ### Opt-in warm-I/O fast paths
 
@@ -140,7 +147,7 @@ cargo run --release -p vnfs --no-default-features --features uring,posix \
 An optional second argument selects an existing scratch parent directory.
 Further arguments select `both|both-reverse|posix|uring`, a phase, queue
 depth (default 256), and maximum scratch bytes (default 2097152). `all` runs
-all 18 distinct cases, including owned, whole-file, mixed-cache and write-shape cases.
+all 20 distinct cases, including owned, whole-file, mixed-cache and write-shape cases.
 `warm`, `cold`, and `write-shapes` select subsets. Every individual case can
 also be selected, including `directories`, `cold-small-read`, `cold-large-read`,
 `mixed-read`, the `owned-*` and `whole-*` cases, `single-large-write`, and `many-files-write`.
@@ -244,6 +251,11 @@ the same phase, not owned allocations against reusable-buffer timings.
 The `whole-*` phases use `ReadOp::whole`, including path opens/closes and final
 collection in timing. `whole-large-read` and `whole-cold-large-read` read one
 complete large file rather than a vector of explicit ranges.
+`whole-mixed-size-read` and `whole-cold-mixed-size-read` read small files plus
+one large final sibling (configured by `--large-bytes`). Reports include the
+actual aggregate byte count and minimum/maximum request sizes; `request_bytes`
+is null for heterogeneous cases. The large sibling counts toward the same
+preflight payload limit and shared read budget.
 The default is `target`, because `/tmp` can be RAM-backed. The benchmark uses
 identical `FsClient` adapters over the same root, comparing `vfsi-posix` against
 `vfsi-uring`, both over shared `LocalBackend` machinery. It validates

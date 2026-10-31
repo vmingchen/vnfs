@@ -1905,10 +1905,11 @@ impl VectorBackend for LocalBackend {
                             .map_err(|error| error.with_index(index))?,
                     );
                 }
-                vfsi_sync::backend::helpers::vread_all_with_options_impl_default(
+                vfsi_sync::backend::helpers::vread_all_owned_impl_default(
                     self,
                     &opened,
                     options.with_max_total_bytes(remaining),
+                    std::num::NonZeroUsize::new(batch_size).unwrap(),
                 )
             })();
             // All engine operations have drained on ordinary errors; even
