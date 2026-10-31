@@ -218,7 +218,19 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         )
         .unwrap();
     assert_eq!(result[0].bytes_read(), 3);
-    assert!(result[0].eof());
+    assert!(
+        !result[0].eof(),
+        "a positive local short read is not proof of EOF"
+    );
+    assert_eq!(a, [b'a', b'b', b'c', 0]);
+    let eof = client
+        .vread(
+            [vnfs::files::ReadOp::range(&files[0], 3, 1)],
+            Default::default(),
+        )
+        .unwrap();
+    assert_eq!(eof[0].bytes_read(), 0);
+    assert!(eof[0].eof());
     assert_eq!(&b, b"ef");
     client
         .vwrite(
@@ -405,7 +417,7 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
             client
                 .vread(reads, Default::default())?
                 .iter()
-                .all(|result| result.data() == Some(b"abc".as_slice()) && result.eof())
+                .all(|result| result.data() == Some(b"abc".as_slice()))
         );
 
         let mut first = [0; 4];
@@ -417,10 +429,21 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
             ],
             Default::default(),
         )?;
-        assert!(
-            result
+        assert!(result.iter().all(|result| result.bytes_read() == 3));
+        assert_eq!(first, [b'a', b'b', b'c', 0]);
+        assert_eq!(second, first);
+        // Protocol backends may know EOF alongside positive progress, while
+        // POSIX read counts alone do not. A subsequent nonempty read at EOF
+        // must establish it on either backend.
+        let eof = client.vread(
+            files
                 .iter()
-                .all(|result| result.bytes_read() == 3 && result.eof())
+                .map(|file| vnfs::files::ReadOp::range(file, 3, 1)),
+            Default::default(),
+        )?;
+        assert!(
+            eof.iter()
+                .all(|result| result.bytes_read() == 0 && result.eof())
         );
         let mut contents = Vec::new();
         client.std_io(&files[0]).read_to_end(&mut contents).unwrap();

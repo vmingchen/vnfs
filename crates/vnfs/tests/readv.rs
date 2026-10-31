@@ -27,7 +27,15 @@ fn mixed<C: Vfsi>(fs: &C) {
     assert_eq!(results[1].data(), Some(b"cd".as_slice()));
     assert_eq!(results[2].data(), None);
     assert_eq!(results[2].bytes_read(), 1);
-    assert!(results[2].eof());
+    assert!(
+        !results[2].eof(),
+        "a positive local short read is not proof of EOF"
+    );
+    let eof = fs
+        .vread([ReadOp::range(&file, 6, 1)], ReadOptions::new())
+        .unwrap();
+    assert_eq!(eof[0].bytes_read(), 0);
+    assert!(eof[0].eof());
     assert_eq!(results[3].data(), Some(b"".as_slice()));
     assert_eq!(
         results.iter().map(|r| r.offset()).collect::<Vec<_>>(),

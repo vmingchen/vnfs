@@ -72,6 +72,7 @@ mod tests {
             written.iter().map(|r| r.bytes_written).collect::<Vec<_>>(),
             [5, 4]
         );
+        assert!(written.iter().all(|r| !r.stable));
         let mut a = [0; 5];
         let results = fs
             .vread(
@@ -85,7 +86,15 @@ mod tests {
         assert_eq!(&a, b"alpha");
         assert!(results[0].data().is_none());
         assert_eq!(results[1].data(), Some(b"beta".as_slice()));
-        assert!(results[1].eof());
+        assert!(
+            !results[1].eof(),
+            "positive short progress is not proof of EOF"
+        );
+        let eof = fs
+            .vread([ReadOp::range(&files[1], 4, 1)], Default::default())
+            .unwrap();
+        assert_eq!(eof[0].bytes_read(), 0);
+        assert!(eof[0].eof());
         fs.vfsync(&files.iter().collect::<Vec<_>>(), SyncMode::Data)
             .unwrap();
         fs.vfsync(&files.iter().collect::<Vec<_>>(), SyncMode::All)

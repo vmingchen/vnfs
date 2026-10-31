@@ -5,6 +5,53 @@ use vfsi_core::{OpenFlags, OpenOp, Vfsi, VfsiExt};
 use vfsi_uring::{Options, connect, connect_with_telemetry};
 
 #[test]
+fn buffered_writes_report_unstable_until_explicit_sync() {
+    for hybrid in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let (fs, telemetry) =
+            connect_with_telemetry(root.path(), Options::default().with_syscall_writes(hybrid))
+                .unwrap();
+        let files = fs
+            .vopen(&[OpenOp::new(
+                "/file",
+                OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE,
+            )])
+            .unwrap();
+        let results = fs
+            .vwrite(
+                &[WriteOp::at(&files[0], 0, b"payload")],
+                WriteOptions::new(),
+            )
+            .unwrap();
+        assert_eq!(results[0].bytes_written, 7);
+        assert!(
+            !results[0].stable,
+            "buffered writes do not guarantee durability"
+        );
+        assert_eq!(
+            telemetry.snapshot().submissions,
+            u64::from(!hybrid),
+            "write must not submit an implicit fsync"
+        );
+        assert_eq!(std::fs::read(root.path().join("file")).unwrap(), b"payload");
+        for mode in [SyncMode::Data, SyncMode::All] {
+            let before = telemetry.snapshot().submissions;
+            fs.vfsync(&[&files[0]], mode).unwrap();
+            assert_eq!(telemetry.snapshot().submissions, before + 1);
+        }
+        assert!(
+            !results[0].stable,
+            "later sync does not change the write's guarantee"
+        );
+        fs.close_files(files).unwrap();
+        assert_eq!(
+            telemetry.snapshot().submissions,
+            telemetry.snapshot().completions
+        );
+    }
+}
+
+#[test]
 fn read_write_sync_vectors_are_bounded_and_match_local() {
     for adaptive in [false, true] {
         let root = tempfile::tempdir().unwrap();

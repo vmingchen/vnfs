@@ -321,6 +321,7 @@ mod tests {
             WriteOp::new(&file, VfOffset::At(0), &b"hello"[..]).with_creation();
         let written = fs.vwrite_impl(&[write]).unwrap();
         assert_eq!(written[0].bytes_written, 5);
+        assert!(!written[0].stable, "path writes are buffered, not durable");
 
         let reads = [ReadOp::at(file.clone(), 0, 3), ReadOp::at(file, 3, 5)];
         let mut first = [0u8; 3];
@@ -334,7 +335,7 @@ mod tests {
         );
         assert_eq!(
             (results[1].offset, results[1].bytes_read, results[1].eof),
-            (3, 2, true)
+            (3, 2, false)
         );
         assert_eq!(&first, b"hel");
         assert_eq!(&second[..2], b"lo");
@@ -423,14 +424,22 @@ mod tests {
             .vread_impl(&[ReadOp::at(FileOperand::from_path("/f"), 0, 4)])
             .unwrap();
         assert_eq!(r[0].data, b"abc");
+        assert!(!r[0].eof, "short progress alone does not establish EOF");
+
+        let r = fs
+            .vread_impl(&[ReadOp::at(FileOperand::from_path("/f"), 3, 1)])
+            .unwrap();
+        assert!(r[0].data.is_empty());
         assert!(r[0].eof);
 
         // Zero-length reads never report EOF.
-        let r = fs
-            .vread_impl(&[ReadOp::at(FileOperand::from_path("/f"), 0, 0)])
-            .unwrap();
-        assert!(r[0].data.is_empty());
-        assert!(!r[0].eof);
+        for offset in [0, 3, 4] {
+            let r = fs
+                .vread_impl(&[ReadOp::at(FileOperand::from_path("/f"), offset, 0)])
+                .unwrap();
+            assert!(r[0].data.is_empty());
+            assert!(!r[0].eof);
+        }
     }
 
     #[test]

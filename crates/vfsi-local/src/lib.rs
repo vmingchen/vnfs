@@ -3,6 +3,11 @@
 //! Backend implementers supply a descriptor executor to [`LocalBackend::new`].
 //! Applications normally use `vfsi-posix` or `vfsi-uring` instead.
 //!
+//! A positive short read is progress, not proof of EOF. Local reads report EOF
+//! only after a nonempty request returns no bytes, without extra metadata probes.
+//! Writes are buffered and report `stable = false`; request durability explicitly
+//! with `Vfsi::vfsync`.
+//!
 //! `"/"` maps to the `root` directory passed to [`LocalBackend::new`]; all
 //! writes stay under that root. Paths are normalized lexically (`.` and `..`
 //! cannot escape the root), and path-based file operations resolve symlinks
@@ -1336,7 +1341,7 @@ impl LocalBackend {
             file: op.file.clone(),
             offset: off,
             bytes_read: n,
-            eof: n < op.length,
+            eof: n == 0 && op.length != 0,
         })
     }
 
@@ -1391,7 +1396,7 @@ impl LocalBackend {
             file: op.file().clone(),
             offset: off,
             bytes_written: op.data().len(),
-            stable: true,
+            stable: false,
         })
     }
 
@@ -1878,7 +1883,7 @@ impl VectorBackend for LocalBackend {
                         out.push(ReadResult {
                             file: op.file.clone(),
                             offset,
-                            eof: data.len() < op.length,
+                            eof: data.is_empty() && op.length != 0,
                             data,
                         });
                     }
@@ -1964,7 +1969,7 @@ impl VectorBackend for LocalBackend {
                             file: op.file.clone(),
                             offset,
                             bytes_read: read,
-                            eof: read < op.length,
+                            eof: read == 0 && op.length != 0,
                         });
                     }
                     Ok(_) => {
@@ -2043,7 +2048,7 @@ impl VectorBackend for LocalBackend {
                             file: op.file().clone(),
                             offset: request.offset,
                             bytes_written: written,
-                            stable: true,
+                            stable: false,
                         })
                     })
                     .collect();

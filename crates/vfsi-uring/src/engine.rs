@@ -1630,7 +1630,10 @@ mod tests {
                 ])
                 .unwrap();
             assert_eq!(results[0].data, bytes);
-            assert!(results[0].eof);
+            assert!(
+                !results[0].eof,
+                "short progress alone does not establish EOF"
+            );
             assert_eq!(results[1].offset, bytes.len() as u64);
             assert!(results[1].eof);
             assert!(results[1].data.is_empty());
@@ -1641,6 +1644,121 @@ mod tests {
             );
         }
         fs.close_impl(&file).unwrap();
+    }
+
+    #[test]
+    fn short_reads_preserve_progress_without_claiming_eof() {
+        for window in [4, 64] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(root.path().join("file"), b"abcdefghij").unwrap();
+            let (mut engine, telemetry) = Engine::new(
+                Options::default()
+                    .with_max_batch_bytes(std::num::NonZeroUsize::new(window).unwrap()),
+            )
+            .unwrap();
+            engine.short_completion = Some(2);
+            let mut fs = vfsi_local::LocalBackend::new(root.path().to_path_buf(), engine).unwrap();
+            let file = fs
+                .open_raw_impl(std::path::Path::new("/file"), libc::O_RDONLY, 0)
+                .unwrap();
+            // Exercise both direct-owned and borrowed/scratch dispatch.
+            let result = fs
+                .vread_impl(&[ReadOp::new(file.clone(), VfOffset::Cur, 10)])
+                .unwrap()
+                .remove(0);
+            assert_eq!(result.data, b"ab");
+            assert!(
+                !result.eof,
+                "positive short progress is not EOF (window {window})"
+            );
+            assert_eq!(
+                fs.seek_raw_impl(&file, 0, vfsi_core::SeekFrom::Cur)
+                    .unwrap(),
+                2
+            );
+            let mut buffer = [99; 8];
+            let result = fs
+                .vread_into_impl(
+                    &[ReadOp::new(file.clone(), VfOffset::Cur, 8)],
+                    &mut [&mut buffer],
+                )
+                .unwrap()
+                .remove(0);
+            assert_eq!(
+                (result.offset, result.bytes_read, result.eof),
+                (2, 2, false)
+            );
+            assert_eq!(&buffer[..2], b"cd");
+            assert_eq!(&buffer[2..], &[99; 6]);
+            for length in [0, 1] {
+                let result = fs
+                    .vread_impl(&[ReadOp::at(file.clone(), 10, length)])
+                    .unwrap()
+                    .remove(0);
+                assert!(result.data.is_empty());
+                assert_eq!(result.eof, length != 0);
+                let mut buffer = vec![99; length];
+                let result = fs
+                    .vread_into_impl(&[ReadOp::at(file.clone(), 10, length)], &mut [&mut buffer])
+                    .unwrap()
+                    .remove(0);
+                assert_eq!((result.bytes_read, result.eof), (0, length != 0));
+            }
+            assert_eq!(
+                fs.seek_raw_impl(&file, 0, vfsi_core::SeekFrom::Cur)
+                    .unwrap(),
+                4
+            );
+            assert_eq!(
+                telemetry.snapshot().submissions,
+                telemetry.snapshot().completions
+            );
+            fs.close_impl(&file).unwrap();
+        }
+    }
+
+    #[test]
+    fn streaming_and_whole_reads_continue_after_short_completions() {
+        use vfsi_core::{
+            Vfsi,
+            api::{ReadOp as AppReadOp, StreamCompletion, StreamOptions},
+        };
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("file"), b"abcdefghij").unwrap();
+        let (mut engine, telemetry) = Engine::new(Options::default()).unwrap();
+        engine.short_completion = Some(2);
+        let fs = vfsi_sync::FsClient::new(
+            vfsi_local::LocalBackend::new(root.path().to_path_buf(), engine).unwrap(),
+        );
+        let mut bytes = Vec::new();
+        let mut offsets = Vec::new();
+        let completion = fs
+            .vstream(
+                &["/file"],
+                StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(10).unwrap()),
+                |index, offset, chunk| {
+                    assert_eq!(index, 0);
+                    offsets.push(offset);
+                    bytes.extend_from_slice(chunk);
+                    Ok(std::ops::ControlFlow::Continue(()))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            bytes, b"abcdefghij",
+            "stream must not truncate at the first short read"
+        );
+        assert_eq!(offsets, [0, 2, 4, 6, 8]);
+        assert_eq!(completion, [StreamCompletion::Complete]);
+        let whole = fs
+            .vread([AppReadOp::whole("/file")], Default::default())
+            .unwrap();
+        assert_eq!(whole[0].data(), Some(b"abcdefghij".as_slice()));
+        assert!(whole[0].eof());
+        assert_eq!(
+            telemetry.snapshot().submissions,
+            telemetry.snapshot().completions
+        );
     }
 
     #[test]
@@ -1717,8 +1835,13 @@ mod tests {
                 0,
             )
             .unwrap();
-        fs.vwrite_impl(&[WriteOp::new(&append, VfOffset::At(0), b"xy".as_slice())])
+        let results = fs
+            .vwrite_impl(&[WriteOp::new(&append, VfOffset::At(0), b"xy".as_slice())])
             .unwrap();
+        assert!(
+            !results[0].stable,
+            "ordered append fallback is also buffered"
+        );
         assert_eq!(
             std::fs::read(root.path().join("file")).unwrap(),
             b"abcdefxy"
