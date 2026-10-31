@@ -32,6 +32,13 @@ for result in results { println!("{} bytes", result.bytes_read()); }
 `vfsi-uring::connect` provides the same `Vfsi`/`VfsiExt` API as a standalone
 crate. `vnfs::uring::Uring` keeps backend handles opaque. Neither needs Tokio.
 
+Whole-file path reads (`ReadOp::whole`) retain open handles in queue-sized
+cohorts and read their contents through the configured executor. Sharing the
+stream budget across live siblings preserves vector submissions; as siblings
+reach EOF, the remaining files grow toward the usual large chunks. Both temporary
+descriptors and transfer bytes are bounded,
+and handles close after success, read/open errors, or a byte-limit failure.
+
 ### Opt-in warm-I/O fast paths
 
 The default still routes independent descriptor I/O through the ring. To try
@@ -53,7 +60,8 @@ positional reads for that cohort; a miss switches the remainder of the batch
 to bounded ring waves. A mixed or evicted cohort can block on up to 14 unprobed
 reads before checking again. Large reads always retain ring batching. Partial
 and zero probe replies are completed through the ring, not mistaken for EOF;
-unsupported filesystems disable probing for that client. This is an execution
+unsupported filesystems disable probing for that client and restore direct
+owned reads for subsequent bounded cohorts. This is an execution
 policy over the existing kernel page cache, not a new client-side data cache.
 
 `syscall_writes(true)` selects the shared ordered positional-write executor,
@@ -132,10 +140,10 @@ cargo run --release -p vnfs --no-default-features --features uring,posix \
 An optional second argument selects an existing scratch parent directory.
 Further arguments select `both|both-reverse|posix|uring`, a phase, queue
 depth (default 256), and maximum scratch bytes (default 2097152). `all` runs
-all 14 distinct cases, including owned, mixed-cache and write-shape cases.
+all 18 distinct cases, including owned, whole-file, mixed-cache and write-shape cases.
 `warm`, `cold`, and `write-shapes` select subsets. Every individual case can
 also be selected, including `directories`, `cold-small-read`, `cold-large-read`,
-`mixed-read`, the `owned-*` cases, `single-large-write`, and `many-files-write`.
+`mixed-read`, the `owned-*` and `whole-*` cases, `single-large-write`, and `many-files-write`.
 For example,
 `-- 300 target uring large-write 256 2097152` isolates the large buffered-write
 workload for profiling; varying `max_batch_bytes` tests byte-window tuning
@@ -233,13 +241,17 @@ leave an empty reserved report file, not a successful benchmark record.
 The `owned-*` phases use `ReadOp::range` and include result allocation in timing;
 ordinary read phases use reusable caller buffers. Compare each phase against
 the same phase, not owned allocations against reusable-buffer timings.
+The `whole-*` phases use `ReadOp::whole`, including path opens/closes and final
+collection in timing. `whole-large-read` and `whole-cold-large-read` read one
+complete large file rather than a vector of explicit ranges.
 The default is `target`, because `/tmp` can be RAM-backed. The benchmark uses
 identical `FsClient` adapters over the same root, comparing `vfsi-posix` against
 `vfsi-uring`, both over shared `LocalBackend` machinery. It validates
 distinct file/range patterns, poisons read buffers before each call, changes
 write payloads every round, and independently reads written files through the
 standard filesystem API. Validation and source reset stay outside timing. It
-keeps opens/closes outside timed I/O, warms up five rounds, and reports
+keeps descriptor opens/closes outside timed range I/O (whole-file phases include
+their path lifecycle), warms up five rounds, and reports
 per-vector latency percentiles. Directory listings retain the same implementation.
 Writes exclude fsync. Advisory-cold reads use `POSIX_FADV_DONTNEED` after syncing,
 outside timing; this does not evict device/controller caches or guarantee cold

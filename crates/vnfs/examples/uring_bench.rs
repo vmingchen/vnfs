@@ -10,6 +10,7 @@ enum Mode {
     ColdRead,
     MixedRead,
     OwnedRead(bool),
+    WholeRead(bool),
 }
 
 #[cfg(target_os = "linux")]
@@ -85,16 +86,24 @@ fn run(config: support::Config) -> Result<(), Box<dyn std::error::Error>> {
         let write = matches!(mode, Mode::Write);
         let cold = matches!(
             mode,
-            Mode::ColdRead | Mode::MixedRead | Mode::OwnedRead(true)
+            Mode::ColdRead | Mode::MixedRead | Mode::OwnedRead(true) | Mode::WholeRead(true)
         );
-        let owned = matches!(mode, Mode::OwnedRead(_));
+        let owned = matches!(mode, Mode::OwnedRead(_) | Mode::WholeRead(_));
+        let whole = matches!(mode, Mode::WholeRead(_));
         let mixed = matches!(mode, Mode::MixedRead);
-        let files = fs.vopen(
-            &paths
-                .iter()
-                .map(|path| OpenOp::new(path, OpenFlags::READ | OpenFlags::WRITE))
-                .collect::<Vec<_>>(),
-        )?;
+        let file_count = paths.len();
+        // Whole-file calls open their own bounded cohort inside the timed
+        // operation. Retaining another unused set here inflates FD usage.
+        let files = if whole {
+            Vec::new()
+        } else {
+            fs.vopen(
+                &paths
+                    .iter()
+                    .map(|path| OpenOp::new(path, OpenFlags::READ | OpenFlags::WRITE))
+                    .collect::<Vec<_>>(),
+            )?
+        };
         let mut buffers = vec![vec![0u8; size]; offsets.len()];
         let budget = ReadOptions::new()
             .with_max_total_bytes(NonZeroUsize::new(size * offsets.len()).unwrap());
@@ -113,10 +122,19 @@ fn run(config: support::Config) -> Result<(), Box<dyn std::error::Error>> {
         // Reset both backends to identical, distinguishable contents. Source
         // preparation and validation never use the executor being measured.
         report.preparation_bytes = 0;
+        if whole {
+            for file in &source {
+                // A preceding write-shape case may have extended a small file.
+                // Whole-file phases must also validate/truncate its old tail.
+                if file.metadata()?.len() != size as u64 {
+                    file.set_len(size as u64)?;
+                }
+            }
+        }
         let mut current = vec![0; size];
         for (i, (buffer, offset)) in buffers.iter_mut().zip(offsets).enumerate() {
-            fill_pattern(buffer, i % files.len(), *offset, 0);
-            let source = &source[i % files.len()];
+            fill_pattern(buffer, i % file_count, *offset, 0);
+            let source = &source[i % file_count];
             // Reused read fixtures must not be rewritten: that can change
             // physical extents on copy-on-write filesystems between binaries.
             if source.read_at(&mut current, *offset)? != size || current != *buffer {
@@ -135,8 +153,8 @@ fn run(config: support::Config) -> Result<(), Box<dyn std::error::Error>> {
         if write {
             alternate = buffers.clone();
             for (i, (buffer, offset)) in buffers.iter_mut().zip(offsets).enumerate() {
-                fill_pattern(buffer, i % files.len(), *offset, 1);
-                fill_pattern(&mut alternate[i], i % files.len(), *offset, 2);
+                fill_pattern(buffer, i % file_count, *offset, 1);
+                fill_pattern(&mut alternate[i], i % file_count, *offset, 2);
             }
         }
         let mut generation = 0;
@@ -174,19 +192,22 @@ fn run(config: support::Config) -> Result<(), Box<dyn std::error::Error>> {
                     .iter()
                     .zip(&buffers)
                     .enumerate()
-                    .map(|(i, (offset, data))| WriteOp::at(&files[i % files.len()], *offset, data))
+                    .map(|(i, (offset, data))| WriteOp::at(&files[i % file_count], *offset, data))
                     .collect();
                 let results = fs.vwrite(&ops, WriteOptions::new().with_write_all(true))?;
                 assert_eq!(results.len(), offsets.len());
                 assert!(results.iter().all(|result| result.bytes_written == size));
             } else if owned {
-                let results = fs.vread(
-                    offsets
-                        .iter()
-                        .enumerate()
-                        .map(|(i, offset)| ReadOp::range(&files[i % files.len()], *offset, size)),
-                    budget,
-                )?;
+                let results = if whole {
+                    fs.vread(paths.iter().map(ReadOp::whole), budget)?
+                } else {
+                    fs.vread(
+                        offsets.iter().enumerate().map(|(i, offset)| {
+                            ReadOp::range(&files[i % file_count], *offset, size)
+                        }),
+                        budget,
+                    )?
+                };
                 assert_eq!(results.len(), offsets.len());
                 assert!(results.iter().all(|result| result.bytes_read() == size));
                 buffers = results
@@ -199,7 +220,7 @@ fn run(config: support::Config) -> Result<(), Box<dyn std::error::Error>> {
                     .zip(&mut buffers)
                     .enumerate()
                     .map(|(i, (offset, buffer))| {
-                        ReadOp::into(&files[i % files.len()], *offset, buffer)
+                        ReadOp::into(&files[i % file_count], *offset, buffer)
                     })
                     .collect();
                 let results = fs.vread(ops, budget)?;
@@ -220,11 +241,11 @@ fn run(config: support::Config) -> Result<(), Box<dyn std::error::Error>> {
         // Verify actual contents outside the timed region, not just throughput.
         if write {
             for (i, (buffer, offset)) in buffers.iter_mut().zip(offsets).enumerate() {
-                fill_pattern(buffer, i % files.len(), *offset, generation.wrapping_add(1));
-                source[i % files.len()].read_exact_at(buffer, *offset)?;
+                fill_pattern(buffer, i % file_count, *offset, generation.wrapping_add(1));
+                source[i % file_count].read_exact_at(buffer, *offset)?;
             }
         }
-        verify_buffers(&buffers, offsets, files.len(), generation)?;
+        verify_buffers(&buffers, offsets, file_count, generation)?;
         fs.close_files(files)?;
         report.record(backend, case, (samples, cpu), (before, after));
         Ok(())
@@ -303,6 +324,74 @@ fn main() {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn whole_file_benchmark_fits_preflight_descriptor_budget() {
+        const CHILD: &str = "VFSI_URING_BENCH_FD_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::whole_file_benchmark_fits_preflight_descriptor_budget",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "descriptor-limited child failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+        // SAFETY: getrlimit initializes the valid output pointer on success.
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) },
+            0
+        );
+        // SAFETY: the successful getrlimit call initialized limit.
+        let mut limit = unsafe { limit.assume_init() };
+        limit.rlim_cur = limit.rlim_cur.min(600);
+        // SAFETY: only this isolated child test's soft limit is reduced; the
+        // hard limit and other tests' descriptor budgets remain unchanged.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+        let files = ((limit.rlim_cur.saturating_sub(32)) / 2).min(256);
+        assert!(files >= 32, "descriptor limit too low to exercise batching");
+        let parent = tempfile::tempdir().unwrap();
+        let output = parent.path().join("whole.json");
+        let files_arg = files.to_string();
+        let config = support::Config::parse(
+            [
+                "1",
+                parent.path().to_str().unwrap(),
+                "uring",
+                "whole-read",
+                "256",
+                "2097152",
+                "ring",
+                "--files",
+                &files_arg,
+                "--json",
+                output.to_str().unwrap(),
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap();
+        run(config).unwrap();
+        let report: serde_json::Value =
+            serde_json::from_reader(std::fs::File::open(output).unwrap()).unwrap();
+        let cases = report["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 1);
+        assert_eq!(cases[0]["rounds"], 1);
+        assert_eq!(cases[0]["allocation"], "whole-file-owned");
+        let stats = &cases[0]["telemetry"];
+        assert!(stats["submissions"].as_u64().unwrap() > 0);
+        assert_eq!(stats["submissions"], stats["completions"]);
+    }
 
     #[test]
     fn validation_rejects_noop_reads_and_unchanged_writes() {
@@ -428,7 +517,7 @@ mod tests {
         let report: serde_json::Value =
             serde_json::from_reader(std::fs::File::open(path).unwrap()).unwrap();
         let cases = report["cases"].as_array().unwrap();
-        assert_eq!(cases.len(), 28);
+        assert_eq!(cases.len(), 36);
         for pair in cases.chunks_exact(2) {
             assert_eq!(pair[0]["case"], pair[1]["case"]);
             assert_eq!(pair[0]["backend"], "uring");
@@ -438,6 +527,15 @@ mod tests {
                 assert_eq!(case["rounds"], 2);
                 assert_eq!(case["samples_ns"].as_array().unwrap().len(), 2);
                 assert!(case["p50_ns"].as_u64().unwrap() > 0);
+                if case["case"].as_str().unwrap().starts_with("whole-") {
+                    assert_eq!(case["allocation"], "whole-file-owned");
+                    assert_eq!(case["path_open_close_timing"], "included");
+                    let cold = case["case"].as_str().unwrap().contains("cold");
+                    assert_eq!(
+                        case["cache"],
+                        if cold { "advisory-evicted" } else { "warm" }
+                    );
+                }
             }
             let stats = &pair[0]["telemetry"];
             assert_eq!(stats["submissions"], stats["completions"]);

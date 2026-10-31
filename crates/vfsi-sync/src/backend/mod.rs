@@ -627,7 +627,7 @@ pub trait VectorBackend: HandleBackend {
         memory_limit: usize,
         cb: &mut ReadStreamCallback<'_>,
     ) -> VfRes {
-        crate::backend::helpers::vstream_impl_default(self, files, chunk_size, memory_limit, cb)
+        crate::backend::helpers::vstream_impl_default(self, files, |_| chunk_size, memory_limit, cb)
     }
 
     // Recursive removal and retained directory lifecycle.

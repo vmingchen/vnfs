@@ -27,6 +27,12 @@ const OWNED: &[&str] = &[
     "owned-cold-large-read",
 ];
 const SHAPES: &[&str] = &["single-large-write", "large-write", "many-files-write"];
+const WHOLE: &[&str] = &[
+    "whole-read",
+    "whole-cold-read",
+    "whole-large-read",
+    "whole-cold-large-read",
+];
 
 #[derive(Debug)]
 pub struct Config {
@@ -151,7 +157,7 @@ impl Config {
     pub fn rounds_for(&self, case: &Case) -> usize {
         if matches!(
             case.mode,
-            Mode::ColdRead | Mode::MixedRead | Mode::OwnedRead(true)
+            Mode::ColdRead | Mode::MixedRead | Mode::OwnedRead(true) | Mode::WholeRead(true)
         ) {
             self.cold_rounds.unwrap_or(self.rounds.min(20))
         } else {
@@ -165,6 +171,7 @@ impl Config {
             .chain(COLD)
             .chain(&["mixed-read"])
             .chain(OWNED)
+            .chain(WHOLE)
             .chain(SHAPES.iter().filter(|s| **s != "large-write"))
             .copied()
             .collect();
@@ -183,6 +190,7 @@ impl Config {
             let (size, count, independent) = match name {
                 "directories" => (0, 16, true),
                 "single-large-write" => (self.large, 1, false),
+                name if name.starts_with("whole-") && name.contains("large") => (self.large, 1, false),
                 "many-files-write" => {
                     if !self.large.is_multiple_of(self.files) { return Err("write-shapes requires large bytes divisible by files".into()); }
                     (self.large / self.files, self.files, true)
@@ -200,6 +208,7 @@ impl Config {
                 else if independent { (0..count).map(|i| format!("/file-{i}")).collect() }
                 else { vec!["/large".into()] };
             let mode = if name.ends_with("write") { Mode::Write }
+                else if name.starts_with("whole-") { Mode::WholeRead(name.contains("cold")) }
                 else if name.starts_with("owned-") { Mode::OwnedRead(name.contains("cold")) }
                 else if name == "mixed-read" { Mode::MixedRead }
                 else if name.contains("cold") { Mode::ColdRead }
@@ -532,8 +541,9 @@ impl Report {
             "request_bytes": case.size, "files": case.paths.len(),
             "preparation_written_bytes": self.preparation_bytes,
             "directory_entries_per_call": if case.name == "directories" { Some(256) } else { None },
-            "allocation": if case.name == "directories" { "listing" } else if matches!(case.mode, Mode::OwnedRead(_)) { "owned" } else { "reused-caller-buffers" },
-            "cache": match case.mode { Mode::MixedRead => "first-file-warm-rest-advisory-evicted", Mode::ColdRead | Mode::OwnedRead(true) => "advisory-evicted", _ => "warm" },
+            "allocation": if case.name == "directories" { "listing" } else if matches!(case.mode, Mode::WholeRead(_)) { "whole-file-owned" } else if matches!(case.mode, Mode::OwnedRead(_)) { "owned" } else { "reused-caller-buffers" },
+            "path_open_close_timing": if matches!(case.mode, Mode::WholeRead(_)) { "included" } else { "excluded" },
+            "cache": match case.mode { Mode::MixedRead => "first-file-warm-rest-advisory-evicted", Mode::ColdRead | Mode::OwnedRead(true) | Mode::WholeRead(true) => "advisory-evicted", _ => "warm" },
             "telemetry": telemetry}));
     }
 
@@ -548,7 +558,7 @@ impl Report {
                         "max_batch_bytes": config.window, "max_case_bytes": config.max_case_bytes,
                         "order": if config.random { "random" } else { "sequential" }, "seed": config.seed,
                         "execution_mode": config.execution, "backend_order": config.backends(), "phase": config.phase},
-                    "notes": ["buffered writes exclude fsync", "eviction is advisory, not cold physical media", "opens/closes, setup and content verification excluded", "runtime source/compiler metadata does not prove binary build provenance", "telemetry deltas exclude warmups; per-case peaks include warmups", "order controls single-file ranges; small-file cases have one request per file", "max-case-bytes bounds payload; validation/alternate buffers can use approximately three times that storage"],
+                    "notes": ["buffered writes exclude fsync", "eviction is advisory, not cold physical media", "setup and content verification excluded; range opens/closes excluded; whole-file path opens/closes included", "runtime source/compiler metadata does not prove binary build provenance", "telemetry deltas exclude warmups; per-case peaks include warmups", "order controls single-file ranges; small-file cases have one request per file", "max-case-bytes bounds payload; validation/alternate buffers can use approximately three times that storage"],
                     "cases": self.records,
                 }),
             )?;
@@ -630,7 +640,7 @@ mod tests {
         let c = config(&[]).unwrap();
         let cases = c.cases().unwrap();
         let names: Vec<_> = cases.iter().map(|c| c.name).collect();
-        assert_eq!(names.len(), 14);
+        assert_eq!(names.len(), 18);
         assert_eq!(
             names.iter().collect::<std::collections::HashSet<_>>().len(),
             names.len()

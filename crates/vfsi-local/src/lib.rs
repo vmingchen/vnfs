@@ -1842,6 +1842,95 @@ impl VectorBackend for LocalBackend {
         Ok(ManyResults::new(paths.len(), results))
     }
 
+    fn vstream_impl(
+        &mut self,
+        files: &[FileOperand],
+        chunk_size: usize,
+        memory_limit: usize,
+        cb: &mut ReadStreamCallback<'_>,
+    ) -> VfRes {
+        // A whole-file read must not give one sibling the entire stream
+        // budget. Share it across the live queue-sized cohort, without tiny
+        // probes, and let remaining files grow after short siblings reach EOF.
+        // chunk_size remains an upper bound; the helper enforces memory_limit.
+        let batch = self.io.path_read_batch_size();
+        vfsi_sync::backend::helpers::vstream_impl_default(
+            self,
+            files,
+            |pending| match batch {
+                Some(batch) => {
+                    let siblings = pending.clamp(1, batch.get());
+                    chunk_size.min((memory_limit / siblings).max(4096))
+                }
+                None => chunk_size,
+            },
+            memory_limit,
+            cb,
+        )
+    }
+
+    fn vread_all_with_options_impl(
+        &mut self,
+        files: &[FileOperand],
+        options: ReadAllOptions,
+    ) -> VfResult<Vec<Vec<u8>>> {
+        let batch_size = self.io.path_read_batch_size();
+        if batch_size.is_none()
+            || !files.iter().all(|file| {
+                matches!(
+                    file,
+                    FileOperand::Path { .. } | FileOperand::Cwd | FileOperand::CwdPath(_)
+                )
+            })
+        {
+            return vfsi_sync::backend::helpers::vread_all_with_options_impl_default(
+                self, files, options,
+            );
+        }
+        // Pin each bounded path cohort once, then reuse descriptor vector reads.
+        // Never reopen paths between chunks: a replacement must not redirect
+        // the suffix to another object. POSIX keeps its serial syscall path.
+        let batch_size = batch_size.unwrap().get();
+        let mut output = Vec::with_capacity(files.len());
+        let mut remaining = options.max_total_bytes();
+        for (cohort, paths) in files.chunks(batch_size).enumerate() {
+            let mut opened = Vec::with_capacity(paths.len());
+            let result = (|| {
+                for (index, path) in paths.iter().enumerate() {
+                    let path = self
+                        .vf_path(path)
+                        .map_err(|error| error.with_index(index))?;
+                    opened.push(
+                        self.open_path_impl(VfPathBase::Abs, &path, libc::O_RDONLY, 0)
+                            .map_err(|error| error.with_index(index))?,
+                    );
+                }
+                vfsi_sync::backend::helpers::vread_all_with_options_impl_default(
+                    self,
+                    &opened,
+                    options.with_max_total_bytes(remaining),
+                )
+            })();
+            // All engine operations have drained on ordinary errors; even
+            // partial OPEN failure must close the cohort's successful prefix.
+            let mut result = result;
+            for (index, file) in opened.iter().enumerate() {
+                if let Err(error) = self.close_impl(file)
+                    && result.is_ok()
+                {
+                    result = Err(error.with_index(index));
+                }
+            }
+            let results =
+                result.map_err(|error| error.map_index(|index| cohort * batch_size + index))?;
+            for data in results {
+                remaining -= data.len(); // validated against the remaining aggregate budget
+                output.push(data);
+            }
+        }
+        Ok(output)
+    }
+
     fn vread_impl(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         let owned = self.io.owned_read_window().is_some_and(|limit| {
             reads
@@ -1850,31 +1939,41 @@ impl VectorBackend for LocalBackend {
                 .is_some_and(|total| total <= limit)
         });
         if owned && Self::independent_reads(reads) {
-            let prepared: Vec<_> = reads
+            let mut operations: Vec<_> = reads
                 .iter()
                 .enumerate()
-                .map(|(index, op)| Self::prepare_read(&self.open_files, op, index))
-                .collect::<VfResult<_>>()?;
-            let operations = prepared
-                .iter()
-                .zip(reads)
-                .map(|((file, offset), op)| io::OwnedRead {
-                    file: Arc::clone(file),
-                    offset: *offset,
-                    buffer: vec![0; op.length],
+                .map(|(index, op)| {
+                    let (file, offset) = Self::prepare_read(&self.open_files, op, index)?;
+                    Ok(io::OwnedRead {
+                        file: Arc::clone(file),
+                        offset,
+                        buffer: Vec::new(),
+                    })
                 })
-                .collect();
-            let offsets: Vec<_> = prepared.iter().map(|(_, offset)| *offset).collect();
-            drop(prepared);
+                .collect::<VfResult<_>>()?;
+            // Preserve whole-batch preflight before allocating any payload.
+            // Reuse this operation vector instead of a separate prepared list.
+            for (operation, request) in operations.iter_mut().zip(reads) {
+                operation.buffer = vec![0; request.length];
+            }
+            // Absolute requests already carry their resolved offsets. Keep an
+            // offset sidecar only when cursor/EOF-relative requests need it.
+            let offsets: Vec<_> = if reads.iter().all(|op| matches!(op.offset, VfOffset::At(_))) {
+                Vec::new()
+            } else {
+                operations.iter().map(|op| op.offset).collect()
+            };
             let results = self.io.read_owned(operations);
             if results.len() != reads.len() {
                 return Err(VfError::from_kind(0, std::io::ErrorKind::Other));
             }
             let mut out = Vec::with_capacity(reads.len());
             let mut failure = None;
-            for (index, ((op, offset), result)) in
-                reads.iter().zip(offsets).zip(results).enumerate()
-            {
+            for (index, (op, result)) in reads.iter().zip(results).enumerate() {
+                let offset = match op.offset {
+                    VfOffset::At(offset) => offset,
+                    _ => offsets[index],
+                };
                 match result {
                     Ok(data) if data.len() <= op.length => {
                         if matches!(op.offset, VfOffset::Cur) {
@@ -1949,7 +2048,11 @@ impl VectorBackend for LocalBackend {
                     buffer,
                 });
             }
-            let offsets: Vec<_> = operations.iter().map(|op| op.offset).collect();
+            let offsets: Vec<_> = if reads.iter().all(|op| matches!(op.offset, VfOffset::At(_))) {
+                Vec::new()
+            } else {
+                operations.iter().map(|op| op.offset).collect()
+            };
             let results = self.io.read(&mut operations);
             drop(operations);
             if results.len() != reads.len() {
@@ -1957,9 +2060,11 @@ impl VectorBackend for LocalBackend {
             }
             let mut out = Vec::with_capacity(reads.len());
             let mut failure = None;
-            for (index, ((op, offset), result)) in
-                reads.iter().zip(offsets).zip(results).enumerate()
-            {
+            for (index, (op, result)) in reads.iter().zip(results).enumerate() {
+                let offset = match op.offset {
+                    VfOffset::At(offset) => offset,
+                    _ => offsets[index],
+                };
                 match result {
                     Ok(read) if read <= op.length => {
                         if matches!(op.offset, VfOffset::Cur) {

@@ -608,8 +608,12 @@ impl Engine {
 }
 
 impl DescriptorIo for Engine {
+    fn path_read_batch_size(&self) -> Option<std::num::NonZeroUsize> {
+        std::num::NonZeroUsize::new(self.options.queue_depth.get() as usize)
+    }
     fn owned_read_window(&self) -> Option<usize> {
-        (!self.options.flags.cached_reads()).then_some(self.options.max_batch_bytes.get())
+        (!(self.options.flags.cached_reads() && self.nowait_supported))
+            .then_some(self.options.max_batch_bytes.get())
     }
     fn read_owned(&mut self, mut operations: Vec<OwnedRead>) -> Vec<io::Result<Vec<u8>>> {
         // Direct final destinations win for bounded small cohorts. Large
@@ -620,7 +624,7 @@ impl DescriptorIo for Engine {
             .iter()
             .try_fold(0usize, |bytes, op| bytes.checked_add(op.buffer.len()))
             .is_some_and(|bytes| bytes <= self.options.max_batch_bytes.get());
-        if self.options.flags.cached_reads() || !fits_window {
+        if (self.options.flags.cached_reads() && self.nowait_supported) || !fits_window {
             return vfsi_local::io::read_owned_via_borrowed(self, operations);
         }
         let mut jobs: Vec<_> = operations
@@ -1084,6 +1088,90 @@ mod tests {
         assert!(engine.write(&operations).iter().all(Result::is_err));
         assert_eq!(std::fs::read(path).unwrap(), b"Ald");
         assert_eq!(telemetry.snapshot().syscall_writes, 2);
+    }
+
+    #[test]
+    fn owned_read_preflight_checks_later_descriptors_before_allocating_outputs() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("file"), b"data").unwrap();
+        let (engine, telemetry) = Engine::new(
+            Options::default()
+                .with_max_batch_bytes(std::num::NonZeroUsize::new(usize::MAX).unwrap()),
+        )
+        .unwrap();
+        let mut fs = vfsi_local::LocalBackend::new(root.path().to_path_buf(), engine).unwrap();
+        let file = fs
+            .open_raw_impl(std::path::Path::new("/file"), libc::O_RDONLY, 0)
+            .unwrap();
+        // The first output cannot be allocated (capacity overflow, not an OOM).
+        // Full preflight must return the later EBADF before allocating it.
+        let error = fs
+            .vread_impl(&[
+                ReadOp::at(file.clone(), 0, usize::MAX - 1),
+                ReadOp::at(vfsi_core::FileOperand::from_fd(i32::MAX), 0, 1),
+            ])
+            .unwrap_err();
+        assert_eq!(error.index(), Some(1));
+        assert_eq!(error.raw_code(), libc::EBADF as u32);
+        assert_eq!(telemetry.snapshot().submissions, 0);
+        fs.close_impl(&file).unwrap();
+    }
+
+    #[test]
+    fn unsupported_nowait_restores_bounded_direct_owned_reads() {
+        for errno in [libc::EOPNOTSUPP, libc::ENOSYS] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("file");
+            std::fs::write(&path, b"abcdefgh").unwrap();
+            let file = Arc::new(File::open(path).unwrap());
+            let (mut engine, telemetry) =
+                Engine::new(Options::default().with_cached_reads(true)).unwrap();
+            assert!(engine.owned_read_window().is_none());
+            engine.cache_read_error = Some((0, errno));
+            let mut buffer = [0; 4];
+            assert_eq!(
+                engine.read(&mut [Read {
+                    file: &file,
+                    offset: 0,
+                    buffer: &mut buffer
+                }])[0]
+                    .as_ref()
+                    .unwrap(),
+                &4
+            );
+            assert_eq!(&buffer, b"abcd");
+            assert!(!engine.nowait_supported);
+            assert_eq!(
+                engine.owned_read_window(),
+                Some(engine.options.max_batch_bytes.get())
+            );
+            let before = telemetry.snapshot();
+            let result = engine
+                .read_owned(vec![OwnedRead {
+                    file: Arc::clone(&file),
+                    offset: 4,
+                    buffer: vec![99; 4],
+                }])
+                .remove(0)
+                .unwrap();
+            assert_eq!(result, b"efgh");
+            let after = telemetry.snapshot();
+            assert_eq!(after.cache_probes, before.cache_probes);
+            assert_eq!(
+                after.copied_read_bytes, before.copied_read_bytes,
+                "unsupported NOWAIT must not permanently force scratch copies"
+            );
+            assert_eq!(after.submissions, before.submissions + 1);
+            engine.ring.take();
+            assert!(
+                engine.read_owned(vec![OwnedRead {
+                    file,
+                    offset: 0,
+                    buffer: vec![0; 4]
+                }])[0]
+                    .is_err()
+            );
+        }
     }
 
     #[test]

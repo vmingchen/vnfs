@@ -258,6 +258,164 @@ mod tests {
     // Offsets: no sentinel collision, Cur/End resolution, result offsets
     // ------------------------------------------------------------------
 
+    struct PathReadExecutor {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<Vec<std::sync::Weak<std::fs::File>>>>>,
+        replace: Option<PathBuf>,
+        fail_after: Option<usize>,
+    }
+    impl crate::io::DescriptorIo for PathReadExecutor {
+        fn path_read_batch_size(&self) -> Option<std::num::NonZeroUsize> {
+            std::num::NonZeroUsize::new(2)
+        }
+        fn read(&mut self, operations: &mut [crate::io::Read<'_>]) -> Vec<std::io::Result<usize>> {
+            use std::os::unix::fs::FileExt;
+            let mut calls = self.calls.lock().unwrap();
+            let call = calls.len();
+            calls.push(
+                operations
+                    .iter()
+                    .map(|op| std::sync::Arc::downgrade(op.file))
+                    .collect(),
+            );
+            drop(calls);
+            if let Some(path) = self.replace.take() {
+                std::fs::rename(&path, path.with_extension("old")).unwrap();
+                std::fs::write(path, b"replacement").unwrap();
+            }
+            operations
+                .iter_mut()
+                .map(|op| {
+                    if self.fail_after.is_some_and(|after| call >= after) {
+                        return Err(std::io::Error::from_raw_os_error(libc::EIO));
+                    }
+                    let length = op.buffer.len().min(2);
+                    op.file.read_at(&mut op.buffer[..length], op.offset)
+                })
+                .collect()
+        }
+        fn write(&mut self, _: &[crate::io::Write<'_>]) -> Vec<std::io::Result<usize>> {
+            unreachable!()
+        }
+        fn sync(
+            &mut self,
+            _: &[&std::sync::Arc<std::fs::File>],
+            _: bool,
+        ) -> Vec<std::io::Result<usize>> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn whole_path_reads_use_bounded_pinned_cohorts_and_always_close_temporary_handles() {
+        for scenario in [
+            "success",
+            "replace",
+            "open-error",
+            "read-error",
+            "late-open-error",
+            "late-read-error",
+            "limit",
+        ] {
+            let root = TempRoot::new(scenario);
+            std::fs::create_dir(&root.0).unwrap();
+            for (name, contents) in [("a", b"abc"), ("b", b"def"), ("c", b"ghi")] {
+                std::fs::write(root.0.join(name), contents).unwrap();
+            }
+            if scenario == "open-error" {
+                std::fs::remove_file(root.0.join("b")).unwrap();
+            }
+            if scenario == "late-open-error" {
+                std::fs::remove_file(root.0.join("c")).unwrap();
+            }
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut fs = LocalBackend::new(
+                root.0.clone(),
+                PathReadExecutor {
+                    calls: std::sync::Arc::clone(&calls),
+                    replace: (scenario == "replace").then(|| root.0.join("a")),
+                    fail_after: match scenario {
+                        "read-error" => Some(0),
+                        "late-read-error" => Some(3),
+                        _ => None,
+                    },
+                },
+            )
+            .unwrap();
+            let retained = fs
+                .open_raw_impl(Path::new("/a"), libc::O_RDONLY, 0)
+                .unwrap();
+            let options = if scenario == "limit" {
+                ReadAllOptions::new().with_max_total_bytes(7)
+            } else {
+                ReadAllOptions::new()
+            };
+            let result = fs.vread_all_with_options_impl(
+                &[
+                    FileOperand::from_path("/a"),
+                    FileOperand::from_path("/b"),
+                    FileOperand::from_path("/c"),
+                ],
+                options,
+            );
+            match scenario {
+                "success" | "replace" => assert_eq!(
+                    result.unwrap(),
+                    [b"abc".to_vec(), b"def".to_vec(), b"ghi".to_vec()]
+                ),
+                "open-error" => {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.index(), Some(1));
+                    assert_eq!(error.raw_code(), libc::ENOENT as u32);
+                }
+                "read-error" => {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.index(), Some(0));
+                    assert_eq!(error.raw_code(), libc::EIO as u32);
+                }
+                "late-open-error" | "late-read-error" => {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.index(), Some(2));
+                    assert_eq!(
+                        error.raw_code(),
+                        if scenario == "late-open-error" {
+                            libc::ENOENT
+                        } else {
+                            libc::EIO
+                        } as u32
+                    );
+                }
+                "limit" => {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.index(), Some(2));
+                    assert_eq!(error.raw_code(), libc::EFBIG as u32);
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                fs.open_files.len() == 1 && fs.open_files.contains_key(&retained.fd().unwrap()),
+                "temporary handles leaked after {scenario}"
+            );
+            assert_eq!(fs.seek_raw_impl(&retained, 0, SeekFrom::Cur).unwrap(), 0);
+            fs.close_impl(&retained).unwrap();
+            let calls = calls.lock().unwrap();
+            if scenario != "open-error" {
+                assert!(!calls.is_empty(), "path reads bypassed the executor");
+            }
+            assert!(calls.iter().all(|wave| wave.len() <= 2));
+            assert!(calls.iter().flatten().all(|file| file.upgrade().is_none()));
+            if scenario == "success" {
+                assert_eq!(calls[0].len(), 2, "siblings must share a vector call");
+            }
+            if scenario == "read-error" {
+                assert_eq!(
+                    calls.len(),
+                    1,
+                    "never replay failures or start the next cohort"
+                );
+            }
+        }
+    }
+
     #[test]
     fn absolute_offset_at_u64_max_minus_one_is_not_cur() {
         let (_root, mut fs) = fs("huge-offset");

@@ -5,6 +5,96 @@ use vfsi_core::{OpenFlags, OpenOp, Vfsi, VfsiExt};
 use vfsi_uring::{Options, connect, connect_with_telemetry};
 
 #[test]
+fn whole_file_chunks_grow_after_short_siblings_finish() {
+    const MIB: usize = 1024 * 1024;
+    for sibling_bytes in [0, 4096] {
+        for large_index in [0, 255] {
+            let root = tempfile::tempdir().unwrap();
+            let paths: Vec<_> = (0..256).map(|i| format!("/file-{i}")).collect();
+            let large = vec![0x5a; 16 * MIB];
+            let small = vec![0xa5; sibling_bytes];
+            for (index, path) in paths.iter().enumerate() {
+                let data = if index == large_index { &large } else { &small };
+                std::fs::write(root.path().join(&path[1..]), data).unwrap();
+            }
+            let (fs, telemetry) = connect_with_telemetry(root.path(), Options::default()).unwrap();
+            let results = fs
+                .vread(
+                    paths.iter().map(ReadOp::whole),
+                    ReadOptions::new().with_max_total_bytes(
+                        NonZeroUsize::new(large.len() + 255 * small.len()).unwrap(),
+                    ),
+                )
+                .unwrap();
+            assert_eq!(results.len(), paths.len());
+            for (index, result) in results.iter().enumerate() {
+                let expected = if index == large_index { &large } else { &small };
+                assert_eq!(result.data(), Some(expected.as_slice()));
+                assert!(result.eof());
+            }
+            let stats = telemetry.snapshot();
+            // One 64 KiB request per sibling initially; nonempty short reads
+            // need another round to establish EOF. The remaining large file
+            // must then grow to 1 MiB, rather than keeping 64 KiB forever.
+            let (submissions, waves) = if sibling_bytes == 0 {
+                (273, 25)
+            } else {
+                (529, 33)
+            };
+            assert_eq!(
+                stats.submissions, submissions,
+                "sibling bytes={sibling_bytes}, large index={large_index}"
+            );
+            assert_eq!(stats.waves, waves);
+            assert_eq!(stats.submissions, stats.completions);
+            assert!(stats.peak_bytes <= 2 * MIB as u64);
+        }
+    }
+}
+
+#[test]
+fn whole_file_paths_share_the_budget_and_submit_bounded_read_vectors() {
+    for cached in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let paths: Vec<_> = (0..8).map(|i| format!("/file-{i}")).collect();
+        for (i, path) in paths.iter().enumerate() {
+            std::fs::write(root.path().join(&path[1..]), vec![i as u8; 4096]).unwrap();
+        }
+        let (fs, telemetry) = connect_with_telemetry(
+            root.path(),
+            Options::default()
+                .with_queue_depth(NonZeroU32::new(4).unwrap())
+                .with_max_batch_bytes(NonZeroUsize::new(16384).unwrap())
+                .with_cached_reads(cached),
+        )
+        .unwrap();
+        let results = fs
+            .vread(
+                paths.iter().map(ReadOp::whole),
+                ReadOptions::new().with_max_total_bytes(NonZeroUsize::new(32768).unwrap()),
+            )
+            .unwrap();
+        for (i, result) in results.iter().enumerate() {
+            assert_eq!(result.data(), Some(vec![i as u8; 4096].as_slice()));
+            assert!(result.eof());
+        }
+        let stats = telemetry.snapshot();
+        assert!(stats.peak_bytes <= 16384);
+        assert_eq!(stats.submissions, stats.completions);
+        if !cached {
+            assert!(
+                stats.submissions > stats.waves,
+                "path contents must use actual vector submissions"
+            );
+            assert_eq!(
+                stats.copied_read_bytes, 16384,
+                "the first cohort uses scratch; the remaining budget lets the second use direct owned reads"
+            );
+        }
+    }
+}
+
+#[test]
 fn buffered_writes_report_unstable_until_explicit_sync() {
     for hybrid in [false, true] {
         let root = tempfile::tempdir().unwrap();

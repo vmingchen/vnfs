@@ -11,6 +11,8 @@
 //! Owned read cohorts fitting the configured byte window use their final result
 //! allocations directly. Borrowed destinations and larger cohorts retain
 //! bounded scratch storage; neither path is kernel zero-copy.
+//! Whole-file path reads open queue-sized cohorts once and retain their handles
+//! through EOF. The stream budget is shared across siblings to preserve batching.
 //!
 //! Ring setup failures (including sandbox/seccomp restrictions) are returned;
 //! there is no silent fallback to a different backend.
@@ -65,7 +67,8 @@ impl Options {
     /// the rest of the call to bounded ring batching. A mixed/evicted cohort may
     /// block for at most 14 unprobed reads before checking again. Large reads
     /// always use the ring; partial or zero probe replies never imply EOF.
-    /// Disabled by default; unsupported filesystems retain ordinary ring reads.
+    /// Disabled by default; unsupported filesystems retain ordinary ring reads
+    /// and recover the direct-owned path for subsequent bounded cohorts.
     pub fn with_cached_reads(mut self, enabled: bool) -> Self {
         self.flags.set_cached_reads(enabled);
         self

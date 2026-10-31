@@ -46,18 +46,24 @@ pub fn vread_all_with_options_impl_default<F: VectorBackend + ?Sized>(
 pub fn vstream_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     files: &[FileOperand],
-    chunk_size: usize,
+    chunk_size: impl Fn(usize) -> usize,
     memory_limit: usize,
     cb: &mut ReadStreamCallback<'_>,
 ) -> VfRes {
     use std::collections::VecDeque;
 
-    if chunk_size == 0 || memory_limit == 0 {
+    if memory_limit == 0 || chunk_size(files.len()) == 0 {
         return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
     }
     let mut pending: VecDeque<usize> = (0..files.len()).collect();
     let mut offsets = vec![0u64; files.len()];
     while !pending.is_empty() {
+        // Select once per round from the live cohort, not the original input.
+        // A constant policy preserves the ordinary backend's fixed chunk size.
+        let chunk_size = chunk_size(pending.len());
+        if chunk_size == 0 {
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+        }
         let mut budget = memory_limit;
         let mut batch_indices = Vec::new();
         let mut reads = Vec::new();

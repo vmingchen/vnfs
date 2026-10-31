@@ -29,9 +29,16 @@ pub struct Write<'a> {
     pub data: &'a [u8],
 }
 
-/// Executor for independent descriptor I/O. Dependent/append/path
-/// operations retain the local backend's ordered syscall implementation.
+/// Executor for independent descriptor I/O. Dependent/append/range-path
+/// operations retain the local backend's ordered syscalls; whole-file paths
+/// can opt into bounded retained-handle cohorts.
 pub trait DescriptorIo: Send {
+    /// Opt into bounded, retained-handle cohorts for whole-file path reads.
+    /// None preserves serial path syscalls. The bound includes temporary open
+    /// descriptors, not just submitted I/O; output and wave byte limits still apply.
+    fn path_read_batch_size(&self) -> Option<std::num::NonZeroUsize> {
+        None
+    }
     /// Largest aggregate destination working set benefiting from owned reads.
     /// None preserves the existing borrowed dispatch/allocation path.
     fn owned_read_window(&self) -> Option<usize> {

@@ -4,6 +4,8 @@ The October 10–11, 2026 sections are historical experiments; their measurement
 are preserved unchanged. The [October 18 follow-up](#october-18-2026-bounded-wave-planning)
 records a new profiling-driven scheduler optimization against commit `7dc2654`.
 For application setup, use the [io_uring guide](../crates/vnfs/src/guides/uring.md).
+The [whole-file path follow-up](#whole-file-path-follow-up-baseline-80a5ca5)
+records the later retained-handle batching and read-planning changes.
 
 ## Summary and provenance
 
@@ -574,3 +576,92 @@ benchmark and guide selections passed, as did the repository smoke selection,
 strict selected-target Clippy, formatting, and Rust 1.88 compatibility checks.
 The new planning regression was observed failing before the optimization.
 Live NFS/SMB tests are outside this executor-only change and were not rerun.
+
+## Whole-file path follow-up (baseline `80a5ca5`)
+
+The correctness-fixed baseline already handles positive short reads without
+inventing EOF and reports buffered writes as unstable. This follow-up does not
+change those semantics, write scheduling, queue/window defaults, or failure replay.
+It makes three targeted changes:
+
+- Whole-file paths open once per queue-sized cohort, retain those handles through
+  EOF, and close them on success or failure. The stream byte budget is shared
+  across live siblings, with a 4 KiB floor when the budget permits; remaining
+  files grow toward normal large chunks as short siblings finish. Ordinary
+  range-path fallbacks remain syscall-based.
+- When NOWAIT is unsupported, subsequent bounded owned reads recover their
+  direct final allocations instead of always copying through scratch.
+- Owned read planning reuses the operation vector instead of a separate prepared
+  vector. Absolute-offset reads need no offset sidecar. All descriptors and
+  offsets are still validated before allocating payloads or starting I/O.
+
+The benchmark now includes `whole-read`, `whole-cold-read`, `whole-large-read`,
+and `whole-cold-large-read` (18 cases total). These measure `ReadOp::whole`,
+including path opens/closes, output allocation, and final collection. They are
+not comparable to the existing retained-handle range-only timings.
+
+The pre-review matched runs used the same expanded benchmark harness on a detached
+`80a5ca5` worktree and on the candidate, optimized release builds, identical
+persistent per-case fixtures, queue depth 256 and a 2 MiB wave budget. Ring mode
+was used, not the opt-in cache/syscall policy. There were five warmups, 60 warm
+samples and 20 advisory-cold samples per backend. No tests, builds, or profiler
+ran concurrently with timed measurements. The environment was ARM64 Linux
+`7.0.0-28-generic`, ext4, Rust 1.93.1; eviction is advisory, not cold-media proof.
+
+| Whole-file workload | Baseline p50 | Candidate p50 | Observation |
+|---|---:|---:|---|
+| Warm: 256 × 4 KiB | 7.25 ms | 1.27 ms | 5.7× faster |
+| Advisory-cold: 256 × 4 KiB | 54.78 ms | 1.99 ms | 27.5× faster |
+| Warm: one 16 MiB file | 3.05 ms | 2.94 ms | Essentially flat; no robust speedup claim |
+| Advisory-cold: one 16 MiB file | 4.02 ms | 3.59 ms | Modest improvement in this run |
+
+For the small-file cases, the candidate performs 512 READ SQEs in two ring
+entries per call, with zero scratch-to-output copies and a 1 MiB peak transfer
+window. The baseline performs no SQEs: its path reads reopen and use syscalls.
+An intermediate version that merely routed whole-file reads through the ring
+still took 512 entries per call; sharing the stream budget is essential to the gain.
+
+Repeated warm/cold/mixed range reads, owned reads, and large buffered writes
+retained their existing SQE, wave and copy counts and showed no consistent large
+median regression. Cold timing and tails were noisy. Warm 16 MiB whole-file
+times also shifted from about 1.2 ms to 3 ms in both executors across runs;
+the matched table above and its POSIX controls avoid treating that drift as a
+code effect. These single-VM observations do not guarantee deployment performance.
+
+Raw JSON, immutable binaries (`baseline-matched`, `candidate`), the exact common
+harness patch, detached baseline source, and the candidate patch are retained
+on the VM at `/home/ubuntu/vnfs-uring-opt.vm5khE`. Use the `verified-*.json`
+reports for the final matched comparison; earlier exploratory reports predate
+the corrected whole-file allocation/cache/lifecycle labels. These saved binaries
+and timings predate the two review fixes below, not a fresh measurement of them.
+
+Review follow-up coverage fixes two gaps in that comparison:
+
+- A 256-file cohort containing one 16 MiB file and 255 empty files now grows
+  the surviving file's chunks from 64 KiB to 1 MiB. The regression asserts
+  273 READ submissions in 25 waves instead of 512 submissions in 264 waves.
+  With 4 KiB siblings it asserts 529 submissions in 33 waves. Both cases check
+  exact contents with the large file first and last, completion draining, and
+  the 2 MiB transfer-window bound.
+- Whole-file benchmark phases no longer retain an unused set of executor
+  handles in addition to their validation handles and temporary path cohort.
+  An isolated subprocess with a soft descriptor limit of 600 runs the actual
+  256-file benchmark, exercising the existing `2 * files + 16` preflight budget.
+  It previously passed preflight but failed during the timed read with `EMFILE`.
+
+```sh
+cargo build --release --locked -p vnfs --no-default-features \
+  --features uring,posix --example uring_bench
+target/release/examples/uring_bench 60 target both whole-read 256 2097152 ring \
+  --fixture /tmp/vfsi-whole-warm-new --json /tmp/vfsi-whole-warm-result-new.json
+target/release/examples/uring_bench 60 target both-reverse whole-cold-read 256 2097152 ring \
+  --cold-rounds 20 --fixture /tmp/vfsi-whole-cold-new --json /tmp/vfsi-whole-cold-result-new.json
+# Repeat with saved baseline/candidate binaries and unchanged managed fixtures.
+```
+
+Regression coverage includes unsupported NOWAIT recovery, short completions,
+path replacement during a read, early/late cohort failures, descriptor cleanup,
+aggregate limits, actual vector submissions, and preflight-before-allocation.
+The io_uring selection, smoke suite, native-client and public POSIX contracts,
+strict affected-target Clippy, formatting and patch checks passed. Live NFS/SMB
+suites were not rerun; no protocol code changed.
