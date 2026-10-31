@@ -7,6 +7,52 @@ from vsmb import _native
 from .common import run_correctness_suite
 
 
+def test_inherited_smb_filesystem_reconnects_after_fork(smb_fs):
+    import os
+    import subprocess
+    import sys
+
+    if not hasattr(os, "fork"):
+        pytest.skip("requires os.fork")
+    # Use a fresh interpreter and a deadline in both processes. In particular,
+    # a reconnect must create fresh runtime workers, not reuse an inherited pool.
+    code = r"""
+import os, signal, uuid
+import fsspec, vsmbfs
+fs = fsspec.filesystem(
+    "vsmbfs", host=os.environ["VFSI_SMB_SERVER"],
+    share=os.environ["VFSI_SMB_SHARE"],
+    username=os.environ.get("VFSI_SMB_USERNAME", ""),
+    password=os.environ.get("VFSI_SMB_PASSWORD", ""),
+    domain=os.environ.get("VFSI_SMB_DOMAIN", ""),
+    root="fork-runtime-" + uuid.uuid4().hex, auto_mkdir=True,
+    skip_instance_cache=True,
+)
+fs.mkdir("vsmbfs:///", create_parents=True)
+fs.pipe_file("/file", b"from-parent")
+read_fd, write_fd = os.pipe()
+try:
+    pid = os.fork()
+    if pid == 0:
+        signal.alarm(10)
+        os.close(read_fd)
+        try:
+            os.write(write_fd, fs.cat_file("/file"))
+        finally:
+            os._exit(0)
+    os.close(write_fd)
+    assert os.read(read_fd, 64) == b"from-parent"
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 0
+    assert fs.cat_file("/file") == b"from-parent"
+finally:
+    fs.rm("/file")
+    fs.rmdir("vsmbfs:///")
+    fs.close()
+"""
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=20)
+
+
 def test_correctness_suite_on_smb(smb_fs):
     run_correctness_suite(smb_fs)
 

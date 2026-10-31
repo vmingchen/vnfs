@@ -10,6 +10,156 @@ pub fn vector_index(error: vfsi_core::api::Error, index: usize) -> vfsi_core::ap
     }
 }
 use vfsi_core::internal::TraversalBudget;
+
+// A later speculative semantic failure must not hide an earlier callback's
+// stop. Native strict OPEN cleans its partial handles before returning an error;
+// only its known read-only prefix is retried. Never replay transport failures.
+fn read_only_prefix<T>(
+    count: usize,
+    mut execute: impl FnMut(usize) -> Result<Vec<T>>,
+) -> Result<(Vec<T>, Option<Error>)> {
+    let mut count = count;
+    let mut deferred = None;
+    loop {
+        match execute(count) {
+            Ok(values) => {
+                if values.len() != count {
+                    return Err(Error::invalid_reply(
+                        None,
+                        "invalid stream cohort result count",
+                    ));
+                }
+                return Ok((values, deferred));
+            }
+            Err(error)
+                if !error.is_transport() && error.index().is_some_and(|i| i > 0 && i < count) =>
+            {
+                count = error.index().unwrap();
+                deferred = Some(error);
+            }
+            Err(error) if error.index().is_some_and(|index| index >= count) => {
+                return Err(Error::invalid_reply(
+                    None,
+                    "invalid stream cohort error index",
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Internal bounded-cohort implementation shared by native and opaque clients.
+/// Keeps callback order unchanged; only the first chunk of siblings is prefetched.
+#[doc(hidden)]
+pub fn stream_cohorts<F: Vfsi, P: AsRef<Path>>(
+    fs: &F,
+    paths: &[P],
+    options: StreamOptions,
+    mut callback: impl FnMut(usize, u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
+) -> Result<Vec<StreamCompletion>> {
+    let chunk = options.chunk_size();
+    let capacity = (fs.limits().max_read_bytes() / chunk).clamp(1, 32);
+    let mut output = Vec::new();
+    for (cohort, paths) in paths.chunks(capacity).enumerate() {
+        let base = cohort * capacity;
+        let requests: Vec<_> = paths
+            .iter()
+            .map(|path| OpenOp::new(path.as_ref(), OpenFlags::READ))
+            .collect();
+        let (mut files, open_error) =
+            read_only_prefix(paths.len(), |count| fs.vopen(&requests[..count]))
+                .map_err(|error| error.map_index(|index| base + index))?;
+        let operation = (|| {
+            let (prefetch, read_error) = read_only_prefix(files.len(), |count| {
+                fs.vread(
+                    files[..count]
+                        .iter()
+                        .map(|file| ReadOp::range(file, 0, chunk)),
+                    ReadOptions::new(),
+                )
+            })
+            .map_err(|error| error.map_index(|index| base + index))?;
+            for (local, first) in prefetch.into_iter().enumerate() {
+                let index = base + local;
+                let mut offset = 0u64;
+                let mut result = first;
+                loop {
+                    let data = result
+                        .data()
+                        .ok_or_else(|| Error::invalid_reply(index, "missing owned stream data"))?;
+                    if result.offset() != offset
+                        || data.len() > chunk
+                        || (data.is_empty() && !result.eof())
+                    {
+                        return Err(Error::invalid_reply(
+                            index,
+                            "invalid stream read offset, length or progress",
+                        ));
+                    }
+                    let next = offset
+                        .checked_add(data.len() as u64)
+                        .ok_or_else(|| Error::errno(index, libc::EOVERFLOW as u32))?;
+                    // Caller errors belong to the caller's nested operation;
+                    // never rewrite their indices as stream-file indices.
+                    if !data.is_empty() && callback(index, offset, data)?.is_break() {
+                        output.push(StreamCompletion::Stopped { next_offset: next });
+                        return Ok(true);
+                    }
+                    if result.eof() {
+                        output.push(StreamCompletion::Complete);
+                        break;
+                    }
+                    offset = next;
+                    drop(result); // release this chunk before allocating its continuation
+                    let mut values = fs
+                        .vread(
+                            [ReadOp::range(&files[local], offset, chunk)],
+                            ReadOptions::new(),
+                        )
+                        .map_err(|error| vector_index(error, index))?;
+                    if values.len() != 1 {
+                        return Err(Error::invalid_reply(
+                            None,
+                            "invalid stream continuation count",
+                        ));
+                    }
+                    result = values.pop().unwrap();
+                }
+            }
+            if let Some(error) = read_error {
+                return Err(error);
+            }
+            if let Some(error) = open_error {
+                return Err(error.map_index(|index| base + index));
+            }
+            Ok(false)
+        })();
+        // Always release the whole speculative cohort, even after cancellation
+        // or a callback error. Failed closes retain RAII/deferred ownership.
+        let close = fs.vclose(&mut files).map_err(|error| {
+            if error.index().is_some_and(|index| index >= files.len()) {
+                Error::invalid_reply(None, "invalid stream close error index")
+            } else {
+                error.map_index(|index| base + index)
+            }
+        });
+        let stopped = operation?;
+        if stopped {
+            // Errors from unvisited speculative siblings must not turn an
+            // earlier callback's successful stop into a later-file failure.
+            // Their armed handles still receive best-effort deferred cleanup.
+            if let Err(error) = close
+                && error.index().is_none_or(|index| index < output.len())
+            {
+                return Err(error);
+            }
+            break;
+        }
+        close?;
+    }
+    Ok(output)
+}
+
 pub fn visit_directory_pages<P: AsRef<Path>>(
     roots: &[P],
     policy: vfsi_core::api::ListDirOptions,

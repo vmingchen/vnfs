@@ -287,11 +287,19 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
             .map(|result| ReadResult::owned(result.offset, result.data, result.eof))
             .collect());
     }
+    let buffered_first = matches!(&first.source, OpSource::Into(..));
     let ops = std::iter::once(first).chain(second).chain(ops);
-    let mut owned_ops = Vec::new();
+    // Bound speculative reservation for iterators with exaggerated size hints.
+    let (lower, upper) = ops.size_hint();
+    let capacity = upper
+        .filter(|&upper| upper <= 1024)
+        .unwrap_or(lower)
+        .clamp(4, 1024);
+    let mut owned_ops = Vec::with_capacity(if buffered_first { 0 } else { capacity });
     let mut owned_indices = Vec::new();
-    let mut buffer_ops = Vec::new();
+    let mut buffer_ops = Vec::with_capacity(if buffered_first { capacity } else { 0 });
     let mut buffer_indices = Vec::new();
+    let mut mixed = false;
     let mut requested = 0usize;
     let mut count = 0usize;
     for (index, op) in ops.enumerate() {
@@ -307,31 +315,46 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
             .ok_or_else(|| Error::errno(index, libc::EFBIG as u32))?;
         match op.source {
             OpSource::Whole(path) => {
+                if !mixed && !buffer_ops.is_empty() {
+                    buffer_indices.extend(0..index);
+                    mixed = true;
+                }
                 owned_ops.push(ReadRequest::whole_file(path));
-                owned_indices.push(index);
+                if mixed {
+                    owned_indices.push(index);
+                }
             }
             OpSource::Range(file, offset, length) => {
+                if !mixed && !buffer_ops.is_empty() {
+                    buffer_indices.extend(0..index);
+                    mixed = true;
+                }
                 owned_ops.push(ReadRequest::range(range(file, offset, length)));
-                owned_indices.push(index);
+                if mixed {
+                    owned_indices.push(index);
+                }
             }
             OpSource::Into(file, offset, buffer) => {
+                if !mixed && !owned_ops.is_empty() {
+                    owned_indices.extend(0..index);
+                    mixed = true;
+                }
                 buffer_ops.push(into(file, offset, buffer));
-                buffer_indices.push(index);
+                if mixed {
+                    buffer_indices.push(index);
+                }
             }
         }
     }
-    let remap = |error: Error, indices: &[usize]| match error.index() {
-        Some(index) if index < indices.len() => error.with_index(indices[index]),
-        Some(_) => Error::invalid_reply(None, "invalid vread_native backend error index"),
-        None => error,
-    };
+    let buffer_count = buffer_ops.len();
     let buffered = if buffer_ops.is_empty() {
         Vec::new()
     } else {
-        buffers(&mut buffer_ops, budget).map_err(|e| remap(e, &buffer_indices))?
+        buffers(&mut buffer_ops, budget)
+            .map_err(|e| remap_read_error(e, &buffer_indices, buffer_count))?
     };
     drop(buffer_ops);
-    if buffered.len() != buffer_indices.len() {
+    if buffered.len() != buffer_count {
         return Err(Error::invalid_reply(
             None,
             "invalid vread_native buffer result count",
@@ -346,9 +369,10 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
     let allocated = if owned_ops.is_empty() {
         Vec::new()
     } else {
-        owned(&owned_ops, remaining).map_err(|e| remap(e, &owned_indices))?
+        owned(&owned_ops, remaining)
+            .map_err(|e| remap_read_error(e, &owned_indices, owned_ops.len()))?
     };
-    if allocated.len() != owned_indices.len() {
+    if allocated.len() != owned_ops.len() {
         return Err(Error::invalid_reply(
             None,
             "invalid vread_native owned result count",
@@ -359,13 +383,13 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
             Error::invalid_reply(None, "vread_native backend exceeded byte budget")
         })?;
     }
-    if buffer_indices.is_empty() {
+    if buffer_count == 0 {
         return Ok(allocated
             .into_iter()
             .map(|result| ReadResult::owned(result.offset, result.data, result.eof))
             .collect());
     }
-    if owned_indices.is_empty() {
+    if owned_ops.is_empty() {
         return Ok(buffered
             .into_iter()
             .map(|result| ReadResult::buffered(result.offset, result.bytes_read, result.eof))
@@ -388,6 +412,21 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
             result.ok_or_else(|| Error::invalid_reply(None, "vread_native omitted a result"))
         })
         .collect()
+}
+
+// Homogeneous batches retain identity ordering without allocating an index map.
+fn remap_read_error(error: Error, indices: &[usize], count: usize) -> Error {
+    match error.index() {
+        Some(index) if index < count => {
+            if indices.is_empty() {
+                error
+            } else {
+                error.with_index(indices[index])
+            }
+        }
+        Some(_) => Error::invalid_reply(None, "invalid vread_native backend error index"),
+        None => error,
+    }
 }
 /// Internal projection for the native owned-result batch path.
 pub struct ReadRequest<'a, R> {
@@ -434,30 +473,34 @@ pub fn read_batch<R>(
     if requests.is_empty() {
         return Ok(Vec::new());
     }
-    let (mut paths, mut path_indices, mut ranges, mut range_indices) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for (i, r) in requests.iter().enumerate() {
+    let paths_first = matches!(requests[0].source, Source::Whole(_));
+    let mut paths = Vec::with_capacity(if paths_first { requests.len() } else { 0 });
+    let mut ranges = Vec::with_capacity(if paths_first { 0 } else { requests.len() });
+    for r in requests {
         match &r.source {
-            Source::Whole(path) => {
-                paths.push(*path);
-                path_indices.push(i);
-            }
-            Source::Range(range) => {
-                ranges.push(range);
-                range_indices.push(i);
+            Source::Whole(path) => paths.push(*path),
+            Source::Range(range) => ranges.push(range),
+        }
+    }
+    // Keep index bookkeeping out of homogeneous hot loops altogether.
+    // Only a mixed batch pays for a second pass and its exact-sized maps.
+    let (mut path_indices, mut range_indices) = (Vec::new(), Vec::new());
+    if !paths.is_empty() && !ranges.is_empty() {
+        path_indices.reserve(paths.len());
+        range_indices.reserve(ranges.len());
+        for (i, request) in requests.iter().enumerate() {
+            match request.source {
+                Source::Whole(_) => path_indices.push(i),
+                Source::Range(_) => range_indices.push(i),
             }
         }
     }
-    let remap = |e: Error, indices: &[usize]| match e.index() {
-        Some(i) if i < indices.len() => e.with_index(indices[i]),
-        Some(_) => Error::invalid_reply(None, "invalid vread_native backend error index"),
-        None => e,
-    };
     // Group ranges before complete paths. Reads do not promise a snapshot.
     let range_results = if ranges.is_empty() {
         Vec::new()
     } else {
-        read_ranges(&ranges, budget).map_err(|e| remap(e, &range_indices))?
+        read_ranges(&ranges, budget)
+            .map_err(|e| remap_read_error(e, &range_indices, ranges.len()))?
     };
     if range_results.len() != ranges.len() {
         return Err(Error::invalid_reply(
@@ -474,7 +517,8 @@ pub fn read_batch<R>(
     let path_results = if paths.is_empty() {
         Vec::new()
     } else {
-        read_paths(&paths, remaining).map_err(|e| remap(e, &path_indices))?
+        read_paths(&paths, remaining)
+            .map_err(|e| remap_read_error(e, &path_indices, paths.len()))?
     };
     if path_results.len() != paths.len() {
         return Err(Error::invalid_reply(
@@ -487,10 +531,10 @@ pub fn read_batch<R>(
             Error::invalid_reply(None, "vread_native backend exceeded byte budget")
         })?;
     }
-    if path_indices.is_empty() {
+    if paths.is_empty() {
         return Ok(range_results);
     }
-    if range_indices.is_empty() {
+    if ranges.is_empty() {
         return Ok(path_results
             .into_iter()
             .map(|data| OwnedReadResult {

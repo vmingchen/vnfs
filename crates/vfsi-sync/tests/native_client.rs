@@ -2360,8 +2360,209 @@ fn stream_callback_errors_keep_nested_operation_indices_and_close_the_stream() {
         .unwrap_err();
     assert_eq!(actual, expected);
     assert_eq!(seen, [0, 1]);
-    assert_eq!(reads.load(Ordering::SeqCst), 2);
-    assert_eq!(closes.load(Ordering::SeqCst) - closes_before, 2);
+    // One bounded chunk may be prefetched for later files, but their
+    // callbacks never run after the nested error and every handle closes.
+    assert_eq!(reads.load(Ordering::SeqCst), 3);
+    assert_eq!(closes.load(Ordering::SeqCst) - closes_before, 3);
+}
+
+#[derive(Default)]
+struct StreamBackend {
+    scalar: ScalarOnly,
+    batches: Vec<(&'static str, usize)>,
+    open_error: Option<VfError>,
+    read_error: Option<VfError>,
+    close_error: Option<VfError>,
+}
+handle_contract!(StreamBackend);
+impl VectorBackend for StreamBackend {
+    fn vopen_impl(&mut self, requests: &[OpenOp]) -> VfResult<Vec<FileOperand>> {
+        self.batches.push(("open", requests.len()));
+        if let Some(error) = &self.open_error
+            && error.index().is_none_or(|index| index < requests.len())
+        {
+            return Err(error.clone());
+        }
+        self.scalar.vopen_impl(requests)
+    }
+    fn vread_impl(&mut self, requests: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+        self.batches.push(("read", requests.len()));
+        if let Some(error) = &self.read_error
+            && error.index().is_none_or(|index| index < requests.len())
+        {
+            return Err(error.clone());
+        }
+        self.scalar.vread_impl(requests)
+    }
+    fn vclose_impl(&mut self, files: &[FileOperand]) -> VfResult<()> {
+        self.batches.push(("close", files.len()));
+        if let Some(error) = &self.close_error {
+            return Err(error.clone());
+        }
+        self.scalar.vclose_impl(files)
+    }
+}
+
+#[test]
+fn stream_cohorts_batch_small_files_with_bounded_memory_and_ordered_callbacks() {
+    let client = FsClient::new(StreamBackend {
+        scalar: ScalarOnly {
+            data: b"data".to_vec(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .with_limits(vfsi_sync::ResourceLimits::new().with_max_read_bytes(16));
+    let mut seen = Vec::new();
+    let result = client
+        .vstream(
+            &["/a", "/b", "/c", "/d", "/e"],
+            vfsi_sync::StreamOptions::new()
+                .with_chunk_size(std::num::NonZeroUsize::new(8).unwrap()),
+            |index, offset, bytes| {
+                // Reentry proves callbacks are outside the backend mutex.
+                assert_eq!(client.limits().max_read_bytes(), 16);
+                client.capabilities()?;
+                seen.push((index, offset, bytes.to_vec()));
+                Ok(std::ops::ControlFlow::Continue(()))
+            },
+        )
+        .unwrap();
+    assert_eq!(result, vec![vfsi_sync::StreamCompletion::Complete; 5]);
+    assert_eq!(
+        seen,
+        (0..5)
+            .map(|index| (index, 0, b"data".to_vec()))
+            .collect::<Vec<_>>()
+    );
+    let backend = client.into_inner().unwrap();
+    assert_eq!(
+        backend.batches,
+        [
+            ("open", 2),
+            ("read", 2),
+            ("close", 2),
+            ("open", 2),
+            ("read", 2),
+            ("close", 2),
+            ("read", 1),
+            ("close", 1)
+        ]
+    );
+    assert_eq!(backend.scalar.close_calls, 5);
+}
+
+#[test]
+fn stream_cohorts_preserve_stop_prefix_and_defer_later_semantic_failures() {
+    for at_open in [false, true] {
+        for stop in [false, true] {
+            let error = VfError::errno(1, libc::ENOENT as u32);
+            let client = FsClient::new(StreamBackend {
+                scalar: ScalarOnly {
+                    data: b"abcde".to_vec(),
+                    ..Default::default()
+                },
+                open_error: at_open.then(|| error.clone()),
+                read_error: (!at_open).then(|| error.clone()),
+                ..Default::default()
+            });
+            let mut seen = Vec::new();
+            let result = client.vstream(
+                &["/first", "/bad", "/never"],
+                vfsi_sync::StreamOptions::new()
+                    .with_chunk_size(std::num::NonZeroUsize::new(2).unwrap()),
+                |index, offset, bytes| {
+                    seen.push((index, offset, bytes.to_vec()));
+                    Ok(if stop {
+                        std::ops::ControlFlow::Break(())
+                    } else {
+                        std::ops::ControlFlow::Continue(())
+                    })
+                },
+            );
+            if stop {
+                assert_eq!(
+                    result.unwrap(),
+                    [vfsi_sync::StreamCompletion::Stopped { next_offset: 2 }]
+                );
+                assert_eq!(seen, [(0, 0, b"ab".to_vec())]);
+            } else {
+                assert_eq!(result.unwrap_err().index(), Some(1));
+                assert_eq!(
+                    seen,
+                    [
+                        (0, 0, b"ab".to_vec()),
+                        (0, 2, b"cd".to_vec()),
+                        (0, 4, b"e".to_vec())
+                    ]
+                );
+            }
+            let backend = client.into_inner().unwrap();
+            assert_eq!(backend.scalar.close_calls, if at_open { 1 } else { 3 });
+        }
+    }
+}
+
+#[test]
+fn stream_cohorts_never_replay_transport_failures_and_close_all_opened_files() {
+    for index in [None, Some(1)] {
+        let expected = VfError::transport(index, "lost read reply");
+        let client = FsClient::new(StreamBackend {
+            read_error: Some(expected.clone()),
+            ..Default::default()
+        });
+        let error = client
+            .vstream(&["/a", "/b"], vfsi_sync::StreamOptions::new(), |_, _, _| {
+                panic!("no data confirmed")
+            })
+            .unwrap_err();
+        assert_eq!(error.index(), expected.index());
+        assert!(error.is_transport());
+        assert!(error.to_string().contains("lost read reply"));
+        let backend = client.into_inner().unwrap();
+        assert_eq!(backend.batches, [("open", 2), ("read", 2), ("close", 2)]);
+        assert_eq!(backend.scalar.close_calls, 2);
+    }
+}
+
+#[test]
+fn stream_cohorts_preserve_callback_errors_and_stop_before_unvisited_cleanup_errors() {
+    for close_index in [Some(0), Some(2), None] {
+        let backend = || StreamBackend {
+            scalar: ScalarOnly {
+                data: b"data".to_vec(),
+                ..Default::default()
+            },
+            close_error: Some(VfError::transport(close_index, "close reply lost")),
+            ..Default::default()
+        };
+        let client = FsClient::new(backend());
+        let result = client.vstream(
+            &["/a", "/b", "/c"],
+            vfsi_sync::StreamOptions::new(),
+            |_, _, _| Ok(std::ops::ControlFlow::Break(())),
+        );
+        if close_index == Some(2) {
+            assert_eq!(
+                result.unwrap(),
+                [vfsi_sync::StreamCompletion::Stopped { next_offset: 4 }]
+            );
+        } else {
+            assert!(result.unwrap_err().is_transport());
+        }
+        assert_eq!(client.into_inner().unwrap().scalar.close_calls, 3);
+        let client = FsClient::new(backend());
+        let expected = VfError::errno(9, libc::ENOENT as u32).with_context("nested", "/nested");
+        let error = client
+            .vstream(
+                &["/a", "/b", "/c"],
+                vfsi_sync::StreamOptions::new(),
+                |_, _, _| Err(expected.clone()),
+            )
+            .unwrap_err();
+        assert_eq!(error, expected);
+        assert_eq!(client.into_inner().unwrap().scalar.close_calls, 3);
+    }
 }
 
 #[test]

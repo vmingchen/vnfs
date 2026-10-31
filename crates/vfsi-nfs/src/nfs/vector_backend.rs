@@ -37,7 +37,47 @@ impl VectorBackend for NfsVecFs {
         if paths.is_empty() {
             return Ok(ManyResults::all_success(Vec::new()));
         }
-        self.openv_merged(paths, flags, modes)
+        let mut results = self.openv_merged(paths, flags, modes)?.into_results();
+        while let Some(Err(error)) = results.last() {
+            let index = results.len() - 1;
+            if error.status() != Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_SYMLINK))
+                || open_flags_mutate(flags[index])
+            {
+                break;
+            }
+            // OPEN/LOOKUP rejected this read-only request before opening it.
+            // Resolve only that path through the scalar symlink-aware path;
+            // retain confirmed prefix handles and keep the suffix vectorized.
+            results.pop();
+            match self.open_raw_impl(paths[index], flags[index], modes[index]) {
+                Ok(file) => results.push(Ok(file)),
+                Err(error) => {
+                    results.push(Err(error.map_index(|_| index)));
+                    break;
+                }
+            }
+            let start = results.len();
+            if start == paths.len() {
+                break;
+            }
+            match self.openv_merged(&paths[start..], &flags[start..], &modes[start..]) {
+                Ok(suffix) => {
+                    results.extend(suffix.into_results().into_iter().map(|result| {
+                        result.map_err(|error| error.map_index(|index| start + index))
+                    }))
+                }
+                Err(error) => {
+                    // An unattributed/transport failure must stay unattributed.
+                    // The suffix owns its own cleanup; release our retained
+                    // prefix before returning an outer error with no handles.
+                    for file in results.into_iter().filter_map(Result::ok) {
+                        let _ = self.close_impl(&file);
+                    }
+                    return Err(error.map_index(|index| start + index));
+                }
+            }
+        }
+        Ok(ManyResults::new(paths.len(), results))
     }
 
     fn before_open_cleanup(&mut self, _index: usize, _file: &FileOperand) -> VfResult<()> {
@@ -1084,8 +1124,8 @@ impl VectorBackend for NfsVecFs {
             let path = self.server_vf_path(&a.file).map_err(|e| e.with_index(i))?;
             let (dir, name) =
                 split_path_bytes(path_bytes(&path)).map_err(|_| VfError::errno(i, ERR_NOENT))?;
-            parents.push(self.visible_path(&path_from_bytes(&dir)));
-            names.push(name);
+            parents.push(self.visible_path(&path_from_bytes(dir)));
+            names.push(name.to_vec());
         }
         let files: Vec<FileOperand> = parents
             .iter()
@@ -1132,8 +1172,8 @@ impl VectorBackend for NfsVecFs {
             let full = self.server_path(new);
             let (dir, name) =
                 split_path_bytes(path_bytes(&full)).map_err(|_| VfError::errno(i, ERR_NOENT))?;
-            parents.push(self.visible_path(&path_from_bytes(&dir)));
-            names.push(name);
+            parents.push(self.visible_path(&path_from_bytes(dir)));
+            names.push(name.to_vec());
         }
         let files: Vec<FileOperand> = parents
             .iter()
@@ -1207,8 +1247,8 @@ impl VectorBackend for NfsVecFs {
             let full = self.server_path(new);
             let (dir, name) =
                 split_path_bytes(path_bytes(&full)).map_err(|_| VfError::errno(i, ERR_NOENT))?;
-            parents.push(self.visible_path(&path_from_bytes(&dir)));
-            names.push(name);
+            parents.push(self.visible_path(&path_from_bytes(dir)));
+            names.push(name.to_vec());
         }
         let files: Vec<FileOperand> = parents
             .iter()
@@ -1514,13 +1554,13 @@ impl VectorBackend for NfsVecFs {
                 Ok(x) => x,
                 Err(_) => return Err(VfError::errno(i, ERR_NOENT)),
             };
-            let dirfh = match self.resolve_path(&path_from_bytes(&dir), true) {
+            let dirfh = match self.resolve_path(&path_from_bytes(dir), true) {
                 Ok(fh) => fh,
                 Err(e) => return Err(e.with_index(i)),
             };
             let (fh, sid) = open_adb_path(i, |create| {
                 self.nfs
-                    .open_path(&dirfh, &name, OPEN4_SHARE_ACCESS_WRITE, create)
+                    .open_path(&dirfh, name, OPEN4_SHARE_ACCESS_WRITE, create)
             })?;
             let mut written = 0usize;
             let mut failed: Option<VfError> = None;

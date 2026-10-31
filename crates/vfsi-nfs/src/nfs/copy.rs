@@ -122,16 +122,16 @@ impl NfsVecFs {
         let (ddir, dname) =
             split_path_bytes(path_bytes(dst_root_rel)).map_err(|_| VfError::errno(0, ERR_NOENT))?;
         let sdirfh = self
-            .resolve_path(&path_from_bytes(&sdir), true)
+            .resolve_path(&path_from_bytes(sdir), true)
             .map_err(|e| e.with_index(0))?;
         let ddirfh = self
-            .resolve_path(&path_from_bytes(&ddir), true)
+            .resolve_path(&path_from_bytes(ddir), true)
             .map_err(|e| e.with_index(0))?;
         let (sfh, ssid) = self
             .nfs
             .open_path(
                 &sdirfh,
-                &sname,
+                sname,
                 OPEN4_SHARE_ACCESS_READ,
                 crate::client::OpenCreate::NoCreate,
             )
@@ -142,7 +142,7 @@ impl NfsVecFs {
         let (dfh, dsid) = open_destination_with_create_fallback(
             &mut self.nfs,
             |nfs, create| {
-                nfs.open_path(&ddirfh, &dname, OPEN4_SHARE_ACCESS_WRITE, create)
+                nfs.open_path(&ddirfh, dname, OPEN4_SHARE_ACCESS_WRITE, create)
                     .map_err(|error| vfsi_core::error_from_rpc(error, 0))
             },
             |nfs| {

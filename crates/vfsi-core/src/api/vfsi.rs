@@ -458,6 +458,10 @@ pub trait Vfsi {
     /// The callback receives the input index, byte offset, and borrowed chunk.
     /// `ControlFlow::Break(())` stops the whole vector; results contain its completed/stopped prefix.
     /// Backends may process streams sequentially; this is not a parallelism promise.
+    /// Native clients preserve callback input order while prefetching at most one
+    /// chunk per sibling in a bounded OPEN/READ/CLOSE cohort. Cohorts hold at most
+    /// 32 files and fit the client's aggregate read budget; singleton/oversized
+    /// chunks keep the scalar stream path. Reads do not provide a snapshot.
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, StreamOptions};

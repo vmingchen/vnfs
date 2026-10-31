@@ -103,9 +103,9 @@ impl NfsVecFs {
             let (dir, name) =
                 split_path_bytes(path_bytes).map_err(|_| VfError::errno(i, ERR_NOENT))?;
             groups
-                .entry(dir.into_boxed_slice())
+                .entry(dir.into())
                 .or_default()
-                .push((i, name));
+                .push((i, name.to_vec()));
         }
         for (dir, mut entries) in groups {
             let dirfh = match self.resolve_path(&path_from_bytes(&dir), true) {
@@ -362,31 +362,31 @@ impl NfsVecFs {
                 split_path_bytes(path_bytes(&s)).map_err(|_| VfError::errno(i, ERR_NOENT))?;
             let (ddir, dname) =
                 split_path_bytes(path_bytes(&d)).map_err(|_| VfError::errno(i, ERR_NOENT))?;
-            let sdirfh = match src_cache.get(sdir.as_slice()) {
+            let sdirfh = match src_cache.get(sdir) {
                 Some(fh) => fh.clone(),
                 None => {
                     let fh = self
-                        .resolve_path(&path_from_bytes(&sdir), true)
+                        .resolve_path(&path_from_bytes(sdir), true)
                         .map_err(|e| e.with_index(i))?;
-                    src_cache.insert(sdir.into_boxed_slice(), fh.clone());
+                    src_cache.insert(sdir.into(), fh.clone());
                     fh
                 }
             };
-            let ddirfh = match dst_cache.get(ddir.as_slice()) {
+            let ddirfh = match dst_cache.get(ddir) {
                 Some(fh) => fh.clone(),
                 None => {
                     let fh = self
-                        .resolve_path(&path_from_bytes(&ddir), true)
+                        .resolve_path(&path_from_bytes(ddir), true)
                         .map_err(|e| e.with_index(i))?;
-                    dst_cache.insert(ddir.into_boxed_slice(), fh.clone());
+                    dst_cache.insert(ddir.into(), fh.clone());
                     fh
                 }
             };
             ops.push(crate::client::RenameOp {
                 srcdir: sdirfh,
-                oldname: sname,
+                oldname: sname.to_vec(),
                 dstdir: ddirfh,
-                newname: dname,
+                newname: dname.to_vec(),
             });
         }
         self.nfs
@@ -408,9 +408,9 @@ impl NfsVecFs {
             let path = self.server_vf_path(f).map_err(|e| e.with_index(i))?;
             let (dir, name) =
                 split_path_bytes(path_bytes(&path)).map_err(|_| VfError::errno(i, ERR_NOENT))?;
-            let group = groups.entry(dir.into_boxed_slice()).or_default();
+            let group = groups.entry(dir.into()).or_default();
             group.indices.push(i);
-            group.names.push(name);
+            group.names.push(name.to_vec());
         }
         for (dir, RemoveGroup { indices, names }) in groups {
             let dirfh = self

@@ -47,6 +47,18 @@ fn measured<T>(run: impl FnOnce() -> T) -> (T, usize) {
 struct File;
 
 #[test]
+fn path_split_borrows_both_components_without_allocating() {
+    let path = b"/parent/\xff//leaf///";
+    let ((parent, leaf), allocations) =
+        measured(|| vfsi_core::path::split_path_bytes(path).unwrap());
+    assert_eq!(allocations, 0);
+    assert_eq!(parent, b"parent/\xff");
+    assert_eq!(leaf, b"leaf");
+    assert_eq!(parent.as_ptr(), path[1..].as_ptr());
+    assert_eq!(leaf.as_ptr(), path[11..].as_ptr());
+}
+
+#[test]
 fn adb_planning_uses_constant_storage_even_for_huge_valid_counts() {
     let pattern = vfsi_core::Adb::blocknum_only("/unused", 0, 0, usize::MAX, 0, 0);
     let (mut layout, allocations) =
@@ -133,6 +145,144 @@ fn homogeneous_owned_reads_do_not_allocate_a_reordering_buffer() {
         allocations <= 3,
         "homogeneous dispatcher allocated {allocations} times"
     );
+}
+
+#[test]
+fn homogeneous_dispatch_staging_stays_constant_across_batch_sizes() {
+    for count in [1, 3, 32, 1024] {
+        let (results, allocations) = measured(|| {
+            consume_ops::<File, (), ()>(
+                (0..count).map(|_| ReadOp::whole("/file")),
+                0,
+                |_, _, _| (),
+                |_, _, _| (),
+                |requests, budget| {
+                    read_batch(
+                        requests,
+                        budget,
+                        |_, _| panic!("no ranges"),
+                        |paths, _| Ok(paths.iter().map(|_| Vec::new()).collect()),
+                    )
+                },
+                |_, _| panic!("no buffers"),
+            )
+            .unwrap()
+        });
+        assert_eq!(results.len(), count);
+        assert!(
+            allocations <= 4,
+            "{count} owned requests allocated {allocations} times"
+        );
+
+        let mut buffers = vec![[0; 1]; count];
+        let (results, allocations) = measured(|| {
+            consume_ops(
+                buffers
+                    .iter_mut()
+                    .map(|buffer| ReadOp::into(&File, 7, buffer)),
+                count,
+                |_, _, _| (),
+                |_, offset, buffer| (offset, buffer),
+                |_, _| panic!("no owned reads"),
+                |requests, _| {
+                    Ok(requests
+                        .iter_mut()
+                        .map(|(offset, buffer)| {
+                            buffer[0] = 42;
+                            ReadIntoResult {
+                                offset: *offset,
+                                bytes_read: 1,
+                                eof: false,
+                            }
+                        })
+                        .collect())
+                },
+            )
+            .unwrap()
+        });
+        assert_eq!(results.len(), count);
+        assert!(buffers.iter().all(|buffer| buffer == &[42]));
+        assert!(
+            allocations <= 3,
+            "{count} buffered requests allocated {allocations} times"
+        );
+    }
+}
+
+#[test]
+fn mixed_dispatch_keeps_order_and_error_indices_with_unknown_iterator_lengths() {
+    for count in [3, 32, 1024] {
+        for buffered_first in [false, true] {
+            for fail in [false, true] {
+                let mut buffers = vec![[]; count];
+                let ops = buffers
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(index, buffer)| {
+                        if (index % 8 == 0) == buffered_first {
+                            ReadOp::into(&File, index as u64, buffer)
+                        } else {
+                            ReadOp::range(&File, index as u64, 0)
+                        }
+                    })
+                    .filter(|_| true); // intentionally no exact lower size hint
+                let complete = |offset| -> vfsi_core::VfResult<_> {
+                    if fail && offset as usize == count - 1 {
+                        Err(vfsi_core::VfError::errno(0, libc::ENOENT as u32))
+                    } else {
+                        Ok(offset)
+                    }
+                };
+                let results = consume_ops(
+                    ops,
+                    0,
+                    |_, offset, _| offset,
+                    |_, offset, _| offset,
+                    |requests, _| {
+                        requests
+                            .iter()
+                            .enumerate()
+                            .map(|(index, request)| {
+                                let offset = complete(*request.range_ref().unwrap())
+                                    .map_err(|e| e.with_index(index))?;
+                                Ok(OwnedReadResult {
+                                    offset,
+                                    data: Vec::new(),
+                                    eof: true,
+                                })
+                            })
+                            .collect()
+                    },
+                    |requests, _| {
+                        requests
+                            .iter()
+                            .enumerate()
+                            .map(|(index, offset)| {
+                                let offset = complete(*offset).map_err(|e| e.with_index(index))?;
+                                Ok(ReadIntoResult {
+                                    offset,
+                                    bytes_read: 0,
+                                    eof: true,
+                                })
+                            })
+                            .collect()
+                    },
+                );
+                if fail {
+                    assert_eq!(results.unwrap_err().index(), Some(count - 1));
+                } else {
+                    assert_eq!(
+                        results
+                            .unwrap()
+                            .iter()
+                            .map(ReadResult::offset)
+                            .collect::<Vec<_>>(),
+                        (0..count as u64).collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]

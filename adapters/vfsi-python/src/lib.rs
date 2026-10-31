@@ -163,13 +163,13 @@ fn aggregate_listdirs(
     let mut unique_to_original = Vec::new();
     let mut unique_index_by_dir = HashMap::new();
     for (index, path) in paths.iter().enumerate() {
-        if !unique_index_by_dir.contains_key(path) {
-            unique_index_by_dir.insert(path.clone(), unique_paths.len());
-            unique_paths.push(path.clone());
+        if !unique_index_by_dir.contains_key(path.as_path()) {
+            unique_index_by_dir.insert(path.as_path(), unique_paths.len());
+            unique_paths.push(path.as_path());
             unique_to_original.push(index);
         }
     }
-    let dirs: Vec<&Path> = unique_paths.iter().map(PathBuf::as_path).collect();
+    let dirs = unique_paths;
     let mut unique_entries = vec![Vec::new(); dirs.len()];
     let mut budget = vfsi_core::internal::TraversalBudget::new(max_entries, max_path_bytes);
     let mut overflow = None;
@@ -215,21 +215,67 @@ fn aggregate_listdirs(
     // Complete unique listings are charged again in original request order,
     // including duplicates, while constructing the caller-visible groups.
     let mut budget = vfsi_core::internal::TraversalBudget::new(max_entries, max_path_bytes);
-    paths
+    let mut groups: Vec<Vec<VfAttrs>> = Vec::with_capacity(paths.len());
+    for (index, path) in paths.iter().enumerate() {
+        let unique = unique_index_by_dir[path.as_path()];
+        let first = unique_to_original[unique];
+        let entries = if index == first {
+            &unique_entries[unique]
+        } else {
+            &groups[first]
+        };
+        for entry in entries {
+            budget
+                .charge_paths(entry.file.path())
+                .map_err(|_| VfError::errno(index, libc::EFBIG as u32))?;
+        }
+        // Transfer each unique listing once. Only repeated operands require
+        // independent copies, after charging their caller-visible budget.
+        let entries = if index == first {
+            std::mem::take(&mut unique_entries[unique])
+        } else {
+            groups[first].clone()
+        };
+        groups.push(entries);
+    }
+    Ok(groups)
+}
+
+fn sort_directory_entries(attrs: &mut [VfAttrs]) {
+    if attrs
         .iter()
-        .enumerate()
-        .map(|(index, path)| {
-            unique_entries[unique_index_by_dir[path]]
-                .iter()
-                .map(|entry| {
-                    budget
-                        .charge_paths(entry.file.path())
-                        .map_err(|_| VfError::errno(index, libc::EFBIG as u32))?;
-                    Ok(entry.clone())
-                })
-                .collect()
-        })
-        .collect()
+        .all(|entry| entry.file.path().is_none_or(|path| path.to_str().is_some()))
+    {
+        // OsStr ordering on valid UTF-8 matches the old full-string ordering,
+        // without allocating a String for each comparison.
+        attrs.sort_by(|a, b| {
+            a.file
+                .path()
+                .unwrap_or(Path::new(""))
+                .as_os_str()
+                .cmp(b.file.path().unwrap_or(Path::new("")).as_os_str())
+        });
+    } else if attrs.len() <= 32 {
+        // Avoid cached-key setup for small or already ordered directories.
+        // Only actual lossy conversions allocate; valid keys remain borrowed.
+        attrs.sort_by(|a, b| {
+            a.file
+                .path()
+                .map(Path::to_string_lossy)
+                .unwrap_or_default()
+                .cmp(&b.file.path().map(Path::to_string_lossy).unwrap_or_default())
+        });
+    } else {
+        // Preserve lossy Unicode ordering (including stable ties) for native
+        // byte paths, but allocate each lossy key only once.
+        attrs.sort_by_cached_key(|entry| {
+            entry
+                .file
+                .path()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
+    }
 }
 /// Directory paths and their entries returned to Python by a tree walk.
 type WalkResult = Vec<(Py<PyString>, Vec<Py<PyDict>>)>;
@@ -1930,18 +1976,7 @@ impl NfsClient {
         let tree = self.with_fs(py, move |fs| {
             let mut sort_fn = |_dir: &Path, attrs: &mut Vec<VfAttrs>| {
                 if sort {
-                    attrs.sort_by(|a, b| {
-                        a.file
-                            .path()
-                            .map(|p| p.to_string_lossy().into_owned())
-                            .unwrap_or_default()
-                            .cmp(
-                                &b.file
-                                    .path()
-                                    .map(|p| p.to_string_lossy().into_owned())
-                                    .unwrap_or_default(),
-                            )
-                    });
+                    sort_directory_entries(attrs);
                 }
             };
             fs.walk_with_options_impl(&root, full_mask(), options, &mut sort_fn)
@@ -2427,6 +2462,110 @@ mod error_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "manual paired directory-sort performance control"]
+    fn directory_sort_performance_control() {
+        use std::os::unix::ffi::OsStringExt;
+        for count in [3, 8, 16, 32, 1024] {
+            for invalid in [false, true] {
+                for order in ["sorted", "reversed", "shuffled"] {
+                    let input: Vec<_> = (0..count)
+                        .map(|i| {
+                            let key = match order {
+                                "sorted" => i,
+                                "reversed" => count - i - 1,
+                                _ => (i * 17) % count,
+                            };
+                            let mut path = format!("/directory/{key:06}/entry").into_bytes();
+                            if invalid && i % 3 == 0 {
+                                path.push(255);
+                            }
+                            VfAttrs {
+                                file: FileOperand::from_os_path(Path::new(
+                                    &std::ffi::OsString::from_vec(path),
+                                )),
+                                size: i as u64,
+                                ..Default::default()
+                            }
+                        })
+                        .collect();
+                    let mut times = [Vec::new(), Vec::new()];
+                    for round in 0..9 {
+                        for optimized in if round % 2 == 0 {
+                            [false, true]
+                        } else {
+                            [true, false]
+                        } {
+                            let mut entries = input.clone();
+                            let start = std::time::Instant::now();
+                            if optimized {
+                                sort_directory_entries(&mut entries);
+                            } else {
+                                entries.sort_by(|a, b| {
+                                    a.file
+                                        .path()
+                                        .unwrap()
+                                        .to_string_lossy()
+                                        .into_owned()
+                                        .cmp(&b.file.path().unwrap().to_string_lossy().into_owned())
+                                });
+                            }
+                            times[usize::from(optimized)].push(start.elapsed().as_nanos());
+                            std::hint::black_box(entries);
+                        }
+                    }
+                    for samples in &mut times {
+                        samples.sort_unstable();
+                    }
+                    eprintln!(
+                        "directory_sort count={count} invalid={invalid} order={order} baseline_ns={} optimized_ns={}",
+                        times[0][4], times[1][4]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn directory_sort_preserves_lossy_string_order_and_stable_ties() {
+        use std::os::unix::ffi::OsStringExt;
+        for invalid in [false, true] {
+            let mut paths = vec![
+                b"/a/z".to_vec(),
+                b"/a.b".to_vec(),
+                b"/a/a".to_vec(),
+                b"/z".to_vec(),
+                b"/a".to_vec(),
+            ];
+            if invalid {
+                paths.extend([b"/a/\xff".to_vec(), b"/a/\xfe".to_vec()]);
+            }
+            for repetitions in [1, 5] {
+                let mut entries: Vec<_> = paths
+                    .iter()
+                    .cycle()
+                    .take(paths.len() * repetitions)
+                    .enumerate()
+                    .map(|(index, path)| VfAttrs {
+                        file: FileOperand::from_os_path(Path::new(&std::ffi::OsString::from_vec(
+                            path.clone(),
+                        ))),
+                        size: index as u64,
+                        ..Default::default()
+                    })
+                    .collect();
+                let mut expected = entries.clone();
+                expected
+                    .sort_by_key(|entry| entry.file.path().unwrap().to_string_lossy().into_owned());
+                sort_directory_entries(&mut entries);
+                assert_eq!(
+                    entries.iter().map(|entry| entry.size).collect::<Vec<_>>(),
+                    expected.iter().map(|entry| entry.size).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
 
     #[test]
     fn walk_rejects_invalid_depth_before_clamping_or_backend_io() {

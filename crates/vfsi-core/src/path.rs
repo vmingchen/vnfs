@@ -25,18 +25,18 @@ pub fn path_from_bytes(bytes: &[u8]) -> PathBuf {
 #[cfg(unix)]
 #[doc(hidden)]
 #[allow(clippy::result_unit_err)]
-pub fn split_path_bytes(path: &[u8]) -> Result<(Vec<u8>, Vec<u8>), ()> {
+pub fn split_path_bytes(path: &[u8]) -> Result<(&[u8], &[u8]), ()> {
     let trimmed = trim_slashes(path);
     if trimmed.is_empty() {
         return Err(());
     }
-    // Only the two returned buffers need ownership. Preserve interior
+    // Borrow both components from the input. Preserve interior
     // separators while dropping those immediately before the final component.
     let (dir, name) = match trimmed.iter().rposition(|&b| b == b'/') {
         Some(split) => (&trimmed[..split], &trimmed[split + 1..]),
         None => (&b""[..], trimmed),
     };
-    Ok((trim_slashes(dir).to_vec(), name.to_vec()))
+    Ok((trim_slashes(dir), name))
 }
 
 /// Join a directory path and a component name.
@@ -157,7 +157,7 @@ mod tests {
         let (dir, name) = split_path_bytes(b"/a/b\xff/c").unwrap();
         assert_eq!(dir, b"a/b\xff");
         assert_eq!(name, b"c");
-        assert_eq!(join_path_bytes(&dir, &name), b"a/b\xff/c");
+        assert_eq!(join_path_bytes(dir, name), b"a/b\xff/c");
         assert_eq!(normalize_bytes(b"a/./b/../c\xff"), b"a/c\xff");
     }
 

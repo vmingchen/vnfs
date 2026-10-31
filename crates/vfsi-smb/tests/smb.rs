@@ -82,6 +82,127 @@ fn connect() -> Option<SmbVecFs> {
 }
 
 #[test]
+fn concurrent_clients_keep_independent_io_and_shutdown() {
+    let Some(first) = connect() else {
+        return;
+    };
+    let mut clients = vec![first, connect().unwrap(), connect().unwrap()];
+    #[cfg(target_os = "linux")]
+    eprintln!(
+        "SMB three-client threads: {}",
+        fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find(|line| line.starts_with("Threads:"))
+            .unwrap()
+    );
+    let prefix = format!("/runtime-sharing-{}", std::process::id());
+    clients[0]
+        .ensure_dir_impl(Path::new(&prefix), 0o777)
+        .unwrap();
+    let started = std::time::Instant::now();
+    let clients = std::thread::scope(|scope| {
+        let workers: Vec<_> = clients
+            .into_iter()
+            .enumerate()
+            .map(|(index, mut client)| {
+                let path = format!("{prefix}/{index}");
+                scope.spawn(move || {
+                    let payload = vec![index as u8; 64 * 1024];
+                    for _ in 0..16 {
+                        client
+                            .vwrite_impl(&[WriteOp::at(
+                                FileOperand::from_path(&path),
+                                0,
+                                payload.as_slice(),
+                            )
+                            .with_creation()
+                            .borrowed()])
+                            .unwrap();
+                        let reads = client
+                            .vread_impl(&[ReadOp::at(
+                                FileOperand::from_path(&path),
+                                0,
+                                payload.len(),
+                            )])
+                            .unwrap();
+                        assert_eq!(reads[0].data, payload);
+                    }
+                    client
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    eprintln!("SMB concurrent three-client I/O: {:?}", started.elapsed());
+    let mut clients = clients.into_iter();
+    clients.next().unwrap().shutdown().unwrap();
+    for (index, mut client) in clients.enumerate() {
+        assert_eq!(
+            client
+                .vread_impl(&[ReadOp::at(
+                    FileOperand::from_path(&format!("{prefix}/{}", index + 1)),
+                    0,
+                    1
+                )])
+                .unwrap()[0]
+                .data,
+            [index as u8 + 1]
+        );
+        client.shutdown().unwrap();
+    }
+    cleanup_test_tree(Path::new(&prefix));
+}
+
+#[test]
+fn single_client_small_vectors_and_large_transfers() {
+    let Some(mut client) = connect() else {
+        return;
+    };
+    let prefix = format!("/runtime-single-{}", std::process::id());
+    client.ensure_dir_impl(Path::new(&prefix), 0o777).unwrap();
+    for (count, size) in [(32, 4096), (1, 2 * 1024 * 1024)] {
+        let files: Vec<_> = (0..count)
+            .map(|index| FileOperand::from_path(&format!("{prefix}/{count}-{index}")))
+            .collect();
+        let payloads: Vec<_> = (0..count)
+            .map(|index| vec![index as u8 + 1; size])
+            .collect();
+        let writes: Vec<_> = files
+            .iter()
+            .zip(&payloads)
+            .map(|(file, bytes)| {
+                WriteOp::new(file, VfOffset::At(0), bytes.as_slice()).with_creation()
+            })
+            .collect();
+        let reads: Vec<_> = files
+            .iter()
+            .map(|file| ReadOp::at(file.clone(), 0, size))
+            .collect();
+        let started = std::time::Instant::now();
+        for _ in 0..8 {
+            let written = client.vwrite_impl(&writes).unwrap();
+            assert_eq!(written.len(), count);
+            assert!(written.iter().all(|result| result.bytes_written == size));
+            let data = client.vread_impl(&reads).unwrap();
+            assert_eq!(data.len(), count);
+            for (result, payload) in data.iter().zip(&payloads) {
+                assert_eq!(&result.data, payload);
+            }
+        }
+        eprintln!(
+            "SMB single case={count}-{size} I/O: {:?}",
+            started.elapsed()
+        );
+    }
+    client.shutdown().unwrap();
+    cleanup_test_tree(Path::new(&prefix));
+}
+
+#[test]
 #[ignore = "requires VFSI_SMB_SERVER and a VFSI_SMB_DFS_SHARE advertising DFS"]
 fn dfs_share_is_rejected_at_connect_while_an_ordinary_share_works() {
     let server = std::env::var("VFSI_SMB_SERVER").expect("VFSI_SMB_SERVER is required");

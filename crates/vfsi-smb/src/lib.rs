@@ -174,6 +174,17 @@ pub struct SmbVecFs {
     last_writev_was_concurrent: bool,
 }
 
+// Synchronous callers poll request futures themselves; one worker drives the
+// connection's background protocol tasks between calls. Retain per-connection
+// ownership so shutdown and Python's post-fork reconnect need no global reactor.
+fn smb_runtime() -> VfResult<Runtime> {
+    Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .map_err(|error| VfError::transport(None, format!("create SMB runtime: {error}")))
+}
+
 impl SmbVecFs {
     /// Whether server-side copy was enabled for this connection.
     pub fn server_copy_enabled(&self) -> bool {
@@ -216,10 +227,7 @@ impl SmbVecFs {
         if options.connect_timeout.is_zero() || options.request_timeout.is_zero() {
             return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
-        let runtime = Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| VfError::transport(None, format!("create SMB runtime: {e}")))?;
+        let runtime = smb_runtime()?;
         let config = ClientConfig {
             addr: normalize_server(server),
             timeout: options.connect_timeout,
@@ -3542,6 +3550,26 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn bounded_runtime_drives_concurrent_callers_and_background_tasks() {
+        let runtime = smb_runtime().unwrap();
+        assert_eq!(runtime.metrics().num_workers(), 1);
+        let (send, receive) = std::sync::mpsc::channel();
+        runtime.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            send.send(42).unwrap();
+        });
+        // Background protocol work must run even outside block_on.
+        assert_eq!(receive.recv_timeout(Duration::from_secs(5)).unwrap(), 42);
+        std::thread::scope(|scope| {
+            for _ in 0..3 {
+                scope.spawn(|| {
+                    runtime.block_on(async { tokio::time::sleep(Duration::from_millis(1)).await });
+                });
+            }
+        });
+    }
 
     #[test]
     fn create_handle_survives_later_compound_waiter_errors() {

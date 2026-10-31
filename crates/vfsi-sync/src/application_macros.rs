@@ -96,6 +96,9 @@ macro_rules! __vfsi_client_methods {
             options: $crate::StreamOptions,
             mut callback: impl FnMut(usize, u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
         ) -> Result<Vec<$crate::StreamCompletion>> {
+            if paths.len() > 1 && self.limits().max_read_bytes() / options.chunk_size() > 1 {
+                return $crate::application::stream_cohorts(self, paths, options, callback);
+            }
             let mut output = Vec::new();
             for (index, path) in paths.iter().enumerate() {
                 let mut callback_error = None;

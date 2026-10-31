@@ -236,18 +236,11 @@ impl HandleBackend for NfsVecFs {
         // that also keeps creation-only mode changes off the winning file.
         let (opened, created) = if created {
             open_after_create_probe(excl, |create, exclusive| {
-                self.open_impl(
-                    &path_from_bytes(&dir),
-                    &name,
-                    access,
-                    create,
-                    exclusive,
-                    mode,
-                )
+                self.open_impl(&path_from_bytes(dir), name, access, create, exclusive, mode)
             })?
         } else {
             (
-                self.open_impl(&path_from_bytes(&dir), &name, access, false, false, mode)?,
+                self.open_impl(&path_from_bytes(dir), name, access, false, false, mode)?,
                 false,
             )
         };

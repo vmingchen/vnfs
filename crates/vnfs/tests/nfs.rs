@@ -907,6 +907,253 @@ fn setup_dir(name: &str) -> String {
     dir
 }
 
+#[test]
+fn public_stream_cohorts_reduce_compounds_without_regressing_single_file_streams() {
+    use vnfs::files::{StreamCompletion, StreamOptions, Vfsi};
+    let dir = setup_dir("stream-cohorts");
+    let telemetry = vnfs::nfs::Telemetry::default();
+    let version = vnfs::nfs::NfsVersion::try_from(
+        std::env::var("VNFS_TEST_MINOR")
+            .ok()
+            .map(|value| value.parse().unwrap()),
+    )
+    .unwrap();
+    let fs = Nfs::builder(test_host())
+        .version(version)
+        .telemetry(telemetry.clone())
+        .connect()
+        .unwrap();
+    for (count, size, chunk) in [
+        (20, 4096, 4096),
+        (20, 4096, 1024 * 1024),
+        (1, 3 * 1024 * 1024 + 17, 1024 * 1024),
+        (3, 3 * 1024 * 1024 + 17, 1024 * 1024),
+    ] {
+        let paths: Vec<_> = (0..count)
+            .map(|index| format!("{dir}/{count}-{size}-{chunk}-{index}"))
+            .collect();
+        let payload = vec![42; size];
+        fs.write_files(
+            &paths
+                .iter()
+                .map(|path| (path, payload.as_slice()))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let options =
+            StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(chunk).unwrap());
+        let mut sequential_calls = 0;
+        let mut vector_calls = 0;
+        let mut sequential_ns = 0;
+        let mut vector_ns = 0;
+        for round in 0..8 {
+            for vector in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let before = telemetry.snapshot().calls;
+                let started = std::time::Instant::now();
+                let mut lengths = vec![0; count];
+                if vector {
+                    let completions = fs
+                        .vstream(&paths, options, |index, offset, data| {
+                            assert_eq!(offset, lengths[index] as u64);
+                            assert!(data.iter().all(|&value| value == 42));
+                            lengths[index] += data.len();
+                            Ok(std::ops::ControlFlow::Continue(()))
+                        })
+                        .unwrap();
+                    assert_eq!(completions, vec![StreamCompletion::Complete; count]);
+                } else {
+                    for (index, path) in paths.iter().enumerate() {
+                        fs.read_stream_with_options(path, options, |offset, data| {
+                            assert_eq!(offset, lengths[index] as u64);
+                            assert!(data.iter().all(|&value| value == 42));
+                            lengths[index] += data.len();
+                            Ok(std::ops::ControlFlow::Continue(()))
+                        })
+                        .unwrap();
+                    }
+                }
+                let elapsed = started.elapsed().as_nanos();
+                let calls = telemetry.snapshot().calls - before;
+                assert_eq!(lengths, vec![size; count]);
+                if vector {
+                    vector_calls += calls;
+                    vector_ns += elapsed;
+                } else {
+                    sequential_calls += calls;
+                    sequential_ns += elapsed;
+                }
+            }
+        }
+        eprintln!(
+            "stream count={count} size={size} chunk={chunk}: scalar={sequential_calls} compounds/{sequential_ns}ns vector={vector_calls} compounds/{vector_ns}ns"
+        );
+        if count == 1 {
+            assert_eq!(vector_calls, sequential_calls);
+        } else {
+            assert!(
+                vector_calls < sequential_calls,
+                "cohorts must reduce real compounds"
+            );
+        }
+    }
+    fs.remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn public_stream_cohorts_follow_file_and_parent_symlinks() {
+    use vnfs::files::{ResourceLimits, StreamCompletion, StreamOptions, Vfsi};
+    let dir = setup_dir("stream-cohort-symlinks");
+    let fs = Nfs::builder(test_host())
+        .root(&dir)
+        .version(
+            vnfs::nfs::NfsVersion::try_from(
+                std::env::var("VNFS_TEST_MINOR")
+                    .ok()
+                    .map(|v| v.parse().unwrap()),
+            )
+            .unwrap(),
+        )
+        .connect()
+        .unwrap();
+    fs.create_dir("/real").unwrap();
+    fs.write_files(&[
+        ("/real/a", b"first-payload".as_slice()),
+        ("/real/b", b"second".as_slice()),
+    ])
+    .unwrap();
+    fs.symlink("real/a", "/leaf").unwrap();
+    fs.symlink("leaf", "/chain").unwrap();
+    fs.symlink("real", "/parent").unwrap();
+    let regular = "/real/b";
+    for chunk in [4, 1024 * 1024] {
+        // Three handles per cohort, including a symlink in a later cohort.
+        let fs = fs
+            .clone()
+            .with_limits(ResourceLimits::new().with_max_read_bytes(3 * chunk));
+        let options =
+            StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(chunk).unwrap());
+        for paths in [
+            vec!["/leaf", regular],
+            vec![regular, "/chain"],
+            vec!["/parent/a", regular],
+            vec![regular, "/parent/a"],
+            vec!["/leaf", "/parent/a", "/chain"],
+            vec![regular, regular, regular, "/parent/a", "/leaf"],
+        ] {
+            let mut expected = Vec::new();
+            for path in &paths {
+                let mut bytes = Vec::new();
+                let completion = fs
+                    .read_stream_with_options(path, options, |_, data| {
+                        bytes.extend_from_slice(data);
+                        Ok(std::ops::ControlFlow::Continue(()))
+                    })
+                    .unwrap();
+                assert_eq!(completion, StreamCompletion::Complete);
+                assert_eq!(
+                    bytes,
+                    if *path == regular {
+                        b"second".as_slice()
+                    } else {
+                        b"first-payload".as_slice()
+                    }
+                );
+                expected.push(bytes);
+            }
+            let mut actual = vec![Vec::new(); paths.len()];
+            let mut last = 0;
+            let completions = fs
+                .vstream(&paths, options, |index, offset, data| {
+                    assert!(index >= last, "callbacks must retain input order");
+                    last = index;
+                    assert_eq!(offset, actual[index].len() as u64);
+                    actual[index].extend_from_slice(data);
+                    Ok(std::ops::ControlFlow::Continue(()))
+                })
+                .unwrap_or_else(|error| panic!("{paths:?}, chunk={chunk}: {error}"));
+            assert_eq!(completions, vec![StreamCompletion::Complete; paths.len()]);
+            assert_eq!(actual, expected);
+        }
+    }
+    fs.remove_dir_all("/real").unwrap();
+    fs.remove_file("/leaf").unwrap();
+    fs.remove_file("/chain").unwrap();
+    fs.remove_file("/parent").unwrap();
+    Nfs::connect(test_host()).unwrap().remove_dir(&dir).unwrap();
+}
+
+#[test]
+fn public_stream_cohorts_preserve_symlink_errors_and_early_stop() {
+    use vnfs::files::{ResourceLimits, StreamCompletion, StreamOptions, Vfsi};
+    let dir = setup_dir("stream-cohort-symlink-errors");
+    let fs = Nfs::builder(test_host())
+        .root(&dir)
+        .version(
+            vnfs::nfs::NfsVersion::try_from(
+                std::env::var("VNFS_TEST_MINOR")
+                    .ok()
+                    .map(|v| v.parse().unwrap()),
+            )
+            .unwrap(),
+        )
+        .connect()
+        .unwrap()
+        .with_limits(ResourceLimits::new().with_max_read_bytes(12));
+    fs.write("/regular", b"hello").unwrap();
+    fs.symlink("missing", "/dangling").unwrap();
+    fs.symlink("loop", "/loop").unwrap();
+    let options = StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(4).unwrap());
+    for bad in ["/dangling", "/loop"] {
+        let expected = fs
+            .read_stream_with_options(bad, options, |_, _| panic!("invalid target"))
+            .unwrap_err();
+        for failing_index in [0, 1, 4] {
+            let mut paths = vec!["/regular"; failing_index + 2];
+            paths[failing_index] = bad;
+            let mut actual = vec![Vec::new(); paths.len()];
+            let error = fs
+                .vstream(&paths, options, |index, offset, bytes| {
+                    assert!(index < failing_index);
+                    assert_eq!(offset, actual[index].len() as u64);
+                    actual[index].extend_from_slice(bytes);
+                    Ok(std::ops::ControlFlow::Continue(()))
+                })
+                .unwrap_err();
+            assert_eq!(error.index(), Some(failing_index));
+            assert_eq!(error.kind(), expected.kind(), "{bad}: {error}");
+            assert_eq!(error.status(), expected.status(), "{bad}: {error}");
+            assert!(
+                actual[..failing_index]
+                    .iter()
+                    .all(|bytes| bytes == b"hello")
+            );
+            assert!(actual[failing_index..].iter().all(Vec::is_empty));
+        }
+        let mut calls = 0;
+        let result = fs
+            .vstream(
+                &["/regular", bad, "/regular"],
+                options,
+                |index, offset, bytes| {
+                    calls += 1;
+                    assert_eq!((index, offset, bytes), (0, 0, b"hell".as_slice()));
+                    Ok(std::ops::ControlFlow::Break(()))
+                },
+            )
+            .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(result, [StreamCompletion::Stopped { next_offset: 4 }]);
+    }
+    fs.remove_file("/regular").unwrap();
+    fs.remove_file("/dangling").unwrap();
+    fs.remove_file("/loop").unwrap();
+    Nfs::connect(test_host()).unwrap().remove_dir(&dir).unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // init / deinit
 // ---------------------------------------------------------------------------
@@ -2145,6 +2392,95 @@ fn openv_partial_failure_resumes_from_failing_index() {
         !c.exists_impl(Path::new(&f2)).unwrap(),
         "suffix was not attempted"
     );
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn openv_symlink_resume_keeps_prefix_and_cleans_up_suffix_transport_failures() {
+    use vfsi_sync::internal::faults::FaultInjector;
+    struct FailResumedBatch {
+        after_reply: Option<bool>,
+        dispatches: std::sync::atomic::AtomicUsize,
+    }
+    impl FaultInjector for FailResumedBatch {
+        fn check(&self, point: &OpenFaultPoint) -> vfsi_core::VfResult<()> {
+            if matches!(point, OpenFaultPoint::BeforeDispatch { .. }) {
+                self.dispatches.fetch_add(1, Ordering::SeqCst);
+            }
+            let fail_here = match self.after_reply {
+                Some(false) => matches!(point, OpenFaultPoint::BeforeDispatch { .. }),
+                Some(true) => matches!(point, OpenFaultPoint::AfterReply { .. }),
+                None => false,
+            };
+            if fail_here && self.dispatches.load(Ordering::SeqCst) == 2 {
+                return Err(VfError::transport(None, "resumed OPEN transport failure"));
+            }
+            Ok(())
+        }
+    }
+    let dir = setup_dir("openv-symlink-resume");
+    for (case, after_reply) in [
+        ("success", None),
+        ("before", Some(false)),
+        ("after", Some(true)),
+    ] {
+        let mut client = client();
+        let dir = format!("{dir}/{case}");
+        client.ensure_dir_impl(Path::new(&dir), 0o755).unwrap();
+        write_file(&mut client, Path::new(&format!("{dir}/target")), b"target");
+        client
+            .symlink_raw_impl(Path::new("target"), Path::new(&format!("{dir}/link")))
+            .unwrap();
+        let injector = Arc::new(FailResumedBatch {
+            after_reply,
+            dispatches: std::sync::atomic::AtomicUsize::new(0),
+        });
+        client.set_fault_injector(injector.clone());
+        let paths = [
+            format!("{dir}/prefix"),
+            format!("{dir}/link"),
+            format!("{dir}/suffix"),
+        ];
+        let refs: Vec<_> = paths.iter().map(Path::new).collect();
+        let exclusive = libc::O_CREAT | libc::O_EXCL | libc::O_RDWR;
+        let result =
+            client.vopen_raw_impl(&refs, &[exclusive, libc::O_RDONLY, exclusive], &[0o644; 3]);
+        if after_reply.is_some() {
+            let error = result.unwrap_err();
+            assert!(error.is_transport(), "{error}");
+            assert_eq!(
+                error.index(),
+                None,
+                "do not invent attribution for a lost suffix reply"
+            );
+            assert!(error.to_string().contains("resumed OPEN transport failure"));
+        } else {
+            let handles = result.unwrap();
+            assert_eq!(handles.len(), 3);
+            assert_eq!(client.test_open_handle_count(), 3);
+            client.vclose_impl(&handles).unwrap();
+        }
+        assert_eq!(
+            injector.dispatches.load(Ordering::SeqCst),
+            2,
+            "never replay the prefix or an ambiguous suffix"
+        );
+        assert_eq!(
+            client.test_open_handle_count(),
+            0,
+            "every confirmed descriptor must be closed"
+        );
+        assert!(
+            client.exists_impl(Path::new(&paths[0])).unwrap(),
+            "the exclusive prefix was created exactly once"
+        );
+        assert_eq!(
+            client.exists_impl(Path::new(&paths[2])).unwrap(),
+            after_reply != Some(false)
+        );
+        client.remove_paths_impl(&[Path::new(&dir)], true).unwrap();
+    }
+    Nfs::connect(test_host()).unwrap().remove_dir(&dir).unwrap();
 }
 
 #[cfg(feature = "test-faults")]

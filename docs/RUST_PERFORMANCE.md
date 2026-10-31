@@ -50,8 +50,8 @@ implementation details, not public ABI guarantees.
 NFS path planning borrows component slices while constructing compounds; the
 compound owns the wire payloads it needs. It restores a saved handle only for
 a relative walk, avoiding a redundant RESTOREFH before a root walk and keeping
-the reported operation count equal to the compound built. Byte-path splitting allocates only
-the returned parent/name buffers, and joining reserves the final length once.
+the reported operation count equal to the compound built. Byte-path splitting borrows
+the parent/name slices; only retained state takes ownership. Joining reserves the final length once.
 Attribute decoding borrows padded owner/group fields from the reply, and
 identity-cache hits borrow names without creating owned keys. The owner and
 group namespaces remain distinct under one shared FIFO capacity of 1024 entries.
@@ -89,6 +89,84 @@ first successor is stored inline to avoid a single-edge allocation; graph arrays
 are prepared before conflict comparisons for batches of two or more requests.
 Scalar writes need no graph arrays. The [scheduler benchmark](write-scheduler-benchmark.md)
 records release comparisons, sparse-case tradeoffs and measurement limits.
+
+### Streaming, dispatch, runtime and directory follow-up — 2026-10-30
+
+This follow-up implements items 5–9 of the October Rust review, against
+`34bfee8` on the ARM64 Linux VM (Rust 1.93.1).
+
+- Public multi-file streaming batches OPEN, the first READ of each file, and
+  CLOSE in cohorts of at most 32 handles. Requested payload fits the client's
+  aggregate read budget. Callbacks remain in input order and outside locks;
+  continuation buffers replace rather than accumulate consumed chunks. The
+  singleton/oversized-chunk path remains unchanged. Later semantic failures
+  do not hide an earlier callback's stop; transport failures are not replayed.
+  NFS read-only OPEN resolves a rejected symlink through its scalar path,
+  retaining confirmed prefix handles and batching the unattempted suffix.
+  Ordinary files need no extra symlink probes or compounds.
+- Read dispatch reserves bounded request storage and creates reordering maps
+  only for mixed batches. The range/path classification pass has no per-item
+  index bookkeeping for homogeneous inputs. Allocation regressions cover 1,
+  3, 32 and 1,024 requests, with mixed-input order/error-index tests as well.
+- SMB retains a separate multi-threaded runtime per connection, with one async
+  worker rather than one CPU-sized worker pool. Synchronous callers still poll
+  request futures; background tasks continue between calls. A global shared
+  runtime was rejected because Python reconnects after fork and inherited
+  runtime workers would not survive in the child. Connection shutdown remains
+  independent; no process-global reactor or new runtime API is introduced.
+- Python directory aggregation moves unique listings and clones only repeated
+  operands, charging every occurrence to the existing budgets. Directory sort
+  comparisons borrow valid UTF-8 paths. Small non-UTF-8 lists use borrowed/lossy
+  comparisons; larger ones cache the old lossy-Unicode keys once, retaining
+  stable ties. Cached keys add temporary per-entry storage on that fallback.
+- Parent/name splitting now borrows byte slices. NFS shares its current-parent
+  walk between ordinary operations and RENAME, keeping SAVEFH explicit. Tests
+  check borrowed storage, exact operation counts, saved-parent preservation and
+  negotiated byte/operation bounds, including non-UTF-8 paths.
+
+Measured controls (not universal throughput guarantees):
+
+| Control | Baseline | Optimized |
+| --- | ---: | ---: |
+| 1,024 whole-file dispatch, empty payloads | 38 allocations | 4 allocations; 1.25× local dispatch speed |
+| 1,024 range dispatch, empty payloads | 37 allocations | 3 allocations; 1.35× local dispatch speed |
+| Three SMB clients, process thread count including test harness | 14 | 5 |
+| Twenty 4 KiB NFS files, 4 KiB stream chunks | 120 compounds/run | 3 compounds/run |
+| Same small files, default 1 MiB chunks | 120 compounds/run | 14 compounds/run |
+| One 3 MiB+17-byte stream | 9 compounds/run | 9 compounds/run |
+| Three 3 MiB+17-byte streams | 27 compounds/run | 13 compounds/run |
+
+Dispatch used matched release libraries, nine alternating CPU-pinned pairs,
+and 60 cases: whole files, ranges, buffers, mixed buffers/paths, and mixed
+ranges/paths; exact, filtered, and absent iterator size hints; 1–1,024 requests.
+No case had a bootstrap interval entirely beyond a 5% slowdown. Initial small
+unknown-length and large-range regressions were fixed before the final run.
+SMB single-client 32-file vectors and 2 MiB transfers were within measurement
+noise. The final three-client paired median favored the bounded runtime by
+approximately 8%, but its confidence interval included parity.
+NFS counts are client-scoped telemetry from eight alternating scalar/vector
+runs on local NFSv4.2, without synthetic latency; these debug timing controls
+do not establish production throughput. Both NFSv4.1/v4.2 integration suites
+also exercise the compound-count assertions.
+
+Directory-sort controls include sorted, reversed and shuffled input, valid and
+non-UTF-8 paths, and 3, 8, 16, 32 and 1,024 entries. Cached-key setup regressed
+tiny lists in the first attempt; keeping the small-list comparator removed
+that regression. Run the manual control with:
+
+```sh
+CARGO_TARGET_DIR=target cargo test --manifest-path adapters/vfsi-python/Cargo.toml \
+  --all-features --lib directory_sort -- --include-ignored --nocapture
+```
+
+Prefetch can still do bounded extra I/O for siblings whose callbacks are never
+visited after cancellation; it is not a snapshot or a latency promise. A stream
+whose chunk fills the client read budget uses the scalar path. Existing
+read-into, short-I/O repair, recovery, error provenance, and no-replay policies
+are retained. Raw paired reports, probes and build provenance are kept in
+`target/opt5-9-results`. Baseline and candidate builds use separate target
+directories: sharing a Cargo artifact directory across source snapshots caused
+an invalid cached baseline, whose initial timings were discarded.
 
 ### Write-frontier comparison — 2026-10-18
 

@@ -663,84 +663,46 @@ impl CfhCursor {
     /// is cheaper than re-resolving from PUTROOTFH, so shared prefixes are
     /// never re-walked. Returns the leaf component and the number of ops
     /// appended, or None if the path is malformed.
-    fn set_parent(&mut self, c: &mut Compound, path: &[u8]) -> Option<(Vec<u8>, usize)> {
+    fn set_parent<'p>(&mut self, c: &mut Compound, path: &'p [u8]) -> Option<(&'p [u8], usize)> {
         let (dir, leaf) = split_path_bytes(path).ok()?;
-        if self.saved_dir.as_deref() == Some(&dir) {
-            let mut ops = 0;
-            if !self.at_saved {
-                // We are below the saved parent; climb back with RESTOREFH.
-                c.restorefh();
-                ops += 1;
-                self.at_saved = true;
-            }
-            return Some((leaf, ops));
-        }
-        let mut ops = 0;
-        if let Some(saved) = self.saved_dir.as_deref() {
-            let saved_comps = path_components(saved);
-            let target_comps = path_components(&dir);
-            let common = saved_comps
-                .clone()
-                .zip(target_comps.clone())
-                .take_while(|(saved, target)| saved == target)
-                .count();
-            let ups = saved_comps.count() - common;
-            let target_count = target_comps.clone().count();
-            let downs = target_count - common;
-            if ups + downs < 1 + target_count {
-                // Restore only for a walk relative to the saved directory.
-                // A root walk replaces the current handle directly.
-                if !self.at_saved {
-                    c.restorefh();
-                    ops += 1;
-                    self.at_saved = true;
-                }
-                for _ in 0..ups {
-                    c.lookupp();
-                    ops += 1;
-                }
-                for comp in target_comps.skip(common) {
-                    c.lookup(comp);
-                    ops += 1;
-                }
-                c.savefh();
-                ops += 1;
-                self.saved_dir = Some(dir.into_boxed_slice());
-                self.at_saved = true;
-                return Some((leaf, ops));
-            }
-        }
-        // Resolve the parent directory from the export root.
-        let mut ops = 1; // PUTROOTFH
-        c.putrootfh();
-        for comp in path_components(&dir) {
-            c.lookup(comp);
+        let changed = self.saved_dir.as_deref() != Some(dir);
+        let mut ops = self.walk_parent(c, dir);
+        if changed {
+            c.savefh();
             ops += 1;
+            self.saved_dir = Some(dir.into());
+            self.at_saved = true;
         }
-        c.savefh();
-        ops += 1;
-        self.saved_dir = Some(dir.into_boxed_slice());
-        self.at_saved = true;
         Some((leaf, ops))
     }
 
     /// Make the current fh the parent of `path` WITHOUT saving it (used by
     /// RENAME, which needs the saved-fh slot to keep the source directory).
-    fn set_current_parent(&mut self, c: &mut Compound, path: &[u8]) -> Option<(Vec<u8>, usize)> {
+    fn set_current_parent<'p>(
+        &mut self,
+        c: &mut Compound,
+        path: &'p [u8],
+    ) -> Option<(&'p [u8], usize)> {
         let (dir, leaf) = split_path_bytes(path).ok()?;
-        if self.saved_dir.as_deref() == Some(&dir) {
+        Some((leaf, self.walk_parent(c, dir)))
+    }
+
+    // Move only the current handle. The caller explicitly decides whether
+    // SAVEFH should replace the retained parent (RENAME must not replace it).
+    fn walk_parent(&mut self, c: &mut Compound, dir: &[u8]) -> usize {
+        if self.saved_dir.as_deref() == Some(dir) {
             let mut ops = 0;
             if !self.at_saved {
                 c.restorefh();
                 ops += 1;
                 self.at_saved = true;
             }
-            return Some((leaf, ops));
+            return ops;
         }
         let mut ops = 0;
         if let Some(saved) = self.saved_dir.as_deref() {
             let saved_comps = path_components(saved);
-            let target_comps = path_components(&dir);
+            let target_comps = path_components(dir);
             let common = saved_comps
                 .clone()
                 .zip(target_comps.clone())
@@ -766,17 +728,17 @@ impl CfhCursor {
                     ops += 1;
                 }
                 self.at_saved = false;
-                return Some((leaf, ops));
+                return ops;
             }
         }
         let mut ops = 1; // PUTROOTFH
         c.putrootfh();
-        for comp in path_components(&dir) {
+        for comp in path_components(dir) {
             c.lookup(comp);
             ops += 1;
         }
         self.at_saved = false; // current fh differs from the saved one
-        Some((leaf, ops))
+        ops
     }
 
     /// Make the current fh a known open-file handle (descriptor ops). The
@@ -1333,7 +1295,7 @@ impl NfsClient {
                         OPEN4_SHARE_DENY_NONE,
                         self.session.clientid,
                         &self.session.path_owner.name,
-                        &leaf,
+                        leaf,
                         None,
                         true,
                     );
@@ -1345,7 +1307,7 @@ impl NfsClient {
                         self.session.clientid,
                         &self.session.path_owner.name,
                         make_open_how(open.create),
-                        &leaf,
+                        leaf,
                     );
                 }
                 *target.opens_in_chunk += 1;
@@ -2554,10 +2516,10 @@ impl NfsClient {
                 let (parent, name) = split_path_bytes(path)
                     .map_err(|_| RpcError::op(caller, nfsstat4_NFS4ERR_INVAL))?;
                 let parent = self
-                    .resolve(&parent)
+                    .resolve(parent)
                     .map_err(|error| error.with_op_index(caller))?;
                 let (fh, stateid) = self
-                    .open(&parent, &name, access, OpenCreate::NoCreate)
+                    .open(&parent, name, access, OpenCreate::NoCreate)
                     .map_err(|error| error.with_op_index(caller))?;
                 let result = repair(self, &fh, &stateid);
                 self.close_path_or_defer(vec![CloseOp { fh, stateid }]);
@@ -3422,7 +3384,7 @@ impl NfsClient {
                             }
                         };
                         map.note_ops(nops);
-                        c.lookup(&leaf);
+                        c.lookup(leaf);
                         map.note_ops(1);
                     }
                     FileRef::Handle(fh) => {
@@ -3570,7 +3532,7 @@ impl NfsClient {
                             }
                         };
                         map.note_ops(nops);
-                        c.lookup(&leaf);
+                        c.lookup(leaf);
                         map.note_ops(1);
                     }
                     FileRef::Handle(fh) => {
@@ -3786,7 +3748,7 @@ impl NfsClient {
                             OPEN4_SHARE_DENY_NONE,
                             self.session.clientid,
                             &public_owner_names[global],
-                            &leaf,
+                            leaf,
                             Some(mode),
                             op.truncate,
                         );
@@ -3798,7 +3760,7 @@ impl NfsClient {
                         self.session.clientid,
                         &public_owner_names[global],
                         make_open_how(create),
-                        &leaf,
+                        leaf,
                     ),
                 }
                 map.note_ops(1);
@@ -3973,7 +3935,7 @@ impl NfsClient {
                     }
                 };
                 map.note_ops(nops);
-                c.remove(&leaf);
+                c.remove(leaf);
                 map.note_ops(1);
                 map.end();
                 // REMOVE leaves the current fh on the parent: cursor state
@@ -4079,7 +4041,7 @@ impl NfsClient {
                     }
                 };
                 map.note_ops(dnops);
-                c.rename(&sname, &dname);
+                c.rename(sname, dname);
                 map.note_ops(1);
                 map.end();
                 cursor.descend(); // RENAME moved the current fh
@@ -4941,6 +4903,70 @@ mod tests {
             .unwrap();
         assert_eq!(ops, 0);
         assert_eq!(cursor.saved_dir.as_deref(), Some(b"a/c".as_slice()));
+    }
+
+    #[test]
+    fn shared_parent_navigation_preserves_save_restore_and_exact_operation_counts() {
+        let parents: &[Option<&[u8]>] =
+            &[None, Some(b""), Some(b"a"), Some(b"a/b"), Some(b"z/\xff")];
+        for &saved in parents {
+            for path in [
+                b"leaf".as_slice(),
+                b"a/leaf",
+                b"a/b/leaf",
+                b"a/c/leaf",
+                b"z/\xff/leaf",
+                b"/a//b/leaf///",
+            ] {
+                for at_saved in [false, true] {
+                    for save in [false, true] {
+                        let (dir, expected_leaf) = super::split_path_bytes(path).unwrap();
+                        let components: Vec<_> = super::path_components(dir).collect();
+                        let walk = match saved {
+                            Some(saved) if saved == dir => usize::from(!at_saved),
+                            Some(saved) => {
+                                let prior: Vec<_> = super::path_components(saved).collect();
+                                let common = prior
+                                    .iter()
+                                    .zip(&components)
+                                    .take_while(|(a, b)| a == b)
+                                    .count();
+                                let relative = prior.len() + components.len() - 2 * common;
+                                if relative < 1 + components.len() {
+                                    relative + usize::from(!at_saved)
+                                } else {
+                                    1 + components.len()
+                                }
+                            }
+                            None => 1 + components.len(),
+                        };
+                        let mut cursor = super::CfhCursor {
+                            saved_dir: saved.map(Into::into),
+                            at_saved,
+                        };
+                        let mut compound = crate::compound::Compound::new();
+                        let (leaf, count) = if save {
+                            cursor.set_parent(&mut compound, path)
+                        } else {
+                            cursor.set_current_parent(&mut compound, path)
+                        }
+                        .unwrap();
+                        assert_eq!(
+                            leaf.as_ptr(),
+                            expected_leaf.as_ptr(),
+                            "leaf must remain borrowed"
+                        );
+                        assert_eq!(count, walk + usize::from(save && saved != Some(dir)));
+                        assert_eq!(compound.op_count(), count);
+                        assert_eq!(
+                            cursor.saved_dir.as_deref(),
+                            if save { Some(dir) } else { saved }
+                        );
+                        assert_eq!(cursor.at_saved, save || saved == Some(dir));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

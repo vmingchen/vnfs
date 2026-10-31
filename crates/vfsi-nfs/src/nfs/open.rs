@@ -282,17 +282,17 @@ impl NfsVecFs {
             let full = self.server_vf_path(f).map_err(|e| e.with_index(i))?;
             let (dir, name) =
                 split_path_bytes(path_bytes(&full)).map_err(|_| VfError::errno(i, ERR_NOENT))?;
-            let dirfh = match dir_cache.get(dir.as_slice()) {
+            let dirfh = match dir_cache.get(dir) {
                 Some(fh) => fh.clone(),
                 None => {
                     let fh = self
-                        .resolve_path(&path_from_bytes(&dir), true)
+                        .resolve_path(&path_from_bytes(dir), true)
                         .map_err(|e| e.with_index(i))?;
-                    dir_cache.insert(dir.into_boxed_slice(), fh.clone());
+                    dir_cache.insert(dir.into(), fh.clone());
                     fh
                 }
             };
-            lookups.push((i, dirfh, name));
+            lookups.push((i, dirfh, name.to_vec()));
         }
         if lookups.is_empty() {
             return Ok(vec![None; files.len()]);
@@ -324,9 +324,9 @@ impl NfsVecFs {
                     let (dir, name2) = split_path_bytes(path_bytes(&full))
                         .map_err(|_| VfError::errno(*orig, ERR_NOENT))?;
                     let dirfh2 = self
-                        .resolve_path(&path_from_bytes(&dir), true)
+                        .resolve_path(&path_from_bytes(dir), true)
                         .map_err(|e| e.with_index(*orig))?;
-                    let create = match self.nfs.lookup_getattr(&dirfh2, &name2) {
+                    let create = match self.nfs.lookup_getattr(&dirfh2, name2) {
                         Ok(_) => crate::client::OpenCreate::NoCreate,
                         Err(e) if e.status == nfsstat4_NFS4ERR_NOENT => {
                             if !creation[*orig] {
@@ -340,7 +340,7 @@ impl NfsVecFs {
                         *orig,
                         crate::client::OpenOp {
                             dir: dirfh2,
-                            name: name2,
+                            name: name2.to_vec(),
                             access,
                             create,
                         },

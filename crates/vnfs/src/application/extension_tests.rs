@@ -412,7 +412,12 @@ impl Probe {
     ) -> Result<Vec<crate::ReadResult>> {
         self.calls.set(self.calls.get() + 1);
         let ops: Vec<_> = ops.into_iter().collect();
-        assert!(ops.iter().all(|op| op.whole_file_path().is_some()));
+        if !ops.iter().all(|op| op.whole_file_path().is_some()) {
+            // Cohort streams use descriptor ranges. Keep whole-file fault
+            // injection scoped to read_files rather than corrupting streams.
+            assert_eq!(self.shape.get(), 0);
+            return self.mounted.vread(ops, options);
+        }
         if self.shape.get() == 6 {
             return Err(crate::Error::transport(None, "lost reply"));
         }

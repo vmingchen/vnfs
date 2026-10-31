@@ -246,8 +246,8 @@ impl NfsVecFs {
         let full = self.server_vf_path(&FileOperand::from_os_path(path))?;
         let (dir, name) =
             split_path_bytes(path_bytes(&full)).map_err(|_| VfError::errno(0, ERR_NOENT))?;
-        let parent = self.resolve_path(&path_from_bytes(&dir), true)?;
-        Ok((parent, name))
+        let parent = self.resolve_path(&path_from_bytes(dir), true)?;
+        Ok((parent, name.to_vec()))
     }
 
     /// Drive recursive removal. Directories are processed depth-first (memory
