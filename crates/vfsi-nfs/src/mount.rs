@@ -45,13 +45,10 @@ impl NfsMount {
                 .with_context("mount path must be absolute", path.as_ref()));
         }
         let path = fs::canonicalize(path.as_ref()).map_err(|error| {
-            VfError::errno(0, error.raw_os_error().unwrap_or(libc::EIO) as u32)
-                .with_context("from_mount", path.as_ref())
+            VfError::from_io(0, error).with_context("from_mount", path.as_ref())
         })?;
-        let metadata = fs::metadata(&path).map_err(|error| {
-            VfError::errno(0, error.raw_os_error().unwrap_or(libc::EIO) as u32)
-                .with_context("from_mount", &path)
-        })?;
+        let metadata = fs::metadata(&path)
+            .map_err(|error| VfError::from_io(0, error).with_context("from_mount", &path))?;
         if !metadata.is_dir() {
             return Err(VfError::errno(0, libc::ENOTDIR as u32).with_context("from_mount", &path));
         }

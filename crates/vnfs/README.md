@@ -61,22 +61,23 @@ which is not a security sandbox.
 
 ## Small-file benchmark
 
-For 20 independent 4 KiB files on NFS-Ganesha 15.3 (NFSv4.2), with approximately
-1 ms added RTT using loopback `netem`, medians of 30 trials were:
+The [benchmark driver][benchmark] compares the public Rust API with
+`std::fs` over a kernel NFS mount. It excludes connection setup and payload
+verification from both timings, alternates client order, and records actual
+COMPOUND/RPC counts. Fresh-path trials and warmed, reused-path trials are separate.
 
-| Workload | Vector backend | Kernel NFS + `std::fs` | Speedup |
-| --- | ---: | ---: | ---: |
-| Cold write | 38.14 ms | 144.39 ms | 3.79× |
-| Cold read | 2.41 ms | 80.65 ms | 33.49× |
-| Warm write | 40.86 ms | 156.46 ms | 3.83× |
-| Warm read | 1.88 ms | 55.12 ms | 29.28× |
+```console
+cargo run --release -p vnfs --example small_files_benchmark -- \
+  --host 127.0.0.1 --direct-root /export --mount-root /mnt/nfs \
+  --files 20 --bytes 4096 --rounds 30 --api both
+```
 
-These measurements use the **native backend**, not the `write_files` helper
-above: each vector completed in one COMPOUND. Connection setup is excluded;
-client order alternates, cold trials use fresh paths, and warm trials reuse
-files after an untimed warm-up. vNFS retains no file data between these calls.
-Results depend on server limits, cache policy, network, and workload—not a
-universal speedup. See the [benchmark driver][benchmark] to reproduce them.
+`--api both` reports the public API and native backend separately; the default
+is `public`. Add `--reuse-paths` for warm trials. The direct root and kernel mount
+must address the same export. vNFS retains no file data between these calls.
+Earlier speedup figures are withdrawn pending a controlled rerun: the old
+driver timed payload verification only for the kernel client. Results depend on
+server limits, cache policy, network latency, and workload.
 
 ## Choose your workflow
 

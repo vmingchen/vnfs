@@ -487,10 +487,13 @@ mod tests {
     #[test]
     fn adb_layout_overflow_fails_before_creating_the_file() {
         let (_root, mut fs) = fs("adb-overflow");
-        let pattern = Adb::blocknum_only("/overflow", u64::MAX, 2, 2, 0, 0);
-        let error = fs.vwrite_adb_impl(&[pattern]).unwrap_err();
-        assert_eq!(error.raw_code(), libc::EOVERFLOW as u32);
-        assert!(!fs.exists_impl(Path::new("/overflow")).unwrap());
+        for (count, stride) in [(2, 2), (usize::MAX, 1)] {
+            let pattern = Adb::blocknum_only("/overflow", u64::MAX, stride, count, 0, 0);
+            let error = fs.vwrite_adb_impl(&[pattern]).unwrap_err();
+            assert_eq!(error.index(), Some(0));
+            assert_eq!(error.raw_code(), libc::EOVERFLOW as u32);
+            assert!(!fs.exists_impl(Path::new("/overflow")).unwrap());
+        }
     }
 
     // ------------------------------------------------------------------

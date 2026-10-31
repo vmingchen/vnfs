@@ -4,8 +4,7 @@ use crate::{Error, Result};
 use std::path::{Path, PathBuf};
 
 fn io_error(path: &Path, error: std::io::Error) -> Error {
-    Error::errno(0, error.raw_os_error().unwrap_or(libc::EIO) as u32)
-        .with_context("path mapper", path)
+    Error::from_io(0, error).with_context("path mapper", path)
 }
 
 /// Resolution policy for the final component of an application operand.

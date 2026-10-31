@@ -1,4 +1,4 @@
-//! Allocation regressions for portable read dispatch, excluding payload storage.
+//! Allocation regressions for dispatch and ADB planning, excluding payload storage.
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
@@ -45,6 +45,21 @@ fn measured<T>(run: impl FnOnce() -> T) -> (T, usize) {
     (output, count)
 }
 struct File;
+
+#[test]
+fn adb_planning_uses_constant_storage_even_for_huge_valid_counts() {
+    let pattern = vfsi_core::Adb::blocknum_only("/unused", 0, 0, usize::MAX, 0, 0);
+    let (mut layout, allocations) =
+        measured(|| vfsi_core::internal::adb_layout(&pattern, 0).unwrap());
+    assert_eq!(allocations, 0, "layout must not allocate per-block storage");
+    assert_eq!(layout.len(), usize::MAX);
+    assert_eq!(layout.next(), Some((0, Some(0), None)));
+    assert_eq!(
+        layout.next_back(),
+        Some(((usize::MAX - 1) as u64, Some(0), None))
+    );
+}
+
 impl FileHandle for File {
     fn path(&self) -> &Path {
         Path::new("/file")

@@ -15,6 +15,7 @@ libntirpc-sys = { workspace = true }
 
 [build-dependencies]
 bindgen = { version = "=0.73.2", default-features = false, features = ["runtime"] }
+cc = "1"
 
 [lints]
 workspace = true

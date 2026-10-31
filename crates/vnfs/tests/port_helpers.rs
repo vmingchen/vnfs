@@ -47,6 +47,57 @@ fn mapping_preserves_final_links_and_rejects_escapes_and_destructive_dot_paths()
 }
 
 #[test]
+fn local_path_setup_errors_retain_the_original_io_source() {
+    let root = tempfile::tempdir().unwrap();
+    let missing = root.path().join("missing");
+    for error in [
+        PathMapper::new(&missing).unwrap_err(),
+        vnfs::mounted::Auto::new(&missing).unwrap_err(),
+        vnfs::nfs::Nfs::discover_mount(&missing).unwrap_err(),
+    ] {
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(error.path(), Some(missing.as_path()));
+        let source = std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .unwrap();
+        assert_eq!(source.raw_os_error(), Some(libc::ENOENT));
+    }
+}
+
+#[test]
+fn writer_bridge_preserves_custom_error_kind_and_source_without_replay() {
+    struct Writer(io::ErrorKind, usize);
+    impl Write for Writer {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            self.1 += 1;
+            Err(io::Error::new(self.0, "writer-specific diagnostic"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            panic!("helper must not flush caller's writer")
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let fs = Posix::new(root.path()).unwrap();
+    fs.write("/source", b"data").unwrap();
+    for kind in [io::ErrorKind::TimedOut, io::ErrorKind::PermissionDenied] {
+        let mut writer = Writer(kind, 0);
+        let error = copy_to_writer(&fs, "/source", &mut writer, StreamOptions::new()).unwrap_err();
+        assert_eq!(error.kind(), kind);
+        assert_eq!(error.status(), None, "do not fabricate an OS errno");
+        assert_eq!(error.operation(), Some("copy_to_writer"));
+        assert_eq!(error.path(), Some(Path::new("/source")));
+        let source = std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .unwrap();
+        assert_eq!(source.kind(), kind);
+        assert_eq!(source.to_string(), "writer-specific diagnostic");
+        assert_eq!(writer.1, 1, "failed output must not be replayed");
+    }
+}
+
+#[test]
 fn writer_bridge_handles_short_writes_and_never_replays_failed_output() {
     struct Writer {
         bytes: Vec<u8>,

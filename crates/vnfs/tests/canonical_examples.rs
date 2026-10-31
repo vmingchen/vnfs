@@ -10,6 +10,9 @@ mod directories;
 #[path = "../examples/open_handles.rs"]
 mod open_handles;
 #[allow(dead_code)]
+#[path = "../examples/small_files_benchmark.rs"]
+mod small_files_benchmark;
+#[allow(dead_code)]
 #[path = "../examples/stream_file.rs"]
 mod stream_file;
 

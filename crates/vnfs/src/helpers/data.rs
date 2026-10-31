@@ -18,10 +18,7 @@ pub fn copy_to_writer(
     let mut write_error = None;
     let completion = source.read_stream_with_options(path, options, |_, data| {
         if let Err(error) = writer.write_all(data) {
-            write_error = Some(
-                Error::errno(0, error.raw_os_error().unwrap_or(libc::EIO) as u32)
-                    .with_context("copy_to_writer", path),
-            );
+            write_error = Some(Error::from_io(0, error).with_context("copy_to_writer", path));
             return Ok(std::ops::ControlFlow::Break(()));
         }
         written = written

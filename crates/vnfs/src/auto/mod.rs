@@ -25,10 +25,8 @@ impl Auto {
     /// root `/work` plus application `/a` addresses host `/work/a`.
     /// The root is a namespace convention, not a security sandbox.
     pub fn new(root: impl AsRef<Path>) -> VfResult<Self> {
-        let root = fs::canonicalize(root.as_ref()).map_err(|e| {
-            VfError::errno(0, e.raw_os_error().unwrap_or(libc::EIO) as u32)
-                .with_context("connect", root.as_ref())
-        })?;
+        let root = fs::canonicalize(root.as_ref())
+            .map_err(|e| VfError::from_io(0, e).with_context("connect", root.as_ref()))?;
         Ok(Self {
             mounted: Posix::new(&root)?.inner,
             root,
