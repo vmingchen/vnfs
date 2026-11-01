@@ -5,27 +5,27 @@ schema_version = 1
 [platform]
 canonical = "https://github.com/vmingchen/vnfs"
 mirror = "https://github.com/vfsi/vfsi"
-code_revision = "36e4c09cae24a8f8760a5308a18b07076c33cba3"
+code_revision = "59ac336f902175d7ca15aefb3d6e0cf54824eda1"
 
 [rust]
 nfsv41-sys = { version = "0.1.14", revision = "5ed13dbb8796a5869b6794401e15bfe4ea4c7866" }
-vfsi-core = { version = "0.1.14", revision = "7dbee1b76d1cfc999d2d42bf1771d72759c8677e" }
-vfsi-local = { version = "0.1.13", revision = "7dbee1b76d1cfc999d2d42bf1771d72759c8677e" }
-vfsi-nfs = { version = "0.1.14", revision = "7dbee1b76d1cfc999d2d42bf1771d72759c8677e" }
+vfsi-core = { version = "0.1.15", revision = "59ac336f902175d7ca15aefb3d6e0cf54824eda1" }
+vfsi-local = { version = "0.1.14", revision = "59ac336f902175d7ca15aefb3d6e0cf54824eda1" }
+vfsi-nfs = { version = "0.1.15", revision = "59ac336f902175d7ca15aefb3d6e0cf54824eda1" }
 vfsi-posix = { version = "0.1.5", revision = "7dbee1b76d1cfc999d2d42bf1771d72759c8677e" }
-vfsi-smb = { version = "0.1.12", revision = "7dbee1b76d1cfc999d2d42bf1771d72759c8677e" }
-vfsi-sync = { version = "0.1.15", revision = "7dbee1b76d1cfc999d2d42bf1771d72759c8677e" }
+vfsi-smb = { version = "0.1.13", revision = "59ac336f902175d7ca15aefb3d6e0cf54824eda1" }
+vfsi-sync = { version = "0.1.16", revision = "59ac336f902175d7ca15aefb3d6e0cf54824eda1" }
 vfsi-uring = { version = "0.1.5", revision = "7dbee1b76d1cfc999d2d42bf1771d72759c8677e" }
 vnfs = { version = "0.0.27", revision = "7dbee1b76d1cfc999d2d42bf1771d72759c8677e" }
 
 [c]
 package = "vfsi-c"
-version = "0.3.10"
+version = "0.3.11"
 abi = 3
-revision = "7dbee1b76d1cfc999d2d42bf1771d72759c8677e"
-# Scoped identity is in development source, not the published C artifact.
+revision = "59ac336f902175d7ca15aefb3d6e0cf54824eda1"
+# First implementation commit; shipped in vfsi-c 0.3.11 while preserving ABI v3.
 scoped_identity_revision = "037759665d9857e216702b6a92d53e37ff8f4fb5"
-scoped_identity_published = false
+scoped_identity_published = true
 
 [python]
 nfs4fs = { version = "0.3.12", revision = "7dbee1b76d1cfc999d2d42bf1771d72759c8677e" }
@@ -36,5 +36,5 @@ vsmbfs = { version = "0.1.5", revision = "7dbee1b76d1cfc999d2d42bf1771d72759c867
 [ports]
 coreutils = "3dc073281b1465b479c4f5bd863099b446835064"
 findutils = "7c936a5cb9b26d304e99ebcfce6df5545d4388a4"
-git = "236317232c6a751c66eb22b51fbeaf1422eee9e7"
+git = "bdf9cc3b75fe030137ea12273b8e5617a8cd8ed2"
 rsync = "81a691c4c53b9acf18ba89057729cc167a617702"

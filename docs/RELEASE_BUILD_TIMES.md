@@ -1,14 +1,50 @@
 # Release build-time baseline
 
-These are observed GitHub Actions timings, retained for a separate release-speed
-investigation. Durations are wall-clock job or step times from the GitHub Actions
-API, not estimates of CPU time. Jobs run concurrently.
+These are observed release timings, retained for a separate release-speed
+investigation. GitHub Actions durations are wall-clock job or step times from
+the API; local measurements identify the command and environment. Neither is
+an estimate of CPU time. CI jobs can run concurrently.
 
 For future records, include the source revision, package versions, workflow
 links, timestamps/timezone, and whether each duration is a workflow, job, build
 step, or complete publish command. Record cache/verification conditions when
 known. Do not compare warm, cold, emulated, and verification-skipping runs as
 though they measured the same work. Preserve older records unchanged.
+
+## 2026-11-01 scoped C identity release
+
+Source: `59ac336f902175d7ca15aefb3d6e0cf54824eda1`. The exact release commit's
+[18-job CI run](https://github.com/vmingchen/vnfs/actions/runs/41317818524)
+passed before publication. Dates in this entry are UTC.
+
+The six crates were published sequentially from the VM's clean checkout with
+`cargo publish -p PACKAGE --locked`. Local Cargo verification was enabled for
+every crate. These command wall times include packaging, verification builds,
+upload, and index wait, using the existing VM build cache:
+
+| Crate | Complete publish command wall time |
+|---|---:|
+| vfsi-core 0.1.15 | 3.699s |
+| vfsi-sync 0.1.16 | 4.974s |
+| vfsi-local 0.1.14 | 3.460s |
+| vfsi-nfs 0.1.15 | 10.098s |
+| vfsi-smb 0.1.13 | 7.439s |
+| vfsi-c 0.3.11 | 15.063s |
+| Sequential total | 44.733s |
+
+The published C SDK was then built with Git's registry-only SDK builder on
+native aarch64 Linux (4 vCPUs, Rust 1.93.1): **68.74s** wall time, **224.91s**
+user CPU, and **19.20s** system CPU. Its Cargo target directory was fresh, while
+Cargo's download cache was reused. Git's C build against that SDK took
+**52.18s** wall time, **83.86s** user CPU, and **12.31s** system CPU. Changing
+the SDK include path caused C recompilation; the existing Rust SDK artifacts
+were reused. These are separate build-command measurements, not CI workflow
+durations or controlled cold/warm comparisons.
+
+The resulting SDK passed C smoke tests against local storage, NFSv4.1, and
+NFSv4.2, followed by Git's full VFSI parity script. Registry archive checksums,
+source provenance, per-crate publish logs, and SDK/Git build logs are retained
+on the VM in `/home/ubuntu/vfsi-c-release-2026-11-01/`.
 
 ## 2026-10-16 coordinated releases
 

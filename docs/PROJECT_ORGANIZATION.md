@@ -297,9 +297,10 @@ registered port revisions plus the current development code baseline. Rust
 release revisions come from the published crate's `.cargo_vcs_info.json`;
 Python revisions come from immutable release tags. A version number alone does
 not imply that unreleased development changes are present in a registry artifact.
-In particular, scoped C identity starts at `0377596`; published `vfsi-c` 0.3.10
-predates it. Git's pinned-public-SDK build remains a tracked follow-up until the
-next C release; platform compatibility uses the development SDK.
+Scoped C identity starts at `0377596` and is published in `vfsi-c` 0.3.11,
+preserving ABI v3. Git pins that public SDK and uses the header and library paths
+emitted by its SDK builder. Its public-package CI exercises the released SDK;
+platform compatibility separately tests the current development SDK.
 
 Keep package repository, documentation, issue, and changelog URLs directed to
 `vmingchen/vnfs`. The organization mirror is a discovery entry point, not a
