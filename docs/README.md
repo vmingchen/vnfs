@@ -20,6 +20,7 @@ with the [Rust crate guides](../crates/vnfs/src/guides) and compiled into rustdo
 
 | Record | Scope |
 |---|---|
+| [Frozen du traversal baseline](du-benchmark.md) | vnfs 0.0.27; kernel/VFSI output parity, paired timings, actual RPC captures, and controlled delay on one metadata-heavy NFS tree. |
 | [Rust performance notes and audits](RUST_PERFORMANCE.md) | Current implementation notes, dated allocation/scheduler audits, and follow-up candidates. |
 | [io_uring versus POSIX](uring-benchmark.md) | October 10–11, 2026 experiments; distinguish borrowed/owned reads and ring/adaptive execution. |
 | [Complete-write scheduler benchmark](write-scheduler-benchmark.md) | October 11, 2026 paired comparisons, checked-in raw samples, and build-verification evidence. |

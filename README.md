@@ -47,6 +47,10 @@ combine them into protocol-native compounds. One `fs.cat([...])` or
 `fs.pipe({...})` can therefore complete in a bounded number of network round
 trips instead of scaling linearly with the file count.
 
+The [frozen `du` benchmark](docs/du-benchmark.md) compares kernel and VFSI
+traversal on one NFS tree, with output parity, measured RPC counts, and native
+plus controlled-delay results.
+
 ## Python quick start
 
 `nfs4fs` is currently Linux-only and supports CPython 3.9 and newer.

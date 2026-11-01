@@ -1,0 +1,15 @@
+{
+  "benchmark_tool_tests": {
+    "passed": 9,
+    "skipped": 0,
+    "tshark_decoder_fixture_executed": true
+  },
+  "script_tests": {
+    "passed": 41
+  },
+  "local_smoke": "passed",
+  "full_server_independent_suite": "passed",
+  "raw_artifact_verification": "all 44 output digests and root totals, all 12 RPC captures and pcap digests verified",
+  "network_cleanup": "temporary namespaces, links and mounts removed; original loopback qdisc unchanged",
+  "no_timing_gate": "performance collection is an explicit lab run, not ordinary CI"
+}

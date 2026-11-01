@@ -217,6 +217,8 @@ jobs:
                 /tmp/vfsi-packaged-c-smoke /tmp/vfsi-packaged-c-root
             fi
           done <"$package_list"
+      - name: Test frozen du benchmark tooling
+        run: python3 -m unittest discover -s benchmarks/du -v
       - name: Validate project organization registry
         run: |
           python ci/check-ecosystem.py
