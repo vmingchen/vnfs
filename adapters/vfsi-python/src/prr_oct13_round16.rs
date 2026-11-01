@@ -51,19 +51,23 @@ fn completed_and_empty_siblings_are_not_replayed() {
 #[test]
 fn explicit_eof_completes_a_short_range() {
     Python::initialize();
-    let root = TestRoot::new();
-    std::fs::write(root.0.join("a"), b"abc").unwrap();
-    let mut backend = FaultBackend::new(&root.0, None);
-    backend.read_limit = Some(2);
-    let calls = backend.read_calls.clone();
-    Python::attach(|py| {
-        let (data, errors) = client(backend)
-            .read_many(py, vec!["/a".into()], vec![0], Some(vec![Some(10)]))
-            .unwrap();
-        assert!(errors.is_empty());
-        assert_eq!(data, vec![Some(b"abc".to_vec())]);
-        assert_eq!(calls.lock().unwrap().len(), 2);
-    });
+    for (explicit_eof, expected_calls) in [(false, 3), (true, 2)] {
+        let root = TestRoot::new();
+        std::fs::write(root.0.join("a"), b"abc").unwrap();
+        let mut backend = FaultBackend::new(&root.0, None);
+        backend.read_limit = Some(2);
+        backend.read_eof_at = explicit_eof.then_some(3);
+        let calls = backend.read_calls.clone();
+        Python::attach(|py| {
+            let (data, errors) = client(backend)
+                .read_many(py, vec!["/a".into()], vec![0], Some(vec![Some(10)]))
+                .unwrap();
+            assert!(errors.is_empty());
+            assert_eq!(data, vec![Some(b"abc".to_vec())]);
+            // POSIX needs a zero-byte probe; an explicit protocol EOF does not.
+            assert_eq!(calls.lock().unwrap().len(), expected_calls);
+        });
+    }
 }
 
 #[test]

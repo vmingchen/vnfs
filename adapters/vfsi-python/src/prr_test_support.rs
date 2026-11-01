@@ -53,6 +53,7 @@ pub(crate) struct FaultBackend {
     pub(crate) write_errors: std::collections::VecDeque<VfError>,
     pub(crate) read_error_on_call: usize,
     pub(crate) read_limit: Option<usize>,
+    pub(crate) read_eof_at: Option<u64>,
     pub(crate) read_requests: ReadRequestTrace,
     pub(crate) grow_before_read: Option<(PathBuf, Vec<u8>)>,
     pub(crate) read_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
@@ -75,6 +76,7 @@ impl FaultBackend {
             write_errors: Default::default(),
             read_error_on_call: 0,
             read_limit: None,
+            read_eof_at: None,
             read_requests: Arc::default(),
             grow_before_read: None,
             read_calls: Arc::default(),
@@ -176,7 +178,13 @@ impl VectorBackend for FaultBackend {
                 )
             })
             .collect();
-        self.inner.vread_impl(&limited)
+        let mut results = self.inner.vread_impl(&limited)?;
+        if let Some(end) = self.read_eof_at {
+            for result in &mut results {
+                result.eof |= result.offset.saturating_add(result.data.len() as u64) >= end;
+            }
+        }
+        Ok(results)
     }
     fn vwrite_impl(
         &mut self,

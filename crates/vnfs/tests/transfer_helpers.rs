@@ -1109,8 +1109,10 @@ fn collecting_adapter_uses_bounded_stream_chunks_without_small_read_waves() {
     );
     assert_eq!(&output[1..], payload);
     let calls = fs.calls.borrow();
-    assert_eq!(calls.read_attempts, 2);
-    assert_eq!(calls.reads, 2);
+    // Two bounded data reads plus an EOF probe: a positive short POSIX read
+    // proves progress, not EOF. Keep the exact bound to catch small-read waves.
+    assert_eq!(calls.read_attempts, 3);
+    assert_eq!(calls.reads, 3);
     assert_eq!(calls.max_files, 1);
     assert_eq!(calls.max_bytes, chunk);
 }
