@@ -672,9 +672,9 @@ dependencies = [
 
 [[package]]
 name = "libntirpc-sys"
-version = "0.3.3"
+version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53598d8ac548008245e75c0c70370f8553aa882bd0dd9e6f75135fd6976fc5ff"
+checksum = "28a8c9abeed61b5a9879bcd0b6a4422dbbd0b39a6a6c2a71160652914ac1dedf"
 dependencies = [
  "bindgen",
  "cc",
@@ -1091,9 +1091,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "smb2"
-version = "0.35.0"
+version = "0.36.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "191e0bf6d61480771778dd0fb7c34ca0dbec2c2f66eb8f06aa2bafddfd1b5374"
+checksum = "b8b71a22b45c9d42e0a91395a4c18d813e8768f8998fe8beebf1b1f66a700aaa"
 dependencies = [
  "aes",
  "aes-gcm",
