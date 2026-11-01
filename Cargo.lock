@@ -1335,7 +1335,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "vfsi-c"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "cbindgen",
  "libc",
@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-core"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "bitfields",
  "bitflags",
@@ -1361,7 +1361,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-local"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "libc",
  "proptest",
@@ -1371,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-nfs"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "bitfields",
  "libc",
@@ -1394,7 +1394,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-smb"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "bitfields",
  "futures-util",
@@ -1408,7 +1408,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-sync"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "libc",
  "vfsi-core",

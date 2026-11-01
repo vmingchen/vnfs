@@ -50,6 +50,7 @@ grep -q '^#define SUPPORT_VFSI 1' "$ports_root/vfsi-port-rsync/config.h" || {
 }
 make -C "$ports_root/vfsi-port-rsync" -j2 CPPFLAGS="-I$repo_root/bindings/c/include"
 export VFSI_LIBRARY="${CARGO_TARGET_DIR:-$repo_root/target}/debug/libvfsi_c.so"
+export VFSI_INCLUDE="$repo_root/bindings/c/include"
 bash "$ports_root/vfsi-port-git/contrib/vfsi/test-port.sh"
 bash "$ports_root/vfsi-port-rsync/support/test-vfsi-port.sh"
 VFSI_PORTS_ROOT="$ports_root" bash "$repo_root/scripts/test-port-listing-overflow.sh"

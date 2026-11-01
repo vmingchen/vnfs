@@ -5,6 +5,19 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+## vfsi-c 0.3.11 — scoped object identity (2026-11-01)
+
+- Add versioned `vfsi_object_id` scalar, descriptor, and vector queries with
+  complete filesystem IDs and process-local namespace scope. Optional stat
+  output comes from the same GETATTR response. Keep ABI v3 and the existing
+  `vfsi_attrs` layout unchanged; identity exports remain optional to loaders.
+- Cover hard-link/mount aliases, namespace collisions, malformed results, old
+  ABI clients, and retained handles after rename and NFS reconnect.
+- Advance required dependency floors to `vfsi-core 0.1.15`, `vfsi-sync 0.1.16`,
+  `vfsi-local 0.1.14`, `vfsi-nfs 0.1.15`, and `vfsi-smb 0.1.13`. These include
+  shared path/ADB helpers, bounded stream collection, and correct POSIX
+  short-read EOF and write-stability reporting. Other package versions stay unchanged.
+
 ## Coordinated error-handling release (2026-10-28)
 
 Rust: `vfsi-core 0.1.14`, `vfsi-sync 0.1.15`, `vfsi-local 0.1.13`,

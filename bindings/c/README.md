@@ -93,8 +93,8 @@ must use a new version, not change the stride of existing C structures.
 
 The convenience loader exposes these as optional function pointers. Older
 ABI-v3 libraries remain compatible; Git falls back to ordinary stat/read paths
-when scoped identity is absent or invalid. Build Git against the development
-SDK header when testing these not-yet-published exports.
+when scoped identity is absent or invalid. Build Git against the
+SDK header from `vfsi-c` 0.3.11 or newer when using these exports.
 
 For large repositories, `vfsi_read_streamv()` reads several paths in bounded
 chunks. `chunk_size` limits each read and `memory_limit` bounds the aggregate
