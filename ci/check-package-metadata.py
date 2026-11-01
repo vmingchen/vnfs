@@ -7,6 +7,7 @@ from pathlib import Path
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
+CANONICAL = "https://github.com/vmingchen/vnfs"
 
 PUBLIC_RUST_PACKAGES = (
     "crates/vnfs/Cargo.toml",
@@ -44,6 +45,8 @@ def main() -> int:
     errors: list[str] = []
     for relative_path in PUBLIC_RUST_PACKAGES + PRIVATE_RUST_PACKAGES:
         package = load(relative_path)["package"]
+        if package.get('repository') != CANONICAL:
+            errors.append(f'{relative_path}: repository must remain {CANONICAL}')
         keywords = {keyword.lower() for keyword in package.get("keywords", [])}
         if "vfsi" not in keywords:
             errors.append(f"{relative_path}: [package].keywords must include 'vfsi'")
@@ -73,6 +76,10 @@ def main() -> int:
 
     for relative_path in PYTHON_PACKAGES:
         project = load(relative_path)["project"]
+        for name, url in project.get('urls', {}).items():
+            if name.lower() in {'repository', 'source', 'issues', 'changelog'}:
+                if url != CANONICAL and not url.startswith(CANONICAL + '/'):
+                    errors.append(f'{relative_path}: {name} must point to the canonical repository')
         keywords = {keyword.lower() for keyword in project.get("keywords", [])}
         if "vfsi" not in keywords:
             errors.append(f"{relative_path}: [project].keywords must include 'vfsi'")

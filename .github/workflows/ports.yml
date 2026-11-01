@@ -9,12 +9,31 @@ permissions:
   contents: read
 
 jobs:
-  ports:
+  registry:
+    if: github.repository == 'vmingchen/vnfs'
     runs-on: ubuntu-26.04
+    outputs:
+      ports: ${{ steps.registry.outputs.ports }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: registry
+        run: |
+          python3 ci/check-ecosystem.py
+          python3 - <<'PY' >>"$GITHUB_OUTPUT"
+          import json, tomllib
+          with open('ecosystem/ports.toml', 'rb') as stream:
+              registry = tomllib.load(stream)
+          print('ports=' + json.dumps([c['id'] for c in registry['component']
+                                      if c['kind'] == 'application-port']))
+          PY
+  ports:
+    needs: registry
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        id: [git, rsync]
+        id: ${{ fromJSON(needs.registry.outputs.ports) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # stable
@@ -23,16 +42,20 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ports-${{ matrix.id }}
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             autoconf automake build-essential clang cmake gawk \
-            libacl1-dev libclang-dev libkrb5-dev liburcu-dev \
-            pkg-config python3-cmarkgfm
+            libacl1-dev libattr1-dev libclang-dev libkrb5-dev libssl-dev liburcu-dev \
+            pkg-config python3-cmarkgfm gettext
       - name: Validate registry
         run: python ci/check-ecosystem.py
       - name: Build VFSI C ABI
+        if: matrix.id == 'git' || matrix.id == 'rsync'
         run: cargo build -p vfsi-c
       - name: Resolve pinned component
         id: component
@@ -56,7 +79,8 @@ jobs:
       - name: Run compatibility test
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/target/debug
+          VFSI_INCLUDE: ${{ github.workspace }}/bindings/c/include
         run: |
           "${{ steps.component.outputs.test }}" \
             "${{ steps.component.outputs.repository }}" \
-            "${{ steps.component.outputs.revision }}"
+            "${{ steps.component.outputs.revision }}" "${{ matrix.id }}"

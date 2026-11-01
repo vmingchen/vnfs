@@ -3,10 +3,10 @@ set -euo pipefail
 
 repository=${1:?repository URL is required}
 revision=${2:?revision is required}
-checkout=${RUNNER_TEMP:-/tmp}/vfsi-port-rsync
 root=$(pwd)
-
-rm -rf "$checkout"
+work=$(mktemp -d "${RUNNER_TEMP:-/tmp}/vfsi-port-rsync.XXXXXX")
+checkout=$work/source
+trap 'rm -rf "$work"' EXIT
 git init --quiet "$checkout"
 git -C "$checkout" remote add origin "$repository"
 git -C "$checkout" fetch --quiet --depth=1 origin "$revision"
@@ -24,8 +24,8 @@ git -C "$checkout" checkout --quiet --detach FETCH_HEAD
     make -j2
 )
 
-fixture=$(mktemp -d)
-trap 'rm -rf "$fixture"' EXIT
+fixture=$work/fixture
+mkdir "$fixture"
 mkdir -p "$fixture/source" "$fixture/destination"
 printf 'vfsi port smoke\n' >"$fixture/source/input"
 
@@ -36,3 +36,6 @@ VFSI_MOUNT="$fixture" \
 "$checkout/rsync" -a "$fixture/source/" "$fixture/destination/"
 
 cmp "$fixture/source/input" "$fixture/destination/input"
+
+VFSI_LIBRARY="$root/target/debug/libvfsi_c.so" \
+    sh "$checkout/support/test-vfsi-port.sh"

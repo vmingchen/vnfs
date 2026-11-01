@@ -587,5 +587,64 @@ class PairedBenchmarkTests(unittest.TestCase):
         self.assertEqual(self.paired.comparison([2, 2, 2])['bootstrap_95_percent_interval'], [2, 2])
 
 
+class EcosystemBaselineTests(unittest.TestCase):
+    def setUp(self):
+        import importlib.util
+        self.repo = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location('ecosystem', self.repo / 'ci/check-ecosystem.py')
+        self.checker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.checker)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        paths = [*self.repo.glob('crates/*/Cargo.toml'), self.repo / 'bindings/c/Cargo.toml',
+                 *self.repo.glob('adapters/*/pyproject.toml'), *self.repo.glob('ecosystem/*.toml'),
+                 *self.repo.glob('ci/ports/*'), self.repo / 'ci/nfs-ganesha/Dockerfile']
+        for path in paths:
+            if path.is_file():
+                target = self.root / path.relative_to(self.repo)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(path, target)
+        self.checker.ROOT = self.root
+        self.checker.REGISTRY = self.root / 'ecosystem/ports.toml'
+
+    def test_current_baseline_validates(self):
+        self.checker.main()
+
+    def test_missing_port_and_stale_manifest_pin_are_rejected(self):
+        registry = self.checker.REGISTRY
+        original = registry.read_text()
+        registry.write_text(original.replace('id = "coreutils"', 'id = "other"'))
+        with self.assertRaisesRegex(SystemExit, 'all four'):
+            self.checker.main()
+        registry.write_text(original)
+        baseline = self.root / 'ecosystem/versions.toml'
+        baseline.write_text(baseline.read_text().replace('coreutils = "', 'coreutils = "0', 1))
+        with self.assertRaisesRegex(SystemExit, 'port revisions'):
+            self.checker.main()
+
+    def test_published_snapshot_can_lag_development_but_not_claim_future_versions(self):
+        import re
+        manifest = self.root / 'crates/vnfs/Cargo.toml'
+        manifest.write_text(re.sub(r'(?m)^version = "[^"]+"', 'version = "99.0.0"', manifest.read_text(), count=1))
+        self.checker.main()
+        baseline = self.root / 'ecosystem/versions.toml'
+        baseline.write_text(re.sub(r'(vnfs = \{ version = ")[^"]+', r'\g<1>100.0.0', baseline.read_text(), count=1))
+        with self.assertRaisesRegex(SystemExit, 'exceeds source'):
+            self.checker.main()
+
+    def test_port_dependency_retarget_preserves_features_and_rejects_ambiguity(self):
+        import runpy
+        retarget = runpy.run_path(str(self.repo / 'ci/ports/check-rust.py'))['use_development_vnfs']
+        manifest = self.root / 'Cargo.toml'
+        manifest.write_text('vnfs = { version = "0.0.26", features = ["posix"], optional = true }\n')
+        retarget(manifest, self.root)
+        import tomllib
+        dep = tomllib.loads(manifest.read_text())['vnfs']
+        self.assertEqual(dep, {'path': str(self.root / 'crates/vnfs'), 'features': ['posix'], 'optional': True})
+        with self.assertRaisesRegex(ValueError, 'exactly one'):
+            retarget(manifest, self.root)
+
+
 if __name__ == "__main__":
     unittest.main()

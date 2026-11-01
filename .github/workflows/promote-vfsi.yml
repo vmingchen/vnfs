@@ -22,12 +22,15 @@ concurrency:
 
 jobs:
   promote:
+    if: github.repository == 'vmingchen/vnfs'
     runs-on: ubuntu-26.04
+    timeout-minutes: 15
     environment: vfsi-publish
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Validate canonical commit and CI
         env:
           GH_TOKEN: ${{ github.token }}
@@ -40,8 +43,8 @@ jobs:
           git fetch origin main --tags
           git cat-file -e "$PROMOTE_COMMIT^{commit}"
           git merge-base --is-ancestor "$PROMOTE_COMMIT" origin/main
-          success=$(gh run list \
-            --workflow CI \
+          success=$(gh run list --repo vmingchen/vnfs \
+            --workflow ci.yml --branch main --event push \
             --commit "$PROMOTE_COMMIT" \
             --status completed \
             --json conclusion \
@@ -51,16 +54,28 @@ jobs:
         env:
           PROMOTE_COMMIT: ${{ inputs.commit }}
           PROMOTE_TAGS: ${{ inputs.tags }}
-          VFSI_MIRROR_TOKEN: ${{ secrets.VFSI_MIRROR_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          VFSI_MIRROR_SSH_KEY: ${{ secrets.VFSI_MIRROR_SSH_KEY }}
         run: |
-          git remote add vfsi \
-            "https://x-access-token:${VFSI_MIRROR_TOKEN}@github.com/vfsi/vfsi.git"
-          if git ls-remote --exit-code --heads vfsi main >/dev/null 2>&1; then
-            git fetch vfsi main --tags
+          test -n "$VFSI_MIRROR_SSH_KEY" || {
+            echo 'Configure vfsi-publish/VFSI_MIRROR_SSH_KEY with the vfsi/vfsi write deploy key.' >&2
+            exit 1
+          }
+          key=$(mktemp "$RUNNER_TEMP/vfsi-mirror-key.XXXXXX")
+          hosts=$(mktemp "$RUNNER_TEMP/vfsi-mirror-hosts.XXXXXX")
+          trap 'rm -f "$key" "$hosts"' EXIT
+          chmod 600 "$key"
+          printf '%s\n' "$VFSI_MIRROR_SSH_KEY" >"$key"
+          # Obtain GitHub's published host keys over authenticated HTTPS.
+          gh api meta --jq '.ssh_keys[] | "github.com " + .' >"$hosts"
+          test -s "$hosts"
+          export GIT_SSH_COMMAND="ssh -i \"$key\" -o IdentitiesOnly=yes -o UserKnownHostsFile=\"$hosts\" -o StrictHostKeyChecking=yes"
+          git remote add vfsi git@github.com:vfsi/vfsi.git
+          # Authentication/network errors must not masquerade as an empty mirror.
+          head=$(git ls-remote --heads vfsi refs/heads/main)
+          if test -n "$head"; then
+            git fetch vfsi main --no-tags
             git merge-base --is-ancestor vfsi/main "$PROMOTE_COMMIT"
-          else
-            # Permit the first promotion into a newly created, empty mirror.
-            git fetch vfsi --tags
           fi
 
           refs=("$PROMOTE_COMMIT:refs/heads/main")
@@ -68,6 +83,7 @@ jobs:
           for raw_tag in "${requested_tags[@]}"; do
             tag=$(printf '%s' "$raw_tag" | xargs)
             test -z "$tag" && continue
+            git check-ref-format "refs/tags/$tag"
             case "$tag" in
               vnfs-v*|nfs4fs-v*|vsmb-v*|vsmbfs-v*|vfsi-fsspec-v*|\
               nfsv41-sys-v*|vfsi-c-v*|vfsi-core-v*|vfsi-sync-v*|\

@@ -6,9 +6,9 @@ kind = "application-port"
 maturity = "experimental"
 repository = "https://github.com/vfsi/vfsi-port-git"
 upstream = "https://github.com/git/git"
-upstream_base = "1a3e64c6c4a623626ff0687008732a8e007e2a1c"
+upstream_base = "7e34d8174dcda3435d1404c9a30bef46afe6c13e"
 integration_branch = "vfsi"
-revision = "b45344d7f11c21ef698866cde7723e474f9970fd"
+revision = "236317232c6a751c66eb22b51fbeaf1422eee9e7"
 vfsi_c_abi = 3
 backends = ["dummy", "nfs"]
 compatibility_test = "ci/ports/check-git.sh"
@@ -19,12 +19,38 @@ kind = "application-port"
 maturity = "experimental"
 repository = "https://github.com/vfsi/vfsi-port-rsync"
 upstream = "https://github.com/RsyncProject/rsync"
-upstream_base = "7fef1c827ef19bce7d3d21009b8537768e627101"
+upstream_base = "be124601c44e7ea166e86f951ffb6587e7a5593e"
 integration_branch = "vfsi"
-revision = "cfd961a2ee2a5d8e45465d46423233dd40f27dea"
+revision = "81a691c4c53b9acf18ba89057729cc167a617702"
 vfsi_c_abi = 3
 backends = ["dummy", "nfs"]
 compatibility_test = "ci/ports/check-rsync.sh"
+
+[[component]]
+id = "coreutils"
+kind = "application-port"
+maturity = "experimental"
+repository = "https://github.com/vfsi/vfsi-port-coreutils"
+upstream = "https://github.com/uutils/coreutils"
+upstream_base = "24f90f5f400c1bd8755988af4aced27a7ee25d1b"
+integration_branch = "vfsi"
+revision = "3dc073281b1465b479c4f5bd863099b446835064"
+vfsi_c_abi = 0
+backends = ["dummy", "nfs"]
+compatibility_test = "ci/ports/check-rust.py"
+
+[[component]]
+id = "findutils"
+kind = "application-port"
+maturity = "experimental"
+repository = "https://github.com/vfsi/vfsi-port-findutils"
+upstream = "https://github.com/uutils/findutils"
+upstream_base = "51f3499f0cee4d9be4c69328f903435523d2846e"
+integration_branch = "vfsi"
+revision = "7c936a5cb9b26d304e99ebcfce6df5545d4388a4"
+vfsi_c_abi = 0
+backends = ["dummy", "nfs"]
+compatibility_test = "ci/ports/check-rust.py"
 
 [[component]]
 id = "nfs-ganesha"

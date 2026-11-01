@@ -25,7 +25,7 @@ their roles; they do not imply a stable pre-1.0 Rust source API:
 - `nfsv41-sys` is the low-level NFS protocol binding package.
 
 `https://github.com/vmingchen/vnfs` is the canonical platform repository. It
-hosts development, issues, pull requests, CI, and package releases. A future
+hosts development, issues, pull requests, CI, and package releases. The
 `https://github.com/vfsi/vfsi` repository is a manually promoted public mirror,
 not a second writable source of truth. Mirror promotion must be explicit,
 CI-gated, and fast-forward-only.
@@ -228,11 +228,15 @@ never build an unpinned external branch.
 
 Fast platform CI validates the registry and public API compatibility. The
 scheduled/manually dispatched [Port compatibility workflow](../.github/workflows/ports.yml)
-currently reconstructs only its Git and rsync matrix entries and builds them
-against `vfsi-c`. The registry also pins Ganesha test infrastructure. Coreutils
-and findutils are not registered or included in that scheduled matrix; do not
-describe them as covered by it. Their checkout-based local runner and coverage
-limits are documented in [scripts/README.md](../scripts/README.md).
+derives its matrix from every registered application port: Git, rsync, coreutils,
+and findutils. It fetches the exact committed revisions into disposable checkouts.
+Git and rsync build against this checkout's C SDK and run their parity scripts.
+The Rust ports temporarily resolve `vnfs` to this checkout, verify that resolution,
+and run integration unit tests and feature-enabled application builds; findutils
+also compares CLI results against its ordinary traversal. This local/POSIX
+coverage does not establish live NFS or SMB behavior. The registry separately
+pins Ganesha infrastructure, which is not an application-matrix entry.
+Local runners and live coverage are documented in [scripts/README.md](../scripts/README.md).
 
 ABI changes require the registered C ports to pass or explicitly move to a new
 declared ABI. Extending the registry and workflow matrix is an implementation
@@ -272,14 +276,38 @@ libntirpc.
 build costs; it is historical telemetry, not a release procedure or a speed
 guarantee.
 
-The `Promote VFSI mirror` workflow requires an explicit canonical commit, a
-successful CI run for that commit, and approval through the `vfsi-publish`
-environment. It pushes only the mirror's `main` branch and explicitly selected
+The `Promote VFSI mirror` workflow requires an explicit canonical commit and a
+successful canonical-main push CI run for that exact commit. It runs only in
+the canonical repository and uses the `vfsi-publish` environment's
+`VFSI_MIRROR_SSH_KEY`: an SSH write deploy key restricted to `vfsi/vfsi`.
+Checkout credentials are not persisted; missing keys fail explicitly. Configure
+environment reviewers separately if a human approval gate is required. It pushes
+only the mirror's `main` branch and explicitly selected
 release tags. It refuses divergent history and never performs an unrestricted
 mirror or force push.
 
 The mirror directs issues and pull requests to the canonical repository. It is
 for organization-level discovery and stable links, not parallel development.
+
+### Public baseline manifest
+
+[`ecosystem/versions.toml`](../ecosystem/versions.toml) maps published Rust, C,
+and Python versions to their release source revisions, and records the four
+registered port revisions plus the current development code baseline. Rust
+release revisions come from the published crate's `.cargo_vcs_info.json`;
+Python revisions come from immutable release tags. A version number alone does
+not imply that unreleased development changes are present in a registry artifact.
+In particular, scoped C identity starts at `0377596`; published `vfsi-c` 0.3.10
+predates it. Git's pinned-public-SDK build remains a tracked follow-up until the
+next C release; platform compatibility uses the development SDK.
+
+Keep package repository, documentation, issue, and changelog URLs directed to
+`vmingchen/vnfs`. The organization mirror is a discovery entry point, not a
+reason to split those destinations. Update the manifest with coordinated
+releases and port promotions; registry validation rejects unknown packages,
+release versions ahead of source, and mismatched port pins. Published versions
+may trail unreleased development versions; update artifact provenance after
+publication rather than predicting a future release commit.
 
 ## Adding a component
 

@@ -33,6 +33,11 @@ The repository provides:
 - integration tests against NFS-Ganesha, a patched NFSv4.2 COPY server, and
   Samba dialects from SMB 2.1 through SMB 3.1.1.
 
+Development, issues, and releases live in [vmingchen/vnfs](https://github.com/vmingchen/vnfs).
+[vfsi/vfsi](https://github.com/vfsi/vfsi) is its promoted public mirror.
+The [version manifest](ecosystem/versions.toml) records published packages and
+the four pinned application ports; see the [repository policy](docs/PROJECT_ORGANIZATION.md).
+
 ## Why vectorize filesystem operations?
 
 Traditional filesystem APIs issue operations one path at a time. On a remote

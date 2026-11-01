@@ -5,10 +5,10 @@ export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
 
 repository=${1:?repository URL is required}
 revision=${2:?revision is required}
-checkout=${RUNNER_TEMP:-/tmp}/vfsi-port-git
 root=$(pwd)
-
-rm -rf "$checkout"
+work=$(mktemp -d "${RUNNER_TEMP:-/tmp}/vfsi-port-git.XXXXXX")
+checkout=$work/source
+trap 'rm -rf "$work"' EXIT
 git init --quiet "$checkout"
 git -C "$checkout" remote add origin "$repository"
 git -C "$checkout" fetch --quiet --depth=1 origin "$revision"
@@ -22,8 +22,8 @@ make -C "$checkout" -j2 \
     NO_TCLTK=YesPlease \
     git
 
-fixture=$(mktemp -d)
-trap 'rm -rf "$fixture"' EXIT
+fixture=$work/fixture
+mkdir "$fixture"
 git -C "$fixture" init --quiet
 git -C "$fixture" config user.email vfsi-ci@example.invalid
 git -C "$fixture" config user.name "VFSI CI"
@@ -36,3 +36,7 @@ VFSI_LIBRARY="$root/target/debug/libvfsi_c.so" \
 VFSI_ROOT="$fixture" \
 VFSI_MOUNT="$fixture" \
 "$checkout/git" -C "$fixture" count-objects -v >/dev/null
+
+VFSI_LIBRARY="$root/target/debug/libvfsi_c.so" \
+VFSI_INCLUDE="$root/bindings/c/include" \
+    sh "$checkout/contrib/vfsi/test-port.sh"
