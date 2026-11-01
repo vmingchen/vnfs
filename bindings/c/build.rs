@@ -54,6 +54,6 @@ fn main() {
         }
         println!("cargo:rustc-link-arg=-Wl,-rpath,{loader_origin}/vfsi-libs");
     }
-    println!("cargo:rerun-if-changed=src/lib.rs");
+    println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=cbindgen.toml");
 }

@@ -79,6 +79,7 @@ int main(void)
     assert(api.dummy_open_mount == NULL && api.nfs_open_mount_export == NULL);
     assert(api.nfs_from_mount == NULL && api.listdir == NULL && api.listdirs == NULL);
     assert(api.read_paths == NULL && api.read_paths_with_limit == NULL);
+    assert(api.get_object_id == NULL && api.fget_object_id == NULL && api.get_object_idv == NULL);
 
     fixture = OPTIONAL_PRESENT;
     assert(vfsi_dynamic_load(&api, &fixture) == 0);

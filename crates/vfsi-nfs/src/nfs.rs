@@ -494,6 +494,15 @@ fn check_mount_write(read_only: bool, count: usize) -> VfResult<()> {
 }
 
 impl NfsVecFs {
+    /// Configured endpoint delimiting the server's object-ID namespace.
+    /// Mount/export roots and NFS minor versions do not delimit object IDs.
+    /// Endpoint aliases are conservatively distinct; this is not a durable
+    /// globally unique server identifier. It is stable through reconnects.
+    #[doc(hidden)]
+    pub fn identity_namespace(&self) -> &str {
+        &self.connection.host
+    }
+
     fn ensure_writable(&self, count: usize) -> VfResult<()> {
         check_mount_write(self.read_only, count)
     }

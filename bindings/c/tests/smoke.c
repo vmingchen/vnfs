@@ -9,6 +9,17 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if UINTPTR_MAX == UINT64_MAX
+_Static_assert(sizeof(struct vfsi_attrs) == 104, "ABI-v3 attribute layout changed");
+_Static_assert(offsetof(struct vfsi_attrs, fileid) == 32, "ABI-v3 fileid offset changed");
+#endif
+
+static bool same_object(const struct vfsi_object_id *a, const struct vfsi_object_id *b)
+{
+    return a->namespace_id && a->namespace_id == b->namespace_id &&
+        a->fs_id[0] == b->fs_id[0] && a->fs_id[1] == b->fs_id[1] && a->fileid == b->fileid;
+}
+
 static bool list_one(const char *name, const struct vfsi_attrs *attrs, void *userdata)
 {
     (void)attrs;
@@ -123,6 +134,29 @@ int main(int argc, char **argv)
     if (rc != 0 || wrote != 5) {
         fprintf(stderr, "write failed: %d\n", rc);
         return 1;
+    }
+    if (!smb) {
+        struct vfsi_object_id ids[2] = {
+            { .struct_size = sizeof(ids[0]), .version = VFSI_OBJECT_ID_VERSION },
+            { .struct_size = sizeof(ids[0]), .version = VFSI_OBJECT_ID_VERSION }
+        };
+        struct vfsi_attrs coherent;
+        struct vfsi_object_id_op ops[2] = {
+            { .path = source, .fd = -1, .out = &ids[0], .attrs = &coherent },
+            { .path = NULL, .fd = fd, .out = &ids[1] }
+        };
+        struct vfsi_result items[2];
+        if (!dynamic_api.get_object_id || !dynamic_api.fget_object_id || !dynamic_api.get_object_idv)
+            return 1;
+        batch = dynamic_api.get_object_idv(fs, ops, 2, items);
+        if (batch.category || batch.index != 2 || items[0].category || items[1].category ||
+            !same_object(&ids[0], &ids[1]) || coherent.fileid != ids[0].fileid || coherent.size != 5)
+            return 1;
+        struct vfsi_object_id original = ids[0];
+        if (dynamic_api.get_object_id(fs, source, 0, &ids[0]).category ||
+            dynamic_api.fget_object_id(fs, fd, &ids[1]).category ||
+            !same_object(&original, &ids[0]) || !same_object(&original, &ids[1]))
+            return 1;
     }
     rc = vfsi_close(fs, fd);
     if (rc != 0)

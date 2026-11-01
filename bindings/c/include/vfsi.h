@@ -126,6 +126,16 @@
 #define VFSI_CAP_ANCHORED_REMOVAL (1 << 9)
 
 /**
+ * Layout version of vfsi_object_id (independent of the library ABI version).
+ */
+#define VFSI_OBJECT_ID_VERSION 1
+
+/**
+ * Query the final path component itself rather than following a symlink.
+ */
+#define VFSI_OBJECT_ID_NOFOLLOW 1
+
+/**
  * Opaque filesystem handle owned by C.
  */
 typedef struct vfsi_fs vfsi_fs;
@@ -145,7 +155,7 @@ typedef struct vfsi_listing_options {
  */
 typedef struct vfsi_attrs {
   /**
-   * Size of this structure, for forward-compatible extension.
+   * Fixed ABI-v3 layout size; do not extend this structure within ABI v3.
    */
   uint32_t struct_size;
   /**
@@ -294,6 +304,42 @@ typedef bool (*vfsi_listdirv_cb)(const char *dir,
                                  void *userdata);
 
 typedef bool (*vfsi_read_paths_cb)(const char *path, const uint8_t *data, size_t len, void *userdata);
+
+/**
+ * Complete object identity, not an open-instance ID or a durable global ID.
+ * Initialize struct_size=sizeof(vfsi_object_id), version=VFSI_OBJECT_ID_VERSION.
+ * Compare namespace_id, both fs_id words and fileid; zero values in fs_id or
+ * fileid are valid. namespace_id is an opaque nonzero token scoped to this
+ * process and loaded library instance; never persist it across reloads.
+ * Local mount views share one namespace; NFS views share a configured endpoint
+ * regardless of export root/minor version. Different endpoint spellings are
+ * conservatively distinct. IDs may be reused after deletion/server changes.
+ */
+typedef struct vfsi_object_id {
+  uint32_t struct_size;
+  uint32_t version;
+  uint64_t namespace_id;
+  /**
+   * Full 128-bit backend filesystem ID, high word first. Never truncate it.
+   */
+  uint64_t fs_id[2];
+  uint64_t fileid;
+} vfsi_object_id;
+
+/**
+ * Exactly one target: path != NULL and fd == -1, or path == NULL and fd >= 0.
+ * flags is zero or VFSI_OBJECT_ID_NOFOLLOW (paths only). out points to an
+ * initialized version/size header. attrs is optional output-only ABI-v3 storage;
+ * when non-NULL, attributes and identity come from the same GETATTR response.
+ * Output pointers must be distinct, exclusive and disjoint from all inputs.
+ */
+typedef struct vfsi_object_id_op {
+  const char *path;
+  int fd;
+  uint32_t flags;
+  struct vfsi_object_id *out;
+  struct vfsi_attrs *attrs;
+} vfsi_object_id_op;
 
 #ifdef __cplusplus
 extern "C" {
@@ -802,6 +848,43 @@ int vfsi_read_paths_with_limit(struct vfsi_fs *fs,
                                size_t max_bytes,
                                vfsi_read_paths_cb cb,
                                void *userdata);
+
+/**
+ * Query path or retained-descriptor identities in backend vector batches.
+ * Returns ABI-v3 results; output IDs are usable only for successful items.
+ * Preflight validates every target/header before any backend request. Valid
+ * output payloads are cleared before dispatch, including on backend failure.
+ * Missing identity components report Unsupported, never fabricated zeros.
+ * Follow/no-follow policy changes partition the batch into contiguous runs.
+ * Planning is bounded by the default directory entry/path-byte limits.
+ *
+ * # Safety
+ * Follow the module C pointer contract. Each out supplies a readable 8-byte
+ * header and exclusive storage for its declared size, at least the v1 layout.
+ * Older/smaller headers are rejected without reading/writing past the header.
+ * No pointers/outputs may alias. count zero permits null arrays.
+ */
+struct vfsi_result vfsi_get_object_idv(struct vfsi_fs *fs,
+                                       const struct vfsi_object_id_op *ops,
+                                       size_t count,
+                                       struct vfsi_result *item_results);
+
+/**
+ * Query a path identity, with optional VFSI_OBJECT_ID_NOFOLLOW.
+ * # Safety
+ * Same output-header, storage and pointer contract as vfsi_get_object_idv.
+ */
+struct vfsi_result vfsi_get_object_id(struct vfsi_fs *fs,
+                                      const char *path,
+                                      uint32_t flags,
+                                      struct vfsi_object_id *out);
+
+/**
+ * Query the object pinned by a retained C descriptor, independent of its name.
+ * # Safety
+ * Same output-header, storage and pointer contract as vfsi_get_object_idv.
+ */
+struct vfsi_result vfsi_fget_object_id(struct vfsi_fs *fs, int fd, struct vfsi_object_id *out);
 
 #ifdef __cplusplus
 }  // extern "C"

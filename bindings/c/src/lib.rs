@@ -111,6 +111,9 @@ macro_rules! fail_batch {
     }};
 }
 
+mod identity;
+pub use identity::*;
+
 /// Opaque filesystem handle owned by C.
 pub struct vfsi_fs {
     fs: Mutex<Box<dyn BindingBackend>>,
@@ -120,6 +123,8 @@ pub struct vfsi_fs {
     mountpoint: PathBuf,
     /// Backend path corresponding to `mountpoint`.
     backend_root: PathBuf,
+    /// Process-local comparison scope, stable across reconnects and mount views.
+    namespace_id: u64,
 }
 
 #[derive(Clone)]
@@ -141,7 +146,7 @@ impl From<FileOperand> for CFile {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct vfsi_attrs {
-    /// Size of this structure, for forward-compatible extension.
+    /// Fixed ABI-v3 layout size; do not extend this structure within ABI v3.
     pub struct_size: u32,
     /// ABI version used to populate this structure.
     pub abi_version: u32,
@@ -1001,12 +1006,14 @@ fn make_fs(
     mountpoint: PathBuf,
     backend_root: PathBuf,
 ) -> *mut vfsi_fs {
+    let namespace_id = identity::namespace_id(fs.identity_namespace().as_deref());
     Box::into_raw(Box::new(vfsi_fs {
         fs: Mutex::new(fs),
         files: Mutex::new(std::collections::HashMap::new()),
         next_fd: AtomicI32::new(1),
         mountpoint,
         backend_root,
+        namespace_id,
     }))
 }
 
@@ -3310,6 +3317,13 @@ pub unsafe extern "C" fn vfsi_read_paths_with_limit(
 
 // Protocol inspection belongs to the bindings, outside the native operation contracts.
 trait BindingBackend: vfsi_sync::backend::VectorBackend {
+    fn identity_namespace(&self) -> Option<std::borrow::Cow<'_, str>> {
+        None
+    }
+    #[cfg(test)]
+    fn reconnect_for_test(&mut self) -> Result<(), VfError> {
+        Err(VfError::unsupported(0))
+    }
     fn nfs_minorversion(&self) -> Option<u32> {
         None
     }
@@ -3317,8 +3331,19 @@ trait BindingBackend: vfsi_sync::backend::VectorBackend {
         None
     }
 }
-impl BindingBackend for LocalBackend {}
+impl BindingBackend for LocalBackend {
+    fn identity_namespace(&self) -> Option<std::borrow::Cow<'_, str>> {
+        Some(std::borrow::Cow::Borrowed("posix"))
+    }
+}
 impl BindingBackend for NfsVecFs {
+    fn identity_namespace(&self) -> Option<std::borrow::Cow<'_, str>> {
+        Some(format!("nfs:{}", NfsVecFs::identity_namespace(self)).into())
+    }
+    #[cfg(test)]
+    fn reconnect_for_test(&mut self) -> Result<(), VfError> {
+        self.reconnect()
+    }
     fn nfs_minorversion(&self) -> Option<u32> {
         Some(self.minorversion())
     }
@@ -4094,9 +4119,11 @@ mod tests {
         }
         for (first, stop_after, completed) in [
             (b"abcdef".as_slice(), 1, 0),
-            (b"a".as_slice(), 1, 1),
+            // A positive short local read is progress, not proven EOF.
+            (b"a".as_slice(), 1, 0),
             (b"".as_slice(), 1, 1),
-            (b"a".as_slice(), 2, 1),
+            (b"a".as_slice(), 2, 0),
+            (b"a".as_slice(), 3, 1),
             (b"abcdef".as_slice(), usize::MAX, 2),
         ] {
             let root = tempfile::tempdir().unwrap();

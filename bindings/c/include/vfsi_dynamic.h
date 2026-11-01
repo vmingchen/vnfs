@@ -29,6 +29,11 @@ typedef struct vfsi_dynamic_api {
                     vfsi_read_paths_cb, void *);
   int (*read_paths_with_limit)(struct vfsi_fs *, const char *const *, size_t,
                                size_t, vfsi_read_paths_cb, void *);
+  struct vfsi_result (*get_object_id)(struct vfsi_fs *, const char *, uint32_t,
+                                      struct vfsi_object_id *);
+  struct vfsi_result (*fget_object_id)(struct vfsi_fs *, int, struct vfsi_object_id *);
+  struct vfsi_result (*get_object_idv)(struct vfsi_fs *, const struct vfsi_object_id_op *,
+                                       size_t, struct vfsi_result *);
 } vfsi_dynamic_api;
 
 /* Resolve an optional symbol into a function pointer without an ISO C cast.
@@ -77,6 +82,9 @@ static inline int vfsi_dynamic_load(vfsi_dynamic_api *api, void *handle) {
   VFSI_DYNAMIC_SYMBOL(listdirs, 0);
   VFSI_DYNAMIC_SYMBOL(read_paths, 0);
   VFSI_DYNAMIC_SYMBOL(read_paths_with_limit, 0);
+  VFSI_DYNAMIC_SYMBOL(get_object_id, 0);
+  VFSI_DYNAMIC_SYMBOL(fget_object_id, 0);
+  VFSI_DYNAMIC_SYMBOL(get_object_idv, 0);
 
 #undef VFSI_DYNAMIC_SYMBOL
   return 0;

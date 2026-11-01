@@ -757,6 +757,8 @@ jobs:
           cargo build -p vfsi-c
           cc -Wall -Wextra -Werror -I bindings/c/include bindings/c/tests/smoke.c -L target/debug -lvfsi_c -ldl -o /tmp/vfsi-smoke
           LD_LIBRARY_PATH=target/debug /tmp/vfsi-smoke --nfs 127.0.0.1 '${{ matrix.minor-version }}'
+          VFSI_NFS_SERVER=127.0.0.1 VFSI_NFS_MINOR='${{ matrix.minor-version }}' \
+            cargo test -p vfsi-c --lib identity::tests::live_nfs_retained_identity_survives_rename_replacement_and_reconnect -- --ignored --exact
       - name: Run required Python/fsspec coverage against NFS
         env:
           VFSI_NFS_REQUIRED: 1

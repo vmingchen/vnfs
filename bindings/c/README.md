@@ -40,6 +40,62 @@ before submission marks the failing element and leaves the rest not attempted;
 after a submitted concurrent batch fails, non-failing elements are explicitly
 marked indeterminate because they may already have completed.
 
+## Scoped object identity (additive ABI v3)
+
+`vfsi_attrs` is frozen at its ABI-v3 size. Its `fileid` alone is not an object
+identity: unrelated filesystems or servers can report the same number. Use the
+separate versioned `vfsi_object_id` and these optional exports:
+
+- `vfsi_get_object_id(fs, path, flags, &id)` follows the final symlink by default;
+  `VFSI_OBJECT_ID_NOFOLLOW` queries the link itself.
+- `vfsi_fget_object_id(fs, fd, &id)` identifies the object pinned by an open C
+  descriptor, even after rename or a supported backend reconnect.
+- `vfsi_get_object_idv(fs, ops, count, results)` batches paths and retained
+  descriptors. Set a path operation's `fd` to -1, or a descriptor operation's
+  `path` to NULL. Follow/no-follow changes partition the vector into runs.
+
+All three return `vfsi_result`. Initialize each output header before calling:
+
+```c
+struct vfsi_object_id id = {
+    .struct_size = sizeof(id), .version = VFSI_OBJECT_ID_VERSION
+};
+struct vfsi_result result = vfsi_get_object_id(fs, "/file", 0, &id);
+if (result.category == VFSI_ERROR_NONE) {
+    /* Compare namespace_id, fs_id[0], fs_id[1], and fileid together. */
+}
+```
+
+`fs_id` preserves the complete 128-bit backend value, high word first.
+`namespace_id` is a nonzero comparison token within this process and loaded
+library instance, not a persistent identifier. Local roots/mount views share
+the local namespace. NFS views using the same configured endpoint share a
+namespace regardless of export root, mountpoint or minor version; different
+endpoint spellings remain conservatively distinct. Different servers/unknown
+backend namespaces cannot alias just because their numeric IDs match. Do not
+compare IDs across processes/library reloads, and do not assume durability:
+servers can reuse IDs after deletion or reconfiguration.
+
+The query requires both ID components; missing fields return Unsupported, never
+fabricated zero values (real zero values remain valid). A vector operation may
+also supply optional `vfsi_attrs *attrs` output: attributes and identity then
+come from the same GETATTR response. Git uses this to refresh cached stat data
+coherently and projects complete namespace/filesystem pairs to collision-free
+process-local `st_dev` values, preserving `fileid` as `st_ino`. These projected
+device values are not persistent kernel mount/device numbers.
+
+Only successful outputs may be used. All headers/targets are preflighted before
+I/O; a preflight rejection leaves payloads untouched. Before dispatch, valid
+payloads are cleared; backend failures therefore cannot expose stale IDs.
+The output header permits rejecting older/smaller layouts without an overrun
+and writing only the supported prefix of larger v1 storage. Future layouts
+must use a new version, not change the stride of existing C structures.
+
+The convenience loader exposes these as optional function pointers. Older
+ABI-v3 libraries remain compatible; Git falls back to ordinary stat/read paths
+when scoped identity is absent or invalid. Build Git against the development
+SDK header when testing these not-yet-published exports.
+
 For large repositories, `vfsi_read_streamv()` reads several paths in bounded
 chunks. `chunk_size` limits each read and `memory_limit` bounds the aggregate
 bytes requested per backend batch. Returning `false` from its callback stops
