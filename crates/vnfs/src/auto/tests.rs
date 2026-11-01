@@ -716,7 +716,18 @@ fn live_nfs_mount_uses_direct_connection() {
             .collect::<Vec<_>>(),
         [5, 6, 5]
     );
-    assert!(reads.iter().all(|read| read.eof()));
+    assert!(reads[..2].iter().all(|read| read.eof()));
+    // NFS supplies an explicit EOF bit. A positive short POSIX read does not;
+    // only a subsequent zero-byte read proves the local file is exhausted.
+    assert!(!reads[2].eof());
+    let probe = client
+        .vread(
+            [crate::ReadOp::into(&files[2], 5, local_buffer)],
+            Default::default(),
+        )
+        .unwrap();
+    assert_eq!(probe[0].bytes_read(), 0);
+    assert!(probe[0].eof());
     assert_eq!(&buffers[0][..5], b"first");
     assert_eq!(&buffers[1][..6], b"second");
     assert_eq!(&buffers[2][..5], b"local");
