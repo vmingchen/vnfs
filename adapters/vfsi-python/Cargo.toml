@@ -20,12 +20,12 @@ dummy = ["dep:vfsi-local", "dep:vfsi-posix"]
 [dependencies]
 libc = "0.2"
 pyo3 = { version = "0.30.1", features = ["abi3-py39", "abi3t"] }
-vfsi-core = { path = "../../crates/vfsi-core", version = "0.1.15" }
-vfsi-local = { path = "../../crates/vfsi-local", version = "0.1.14", optional = true }
-vfsi-posix = { path = "../../crates/vfsi-posix", version = "0.1.5", optional = true }
-vfsi-nfs = { path = "../../crates/vfsi-nfs", version = "0.1.15", optional = true }
-vfsi-sync = { path = "../../crates/vfsi-sync", version = "0.1.16" }
-vfsi-smb = { path = "../../crates/vfsi-smb", version = "0.1.13", optional = true }
+vfsi-core = { path = "../../crates/vfsi-core", version = "0.1.16" }
+vfsi-local = { path = "../../crates/vfsi-local", version = "0.1.15", optional = true }
+vfsi-posix = { path = "../../crates/vfsi-posix", version = "0.1.6", optional = true }
+vfsi-nfs = { path = "../../crates/vfsi-nfs", version = "0.1.16", optional = true }
+vfsi-sync = { path = "../../crates/vfsi-sync", version = "0.1.17" }
+vfsi-smb = { path = "../../crates/vfsi-smb", version = "0.1.14", optional = true }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

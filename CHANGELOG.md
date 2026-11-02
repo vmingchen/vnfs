@@ -5,6 +5,19 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+## Coordinated Rust patch release (2026-11-01)
+
+Rust: `nfsv41-sys 0.1.15`, `vfsi-core 0.1.16`, `vfsi-sync 0.1.17`,
+`vfsi-local 0.1.15`, `vfsi-posix 0.1.6`, `vfsi-uring 0.1.6`,
+`vfsi-nfs 0.1.16`, `vfsi-smb 0.1.14`, `vnfs 0.0.28`, and `vfsi-c 0.3.12`.
+
+- Add page-level recursive directory pruning while retaining anchored child
+  cursors, sibling batching, shared traversal budgets, and cancellation.
+- Publish the supporting Rust/C dependency graph together; C ABI remains v3.
+- Retain reproducible du traversal profiles, raw RPC captures, frozen-release
+  comparisons, and regression tests for candidate builds and report sampling.
+- Keep the vnfs 0.0.27 benchmark baseline and Python package versions unchanged.
+
 ## vfsi-c 0.3.11 — scoped object identity (2026-11-01)
 
 - Add versioned `vfsi_object_id` scalar, descriptor, and vector queries with
