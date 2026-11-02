@@ -1,0 +1,95 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 111  of event 'cpu-clock'
+# Event count (approx.): 222444888
+#
+# Overhead  Command  Shared Object      Symbol                                                                
+# ........  .......  .................  ......................................................................
+#
+     8.11%  du       [kernel.kallsyms]  [k] try_to_wake_up
+     6.31%  du       [kernel.kallsyms]  [k] xas_start
+     5.41%  du       [kernel.kallsyms]  [k] find_inode
+     4.50%  du       [kernel.kallsyms]  [k] __refill_objects_node
+     2.70%  du       [kernel.kallsyms]  [k] inode_insert5
+     1.80%  du       [kernel.kallsyms]  [k] __kern_my_cpu_offset
+     1.80%  du       [kernel.kallsyms]  [k] __pi_clear_page
+     1.80%  du       [kernel.kallsyms]  [k] d_alloc_parallel
+     1.80%  du       [kernel.kallsyms]  [k] el0_svc
+     1.80%  du       [kernel.kallsyms]  [k] xas_load
+     1.80%  du       [kernel.kallsyms]  [k] xdr_stream_pos
+     1.80%  du       [kernel.kallsyms]  [k] xprt_init_majortimeo
+     0.90%  du       [kernel.kallsyms]  [k] __check_heap_object
+     0.90%  du       [kernel.kallsyms]  [k] __d_rehash
+     0.90%  du       [kernel.kallsyms]  [k] __folio_put
+     0.90%  du       [kernel.kallsyms]  [k] __free_frozen_pages
+     0.90%  du       [kernel.kallsyms]  [k] __ip_local_out
+     0.90%  du       [kernel.kallsyms]  [k] __kmalloc_node_track_caller_noprof
+     0.90%  du       [kernel.kallsyms]  [k] __nfs_revalidate_inode
+     0.90%  du       [kernel.kallsyms]  [k] __pi_memcpy_generic
+     0.90%  du       [kernel.kallsyms]  [k] __pi_memset_generic
+     0.90%  du       [kernel.kallsyms]  [k] __rcu_read_unlock
+     0.90%  du       [kernel.kallsyms]  [k] __rmqueue_pcplist
+     0.90%  du       [kernel.kallsyms]  [k] __rpc_do_sleep_on_priority
+     0.90%  du       [kernel.kallsyms]  [k] __schedule
+     0.90%  du       [kernel.kallsyms]  [k] _copy_from_iter
+     0.90%  du       [kernel.kallsyms]  [k] aa_file_perm
+     0.90%  du       [kernel.kallsyms]  [k] alloc_pages_mpol
+     0.90%  du       [kernel.kallsyms]  [k] arch_counter_read
+     0.90%  du       [kernel.kallsyms]  [k] d_splice_alias_ops
+     0.90%  du       [kernel.kallsyms]  [k] do_futex
+     0.90%  du       [kernel.kallsyms]  [k] dynamic_might_resched
+     0.90%  du       [kernel.kallsyms]  [k] el0_svc_common.constprop.0
+     0.90%  du       [kernel.kallsyms]  [k] fpsimd_restore_current_state
+     0.90%  du       [kernel.kallsyms]  [k] free_frozen_page_commit.isra.0
+     0.90%  du       [kernel.kallsyms]  [k] from_kuid_munged
+     0.90%  du       [kernel.kallsyms]  [k] get_page_from_freelist
+     0.90%  du       [kernel.kallsyms]  [k] hrtimer_start_range_ns
+     0.90%  du       [kernel.kallsyms]  [k] inode_init_always_gfp
+     0.90%  du       [kernel.kallsyms]  [k] inode_set_ctime_to_ts
+     0.90%  du       [kernel.kallsyms]  [k] invoke_syscall.constprop.0
+     0.90%  du       [kernel.kallsyms]  [k] ipv4_dst_check
+     0.90%  du       [kernel.kallsyms]  [k] jbd2_journal_stop
+     0.90%  du       [kernel.kallsyms]  [k] kmem_cache_alloc_lru_noprof
+     0.90%  du       [kernel.kallsyms]  [k] kmem_cache_free
+     0.90%  du       [kernel.kallsyms]  [k] lruvec_stat_mod_folio
+     0.90%  du       [kernel.kallsyms]  [k] map_id_range_down
+     0.90%  du       [kernel.kallsyms]  [k] may_open
+     0.90%  du       [kernel.kallsyms]  [k] memcg_list_lru_alloc
+     0.90%  du       [kernel.kallsyms]  [k] netem_enqueue
+     0.90%  du       [kernel.kallsyms]  [k] nfs4_do_handle_exception
+     0.90%  du       [kernel.kallsyms]  [k] nfs4_setup_readdir
+     0.90%  du       [kernel.kallsyms]  [k] nfs_attribute_cache_expired
+     0.90%  du       [kernel.kallsyms]  [k] percpu_ref_put_many.constprop.0
+     0.90%  du       [kernel.kallsyms]  [k] pfn_is_map_memory
+     0.90%  du       [kernel.kallsyms]  [k] security_file_open
+     0.90%  du       [kernel.kallsyms]  [k] sk_forced_mem_schedule
+     0.90%  du       [kernel.kallsyms]  [k] tcp_event_new_data_sent
+     0.90%  du       [kernel.kallsyms]  [k] tcp_tso_segs
+     0.90%  du       [kernel.kallsyms]  [k] try_charge_memcg
+     0.90%  du       [kernel.kallsyms]  [k] try_to_grab_pending
+     0.90%  du       [kernel.kallsyms]  [k] wake_up_var
+     0.90%  du       [kernel.kallsyms]  [k] xdr_finish_decode
+     0.90%  du       [kernel.kallsyms]  [k] xdr_init_decode
+     0.90%  du       [kernel.kallsyms]  [k] xdr_inline_decode
+     0.90%  du       [kernel.kallsyms]  [k] xdr_read_pages
+     0.90%  du       [kernel.kallsyms]  [k] xs_stream_abort_send_request
+     0.90%  du       du                 [.] <std::io::stdio::Stdout as std::io::Write>::write_all
+     0.90%  du       du                 [.] <uucore::mods::line_ending::LineEnding as core::fmt::Display>::fmt
+     0.90%  du       du                 [.] core::fmt::write
+     0.90%  du       du                 [.] hashbrown::map::HashMap<K,V,S,A>::insert
+     0.90%  du       du                 [.] std::sync::mpmc::list::Channel<T>::recv::{{closure}}
+     0.90%  du       du                 [.] std::sys::backtrace::__rust_begin_short_backtrace
+     0.90%  du       du                 [.] uu_du::StatPrinter::convert_size
+     0.90%  du       libc.so.6          [.] __strlen_asimd
+     0.90%  du       libc.so.6          [.] __syscall_cancel_arch_end
+     0.90%  du       libc.so.6          [.] syscall
+     0.90%  du       libc.so.6          [.] unlink_chunk.isra.0
+     0.90%  runuser  [kernel.kallsyms]  [k] timerfd_release
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

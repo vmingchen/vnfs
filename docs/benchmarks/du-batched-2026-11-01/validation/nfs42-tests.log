@@ -1,0 +1,16 @@
+    Blocking waiting for file lock on artifact directory
+   Compiling vfsi-core v0.1.15 (/home/ubuntu/vnfs/crates/vfsi-core)
+   Compiling vfsi-sync v0.1.16 (/home/ubuntu/vnfs/crates/vfsi-sync)
+   Compiling vfsi-local v0.1.14 (/home/ubuntu/vnfs/crates/vfsi-local)
+   Compiling vfsi-nfs v0.1.15 (/home/ubuntu/vnfs/crates/vfsi-nfs)
+   Compiling vfsi-posix v0.1.5 (/home/ubuntu/vnfs/crates/vfsi-posix)
+   Compiling vnfs v0.0.27 (/home/ubuntu/vnfs/crates/vnfs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.75s
+     Running tests/nfs.rs (target/debug/deps/nfs-5ff2056fd0cd7fc3)
+
+running 1 test
+test recursive_admission_batches_anchored_children_without_repeated_path_resolution ... recursive admission: calls=10, operations=379
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 113 filtered out; finished in 0.33s
+

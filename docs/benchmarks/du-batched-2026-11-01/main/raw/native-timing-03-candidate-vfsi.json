@@ -1,0 +1,8 @@
+{
+  "elapsed_ns": 89238524,
+  "stdout_lines": 13995,
+  "stdout_sorted_sha256": "776cd20e56791c731a0a7b46e7b48ffefb494cf6cab5adb2dc98c7a96f9b12d7",
+  "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+  "library_rpc_calls": 128,
+  "library_diagnostics": "[vnfs] compounds=128 avg_ops=52.18 max_ops=105 avg_bytes=1291 total_bytes=165196\n[vnfs] rpc_calls=128 avg_rpc_ms=0.54 total_rpc_ms=69.1"
+}

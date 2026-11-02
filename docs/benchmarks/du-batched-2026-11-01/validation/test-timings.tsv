@@ -1,0 +1,15 @@
+command	seconds	status
+python3 scripts/test-ci-scripts.py	2	0
+cargo test -p vfsi-core -p vfsi-sync -p vfsi-local -p vfsi-posix --features vfsi-core/test-faults vfsi-sync/test-faults vfsi-sync/test-support vfsi-local/test-faults	11	0
+cargo test -p vfsi-nfs --lib --all-features	4	0
+cargo test -p vfsi-smb --lib	6	0
+cargo test -p nfsv41-sys	0	0
+./scripts/test-libntirpc.sh	1	0
+cargo test -p vnfs --features test-faults --lib	0	0
+cargo test -p vnfs --features posix test-faults --test posix_backend	3	0
+cargo test -p vnfs --test public_api --test application_boundary --test tree_builder --test transfer_helpers --test canonical_examples --test readv --test client_vectors --test directory_pages --test port_helpers --test posix	16	0
+cargo test -p vnfs --doc	4	0
+cargo test -p vfsi-c --lib	8	0
+cargo test --manifest-path adapters/vfsi-python/Cargo.toml --locked --all-features	10	0
+cargo test --manifest-path adapters/nfs4fs/Cargo.toml --locked	6	0
+cargo test --manifest-path adapters/vsmb/Cargo.toml --locked	5	0

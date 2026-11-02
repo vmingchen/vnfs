@@ -1,0 +1,16 @@
+# started on Sun Nov  1 22:04:34 2026
+
+
+ Performance counter stats for 'runuser -u ubuntu -- /usr/bin/time -v -o /home/ubuntu/vfsi-du-profile-20261101/added-1ms-rtt-stat-2-vfsi.time.txt /home/ubuntu/vfsi-du-baseline-0.0.27/target/release/du -a -B1 tree':
+
+            330.26 msec task-clock                                                            
+             14386      context-switches                                                      
+              1211      cpu-migrations                                                        
+              1012      page-faults                                                           
+
+       4.222205555 seconds time elapsed
+
+       0.112789000 seconds user
+       0.355638000 seconds sys
+
+

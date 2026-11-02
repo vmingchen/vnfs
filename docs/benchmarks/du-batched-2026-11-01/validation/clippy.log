@@ -1,0 +1,7 @@
+    Checking vfsi-sync v0.1.16 (/home/ubuntu/vnfs/crates/vfsi-sync)
+    Checking nfsv41-sys v0.1.14 (/home/ubuntu/vnfs/crates/nfsv41-sys)
+   Compiling vfsi-nfs v0.1.15 (/home/ubuntu/vnfs/crates/vfsi-nfs)
+    Checking vfsi-local v0.1.14 (/home/ubuntu/vnfs/crates/vfsi-local)
+    Checking vfsi-posix v0.1.5 (/home/ubuntu/vnfs/crates/vfsi-posix)
+    Checking vnfs v0.0.27 (/home/ubuntu/vnfs/crates/vnfs)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.45s

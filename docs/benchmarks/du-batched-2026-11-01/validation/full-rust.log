@@ -1,0 +1,1418 @@
+.........................................
+----------------------------------------------------------------------
+Ran 41 tests in 1.695s
+
+OK
+validated 5 ecosystem components and package baseline
+validated 5 ecosystem components and package baseline
+   Compiling vfsi-posix v0.1.5 (/home/ubuntu/vnfs/crates/vfsi-posix)
+   Compiling vfsi-sync v0.1.16 (/home/ubuntu/vnfs/crates/vfsi-sync)
+   Compiling vfsi-core v0.1.15 (/home/ubuntu/vnfs/crates/vfsi-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.28s
+     Running unittests src/lib.rs (target/debug/deps/vfsi_core-4ec0717a256a33cb)
+
+running 35 tests
+test api::metadata::option_layout_tests::packed_follow_flag_preserves_selected_fields ... ok
+test api::metadata::compact_update_tests::integer_presence_is_independent_and_keeps_zero_and_maximum_values ... ok
+test api::metadata::option_layout_tests::retargeting_preserves_all_changes_without_cloning_the_target ... ok
+test api::read::option_layout_tests::read_options_are_one_word_and_keep_inheritance_distinct ... ok
+test api::read::compact_read_tests::compact_read_results_preserve_owned_and_buffered_empty_progress ... ok
+test api::support::depth_limit_tests::checked_depths_preserve_finite_limits_and_inheritance ... ok
+test api::target_tests::borrowed_targets_and_handle_operations_do_not_require_cloning_handles ... ok
+test api::traversal::tests::prune_prevents_io_and_events_have_depth_first_order ... ok
+test api::traversal::tests::stop_error_and_limits_do_not_read_descendants ... ok
+test api::traversal::tests::depth_limit_allows_boundary_entries_and_only_blocks_directory_descent ... ok
+test api::write::option_layout_tests::packed_completion_flag_keeps_const_defaults_and_toggles ... ok
+test api::visit::option_layout_tests::compact_traversal_options_preserve_zero_overrides_and_independent_bits ... ok
+test internal::adb::tests::layout_keeps_optional_fields_and_zero_blocks ... ok
+test internal::adb::tests::final_block_number_and_field_ends_are_checked_before_execution ... ok
+test internal::budget::tests::root_path_charges_and_failed_entries_preserve_remaining_budget ... ok
+test internal::budget::tests::maximum_limits_do_not_wrap_and_remaining_options_retain_policy ... ok
+test internal::adb::tests::huge_block_count_returns_overflow_without_allocating ... ok
+test internal::metadata_tests::metadata_validation_rejects_reserved_ids_and_preserves_absent_times ... ok
+test internal::metadata_tests::timestamp_normalization_handles_both_sides_of_epoch ... ok
+test path::tests::fixed_bytes_normalization_preserves_component_and_parent_rules ... ok
+test path::tests::native_path_roundtrip ... ok
+test path::tests::non_utf8_components_roundtrip ... ok
+test types::copy_option_tests::follows_source_symlinks_by_default_and_builder_can_disable_it ... ok
+test types::filesystem_stats_tests::compact_layout_preserves_all_optional_values_independently ... ok
+test path::tests::allocation_path_split_preserves_separators_and_arbitrary_bytes ... ok
+test types::filesystem_stats_tests::debug_reports_logical_optional_values_not_storage ... ok
+test types::open_request_ownership_tests::borrowed_open_requests_and_their_clones_reuse_path_storage ... ok
+test types::open_request_ownership_tests::owned_open_requests_outlive_inputs_and_transfer_their_storage ... ok
+test types::sparse_metadata_tests::absent_integer_payloads_do_not_change_equality_or_debug_output ... ok
+test types::sparse_metadata_tests::omitted_fields_are_distinct_from_real_zero_values ... ok
+test types::sparse_metadata_tests::timestamp_conversion_failure_does_not_erase_the_returned_mask ... ok
+test write::tests::owned_storage_is_borrowed_without_copying_or_losing_native_options ... ok
+test write::tests::portable_operations_are_copyable_without_handle_traits_or_extra_flags_storage ... ok
+test types::sparse_metadata_tests::compact_attrs_preserve_each_presence_bit_zero_and_maximum_values ... ok
+test internal::adb::tests::all_layout_arithmetic_matches_wide_integer_reference ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/allocations.rs (target/debug/deps/allocations-8ce3cfdd0e7199ad)
+
+running 8 tests
+test adb_planning_uses_constant_storage_even_for_huge_valid_counts ... ok
+test homogeneous_owned_reads_do_not_allocate_a_reordering_buffer ... ok
+test path_split_borrows_both_components_without_allocating ... ok
+test range_batches_reuse_backend_result_storage ... ok
+test homogeneous_dispatch_staging_stays_constant_across_batch_sizes ... ok
+test singleton_buffer_reads_allocate_only_backend_results_and_output ... ok
+test singleton_preflight_and_backend_indices_do_not_replay_or_mutate ... ok
+test mixed_dispatch_keeps_order_and_error_indices_with_unknown_iterator_lengths ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/error_contract.rs (target/debug/deps/error_contract-1ca90d853907dca6)
+
+running 6 tests
+test io_sources_and_semantic_diagnostics_survive_cloning_and_context ... ok
+test errno_translation_never_relabels_a_native_status ... ok
+test common_native_statuses_have_portable_categories_without_losing_status ... ok
+test status_only_results_keep_cold_diagnostics_out_of_line ... ok
+test rpc_transport_categories_do_not_change_when_remapping_indices ... ok
+test unsupported_is_a_client_category_not_a_fabricated_errno ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/many_results.rs (target/debug/deps/many_results-bed57e9793d15e52)
+
+running 14 tests
+test cleanup_failure_does_not_mask_primary_error ... ok
+test backend_cannot_override_the_callers_request_count ... ok
+test complete_results_collect_in_request_order ... ok
+test concurrent_failures_report_the_lowest_request_position ... ok
+test fault_script_fires_once_at_the_exact_point ... ok
+test overlong_backend_result_is_a_contract_error_not_a_panic ... ok
+test overlong_open_result_cleans_every_returned_handle ... ok
+test short_success_prefix_is_a_transport_contract_error ... ok
+test short_success_prefix_is_cleaned_before_contract_error ... ok
+test strict_open_policy_cleans_successes_after_concurrent_failure ... ok
+test strict_open_policy_cleans_successful_prefix_on_failure ... ok
+test vector_position_overrides_a_stale_backend_error_index ... ok
+test every_nfs_style_failure_index_is_preserved_and_prefix_is_cleaned ... ok
+test every_smb_style_failure_cleans_successes_on_both_sides ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/outcomes.rs (target/debug/deps/outcomes-4c99fb16c80f8b33)
+
+running 18 tests
+test descriptor_allocator_wraps_without_replacing_a_live_descriptor ... ok
+test index_mapping_preserves_unknown_transport_location ... ok
+test metadata_absent_mask_preserves_unknown_requested_bits ... ok
+test metadata_converts_fractional_pre_epoch_timestamps ... ok
+test metadata_exposes_present_and_absent_masks ... ok
+test metadata_distinguishes_unavailable_fields_from_zero_and_false ... ok
+test opaque_error_display_and_transport_diagnostics_preserve_context ... ok
+test opaque_errors_keep_typed_status_context_and_optional_indices_consistent ... ok
+test protocol_cross_device_errors_keep_their_category_and_status_through_standard_io ... ok
+test nfs_status_is_not_conflated_with_errno ... ok
+test portable_error_kinds_preserve_protocol_status_and_source ... ok
+test protocol_status_constructors_preserve_their_domains ... ok
+test rpc_transport_placeholder_is_not_exposed_as_request_zero ... ok
+test status_without_a_known_index_is_not_reported_as_operation_zero ... ok
+test transport_failure_is_ambiguous_and_requires_reconciliation ... ok
+test transport_categories_survive_attribution_context_and_io_conversion ... ok
+test rpc_conversion_preserves_messages_and_explicit_or_protocol_indices ... ok
+test unsupported_referrals_preserve_protocol_status_indices_and_context ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/portable_api.rs (target/debug/deps/portable_api-c132d2b76ba111a7)
+
+running 15 tests
+test blanket_extensions_preserve_vector_dispatch_and_root_grouping ... ok
+test buffered_listdir_forwards_remaining_budgets_fields_and_resolution_policy ... ok
+test consuming_reads_release_caller_buffers_and_owned_counts_are_derived ... ok
+test directory_budget_overrides_remain_distinct_from_client_defaults ... ok
+test collecting_and_page_adapters_reject_unhandled_policies_before_io ... ok
+test directory_defaults_match_with_or_without_explicit_options ... ok
+test consuming_directory_entries_reuses_the_owned_path_allocation ... ok
+test listdir_default_stops_before_next_page_without_metadata_or_root_events ... ok
+test extensions_reject_malformed_results_and_do_not_replay_transport_failures ... ok
+test listdir_lifecycle_sorts_prunes_and_balances_directory_events ... ok
+test listdir_lifecycle_root_pruning_stop_and_empty_directory_need_no_child_reads ... ok
+test listdir_preserves_callback_error_provenance_in_every_presentation_mode ... ok
+test listdir_recursive_entry_pruning_requires_lifecycle_configuration ... ok
+test path_contents_helpers_dispatch_once_without_handles_or_listing ... ok
+test listdir_rejects_malformed_page_indices_parents_and_completions_without_replay ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/write_construction.rs (target/debug/deps/write_construction-a808c0a864e473e9)
+
+running 3 tests
+test borrowed_native_constructors_infer_without_a_backend_call ... ok
+test owned_native_constructors_infer_without_expected_types_or_flag_builders ... ok
+test portable_constructors_keep_absolute_offsets_and_copyable_borrowed_storage ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/vfsi_local-a44205e13d3a9dda)
+
+running 70 tests
+test contract_tests::tests::anchored_no_follow_path_survives_parent_replacement ... ok
+test contract_tests::tests::adb_layout_overflow_fails_before_creating_the_file ... ok
+test contract_tests::tests::borrowed_write_and_direct_read_into_preserve_offsets_and_eof ... ok
+test contract_tests::tests::absolute_offset_at_u64_max_minus_one_is_not_cur ... ok
+test contract_tests::tests::anchored_create_cannot_be_redirected_after_resolution ... ok
+test contract_tests::tests::constructor_requires_an_existing_root_and_preserves_lookup_errors ... ok
+test contract_tests::tests::constructor_rejects_fifo_roots_without_waiting_for_a_writer ... ok
+test contract_tests::tests::cur_offset_reads_resolve_and_advance ... ok
+test contract_tests::tests::cwd_relative_unlink_targets_cwd ... ok
+test contract_tests::tests::checked_offsets_match_u64_arithmetic_at_signed_and_unsigned_boundaries ... ok
+test contract_tests::tests::descriptor_identity_cache_stays_with_the_open_object_not_its_path ... ok
+test contract_tests::tests::directory_cursor_metadata_stays_with_renamed_directory ... ok
+test contract_tests::tests::copy_options_handle_mixed_dangling_links_and_original_error_indices ... ok
+test contract_tests::tests::directory_listing_pins_final_directory_before_enumeration ... ok
+test contract_tests::tests::dummy_descriptor_sees_external_truncation ... ok
+test contract_tests::tests::copy_options_preserve_source_symlinks ... ok
+test contract_tests::tests::dummy_open_by_path_abs_is_root_relative ... ok
+test contract_tests::tests::dummy_named_attr_detection ... ok
+test contract_tests::tests::dummy_reports_special_file_types ... ok
+test contract_tests::tests::dummy_cwd_dotdot_stays_in_root ... ok
+test contract_tests::tests::dummy_root_clamps_dotdot ... ok
+test contract_tests::tests::end_offset_writes_append_and_reads_at_end ... ok
+test contract_tests::tests::dummy_root_resolves_absolute_symlink_targets_inside_root ... ok
+test contract_tests::tests::eof_is_only_true_at_end ... ok
+test contract_tests::tests::exists_and_file_type_use_lstat_semantics ... ok
+test contract_tests::tests::following_chown_keeps_an_existing_target_pinned_after_replacement ... ok
+test contract_tests::tests::following_chown_rejects_a_missing_leaf_replaced_by_an_escaping_symlink ... ok
+test contract_tests::tests::fseek_takes_shared_ref_and_works ... ok
+test contract_tests::tests::getattrsv_reports_returned_mask ... ok
+test contract_tests::tests::handle_attributes_survive_unlink_and_scalar_helpers_share_the_engine ... ok
+test contract_tests::tests::listdir_zero_max_count_is_unlimited ... ok
+test contract_tests::tests::lsetattrsv_does_not_follow_final_symlink ... ok
+test contract_tests::tests::mkdir_mode_does_not_follow_a_leaf_symlink_swap ... ok
+
+running 1 test
+test contract_tests::tests::mkdir_mode_overrides_restrictive_umask ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 69 filtered out; finished in 0.00s
+
+test contract_tests::tests::mkdir_mode_overrides_restrictive_umask ... ok
+test contract_tests::tests::named_attr_query_errors_propagate_for_paths_and_handles ... ok
+test contract_tests::tests::named_attr_syscalls_only_run_when_requested ... ok
+test contract_tests::tests::native_scalar_adapters_preserve_application_error_context ... ok
+test contract_tests::tests::no_follow_operations_reject_symlinked_parent_escape ... ok
+test contract_tests::tests::no_replace_empty_vector_is_a_noop ... ok
+test contract_tests::tests::no_replace_preserves_invalid_self_directory_rename ... ok
+test contract_tests::tests::nofollow_setattrs_do_not_mutate_a_leaf_symlink_swap_target ... ok
+test contract_tests::tests::offset_overflow_is_reported_without_io_or_cursor_wraparound ... ok
+test contract_tests::tests::open_create_honors_umask_and_does_not_chmod_existing_file ... ok
+test contract_tests::tests::open_create_new_rejects_dangling_final_symlink ... ok
+test contract_tests::tests::openv_rejects_mismatched_lengths ... ok
+test contract_tests::tests::portable_fallback_create_keeps_parent_directory_anchored ... ok
+test contract_tests::tests::renamev_honors_path_base ... ok
+
+running 1 test
+test contract_tests::tests::setattr_mode_does_not_block_on_a_raced_fifo ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 69 filtered out; finished in 0.00s
+
+test contract_tests::tests::finite_overlapping_copy_between_hardlink_aliases_is_rejected_before_mutation ... ok
+test contract_tests::tests::setattr_mode_does_not_block_on_a_raced_fifo ... ok
+test contract_tests::tests::setattr_mode_does_not_follow_a_leaf_symlink_swap ... ok
+
+running 1 test
+test contract_tests::tests::setattr_times_do_not_require_read_permission ... ok
+test contract_tests::tests::setattr_times_stay_with_the_pinned_target_after_replacement ... ok
+test contract_tests::tests::setattrsv_rejects_unsupported_bits ... ok
+test contract_tests::tests::setattr_times_do_not_block_on_a_fifo_without_a_writer ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 69 filtered out; finished in 0.00s
+
+test contract_tests::tests::setattrsv_updates_access_and_modify_times ... ok
+test contract_tests::tests::setattr_times_do_not_block_on_a_fifo_without_a_writer ... ok
+test contract_tests::tests::to_eof_copy_between_hardlink_aliases_is_rejected_without_growth ... ok
+test contract_tests::tests::shared_tree_copy_preserves_symlinks_and_uses_the_copy_strategy ... ok
+test contract_tests::tests::try_new_reports_setup_errors_instead_of_panicking ... ok
+test contract_tests::tests::vf_file_cwd_and_cwd_path_resolution ... ok
+test contract_tests::tests::vf_path_rejects_descriptors ... ok
+test contract_tests::tests::unsupported_rename_flags_are_distinguished_from_invalid_directory_moves ... ok
+test contract_tests::tests::walk_works_through_dyn_vecfs ... ok
+test contract_tests::tests::vfsi_vsetattrs_batches_permissions_and_sizes ... ok
+test contract_tests::tests::whole_collection_reuses_full_chunks_without_retaining_oversized_buffers ... ok
+test contract_tests::tests::writev_truncate_removes_stale_tail ... ok
+test io::tests::owned_adapter_rejects_bad_counts_and_cardinality_without_panicking ... ok
+test contract_tests::tests::whole_path_reads_use_bounded_pinned_cohorts_and_always_close_temporary_handles ... ok
+test contract_tests::tests::extent_copy_preserves_multi_chunk_ranges_and_final_size ... ok
+test io_range_tests::sorted_overlap_checks_preserve_alias_empty_and_adjacent_semantics ... ok
+test contract_tests::tests::deep_recursive_operations_use_bounded_call_stack ... ok
+
+test result: ok. 70 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.01s
+
+     Running unittests src/lib.rs (target/debug/deps/vfsi_posix-b169f378b0bfcb08)
+
+running 2 tests
+test tests::executor_stops_after_error_and_preserves_result_slots ... ok
+test tests::standalone_backend_roundtrips_vectors_buffers_and_sync ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/vfsi_sync-9347ca4f9f11d9ae)
+
+running 12 tests
+test application::admission_tests::admission_keeps_anchored_sibling_batches_and_prunes_before_io ... ok
+test application::admission_tests::admission_stop_error_and_depth_pruning_never_fetch_children ... ok
+test application::traversal_tests::recursive_visit_drops_fallback_snapshot_on_stop_error_and_limit ... ok
+test traits::contract_tests::read_result_cardinality_is_checked_before_indexing ... ok
+test traits::contract_tests::read_result_identity_offset_progress_and_size_are_checked ... ok
+test traits::contract_tests::scalar_result_cardinality_is_checked_without_panicking ... ok
+test traits::contract_tests::write_result_identity_offset_size_and_cardinality_are_checked ... ok
+test traits::walk_depth_tests::depth_limit_is_compact_and_finite_values_never_become_unlimited ... ok
+test application::traversal_tests::recursive_visit_releases_fallback_snapshots_before_descending ... ok
+test traits::walk_depth_tests::depth_limits_normalize_without_wrapping_and_keep_other_options ... ok
+test application::traversal_tests::recursive_pages_keep_root_policy_and_reject_descendant_symlinks ... ok
+test client::write::large_write_graphs_have_linear_edges_and_preserve_initial_readiness ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/native_client.rs (target/debug/deps/native_client-fb9a05166d5974bf)
+
+running 75 tests
+test allocating_whole_file_reads_enforce_a_configurable_limit ... ok
+test append_adapters_share_completion_and_report_actual_end_after_short_writes ... ok
+test consolidated_write_dispatch_retries_only_successful_short_writes_without_copying ... ok
+test complete_append_vectors_order_short_writes_and_never_replay_failures ... ok
+test convenience_string_errors_retain_operation_and_path_context ... ok
+test default_directory_pages_preserve_cursor_fields_and_bounds ... ok
+test default_directory_visitor_uses_native_pages_without_materializing_a_listing ... ok
+test directory_vectors_preflight_all_handles_and_use_retained_descriptors ... ok
+
+running 1 test
+test complete_write_projection_can_reenter_during_alias_planning ... test directory_vector_errors_preserve_index_and_do_not_replay_transport_failures ... ok
+test client_policy_applies_to_scalar_vector_and_into_reads_before_dispatch ... ok
+test directory_visit_starts_with_one_entry_and_respects_tight_limits ... ok
+test explicit_close_failure_keeps_handle_armed_for_drop_cleanup ... ok
+test failed_directory_open_cleans_up_the_opened_prefix ... ok
+test failed_deferred_close_keeps_ownership_until_drained ... ok
+test failed_try_closev_retains_handles_for_explicit_retry ... ok
+test filesystem_statistics_validate_backend_shape_and_preflight_all_handles ... ok
+test final_owner_drains_deferred_cleanup ... ok
+test failed_try_close_retains_handle_for_explicit_retry ... ok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 74 filtered out; finished in 0.00s
+
+test file_drop_never_waits_for_an_in_flight_rpc ... ok
+test indexed_write_frontier_stops_at_late_short_write_failure_without_replay ... ok
+test into_inner_drains_cleanup_queued_while_an_earlier_close_is_running ... ok
+test malformed_open_results_retain_failed_cleanup_for_retry ... ok
+test legacy_directory_fallback_fails_closed_without_no_follow_support ... ok
+test minimal_backend_defaults_are_object_safe_bounded_and_terminate ... ok
+test minimal_backend_directory_defaults_return_unsupported ... ok
+test native_read_into_dispatches_without_owned_read_results ... ok
+test native_read_into_rejects_malformed_backend_results ... ok
+test notifications_reenter_and_drop_handles_after_unlock ... ok
+test openv_rejects_wrong_result_count_and_cleans_returned_handles ... ok
+test observer_panic_does_not_poison_the_backend_mutex ... ok
+test ordinary_operation_drains_dropped_handles ... ok
+test owned_vector_reads_reject_oversized_batches_before_backend_io ... ok
+test portable_handle_queries_and_sync_batch_and_preflight_every_handle ... ok
+
+running 1 test
+test generic_path_conversion_can_reenter_namespace_operations ... test portable_open_builder_preflights_and_preserves_all_flag_combinations ... ok
+
+running 1 test
+test projected_io_errors_allow_client_reentry ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 74 filtered out; finished in 0.00s
+
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 74 filtered out; finished in 0.01s
+
+test complete_write_projection_can_reenter_during_alias_planning ... ok
+test projected_metadata_vectors_convert_each_target_once_and_preflight_all_mutations ... ok
+test readv_and_writev_reject_wrong_result_counts ... ok
+test scalar_read_uses_bounded_whole_file_api_without_opening_a_handle ... ok
+test setattrs_ops_batch_policy_runs_in_order_and_preflight_before_dispatch ... ok
+test setattrs_ops_remap_later_run_failures_without_replaying_or_dispatching_suffix ... ok
+test owned_handle_keeps_backend_alive_after_standard_io_adapter_is_dropped ... ok
+test shared_attribute_ops_preserve_all_fields_at_the_raw_backend_boundary ... ok
+test shared_native_attribute_batches_preflight_and_remap_policy_run_errors ... ok
+test shared_workflows_keep_dynamic_backend_overrides_reachable ... ok
+test shared_write_operations_keep_storage_borrowed_through_dynamic_vector_dispatch ... ok
+test std_io_errors_retain_vector_operation_and_path_context ... ok
+test std_io_collection_obeys_client_limits_and_retains_cursor ... ok
+test std_io_rejects_backend_results_that_violate_io_contracts ... ok
+test std_io_write_all_reports_write_zero_without_retrying ... ok
+test std_io_write_all_retries_interruptions_without_replaying_progress ... ok
+test stream_callback_errors_keep_nested_operation_indices_and_close_the_stream ... ok
+test stream_callback_errors_preserve_indexed_and_unattributed_transport_failures ... ok
+test stream_cohorts_batch_small_files_with_bounded_memory_and_ordered_callbacks ... ok
+test stream_cohorts_never_replay_transport_failures_and_close_all_opened_files ... ok
+
+running 1 test
+test stream_callback_can_reenter_client_and_drop_another_file ... test stream_cohorts_preserve_callback_errors_and_stop_before_unvisited_cleanup_errors ... ok
+test stream_cohorts_preserve_stop_prefix_and_defer_later_semantic_failures ... ok
+test successfully_closed_handle_returns_ebadf_instead_of_panicking ... ok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 74 filtered out; finished in 0.00s
+
+
+running 1 test
+test sync_errors_preserve_valid_indices_and_reject_invalid_backend_indices ... test generic_path_conversion_can_reenter_namespace_operations ... ok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 74 filtered out; finished in 0.00s
+
+test vector_results_must_match_their_requests_and_io_limits ... ok
+test vector_transport_failure_does_not_invent_request_zero_context ... ok
+test visitor_field_selection_is_forwarded_to_each_page ... ok
+test write_allv_dependency_schedule_maps_later_wave_errors_without_replay ... ok
+test projected_io_errors_allow_client_reentry ... ok
+test write_allv_dependency_schedule_orders_newly_ready_and_partial_requests ... ok
+test write_allv_dependency_schedule_treats_validated_empty_requests_as_complete ... ok
+test write_allv_dependency_schedule_visits_requests_only_when_ready ... ok
+test write_allv_orders_aliases_and_unknown_objects_across_short_writes ... ok
+test write_allv_preserves_order_for_overlapping_short_writes ... ok
+test write_allv_rejects_zero_progress ... ok
+test write_allv_retries_short_writes_in_vector_waves ... ok
+test write_allv_validates_every_request_before_writing_a_prefix ... ok
+test write_allv_waits_for_every_earlier_overlapping_request ... ok
+test stream_callback_can_reenter_client_and_drop_another_file ... ok
+test sync_errors_preserve_valid_indices_and_reject_invalid_backend_indices ... ok
+test write_allv_dependency_schedule_matches_reference_waves ... ok
+
+test result: ok. 75 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.37s
+
+     Running tests/prr_rust20_round02.rs (target/debug/deps/prr_rust20_round02-3b3a1cd2ccbcbca5)
+
+running 6 tests
+test buffer_read_preflight_reports_closed_slot_without_mutating_buffers ... ok
+test mixed_whole_and_range_preflight_remaps_closed_handle_to_original_slot ... ok
+test mixed_buffer_preflight_remaps_closed_handle_before_any_dispatch ... ok
+test singleton_closed_read_controls_keep_index_zero ... ok
+test successful_range_and_buffer_batches_keep_one_dispatch_each ... ok
+test owned_read_preflight_reports_closed_slot_including_zero_length ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/public_api.rs (target/debug/deps/public_api-04fe29f475b329c4)
+
+running 1 test
+test backend_contracts_are_object_safe_and_vector_includes_handles ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vfsi_core
+
+running 53 tests
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::attrs (line 470) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::attrs_with_options (line 490) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::close_files (line 130) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::create (line 81) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::create_dir (line 862) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::copy (line 1012) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::listdir (line 703) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::open (line 57) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::open_with (line 110) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::listdir (line 716) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::create_dir_all (line 942) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::read_dir (line 540) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::read_dir_with_options (line 559) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::read_dirs_with_options (line 625) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::read_files (line 169) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::read_files_with_options (line 183) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::read_stream (line 281) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::read_dirs (line 593) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::read_stream_with_options (line 318) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::read_to_string (line 237) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::remove_dir_contents (line 1142) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::read_to_string_with_options (line 254) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::remove_dir (line 1074) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::remove_dir_all (line 1101) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::rename (line 992) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::remove_file (line 1041) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::visit_dirs_ordered (line 778) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::symlink_attrs (line 518) - compile ... ok
+test crates/vfsi-core/src/api/metadata.rs - api::metadata::SetAttrsOp<super::Target<'a,F>>::file (line 209) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::write_files (line 389) - compile ... ok
+test crates/vfsi-core/src/api/extensions.rs - api::extensions::VfsiExt::write (line 362) - compile ... ok
+test crates/vfsi-core/src/api/vfsi.rs - api::vfsi::Vfsi::limits (line 202) - compile ... ok
+test crates/vfsi-core/src/api/vfsi.rs - api::vfsi::Vfsi (line 34) - compile ... ok
+test crates/vfsi-core/src/api/vfsi.rs - api::vfsi::Vfsi::vcopy (line 363) - compile ... ok
+test crates/vfsi-core/src/api/vfsi.rs - api::vfsi::Vfsi::vgetattrs (line 83) - compile ... ok
+test crates/vfsi-core/src/api/vfsi.rs - api::vfsi::Vfsi::vlistdirs (line 441) - compile ... ok
+test crates/vfsi-core/src/api/vfsi.rs - api::vfsi::Vfsi::vmkdir (line 342) - compile ... ok
+test crates/vfsi-core/src/api/vfsi.rs - api::vfsi::Vfsi::vclose (line 322) - compile ... ok
+test crates/vfsi-core/src/api/vfsi.rs - api::vfsi::Vfsi::vopen (line 219) - compile ... ok
+test crates/vfsi-core/src/api/vfsi.rs - api::vfsi::Vfsi::vread (line 236) - compile ... ok
+test crates/vfsi-core/src/api/vfsi.rs - api::vfsi::Vfsi::vread (line 259) - compile ... ok
+test crates/vfsi-core/src/api/read.rs - api::read::ReadOptions (line 167) ... ok
+test crates/vfsi-core/src/api/vfsi.rs - api::vfsi::Vfsi::vsetattrs (line 128) - compile ... ok
+test crates/vfsi-core/src/api/vfsi.rs - api::vfsi::Vfsi::vrename (line 405) - compile ... ok
+test crates/vfsi-core/src/api/vfsi.rs - api::vfsi::Vfsi::vsetattrs (line 116) - compile ... ok
+test crates/vfsi-core/src/api/vfsi.rs - api::vfsi::Vfsi::vstream (line 469) - compile ... ok
+test crates/vfsi-core/src/api/vfsi.rs - api::vfsi::Vfsi::vwrite (line 293) - compile ... ok
+test crates/vfsi-core/src/api/vfsi.rs - api::vfsi::Vfsi::vremove (line 384) - compile ... ok
+test crates/vfsi-core/src/lib.rs - (line 9) - compile ... ok
+test crates/vfsi-core/src/types.rs - types::FilesystemStats (line 1121) ... ok
+test crates/vfsi-core/src/write.rs - write::WriteRequest<T,D,O,P>::at (line 129) - compile ... ok
+test crates/vfsi-core/src/types.rs - types::FsObjId (line 662) ... ok
+test crates/vfsi-core/src/write.rs - write::WriteOp (line 16) ... ok
+
+test result: ok. 53 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 7 tests
+test crates/vfsi-core/src/api/read.rs - api::read::ReadOptions (line 156) - compile fail ... ok
+test crates/vfsi-core/src/api/support.rs - api::support::StreamOptions::with_chunk_size (line 29) - compile fail ... ok
+test crates/vfsi-core/src/api/metadata.rs - api::metadata::AttrsOptions (line 14) - compile fail ... ok
+test crates/vfsi-core/src/api/read.rs - api::read::ReadOptions (line 179) - compile fail ... ok
+test crates/vfsi-core/src/api/visit.rs - api::visit::WalkOptions (line 194) - compile fail ... ok
+test crates/vfsi-core/src/api/visit.rs - api::visit::ListDirOptions (line 42) - compile fail ... ok
+test crates/vfsi-core/src/api/visit.rs - api::visit::WalkOptions (line 198) - compile fail ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+all doctests ran in 0.63s; merged doctests compilation took 0.50s
+   Doc-tests vfsi_local
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vfsi_posix
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vfsi_sync
+
+running 7 tests
+test crates/vfsi-sync/src/lib.rs - backend (line 37) - compile fail ... ok
+test crates/vfsi-sync/src/lib.rs - backend (line 31) - compile fail ... ok
+test crates/vfsi-sync/src/lib.rs - backend (line 34) - compile fail ... ok
+test crates/vfsi-sync/src/lib.rs - backend (line 40) - compile fail ... ok
+test crates/vfsi-sync/src/lib.rs - backend (line 43) - compile fail ... ok
+test crates/vfsi-sync/src/lib.rs - backend (line 46) - compile fail ... ok
+test crates/vfsi-sync/src/lib.rs - backend (line 49) - compile fail ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+   Compiling vfsi-nfs v0.1.15 (/home/ubuntu/vnfs/crates/vfsi-nfs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.02s
+     Running unittests src/lib.rs (target/debug/deps/vfsi_nfs-768c3fe1d6a0cc27)
+
+running 156 tests
+test client::io_progress::tests::overflow_fails_before_repair_dispatch ... ok
+test client::io_progress::tests::read_rejects_zero_progress_and_oversized_payloads ... ok
+test client::io_progress::tests::read_repairs_only_unread_suffix_at_actual_offsets ... ok
+test client::io_progress::tests::read_preserves_repair_failure_and_never_replays_prefix ... ok
+test client::io_progress::tests::read_stops_at_eof_and_accepts_empty_eof ... ok
+test client::io_progress::tests::write_does_not_replay_after_repair_failure ... ok
+test client::io_progress::tests::write_rejects_zero_progress_and_oversized_counts ... ok
+test client::session_recovery_tests::live_shutdown_tests::shutdown_drains_failed_unregistered_open_cleanup ... ok
+test client::tests::allocation_path_components_borrow_input_and_preserve_cursor_navigation ... ok
+test client::path_open_cleanup::tests::cleanup_uses_last_observation_even_when_stateid_sequence_wraps ... ok
+test client::io_progress::tests::write_repairs_only_missing_suffix_and_combines_stability ... ok
+test client::tests::cleanup_error_remapping_preserves_transport_errors_as_unattributed ... ok
+test client::tests::directory_page_eof_suppresses_continuation_without_rewriting_entry_cookies ... ok
+test client::tests::exclusive_open_attrset_selects_only_verifier_storage_timestamps ... ok
+test client::tests::failed_path_batch_preparation_closes_every_open_and_keeps_primary_error ... ok
+test client::tests::exclusive_cleanup_setattr_combines_creation_mode_and_reported_verifier_times ... ok
+test client::tests::fixed_bytes_cursor_preserves_saved_parent_reuse ... ok
+test client::tests::fixed_bytes_filehandle_layout_and_wire_ownership ... ok
+test client::tests::merged_budgets_never_exceed_server_limit ... ok
+test client::tests::negotiated_byte_limits_have_no_sixty_four_kib_floor ... ok
+test client::tests::negotiated_op_budgets_include_sequence ... ok
+test client::tests::oversized_path_read_reply_closes_open_stateids_before_returning_error ... ok
+test client::tests::read_reply_data_never_exceeds_the_requested_count ... ok
+test client::tests::readdir_rejects_invalid_name_components_as_invalid_replies ... ok
+test client::tests::readdir_preserves_non_utf8_name_components ... ok
+test client::tests::remove_failure_index_counts_only_remove_items ... ok
+test client::tests::statistics_resource_retries_preserve_complete_items ... ok
+test client::tests::shared_parent_navigation_preserves_save_restore_and_exact_operation_counts ... ok
+test client::tests::zero_configuration_cannot_bypass_negotiated_limit ... ok
+test compound::request_size_tests::fixed_bytes_compound_payload_pointers_survive_growth ... ok
+test compound::request_size_tests::ownership_setattr_encodes_numeric_ids_in_attribute_order ... ok
+test compound::request_size_tests::bounded_xdr_size_counts_variable_payload_and_sequence ... ok
+test compound::compound_preflight_survives_late_thread_local_client_cleanup ... ok
+test compound::request_size_tests::preflight_cache_is_invalidated_by_compound_mutations ... ok
+test compound::request_size_tests::rpc_codec_counts_only_actual_argument_bytes_without_reencoding ... ok
+test compound::request_size_tests::symlink_nverify_encodes_type_before_guarded_setattr ... ok
+test compound::response_validation_tests::accepts_matching_failure_prefix ... ok
+test compound::response_validation_tests::checked_status_preserves_a_zero_op_compound_failure ... ok
+test compound::response_validation_tests::collects_open_results_after_an_earlier_read_in_the_same_range ... ok
+test compound::response_validation_tests::collects_open_stateid_from_successful_prefix_of_failed_read_item ... ok
+test compound::request_size_tests::safe_create_union_initializes_each_wire_payload ... ok
+test compound::response_validation_tests::ignores_open_without_a_successful_getfh_in_the_executed_prefix ... ok
+test compound::response_validation_tests::rejects_null_success_payload_before_slice_construction ... ok
+test compound::response_validation_tests::empty_read_data_accepts_the_decoders_null_empty_payload ... ok
+test compound::response_validation_tests::rejects_successful_short_reply_before_typed_access ... ok
+test compound::response_validation_tests::rejects_operation_status_that_disagrees_with_compound_status ... ok
+test compound::response_validation_tests::rejects_wrong_opcode_and_null_nonempty_array ... ok
+test compound::response_validation_tests::typed_read_rejects_a_failed_operation_before_accessing_success_union ... ok
+test compound::response_validation_tests::decoded_responses_can_be_freed_concurrently ... ok
+test client::tests::checked_offsets_match_u64_arithmetic_at_signed_and_unsigned_boundaries ... ok
+test identity::tests::allocation_cache_borrows_lookup_names_and_bounds_both_namespaces ... ok
+test identity::tests::fixed_text_cache_keys_preserve_namespaces_updates_and_negative_results ... ok
+test identity::tests::numeric_ids_do_not_require_nss ... ok
+test identity::tests::cache_is_bounded ... ok
+test identity::tests::qualified_names_are_not_stripped_to_local_accounts ... ok
+test mount::tests::directory_mapping_and_read_only_are_preserved ... ok
+test mount::tests::escapes_ipv6_and_nested_mounts_are_handled ... ok
+test mount::tests::local_paths_and_files_are_rejected_without_network_io ... ok
+test identity::tests::reentrant_lookup_is_safe_across_threads ... ok
+test mount::tests::relative_mount_paths_are_rejected_before_resolution ... ok
+test mount::tests::wrong_remote_identity_and_connection_overrides_are_rejected ... ok
+test mount::tests::unsupported_security_transport_and_ambiguous_endpoints_fail_closed ... ok
+test nfs::copy::tests::copy_fallback_accepts_eof_and_returns_final_destination_size ... ok
+test nfs::copy::tests::copy_fallback_rejects_empty_non_eof_read ... ok
+test nfs::copy::tests::failed_guarded_destination_open_closes_the_source ... ok
+test nfs::copy::tests::copy_fallback_rejects_zero_progress_write ... ok
+test nfs::copy::tests::server_copy_fallback_requires_no_completed_prefix ... ok
+test nfs::filesystem_stats_tests::all_statistics_decode_without_losing_zero_maxima_or_presence ... ok
+test nfs::filesystem_stats_tests::malformed_statistics_are_rejected ... ok
+test nfs::filesystem_stats_tests::omitted_attributes_remain_unknown_and_zero_is_preserved ... ok
+test nfs::handle_backend::tests::exclusive_create_race_does_not_retry_as_an_existing_open ... ok
+test nfs::handle_backend::tests::nonexclusive_create_race_opens_the_winning_file_without_creation_mode ... ok
+test nfs::io::path_write_tests::path_write_retries_short_counts_and_rejects_zero_progress ... ok
+test nfs::metadata::tests::allocation_attribute_strings_borrow_wire_and_check_padding ... ok
+test nfs::metadata::tests::compact_decoder_preserves_sparse_values_and_requested_masks ... ok
+test nfs::metadata::tests::phased_metadata_preserves_grouping_masks_duplicates_and_error_indices ... ok
+test nfs::metadata::tests::unmapped_owner_clears_presence_without_changing_other_payloads ... ok
+test nfs::namespace::tests::following_lookup_symlink_returns_the_resolved_target_type ... ok
+test nfs::namespace::tests::following_non_symlink_does_not_resolve_again ... ok
+test nfs::namespace::tests::lookup_without_following_keeps_the_link_and_skips_resolution ... ok
+test nfs::open::prr_temporary_open_tests::multi_compound_path_cleanup_closes_latest_states_in_one_batch ... ok
+test nfs::read_pool::tests::options_enforce_minimums_and_cap_concurrency_by_memory_budget ... ok
+test nfs::open::tests::truncate_setattr_failure_closes_open_path_state_and_keeps_mapped_error ... ok
+test nfs::read_pool::tests::stream_start_measures_the_open_handle_and_closes_it_on_metadata_error ... ok
+test nfs::tests::abs_path_is_namespace_relative_and_server_path_prepends_the_export_root ... ok
+test nfs::tests::allocation_read_assembly_transfers_payloads_and_preserves_result_order ... ok
+test nfs::read_pool::tests::panicking_worker_emits_a_terminal_event ... ok
+test nfs::tests::builder_collects_connection_and_runtime_configuration ... ok
+test nfs::tests::client_pool_validates_size_and_gives_explicit_owners_distinct_ids ... ok
+test nfs::tests::connection_options_preserve_auth_sys_as_the_compatible_default ... ok
+test nfs::tests::default_recovery_window_can_span_a_conventional_server_grace_period ... ok
+test nfs::tests::descriptor_chunk_errors_report_the_original_vector_owner ... ok
+test nfs::tests::distinct_nfs_filehandles_can_group_as_the_same_filesystem_object ... ok
+test nfs::tests::fixed_text_builder_owns_compact_endpoints_and_preserves_input_compatibility ... ok
+test nfs::tests::fs_id_and_fileid_decode_as_one_fs_obj_id ... ok
+test nfs::tests::live_guarded_setattr_handles_symlink_cohorts_on_a_bounded_stack ... ignored, requires VFSI_NFS_TEST_MOUNT pointing to a writable direct NFS mount
+test nfs::tests::live_nofollow_setattr_respects_symlink_semantics ... ignored, requires VFSI_NFS_TEST_MOUNT pointing to a writable direct NFS mount
+test nfs::tests::live_read_only_mount_retains_restriction_after_native_reconnect ... ignored, requires configured NFS mount fixtures
+test nfs::tests::live_reconnect_uses_resolved_mount_after_discovery_path_disappears ... ignored, requires VFSI_NFS_TEST_MOUNT pointing to a direct NFS mount
+test nfs::tests::invalid_client_owner_fails_before_network_io ... ok
+test nfs::tests::malformed_readdir_attributes_are_transport_errors ... ok
+test nfs::tests::malformed_type_attribute_is_an_error_not_a_regular_type ... ok
+test nfs::tests::path_setattrs_resolve_symlink_policy_before_mutation ... ok
+test nfs::tests::read_all_batches_never_request_beyond_the_remaining_allocation_budget ... ok
+test nfs::tests::read_all_round_preserves_original_positions_after_cohort_shrinks ... ok
+test nfs::tests::read_all_round_remaps_failures_and_rejects_zero_progress ... ok
+test nfs::tests::read_only_mounts_reject_all_mutating_open_flags ... ok
+test nfs::tests::recovery_only_retries_transport_and_recoverable_session_statuses ... ok
+test nfs::tests::recovery_reopen_flags_cannot_repeat_creation_or_truncation ... ok
+test nfs::tests::recursive_readdir_rejects_a_stalled_continuation_cookie ... ok
+test nfs::tests::recursive_readdir_rejects_nonadjacent_cookie_cycles ... ok
+test nfs::tests::removal_scan_continues_cookies_and_verifies_changed_passes_once ... ok
+test nfs::tests::walk_page_decoder_stops_at_entry_and_path_budgets ... ok
+test nfs::tests::write_wave_batches_only_disjoint_positional_ranges ... ok
+test nfs::vector_backend::adb_path_tests::adb_reuses_existing_path_and_only_creates_after_noent ... ok
+test planner::tests::adaptive_batch_honors_negotiated_limit_and_is_shape_local ... ok
+test planner::tests::adaptive_batch_learns_only_from_followup_work ... ok
+test planner::tests::allocation_completed_ranges_follow_execution_prefix_for_sparse_callers ... ok
+test planner::tests::every_compound_shape_learns_without_extra_requests ... ok
+test planner::tests::executed_ranges_include_successful_prefix_of_failed_item ... ok
+test planner::tests::exhaustive_failure_positions_preserve_prefix_and_suffix ... ok
+test planner::tests::explicit_operation_limit_remains_a_hard_ceiling ... ok
+test planner::tests::malformed_replies_are_rejected ... ok
+test planner::tests::mock_executor_resumes_without_reexecuting_the_prefix ... ok
+test planner::tests::mutating_shapes_recover_after_transient_resource_rejection ... ok
+test planner::tests::negotiated_limit_always_wins ... ok
+test planner::tests::only_pre_mutation_resource_replies_allow_a_smaller_retry ... ok
+test planner::tests::planners_are_isolated_when_tests_run_concurrently ... ok
+test planner::tests::pre_sequence_resource_rejection_is_recoverable ... ok
+test planner::tests::recovery_policy_is_failure_and_side_effect_aware ... ok
+test planner::tests::reports_completed_failed_and_unexecuted_separately ... ok
+test planner::tests::resource_backoff_allows_cautious_recovery ... ok
+test planner::tests::resource_feedback_is_shape_local_and_not_a_permanent_ceiling ... ok
+test planner::tests::sequence_failure_leaves_all_items_unexecuted ... ok
+test planner::tests::statistics_shape_starts_conservatively_and_backs_off_after_partial_resource_failure ... ok
+test planner::tests::successful_reply_completes_every_item ... ok
+test planner::tests::trailing_failure_does_not_erase_completed_items ... ok
+test rpc::tests::authentication_defaults_to_auth_sys ... ok
+test rpc::tests::default_gss_principal_excludes_an_explicit_port ... ok
+test rpc::tests::explicit_port_detection_requires_a_numeric_port ... ok
+test rpc::tests::rpc_gss_security_triple_matches_the_supported_c_abi ... ok
+test rpc::tests::rpcsec_gss_levels_map_to_wire_services_and_required_context_flags ... ok
+test rpc::tests::waitq_init_locks_the_queue_like_clnt_req_fill ... ok
+test rpc::transport_kind_tests::rpc_classification_uses_status_not_message_text ... ok
+test session::session_identity_tests::create_session_preserves_server_exchange_sequence ... ok
+test session::session_identity_tests::rejected_reused_identity_setup_does_not_destroy_original_client ... ok
+test session::tests::compound_failure_preserves_executed_prefix_position ... ok
+test session::tests::create_session_advertises_only_a_minimal_backchannel ... ok
+test session::tests::generated_verifiers_are_unique_for_distinct_requests ... ok
+test session::tests::negotiate_minor_does_not_retry_on_other_errors ... ok
+test session::tests::negotiate_minor_prefers_v42_and_falls_back_to_v41 ... ok
+test session::tests::negotiation_stops_after_the_preferred_version_succeeds ... ok
+test telemetry::tests::clones_aggregate_without_resetting_or_crossing_client_scopes ... ok
+test fuzzing::tests::arbitrary_attribute_lists_do_not_panic ... ok
+test fuzzing::tests::arbitrary_compound_shapes_do_not_escape_validation ... ok
+test nfs::tests::write_wave_interval_index_matches_pairwise_oracle ... ok
+
+test result: ok. 152 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+   Compiling vfsi-core v0.1.15 (/home/ubuntu/vnfs/crates/vfsi-core)
+   Compiling vfsi-sync v0.1.16 (/home/ubuntu/vnfs/crates/vfsi-sync)
+   Compiling vfsi-smb v0.1.13 (/home/ubuntu/vnfs/crates/vfsi-smb)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.53s
+     Running unittests src/lib.rs (target/debug/deps/vfsi_smb-3c5892df851152f2)
+
+running 29 tests
+test error_tests::known_server_statuses_keep_their_original_domain ... ok
+test error_tests::timeout_connection_auth_and_invalid_data_keep_typed_provenance ... ok
+test option_layout_tests::packed_smb_options_keep_defaults_and_flags_independent ... ok
+test error_tests::truncated_compounds_have_invalid_reply_provenance ... ok
+test tests::checked_offsets_preserve_request_index_on_overflow ... ok
+test tests::connection_deadlines_are_configurable_and_nonzero ... ok
+test tests::create_handle_survives_later_compound_waiter_errors ... ok
+test tests::create_handle_survives_truncated_compound_response ... ok
+test tests::credit_charge_rounds_up_and_never_returns_zero ... ok
+test tests::concurrent_writes_require_distinct_server_file_identities ... ok
+test tests::delete_entry_request_opens_the_reparse_point_without_type_constraint ... ok
+test tests::dfs_wire_path_preserves_ipv6_server_name ... ok
+test tests::failed_temporary_close_is_retained_for_deferred_cleanup ... ok
+test tests::handle_metadata_checks_lengths_and_decodes_only_reported_fields ... ok
+test tests::dfs_shares_are_rejected_but_ordinary_shares_remain_usable ... ok
+test tests::missing_or_failed_compound_close_response_requires_fallback_close ... ok
+test tests::pre_epoch_fractional_filetimes_round_trip ... ok
+test tests::oversized_read_responses_are_rejected_with_invalid_reply_classification ... ok
+test tests::referral_errors_are_unsupported_without_losing_the_request_index ... ok
+test tests::server_address_defaults_to_port_445 ... ok
+test tests::smb_path_dependencies_include_case_aliases_and_serialize_unicode_batches ... ok
+test tests::smb_transport_failures_preserve_the_message ... ok
+test tests::timestamp_updates_reject_protocol_controls_and_negative_filetimes ... ok
+test tests::unmapped_server_status_is_not_a_transport_failure ... ok
+test tests::unsupported_create_modes_are_rejected_before_io ... ok
+test tests::vectorized_compound_close_failure_returns_handle_for_deferred_cleanup ... ok
+test tests::checked_offsets_match_u64_arithmetic_at_signed_and_unsigned_boundaries ... ok
+test tests::bounded_runtime_drives_concurrent_callers_and_background_tasks ... ok
+test tests::request_deadline_applies_to_the_initial_negotiate ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running unittests src/lib.rs (target/debug/deps/nfsv41_sys-8ce014f115dd1fba)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ops_roundtrip.rs (target/debug/deps/ops_roundtrip-3726fee9be70536b)
+
+running 22 tests
+test commit_res_roundtrip ... ok
+test create_args_roundtrip ... ok
+test commit_args_roundtrip ... ok
+test getattr_res_roundtrip ... ok
+test link_args_roundtrip ... ok
+test link_res_roundtrip ... ok
+test getattr_args_roundtrip ... ok
+test getfh_res_roundtrip ... ok
+test lookup_res_roundtrip ... ok
+test lookup_args_roundtrip ... ok
+test readdir_args_bitmap_encode ... ok
+test readdir_args_roundtrip ... ok
+test read_res_roundtrip ... ok
+test read_args_roundtrip ... ok
+test readlink_res_roundtrip ... ok
+test readdir_res_roundtrip ... ok
+test remove_args_roundtrip ... ok
+test remove_res_roundtrip ... ok
+test rename_res_roundtrip ... ok
+test rename_args_roundtrip ... ok
+test write_res_roundtrip ... ok
+test write_args_roundtrip ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/roundtrip.rs (target/debug/deps/roundtrip-7ba09f79c02aab97)
+
+running 2 tests
+test compound_putfh_res_roundtrip ... ok
+test compound_putfh_args_roundtrip ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/wire_contract.rs (target/debug/deps/wire_contract-3855d2e7167074af)
+
+running 3 tests
+test putfh_failure_reply_uses_the_error_union_arm ... ok
+test putfh_decoder_rejects_every_truncated_wire_prefix ... ok
+test putfh_encoding_matches_an_independent_wire_fixture ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests nfsv41_sys
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+warning: libntirpc-sys@0.3.3: In file included from /home/ubuntu/vnfs/target/debug/build/libntirpc-sys-228bf580cd094744/out/native-install/include/ntirpc/rpc/svc.h:59,
+warning: libntirpc-sys@0.3.3:                  from src/auth_helpers.c:3:
+warning: libntirpc-sys@0.3.3: /home/ubuntu/vnfs/target/debug/build/libntirpc-sys-228bf580cd094744/out/native-install/include/ntirpc/lttng/ntirpc_traces.h:66:1: warning: 'inline' is not at beginning of declaration [-Wold-style-declaration]
+warning: libntirpc-sys@0.3.3:    66 | static void inline ntirpc_empty_function(const char* UNUSED(unused), ...) {}
+warning: libntirpc-sys@0.3.3:       | ^~~~~~
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/debug/deps/libntirpc_sys-fea4373f7f80b7c6)
+
+running 8 tests
+test build_support::tests::native_copy_preserves_unchanged_timestamps_and_refreshes_content ... ok
+test test::memory_xdr_encodes_decodes_and_frees_a_string ... ok
+test xdr_regressions::call_encoder_initializes_authentication_padding ... ok
+test test::svcxprt_abi_matches_shims ... ok
+test xdr_regressions::reply_encoder_initializes_verifier_padding ... ok
+test xdr_regressions::truncated_string_preserves_caller_storage ... ok
+test xdr_regressions::truncated_string_does_not_publish_a_new_allocation ... ok
+test xdr_regressions::complete_string_reuses_caller_storage ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/source_contract.rs (target/debug/deps/source_contract-2dc684cb451d7dd5)
+
+running 2 tests
+test pinned_source_contains_decoded_reply_verifier_fix ... ok
+test gss_allocation_is_zeroed_without_global_hook ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests libntirpc_sys
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running unittests src/lib.rs (target/debug/deps/vnfs-b4e86a6b8cdf0243)
+
+running 45 tests
+test application::extension_tests::directory_continuations_run_in_vector_waves_and_cancellation_marks_unfinished_roots ... ok
+test application::extension_tests::default_listing_and_stream_helpers_respect_client_limits_and_reentry ... ok
+test application::extension_tests::page_faults_do_not_replay_transport_failures_and_reject_malformed_shapes ... ok
+test application::extension_tests::read_files_rejects_malformed_replies_and_never_replays_transport_errors ... ok
+test application::extension_tests::removal_modes_preserve_roots_symlinks_and_vector_indices ... ok
+test application::extension_tests::singleton_walk_reports_the_root_index_not_an_entry_index ... ok
+test application::extension_tests::blanket_scalar_helpers_and_new_vectors_preserve_limits_stop_and_indices ... ok
+test application::extension_tests::unified_visiting_preserves_depth_defaults_fields_and_failures ... ok
+test application::extension_tests::unified_collection_keeps_grouping_limits_and_generic_metadata_paths ... ok
+test application::extension_tests::vector_walk_budgets_count_entries_not_listing_containers ... ok
+test application::extension_tests::vector_walk_visitors_charge_root_paths_once_and_honor_cancellation ... ok
+test auto::tests::allocation_auto_routes_retain_one_shared_pointer ... ok
+test application::extension_tests::write_options_select_completion_without_replaying_ambiguous_errors ... ok
+test auto::tests::fixed_text_mount_specs_keep_endpoints_and_public_strings ... ok
+test auto::tests::live_auto_traversal_charges_public_path_bytes ... ignored, requires configured NFS mount fixtures
+test auto::tests::live_changed_auto_limits_apply_to_cached_connections_and_open_handles ... ignored, requires configured NFS mount fixtures
+test auto::tests::live_directory_open_errors_report_application_operands ... ignored, requires VFSI_AUTO_TEST_MOUNT pointing to a direct NFS mount
+test auto::tests::live_file_bind_mount_uses_covering_mount ... ignored, requires configured NFS mount fixtures
+test auto::tests::live_mount_alias_clients_share_identity_and_cross_routes_never_use_kernel_copy ... ignored, requires VFSI_AUTO_TEST_MOUNT pointing to a direct NFS mount
+test auto::tests::live_nfs_mount_uses_direct_connection ... ignored, requires configured NFS mount fixtures
+test auto::tests::live_remove_contents_respects_nested_mounts ... ignored, requires configured NFS mount fixtures
+test auto::tests::live_retained_directory_cursor_rechecks_filesystem_credentials ... ignored, requires an isolated root child and VFSI_NFS_SERVER; no mount required
+test auto::tests::live_vector_open_retains_each_mount_alias_route ... ignored, requires VFSI_AUTO_TEST_MOUNT pointing to a direct NFS mount
+test auto::tests::live_write_allv_preflights_invalid_later_requests_across_routes ... ignored, requires configured NFS mount fixtures
+test auto::tests::decodes_mountinfo_escapes ... ok
+test auto::tests::mount_id_prevents_prefix_based_misrouting ... ok
+test auto::tests::parses_only_unambiguous_supported_mounts ... ok
+test auto::tests::local_paths_stay_mounted_and_open_file_roundtrips ... ok
+test auto::tests::child_seeds_recheck_routing_and_keep_owner_validation ... ok
+test auto::tests::write_allv_preflights_closed_empty_and_overflowing_requests_locally ... ok
+test helpers::path::tests::validated_root_constructor_performs_no_filesystem_lookup ... ok
+test helpers::transfer::object_identity_tests::same_file_requires_complete_filesystem_identity ... ok
+test helpers::tree::tests::failed_directory_batch_maps_inferred_parent_to_original_declaration ... ok
+test helpers::tree::tests::failed_open_preserves_original_index_and_partial_tree_without_replay_or_leaks ... ok
+test helpers::tree::tests::fixed_bytes_tree_contents_are_owned_and_preserve_empty_files ... ok
+test native_nfs::mount_tests::direct_builders_cannot_create_mapped_mount_sessions ... ok
+test native_nfs::mount_tests::live_mount_builder_preserves_tuning_and_rejects_root_auth_or_version_changes ... ignored, requires configured NFS mount fixtures
+test native_nfs::mount_tests::live_mount_constructor_roots_vector_io_at_a_subdirectory ... ignored, requires configured NFS mount fixtures
+test native_nfs::mount_tests::live_read_only_mount_rejects_mutations_before_dispatch ... ignored, requires configured NFS mount fixtures
+test read::tests::empty_requests_do_not_dispatch ... ok
+test read::tests::consuming_dispatch_rejects_bad_reply_shapes_and_does_not_replay ... ok
+test read::tests::malformed_cardinality_and_budget_are_errors ... ok
+test read::tests::transport_errors_are_not_attributed_or_replayed ... ok
+test auto::tests::routed_pages_enforce_public_budgets_and_pin_cursor_ownership ... ok
+test application::extension_tests::blanket_helpers_preserve_order_empty_files_limits_and_error_indices ... ok
+
+test result: ok. 32 passed; 0 failed; 13 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Compiling vnfs v0.0.27 (/home/ubuntu/vnfs/crates/vnfs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.45s
+     Running tests/posix_backend.rs (target/debug/deps/posix_backend-74c78d16654c8056)
+
+running 41 tests
+test allocating_directory_apis_enforce_entry_path_and_depth_limits ... ok
+test application_directory_vectors_preserve_fields_and_limits ... ok
+test application_directory_cohorts_preserve_global_error_index ... ok
+test closed_handle_rejects_standard_io ... ok
+test create_mode_failure_is_reported_instead_of_ignored ... ok
+test bounded_open_file_collection_keeps_identity_across_rename_and_replacement ... ok
+test dummy_errors_on_missing_file ... ok
+
+running 1 test
+test application_walk_prunes_before_io_selects_metadata_and_allows_reentry ... 
+running 1 test
+test directory_visitor_callback_can_reenter_client_and_drop_a_file ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.00s
+
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.01s
+
+test application_walk_prunes_before_io_selects_metadata_and_allows_reentry ... ok
+test dummy_getcwd ... ok
+test dummy_stays_under_root ... ok
+test ensure_empty_dir_creates_empties_and_rejects_files ... ok
+test generic_remover_rejects_options_it_cannot_honor ... ok
+test directory_visitor_callback_can_reenter_client_and_drop_a_file ... ok
+test application_metadata_and_batch_mutations ... ok
+test mkdir_mode_failure_is_reported_instead_of_ignored ... ok
+test native_path_adapters_preserve_relative_paths ... ok
+test native_scalar_contract_separates_metadata_query_from_update ... ok
+
+running 1 test
+test native_paged_tree_honors_budget_overrides_and_allows_reentry ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.00s
+
+test native_vector_operations_are_composable ... ok
+test non_utf8_filenames_roundtrip ... ok
+test one_shot_file_vectors_handle_empty_batches_and_replace_files ... ok
+test native_client_covers_idiomatic_file_and_namespace_workflows ... ok
+test open_dir_handle_empties_contents ... ok
+test openv_cleanup_fault_does_not_mask_primary_error_or_leak_handles ... ok
+test one_shot_file_vectors_roundtrip_and_bound_returned_bytes ... ok
+test openv_fault_after_registration_closes_the_injected_handle ... ok
+test openv_fault_injection_closes_the_successful_prefix ... ok
+test openv_fault_before_dispatch_has_no_effects_or_handles ... ok
+test optional_operation_capabilities_match_local_and_routed_dispatch ... ok
+test owned_directory_handle_refuses_path_only_backend ... ok
+test native_paged_tree_honors_budget_overrides_and_allows_reentry ... ok
+test recursive_remove_propagates_type_lookup_failure_without_unlinking ... ok
+test recursive_rm_removes_a_symlink_not_its_target ... ok
+test rm_contents_keeps_the_directory ... ok
+test rm_contents_rejects_a_symlink_to_a_directory ... ok
+test dummy_full_suite ... ok
+test standard_io_adapter_borrows_an_owned_raii_handle ... ok
+test standard_open_options_validate_access_modes ... ok
+test strict_vectors_report_failure_index_without_rollback ... ok
+test read_allv_default_rejects_more_than_sixteen_mibibytes ... ok
+test owned_client_supports_multiple_live_files_and_typed_requests ... ok
+test single_file_stream_is_bounded_ordered_and_cancellable ... ok
+
+test result: ok. 41 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+   Compiling vfsi-sync v0.1.16 (/home/ubuntu/vnfs/crates/vfsi-sync)
+   Compiling vfsi-local v0.1.14 (/home/ubuntu/vnfs/crates/vfsi-local)
+   Compiling vfsi-nfs v0.1.15 (/home/ubuntu/vnfs/crates/vfsi-nfs)
+   Compiling vfsi-posix v0.1.5 (/home/ubuntu/vnfs/crates/vfsi-posix)
+   Compiling vnfs v0.0.27 (/home/ubuntu/vnfs/crates/vnfs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.20s
+     Running tests/application_boundary.rs (target/debug/deps/application_boundary-42e51cebe1bdc1a8)
+
+running 7 tests
+test handles_remain_send_sync_and_clients_remain_cheaply_cloneable ... ok
+test opaque_requests_preserve_owner_preflight_and_error_sources ... ok
+test auto_range_only_reads_keep_the_legacy_routing_allocation_cost ... ok
+test opaque_adapters_preserve_batch_allocations_and_borrowed_storage ... ok
+test stream_bookkeeping_allocations_do_not_scale_with_rounds ... ok
+test owned_collection_saves_only_right_sized_small_output_allocations ... ok
+test unified_operation_construction_does_not_allocate ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/canonical_examples.rs (target/debug/deps/canonical_examples-89a5ca423f852da9)
+
+running 9 tests
+test canonical_workflows_on_nfsv41_and_nfsv42 ... ignored, requires VFSI_NFS_SERVER and a writable VFSI_NFS_EXPORT
+test grouped_namespaces_use_the_same_application_types ... ok
+test handle_ranges_preserve_order_for_empty_short_and_large_files ... ok
+test small_files_benchmark::tests::public_api_is_the_default_and_backend_measurements_are_explicit ... ok
+test directory_batches_and_no_follow_walk ... ok
+test small_files_benchmark::tests::read_measurements_reject_corruption_cardinality_and_io_errors ... ok
+test bulk_roundtrip_cleanup_and_existing_directory_protection ... ok
+test small_files_benchmark::tests::read_validation_is_excluded_from_elapsed_time ... ok
+test stream_multiple_chunks_and_empty_file ... ok
+
+test result: ok. 8 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/client_vectors.rs (target/debug/deps/client_vectors-4102014ae4aa5026)
+
+running 5 tests
+test complete_writes_reject_the_entire_invalid_batch_before_mutation ... ok
+test custom_targets_are_prepared_once_on_mounted_and_auto ... ok
+test portable_writes_on_mounted_and_auto ... ok
+test consolidated_metadata_fields_and_symlinks_on_mounted_and_auto ... ok
+test path_contents_removal_works_without_retained_directory_handles ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/directory_pages.rs (target/debug/deps/directory_pages-bd3e8730bc3125b5)
+
+running 9 tests
+test collection_limits_and_errors_keep_the_input_root_index ... ok
+
+running 1 test
+test listdir_modes_preserve_scope_limits_depth_and_callback_contracts ... test buffered_local_walk_never_follows_replaced_children_or_ancestors ... ok
+test presentation_policy_preserves_its_independent_listing_configuration ... ok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.01s
+
+test page_delivery_is_bounded_reentrant_and_reports_empty_directory_cancellation ... ok
+test recursive_roots_and_entries_never_allow_symlink_componentss ... ok
+test recursive_paged_walk_rejects_swapped_ancestors ... ok
+test scalar_collectors_select_named_scope_and_respect_visit_budgets ... ok
+test blanket_collection_preserves_empty_roots_children_duplicates_and_multi_page_entries ... ok
+test listdir_modes_preserve_scope_limits_depth_and_callback_contracts ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/port_helpers.rs (target/debug/deps/port_helpers-6af85aca70d99a3a)
+
+running 9 tests
+test local_path_setup_errors_retain_the_original_io_source ... ok
+test mapping_preserves_final_links_and_rejects_escapes_and_destructive_dot_paths ... ok
+test ordered_walk_rejects_replaced_children_and_ancestors ... ok
+test ordered_walk_preserves_the_input_roots_component_policy ... ok
+test ordered_walk_depth_zero_delivers_root_and_limits_descent_only ... ok
+test writer_bridge_handles_short_writes_and_never_replays_failed_output ... ok
+test ordered_walk_stop_skip_and_limits_are_not_silent_truncation ... ok
+test ordered_walk_preserves_sorting_prunes_before_io_and_callbacks_are_unlocked ... ok
+test writer_bridge_preserves_custom_error_kind_and_source_without_replay ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/posix.rs (target/debug/deps/posix-829aa60082d81c04)
+
+running 1 test
+test standalone_posix_facade_is_rooted_and_rejects_missing_roots ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/public_api.rs (target/debug/deps/public_api-d7c1cd09088bcbe3)
+
+running 21 tests
+test application_requests_results_and_errors_are_root_types ... ok
+test application_surface_is_small_and_typed ... ok
+test application_traversal_and_mutation_do_not_require_backend_imports ... ok
+test backend_implementers_depend_on_lower_level_crates ... ok
+test canonical_open_descriptors_and_operands_preserve_ownership ... ok
+test complete_writes_order_hardlinks_and_renamed_open_instances ... ok
+test concrete_and_extension_directory_visitors_borrow_entries_consistently ... ok
+test fs_obj_id_is_available_from_the_application_metadata_module ... ok
+test invalid_open_batch_cannot_create_or_truncate_earlier_files ... ok
+test local_constructors_preserve_missing_and_non_directory_root_errors ... ok
+test explicit_io_adapter_bounds_collecting_reads_and_preserves_retained_identity ... ok
+test object_identity_and_open_instances_are_distinct_concepts ... ok
+test policy_builders_preserve_zero_budgets_and_bound_recovery ... ok
+test portable_traits_and_options_are_reexports_not_parallel_contracts ... ok
+test symlink_policy_names_distinguish_final_metadata_from_directory_components ... ok
+test traversal_depths_share_finite_and_unlimited_semantics_without_panics ... ok
+test filesystem_stats_local_and_routed_handles ... ok
+test auto_supports_the_core_native_bulk_and_streaming_surface ... ok
+test one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types ... ok
+test vector_links_modes_and_capabilities_work_generically_on_local_and_auto ... ok
+test vsetattrs_many_local_and_routed_files ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/readv.rs (target/debug/deps/readv-e6956134c3dd695b)
+
+running 9 tests
+test external_clients_can_inspect_sources_without_private_fields ... ok
+test an_exhausted_internal_budget_never_restores_the_default ... ok
+test failure_indices_and_buffer_borrows_survive_consumption ... ok
+test result_constructors_preserve_storage_invariants_without_retaining_borrows ... ok
+test budgets_are_shared_and_preflight_buffer_lengths ... ok
+test text_options_inherit_or_override_budgets_and_preserve_utf8_errors ... ok
+test mixed_destinations_on_mounted_and_auto ... ok
+test zero_length_buffers_and_owned_reads_keep_distinct_data_ownership ... ok
+test path_conversions_and_iterators_construct_whole_file_operations ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/transfer_helpers.rs (target/debug/deps/transfer_helpers-cb75426a51f1e37a)
+
+running 32 tests
+test aggregate_move_budget_and_progress_span_all_roots ... ok
+test absent_sizes_make_copy_and_tree_statistics_fail_instead_of_reporting_zero ... ok
+test batch_copy_error_or_close_error_retains_every_source ... ok
+test bulk_move_renames_independent_roots_in_one_vector ... ok
+test cancellation_reports_completed_wave_and_retains_sources ... ok
+test collecting_adapter_retries_interrupted_reads_and_exact_budget_probes ... ok
+test exchange_requires_both_names_to_exist ... ok
+test exchange_swaps_names_atomically ... ok
+test bulk_move_copies_closes_and_deletes_in_vectors ... ok
+test lost_batch_rename_reply_never_falls_back_or_replays ... ok
+test layouts_permissions_and_stats ... ok
+test malformed_reads_lost_write_and_close_failure_never_delete_or_replay ... ok
+test move_wave_keeps_skipped_roots_but_deletes_complete_siblings ... ok
+test no_replace_is_atomic_and_reports_existing_destination ... ok
+test no_replace_vector_reports_the_failing_pair_after_a_successful_prefix ... ok
+test overlap_depth_and_budgets_are_explicit ... ok
+test conflict_policies_preserve_hard_links_and_reject_self_copy ... ok
+test recursive_callback_errors_keep_original_root_index_and_path ... ok
+test collecting_adapter_uses_bounded_stream_chunks_without_small_read_waves ... ok
+test recursive_copy_is_bounded_and_short_reads_have_no_gaps ... ok
+test shared_open_builder_dispatches_scalar_and_batch_opens_through_vfsi ... ok
+test replacement_refuses_destination_symlinks ... ok
+test skipped_move_and_callback_error_keep_source ... ok
+test standard_io_adapter_uses_vectors_and_has_an_independent_retained_cursor ... ok
+test tiny_files_fill_the_budget_without_reserving_whole_chunks ... ok
+test partial_cross_device_rename_reconciles_without_replaying_prefix ... ok
+test vector_errors_map_to_original_mixed_root_index ... ok
+test vector_counts_and_storage_follow_cohort_limits ... ok
+test zero_read_budget_rejects_nonempty_descriptor_copies_before_file_mutation ... ok
+test zero_read_budget_allows_empty_transfer_batches_and_empty_files ... ok
+test zero_read_budget_allows_native_copies_and_rename_only_moves ... ok
+test move_rename_and_cross_device_fallback_are_not_general_retry ... ok
+
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/tree_builder.rs (target/debug/deps/tree_builder-da486eaba5478702)
+
+running 10 tests
+test duplicate_directories_do_not_consume_path_storage_budget ... ok
+test budgets_include_implicit_directories_payloads_and_planned_path_bytes ... ok
+test bulk_directory_creation_preserves_error_index_path_and_completed_prefix ... ok
+test empty_tree_and_missing_root_parent_have_explicit_semantics ... ok
+test duplicate_directories_do_not_consume_planned_entry_slots ... ok
+test original_error_indices_include_suppressed_directory_declarations ... ok
+test builds_nested_binary_empty_and_directory_entries_without_implicit_cleanup ... ok
+test rejects_invalid_paths_and_collisions_before_creating_root ... ok
+test existing_root_is_not_overwritten_or_cleaned_up_even_if_it_is_a_symlink ... ok
+test routed_client_supports_the_same_builder_and_directory_preflight ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.28s
+   Doc-tests vnfs
+
+running 21 tests
+test crates/vnfs/src/../README.md - readme_examples (line 32) - compile ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 242) - compile ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 259) - compile ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 379) - compile ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 188) - compile ... ok
+test crates/vnfs/src/lib.rs - files (line 150) - compile ... ok
+test crates/vnfs/src/helpers/tree.rs - helpers::tree::TreeBuilder (line 43) - compile ... ok
+test crates/vnfs/src/lib.rs - files (line 51) - compile ... ok
+test crates/vnfs/src/lib.rs - files (line 98) - compile ... ok
+test crates/vnfs/src/lib.rs - helpers (line 188) - compile ... ok
+test crates/vnfs/src/lib.rs - helpers (line 205) - compile ... ok
+test crates/vnfs/src/lib.rs - helpers (line 222) - compile ... ok
+test crates/vnfs/src/lib.rs - helpers (line 277) - compile ... ok
+test crates/vnfs/src/lib.rs - nfs (line 190) - compile ... ok
+test crates/vnfs/src/lib.rs - nfs (line 145) - compile ... ok
+test crates/vnfs/src/lib.rs - directory (line 76) - compile ... ok
+test crates/vnfs/src/lib.rs - nfs (line 232) - compile ... ok
+test crates/vnfs/src/lib.rs - nfs (line 28) - compile ... ok
+test crates/vnfs/src/lib.rs - nfs (line 364) - compile ... ok
+test crates/vnfs/src/overview.md - (line 11) - compile ... ok
+test crates/vnfs/src/lib.rs - nfs (line 259) - compile ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 117 tests
+test crates/vnfs/src/api_boundary.md - api_contract (line 100) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 104) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 11) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 108) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 116) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 120) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 124) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 132) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 128) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 136) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 140) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 146) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 150) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 154) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 158) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 175) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 166) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 18) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 184) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 206) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 199) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 213) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 218) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 236) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 223) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 252) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 269) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 28) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 279) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 288) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 298) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 292) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 305) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 312) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 319) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 326) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 340) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 333) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 347) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 35) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 354) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 361) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 389) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 370) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 395) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 408) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 416) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 402) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 42) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 438) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 425) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 431) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 445) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 458) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 451) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 462) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 466) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 470) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 477) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 482) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 491) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 50) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 497) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 503) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 508) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 517) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 513) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 522) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 529) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 541) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 546) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 553) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 560) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 583) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 575) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 569) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 588) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 596) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 592) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 6) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 600) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 604) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 608) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 61) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 623) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 617) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 629) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 635) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 643) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 659) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 651) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 66) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 669) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 663) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 675) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 681) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 685) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 689) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 696) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 700) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 71) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 704) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 708) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 714) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 731) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 724) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 720) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 735) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 741) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 746) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 79) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 88) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 92) - compile fail ... ok
+test crates/vnfs/src/api_boundary.md - api_contract (line 96) - compile fail ... ok
+test crates/vnfs/src/helpers/transfer.rs - helpers::transfer::TransferOptions (line 44) - compile fail ... ok
+test crates/vnfs/src/helpers/transfer.rs - helpers::transfer::TransferOptions (line 48) - compile fail ... ok
+test crates/vnfs/src/helpers/tree.rs - helpers::tree::TreeBuilder (line 57) - compile fail ... ok
+
+test result: ok. 117 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.86s
+
+all doctests ran in 3.26s; merged doctests compilation took 1.40s
+   Compiling vfsi-core v0.1.15 (/home/ubuntu/vnfs/crates/vfsi-core)
+   Compiling vfsi-sync v0.1.16 (/home/ubuntu/vnfs/crates/vfsi-sync)
+   Compiling vfsi-local v0.1.14 (/home/ubuntu/vnfs/crates/vfsi-local)
+   Compiling vfsi-nfs v0.1.15 (/home/ubuntu/vnfs/crates/vfsi-nfs)
+   Compiling vfsi-smb v0.1.13 (/home/ubuntu/vnfs/crates/vfsi-smb)
+   Compiling vfsi-posix v0.1.5 (/home/ubuntu/vnfs/crates/vfsi-posix)
+   Compiling vnfs v0.0.27 (/home/ubuntu/vnfs/crates/vnfs)
+   Compiling vfsi-c v0.3.11 (/home/ubuntu/vnfs/bindings/c)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.57s
+     Running unittests src/lib.rs (target/debug/deps/vfsi_c-bd319d193229f2c4)
+
+running 49 tests
+test error_tests::native_unsupported_errors_keep_their_diagnostic_at_the_c_boundary ... ok
+test identity::tests::identity_preflight_rejects_short_headers_and_wrong_versions_without_io ... ok
+test identity::tests::abi_v3_attributes_and_future_output_tail_are_preserved ... ok
+test identity::tests::hardlinks_mount_views_nofollow_and_retained_rename_use_complete_identity ... ok
+test identity::tests::live_nfs_retained_identity_survives_rename_replacement_and_reconnect ... ignored, requires writable NFSv4 server; run explicitly with VFSI_NFS_SERVER
+test identity::tests::namespace_collisions_zero_numbers_and_vector_batching_are_not_fabricated ... ok
+test identity::tests::missing_or_malformed_identity_and_transport_failures_clear_outputs_without_replay ... ok
+test tests::bounded_directory_accepts_exact_limits_and_rejects_only_the_probe ... ok
+test tests::c_attribute_options_reject_unrepresentable_rdev ... ok
+test tests::c_apis_reject_invalid_boolean_bytes_before_backend_io ... ok
+test tests::bounded_c_adapters_prune_before_io_and_preserve_error_limits ... ok
+test tests::c_boolean_fields_accept_only_zero_and_one ... ok
+test tests::c_openv_rejects_backend_result_cardinality_mismatch_and_cleans_handles ... ok
+test tests::c_openv_rejects_duplicate_and_non_handle_results ... ok
+test tests::abi_v3_vector_io_and_bounded_streaming ... ok
+test tests::c_vector_reads_never_copy_beyond_the_requested_output_length ... ok
+test tests::c_vector_reads_reject_backend_result_cardinality_mismatch_before_copying ... ok
+test tests::c_vector_reads_reject_malformed_backend_results_before_copying ... ok
+test tests::c_scalar_writes_preserve_append_and_positional_handles ... ok
+test tests::c_vector_writes_borrow_payloads_and_preflight_the_entire_batch ... ok
+test tests::c_metadata_apis_reject_missing_requested_fields_without_callbacks ... ok
+test tests::c_vector_writes_reject_malformed_backend_results ... ok
+test tests::c_walk_checks_requested_metadata_before_callbacks ... ok
+test tests::c_walk_rejects_invalid_depth_before_backend_metadata ... ok
+test tests::close_failure_only_releases_a_confirmed_semantic_prefix ... ok
+test tests::directory_byte_overflow_stops_before_retaining_or_visiting_more_entries ... ok
+test tests::c_vector_writes_preserve_append_and_positional_handles ... ok
+test tests::dummy_backend_read_write_list ... ok
+test tests::dummy_constructor_reports_root_setup_errors ... ok
+test tests::dummy_backend_listdirv_maps_dirs_to_entries ... ok
+test tests::cancelled_stream_reports_only_delivered_file_completions ... ok
+test tests::dummy_open_mount_accepts_kernel_paths ... ok
+test tests::c_vector_writes_reject_backend_result_cardinality_mismatch ... ok
+test tests::indexed_listings_bound_first_page_fetches_even_with_tiny_quotas ... ok
+test tests::indexed_listings_report_empty_duplicates_stop_and_reject_overflow_before_callbacks ... ok
+test tests::indexed_listings_reject_missing_returned_fields_before_any_callback ... ok
+test tests::indexed_listings_discard_earlier_cohorts_on_late_backend_or_metadata_failure ... ok
+test tests::indexed_listings_share_exact_budgets_across_cohorts_and_duplicate_operands ... ok
+test tests::openv_preflight_failure_preserves_not_attempted_items ... ok
+test tests::openv_backend_failure_marks_submitted_items_indeterminate ... ok
+test tests::mount_mapping_includes_backend_root_and_rejects_escape ... ok
+test tests::read_paths_batches_full_file_contents ... ok
+test tests::poisoned_backend_mutex_returns_eio ... ok
+test tests::result_arrays_initialize_uninitialized_foreign_storage ... ok
+test tests::unattributed_status_keeps_its_errno_and_category_for_c_callers ... ok
+test tests::smb_constructor_rejects_invalid_arguments_before_connecting ... ok
+test tests::unknown_transport_index_remains_unknown_for_c_callers ... ok
+test tests::recursive_listdirv_strips_backend_root_before_mount_mapping ... ok
+
+running 1 test
+test tests::listdirv_callback_can_reenter_filesystem ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.00s
+
+test tests::listdirv_callback_can_reenter_filesystem ... ok
+
+test result: ok. 48 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+   Compiling vfsi-core v0.1.15 (/home/ubuntu/vnfs/crates/vfsi-core)
+   Compiling vfsi-sync v0.1.16 (/home/ubuntu/vnfs/crates/vfsi-sync)
+   Compiling vfsi-local v0.1.14 (/home/ubuntu/vnfs/crates/vfsi-local)
+   Compiling vfsi-nfs v0.1.15 (/home/ubuntu/vnfs/crates/vfsi-nfs)
+   Compiling vfsi-smb v0.1.13 (/home/ubuntu/vnfs/crates/vfsi-smb)
+   Compiling vfsi-posix v0.1.5 (/home/ubuntu/vnfs/crates/vfsi-posix)
+   Compiling vfsi-python-native v0.1.6 (/home/ubuntu/vnfs/adapters/vfsi-python)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.67s
+     Running unittests src/lib.rs (target/debug/deps/vfsi_python_native-da4d9cd5acf78cb5)
+
+running 54 tests
+test aggregate_listdir_error_tests::byte_overflow_stops_both_vector_and_prefix_before_unrelated_entries ... ok
+test aggregate_listdir_error_tests::indexed_and_unattributed_transport_errors_never_replay_listings ... ok
+test aggregate_listdir_error_tests::completed_interleaved_groups_preserve_duplicates_without_scalar_listing ... ok
+test aggregate_listdir_error_tests::a_concurrent_shrink_does_not_publish_interrupted_groups ... ok
+test aggregate_listdir_error_tests::interleaved_entry_overflow_checks_the_original_prefix ... ok
+test aggregate_listdir_error_tests::unattributed_transport_error_does_not_name_first_input_path ... ok
+test error_tests::bulk_failures_preserve_native_status_and_original_request_positions ... ok
+test copy_identity_tests::small_copy_allows_missing_destinations_but_still_rejects_aliases ... ok
+test error_tests::scalar_errors_use_portable_categories_and_linux_errno ... ok
+test copy_identity_tests::single_small_copy_allows_missing_destination_identity_attributes ... ok
+test object_identity_tests::fs_obj_id_distinguishes_filesystems_and_requires_both_returned_fields ... ok
+test prr_oct13_round14::copy_transport_failure_remains_connection_error_without_replay ... ok
+test prr_oct13_round14::full_and_empty_copy_writes_remain_successful ... ok
+test copy_identity_tests::small_copy_identity_failures_prevent_mutation_and_keep_original_indices ... ok
+test prr_oct13_round13::ranged_read_semantic_failure_still_recovers_unaffected_paths ... ok
+test prr_oct13_round14::mixed_copy_completion_preserves_success_and_original_error_indices ... ok
+test prr_oct13_round13::ranged_read_transport_never_becomes_semantic_recovery ... ok
+test prr_oct13_round16::continuation_semantic_errors_use_original_indices_and_discard_partial_data ... ok
+test prr_oct13_round16::completed_and_empty_siblings_are_not_replayed ... ok
+test prr_oct13_round16::continuation_transport_errors_abort_and_name_original_index ... ok
+test prr_oct13_round16::explicit_eof_completes_a_short_range ... ok
+test prr_oct13_round16::positive_short_ranges_complete_at_frozen_offsets ... ok
+test prr_oct13_round14::short_and_zero_copy_writes_are_errors_without_replay ... ok
+test prr_oct13_round14::short_copy_errors_keep_indices_after_read_failure_filtering ... ok
+test prr_oct13_round16::zero_progress_without_eof_is_an_indexed_error ... ok
+test prr_oct13_round16::size_resolved_before_growth_remains_the_range_end ... ok
+test prr_oct14b_round10::completed_copy_prefix_is_not_replayed_after_later_error ... ok
+test prr_oct14b_round10::copy_prefix_errors_remap_after_source_read_filtering ... ok
+test prr_oct14b_round10::prefix_verification_semantic_error_is_not_success_or_mutation_retry ... ok
+test prr_oct14b_round10::first_copy_error_retries_only_unattempted_suffix ... ok
+test prr_oct14b_round10::prefix_verification_transport_error_maps_original_copy_index ... ok
+test prr_oct14b_round10::prefix_verification_transport_index_survives_semantic_filtering ... ok
+test prr_oct14c_round07::attribute_transport_maps_after_semantic_filtering_for_both_follow_modes ... ok
+test prr_oct14c_round07::copy_identity_transport_maps_flattened_and_filtered_attribute_indices ... ok
+test prr_oct14c_round07::descriptor_read_transport_maps_after_semantic_filtering ... ok
+test prr_oct14c_round07::copy_write_transport_maps_again_after_an_earlier_semantic_failure ... ok
+test prr_oct14c_round07::ordinary_descriptor_metadata_delegates_without_faults ... ok
+test prr_oct14b_round10::unreported_short_prefix_is_not_assumed_complete_or_replayed ... ok
+test prr_oct14c_round07::out_of_range_descriptor_does_not_close_a_valid_handle ... ok
+test prr_oct14c_round07::oversized_destination_attribute_transport_maps_back_to_copy_index ... ok
+test prr_oct14c_round07::oversized_extent_transport_maps_again_after_semantic_filtering ... ok
+test prr_oct14c_round07::copy_write_transport_maps_filtered_source_indices_without_replay ... ok
+test tests::copy_fast_path_is_capped_at_extent_size ... ok
+test prr_oct14c_round07::range_size_lookup_transport_uses_original_path_index ... ok
+test tests::directory_sort_performance_control ... ignored, manual paired directory-sort performance control
+test tests::path_result_cannot_cross_the_descriptor_boundary ... ok
+test prr_oct14c_round07::oversized_source_attribute_transport_maps_back_to_copy_index ... ok
+test tests::scalar_read_result_contract_is_validated ... ok
+test tests::scalar_write_result_contract_is_validated ... ok
+test tests::referral_exceptions_preserve_diagnostics_paths_and_optional_indices ... ok
+test tests::directory_sort_preserves_lossy_string_order_and_stable_ties ... ok
+test prr_oct14c_round07::oversized_extent_transport_maps_back_to_copy_index_without_replay ... ok
+test tests::unsupported_mapping_preserves_context_without_changing_other_exception_classes ... ok
+test tests::walk_rejects_invalid_depth_before_clamping_or_backend_io ... ok
+
+test result: ok. 53 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+   Doc-tests vfsi_python_native
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling vfsi-core v0.1.15 (/home/ubuntu/vnfs/crates/vfsi-core)
+   Compiling vfsi-sync v0.1.16 (/home/ubuntu/vnfs/crates/vfsi-sync)
+   Compiling vfsi-local v0.1.14 (/home/ubuntu/vnfs/crates/vfsi-local)
+   Compiling vfsi-nfs v0.1.15 (/home/ubuntu/vnfs/crates/vfsi-nfs)
+   Compiling vfsi-posix v0.1.5 (/home/ubuntu/vnfs/crates/vfsi-posix)
+   Compiling vfsi-python-native v0.1.6 (/home/ubuntu/vnfs/adapters/vfsi-python)
+   Compiling nfs4fs-python v0.3.12 (/home/ubuntu/vnfs/adapters/nfs4fs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.80s
+     Running unittests src/lib.rs (target/debug/deps/nfs4fs_native-33715741a3fc9919)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling vfsi-core v0.1.15 (/home/ubuntu/vnfs/crates/vfsi-core)
+   Compiling vfsi-sync v0.1.16 (/home/ubuntu/vnfs/crates/vfsi-sync)
+   Compiling vfsi-smb v0.1.13 (/home/ubuntu/vnfs/crates/vfsi-smb)
+   Compiling vfsi-python-native v0.1.6 (/home/ubuntu/vnfs/adapters/vfsi-python)
+   Compiling vsmb-python v0.1.5 (/home/ubuntu/vnfs/adapters/vsmb)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.79s
+     Running unittests src/lib.rs (target/debug/deps/vsmb_native-edebe94cb86f9ed4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

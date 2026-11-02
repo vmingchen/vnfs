@@ -1,0 +1,19 @@
+   Compiling uu_du v0.13.0 (/home/ubuntu/vfsi-du-candidate/src/uu/du)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.93s
+     Running unittests src/du.rs (target/debug/deps/uu_du-aa050e3a2acc6f1c)
+
+running 11 tests
+test test_du::test_read_block_size ... ok
+test vnfs::tests::all_emits_files_and_default_does_not ... ok
+test vnfs::tests::device_boundary_and_follow_modes_keep_kernel_semantics ... ok
+test vnfs::tests::cross_directory_hardlinks_keep_depth_first_attribution ... ok
+test vnfs::tests::changing_names_and_link_counts_count_each_file_identity_once ... ok
+test vnfs::tests::hardlinks_count_once_and_count_links_counts_each ... ok
+test vnfs::tests::excluded_directories_are_not_listed_or_charged_to_totals ... ok
+test vnfs::tests::missing_size_is_an_error_but_empty_file_is_zero ... ok
+test vnfs::tests::separate_dirs_excludes_subdirectory_totals ... ok
+test vnfs::tests::totals_apparent_sizes_like_std_du ... ok
+test vnfs::tests::batched_pages_keep_post_order_totals_across_cohorts_and_large_listings ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

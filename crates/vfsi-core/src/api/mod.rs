@@ -55,7 +55,7 @@ pub use read::{ReadOp, ReadOptions, ReadResult};
 mod write;
 pub use write::{WriteOp, WriteOptions};
 mod visit;
-pub use visit::{ListDirOptions, WalkOptions};
+pub use visit::{ListDirControl, ListDirOptions, WalkOptions};
 mod support;
 pub use support::{
     DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
@@ -93,9 +93,9 @@ pub mod internal {
 pub mod prelude {
     pub use super::{
         AsTarget, Attributes, AttrsOptions, ControlFlow, CopyOptions, DirHandle, FileHandle,
-        ListDirOptions, MkDirOp, OpenFlags, OpenOp, ReadOp, ReadOptions, ReadResult, RemoveMode,
-        RemoveOptions, RenameMode, ResourceLimits, SetAttrsOp, StreamOptions, SyncMode, Target,
-        Vfsi, VfsiExt, WalkOptions, WriteOp, WriteOptions,
+        ListDirControl, ListDirOptions, MkDirOp, OpenFlags, OpenOp, ReadOp, ReadOptions,
+        ReadResult, RemoveMode, RemoveOptions, RenameMode, ResourceLimits, SetAttrsOp,
+        StreamOptions, SyncMode, Target, Vfsi, VfsiExt, WalkOptions, WriteOp, WriteOptions,
     };
 }
 

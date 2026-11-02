@@ -1,0 +1,15 @@
+test_candidate_postorder_guard_rejects_parent_before_descendant (test_benchmark.BenchmarkTests.test_candidate_postorder_guard_rejects_parent_before_descendant) ... ok
+test_cleanup_only_deletes_resources_it_created (test_benchmark.BenchmarkTests.test_cleanup_only_deletes_resources_it_created) ... ok
+test_count_rpc_pdus_not_tcp_packets (test_benchmark.BenchmarkTests.test_count_rpc_pdus_not_tcp_packets) ... ok
+test_generator_bounds_before_creation (test_benchmark.BenchmarkTests.test_generator_bounds_before_creation) ... ok
+test_geometry_and_mutation_detection (test_benchmark.BenchmarkTests.test_geometry_and_mutation_detection) ... ok
+test_lock_and_release_frozen_together (test_benchmark.BenchmarkTests.test_lock_and_release_frozen_together) ... ok
+test_payload_boundaries (test_benchmark.BenchmarkTests.test_payload_boundaries) ... ok
+test_reserved_client_port_decoded_as_rpc (test_benchmark.BenchmarkTests.test_reserved_client_port_decoded_as_rpc) ... ok
+test_retries_count_as_actual_calls (test_benchmark.BenchmarkTests.test_retries_count_as_actual_calls) ... ok
+test_unmatched_or_ambiguous_capture_rejected (test_benchmark.BenchmarkTests.test_unmatched_or_ambiguous_capture_rejected) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 0.215s
+
+OK

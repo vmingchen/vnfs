@@ -160,7 +160,7 @@ pub fn stream_cohorts<F: Vfsi, P: AsRef<Path>>(
     Ok(output)
 }
 
-pub fn visit_directory_pages<P: AsRef<Path>>(
+pub fn visit_directory_pages<P: AsRef<Path>, C: Into<ListDirControl>>(
     roots: &[P],
     policy: vfsi_core::api::ListDirOptions,
     limits: ResourceLimits,
@@ -173,7 +173,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
         usize,
         bool,
     ) -> Result<Vec<crate::DirectoryPage>>,
-    mut callback: impl FnMut(usize, DirectoryListing) -> Result<std::ops::ControlFlow<()>>,
+    mut callback: impl FnMut(usize, DirectoryListing) -> Result<C>,
 ) -> Result<Vec<crate::TraversalCompletion>> {
     let directory = policy.directory_options(limits);
     let walk = policy.walk_options(limits);
@@ -275,6 +275,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
                 }
                 let mut seeds: std::collections::HashMap<_, _> = seeds.into_iter().collect();
                 let mut page_error = None;
+                let mut candidates = Vec::new();
                 let mut accepted = 0;
                 for entry in &page.entries {
                     if let Err(error) = budget.charge(entry.path()) {
@@ -286,22 +287,12 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
                     }
                     accepted += 1;
                     if policy.recursive() && entry.attrs().is_dir() {
-                        if depth >= walk.max_depth_or(Default::default()).get() {
-                            if !walk.truncate_at_max_depth() {
-                                page_error = Some(
-                                    vfsi_core::api::Error::errno(index, libc::EFBIG as u32)
-                                        .with_context("visit_dirs", entry.path()),
-                                );
-                                break;
-                            }
-                        } else {
-                            children.push((
-                                index,
-                                entry.path().to_path_buf(),
-                                depth + 1,
-                                seeds.remove(entry.path()),
-                            ));
-                        }
+                        candidates.push((
+                            index,
+                            entry.path().to_path_buf(),
+                            depth + 1,
+                            seeds.remove(entry.path()),
+                        ));
                     }
                 }
                 if let Some(error) = &page_error {
@@ -313,10 +304,10 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
                 if !policy.recursive() && completed.len() <= index {
                     completed.resize(index + 1, crate::TraversalCompletion::Stopped);
                 }
-                if callback(index, page)
+                let decision = callback(index, page)
                     .map_err(|error| vector_index(error, index))?
-                    .is_break()
-                {
+                    .into();
+                if decision == ListDirControl::Stop {
                     if policy.recursive() {
                         completed.truncate(index);
                         completed.push(crate::TraversalCompletion::Stopped);
@@ -327,6 +318,26 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
                 }
                 if let Some(error) = page_error {
                     return Err(error);
+                }
+                if let ListDirControl::Prune(paths) = decision {
+                    // Admission applies before both depth checks and child I/O.
+                    // Reject unrelated names instead of silently pruning a
+                    // different directory or a later page.
+                    for path in &paths {
+                        if !candidates.iter().any(|candidate| &candidate.1 == path) {
+                            return Err(Error::from_kind(index, std::io::ErrorKind::InvalidInput)
+                                .with_context("vlistdirs prune", path));
+                        }
+                    }
+                    candidates.retain(|candidate| !paths.contains(&candidate.1));
+                }
+                if depth >= walk.max_depth_or(Default::default()).get() && !candidates.is_empty() {
+                    if !walk.truncate_at_max_depth() {
+                        return Err(Error::errno(index, libc::EFBIG as u32)
+                            .with_context("visit_dirs", &candidates[0].1));
+                    }
+                } else {
+                    children.extend(candidates);
                 }
                 match next {
                     Some(cursor) => continuations.push(((index, path, depth, false), Some(cursor))),
@@ -722,6 +733,155 @@ mod traversal_tests {
                 for (path, follow) in observed {
                     assert_eq!(follow, allow && path == Path::new("/tree"));
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    struct Seed(PathBuf);
+    struct RootPage;
+    fn entry(path: &str) -> DirEntry {
+        DirEntry::new(
+            path.into(),
+            vfsi_core::metadata_from_attrs(vfsi_core::VfAttrs {
+                file: vfsi_core::FileOperand::from_path(path),
+                masks: vfsi_core::AttrMask::MODE,
+                ftype: vfsi_core::VfType::Directory,
+                ..Default::default()
+            }),
+        )
+    }
+    fn walk(
+        depth: usize,
+        mut callback: impl FnMut(usize, DirectoryListing) -> Result<ListDirControl>,
+    ) -> (Result<Vec<TraversalCompletion>>, Vec<Vec<PathBuf>>) {
+        let waves = RefCell::new(Vec::new());
+        let result = visit_directory_pages(
+            &["/tree"],
+            ListDirOptions::new()
+                .with_recursive(true)
+                .with_max_depth(DepthLimit::new(depth).unwrap()),
+            ResourceLimits::new(),
+            |_| Ok(2),
+            |_| Ok(()),
+            |paths, cursors, size, _, follow| {
+                waves
+                    .borrow_mut()
+                    .push(paths.iter().map(|p| p.to_path_buf()).collect());
+                paths
+                    .iter()
+                    .zip(cursors)
+                    .map(|(path, cursor)| {
+                        let (entries, next) = if *path == Path::new("/tree") {
+                            assert!(follow);
+                            if let Some(cursor) = cursor {
+                                cursor.into_state::<RootPage>()?;
+                                (vec![entry("/tree/prune"), entry("/tree/b")], None)
+                            } else {
+                                assert_eq!(size, 1);
+                                (
+                                    vec![entry("/tree/a")],
+                                    Some(crate::DirPageCursor::new(RootPage)),
+                                )
+                            }
+                        } else {
+                            assert!(!follow);
+                            assert_ne!(*path, Path::new("/tree/prune"), "pruned before child I/O");
+                            let seed = cursor
+                                .expect("must retain anchored child seed")
+                                .into_state::<Seed>()?;
+                            assert_eq!(seed.0, *path);
+                            (Vec::new(), None)
+                        };
+                        let seeds = entries
+                            .iter()
+                            .map(|entry| {
+                                (
+                                    entry.path().to_path_buf(),
+                                    crate::DirPageCursor::new(Seed(entry.path().to_path_buf())),
+                                )
+                            })
+                            .collect();
+                        Ok((
+                            DirectoryListing {
+                                path: path.to_path_buf(),
+                                entries,
+                            },
+                            next,
+                            seeds,
+                        ))
+                    })
+                    .collect()
+            },
+            &mut callback,
+        );
+        (result, waves.into_inner())
+    }
+
+    #[test]
+    fn admission_keeps_anchored_sibling_batches_and_prunes_before_io() {
+        let mut seen = Vec::new();
+        let (result, waves) = walk(1, |index, page| {
+            assert_eq!(index, 0);
+            seen.push(page.path);
+            Ok(ListDirControl::Prune(
+                page.entries
+                    .iter()
+                    .filter(|entry| entry.file_name() == Some(std::ffi::OsStr::new("prune")))
+                    .map(|entry| entry.path().to_path_buf())
+                    .collect(),
+            ))
+        });
+        assert_eq!(result.unwrap(), [TraversalCompletion::Complete]);
+        assert_eq!(
+            seen,
+            ["/tree", "/tree", "/tree/a", "/tree/b"].map(PathBuf::from)
+        );
+        assert_eq!(
+            waves,
+            vec![
+                vec![PathBuf::from("/tree")],
+                vec![PathBuf::from("/tree")],
+                vec![PathBuf::from("/tree/a"), PathBuf::from("/tree/b")]
+            ]
+        );
+    }
+
+    #[test]
+    fn admission_stop_error_and_depth_pruning_never_fetch_children() {
+        for mode in 0..5 {
+            let mut calls = 0;
+            let (result, waves) = walk(0, |_, page| {
+                calls += 1;
+                match mode {
+                    0 => Ok(ListDirControl::Stop),
+                    1 => Err(Error::errno(7, libc::ECANCELED as u32)),
+                    2 => Ok(ListDirControl::Prune(
+                        page.entries
+                            .iter()
+                            .map(|e| e.path().to_path_buf())
+                            .collect(),
+                    )),
+                    3 => Ok(ListDirControl::Prune(vec!["/unrelated".into()])),
+                    _ => Ok(ListDirControl::Continue),
+                }
+            });
+            assert!(waves.iter().flatten().all(|p| p == Path::new("/tree")));
+            match mode {
+                0 => assert_eq!(result.unwrap(), [TraversalCompletion::Stopped]),
+                1 => assert_eq!(result.unwrap_err().index(), Some(0), "input root index"),
+                2 => {
+                    assert_eq!(result.unwrap(), [TraversalCompletion::Complete]);
+                    assert_eq!(calls, 2);
+                }
+                3 => assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput),
+                _ => assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::FileTooLarge),
             }
         }
     }

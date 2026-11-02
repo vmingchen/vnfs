@@ -1,0 +1,81 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 147  of event 'cpu-clock'
+# Event count (approx.): 294589176
+#
+# Overhead  Command  Shared Object      Symbol                                                                                                                      
+# ........  .......  .................  ............................................................................................................................
+#
+    36.73%  du       [kernel.kallsyms]  [k] try_to_wake_up
+     5.44%  du       libc.so.6          [.] __syscall_cancel_arch_end
+     3.40%  du       libc.so.6          [.] _int_malloc
+     3.40%  du       libc.so.6          [.] cfree@GLIBC_2.17
+     2.04%  du       [kernel.kallsyms]  [k] _raw_spin_unlock_irqrestore
+     2.04%  du       [kernel.kallsyms]  [k] el0_svc
+     1.36%  du       du                 [.] <core::str::lossy::Utf8Chunks as core::iter::traits::iterator::Iterator>::next
+     1.36%  du       du                 [.] hashbrown::map::HashMap<K,V,S,A>::insert
+     1.36%  du       du                 [.] svc_vc_recv
+     1.36%  du       du                 [.] work_pool_thread
+     1.36%  du       du                 [.] xdr_dplx_decode
+     1.36%  du       libc.so.6          [.] __GI___futex_abstimed_wait_cancelable64
+     1.36%  du       libc.so.6          [.] __internal_syscall_cancel
+     1.36%  du       libc.so.6          [.] clock_gettime@@GLIBC_2.17
+     1.36%  du       libc.so.6          [.] memcmp
+     1.36%  du       libc.so.6          [.] unlink_chunk.isra.0
+     0.68%  du       [kernel.kallsyms]  [k] __import_iovec
+     0.68%  du       [kernel.kallsyms]  [k] __local_bh_enable_ip
+     0.68%  du       [kernel.kallsyms]  [k] apparmor_file_permission
+     0.68%  du       [kernel.kallsyms]  [k] blkcg_maybe_throttle_current
+     0.68%  du       [kernel.kallsyms]  [k] cubictcp_cwnd_event
+     0.68%  du       [kernel.kallsyms]  [k] ep_send_events
+     0.68%  du       [kernel.kallsyms]  [k] ext4_da_write_begin
+     0.68%  du       [kernel.kallsyms]  [k] fdget
+     0.68%  du       [kernel.kallsyms]  [k] fdget_pos
+     0.68%  du       [kernel.kallsyms]  [k] folio_mark_accessed
+     0.68%  du       [kernel.kallsyms]  [k] folio_wait_stable
+     0.68%  du       [kernel.kallsyms]  [k] fpsimd_load_state
+     0.68%  du       [kernel.kallsyms]  [k] hrtimer_start_range_ns
+     0.68%  du       [kernel.kallsyms]  [k] import_iovec
+     0.68%  du       [kernel.kallsyms]  [k] inet_recvmsg
+     0.68%  du       [kernel.kallsyms]  [k] inode_maybe_inc_iversion
+     0.68%  du       [kernel.kallsyms]  [k] invoke_syscall.constprop.0
+     0.68%  du       [kernel.kallsyms]  [k] ipv4_mtu
+     0.68%  du       [kernel.kallsyms]  [k] netem_dequeue
+     0.68%  du       [kernel.kallsyms]  [k] netem_enqueue
+     0.68%  du       [kernel.kallsyms]  [k] percpu_up_read
+     0.68%  du       [kernel.kallsyms]  [k] tcp_rcv_space_adjust
+     0.68%  du       [kernel.kallsyms]  [k] uaccess_ttbr0_disable.isra.0
+     0.68%  du       [kernel.kallsyms]  [k] vfs_write
+     0.68%  du       du                 [.] <alloc::string::String as core::fmt::Display>::fmt
+     0.68%  du       du                 [.] __aarch64_ldclr2_acq_rel
+     0.68%  du       du                 [.] __rustc::__rust_alloc
+     0.68%  du       du                 [.] alloc::raw_vec::RawVecInner<A>::finish_grow
+     0.68%  du       du                 [.] core::fmt::Formatter::pad
+     0.68%  du       du                 [.] core::ptr::drop_in_place<alloc::vec::into_iter::IntoIter<(alloc::vec::Vec<vfsi_nfs::client::DirEntry>,u64)>>
+     0.68%  du       du                 [.] free@plt
+     0.68%  du       du                 [.] svc_rqst_epoll_loop
+     0.68%  du       du                 [.] svc_rqst_rearm_events_locked
+     0.68%  du       du                 [.] uu_du::vnfs::traverse
+     0.68%  du       du                 [.] vfsi_nfs::client::NfsClient::call_compound
+     0.68%  du       du                 [.] vfsi_nfs::client::NfsClient::resolve
+     0.68%  du       du                 [.] vfsi_nfs::nfs::namespace::<impl vfsi_nfs::nfs::NfsVecFs>::resolve_directory_path
+     0.68%  du       du                 [.] vfsi_nfs::nfs::vector_backend::<impl vfsi_sync::backend::VectorBackend for vfsi_nfs::nfs::NfsVecFs>::vlistdir_pages_impl
+     0.68%  du       du                 [.] xdr_array
+     0.68%  du       du                 [.] xdr_bytes
+     0.68%  du       libc.so.6          [.] __GI___libc_write
+     0.68%  du       libc.so.6          [.] __memcpy_generic
+     0.68%  du       libc.so.6          [.] _int_free_create_chunk
+     0.68%  du       libc.so.6          [.] pthread_cond_destroy@@GLIBC_2.17
+     0.68%  du       libc.so.6          [.] pthread_cond_signal@@GLIBC_2.17
+     0.68%  du       libc.so.6          [.] pthread_cond_timedwait@@GLIBC_2.17
+     0.68%  du       libc.so.6          [.] pthread_mutex_destroy@@GLIBC_2.17
+     0.68%  du       libc.so.6          [.] pthread_mutex_lock@@GLIBC_2.17
+     0.68%  runuser  [kernel.kallsyms]  [k] __memcg_slab_post_alloc_hook
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

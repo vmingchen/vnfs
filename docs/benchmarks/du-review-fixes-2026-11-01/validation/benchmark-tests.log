@@ -1,0 +1,20 @@
+test_candidate_build_failure_stops_before_source_snapshot_or_measurement (test_benchmark.BenchmarkTests.test_candidate_build_failure_stops_before_source_snapshot_or_measurement) ... ok
+test_candidate_build_without_du_artifact_never_uses_cached_executable (test_benchmark.BenchmarkTests.test_candidate_build_without_du_artifact_never_uses_cached_executable) ... ok
+test_candidate_is_rebuilt_before_source_provenance_is_recorded (test_benchmark.BenchmarkTests.test_candidate_is_rebuilt_before_source_provenance_is_recorded) ... ok
+test_candidate_postorder_guard_rejects_parent_before_descendant (test_benchmark.BenchmarkTests.test_candidate_postorder_guard_rejects_parent_before_descendant) ... ok
+test_cleanup_only_deletes_resources_it_created (test_benchmark.BenchmarkTests.test_cleanup_only_deletes_resources_it_created) ... ok
+test_comparison_reaches_every_trial_after_building_and_checks_parity (test_benchmark.BenchmarkTests.test_comparison_reaches_every_trial_after_building_and_checks_parity) ... ok
+test_comparison_tables_require_three_timings_and_a_capture_per_variant (test_benchmark.BenchmarkTests.test_comparison_tables_require_three_timings_and_a_capture_per_variant) ... ok
+test_count_rpc_pdus_not_tcp_packets (test_benchmark.BenchmarkTests.test_count_rpc_pdus_not_tcp_packets) ... ok
+test_generator_bounds_before_creation (test_benchmark.BenchmarkTests.test_generator_bounds_before_creation) ... ok
+test_geometry_and_mutation_detection (test_benchmark.BenchmarkTests.test_geometry_and_mutation_detection) ... ok
+test_lock_and_release_frozen_together (test_benchmark.BenchmarkTests.test_lock_and_release_frozen_together) ... ok
+test_payload_boundaries (test_benchmark.BenchmarkTests.test_payload_boundaries) ... ok
+test_reserved_client_port_decoded_as_rpc (test_benchmark.BenchmarkTests.test_reserved_client_port_decoded_as_rpc) ... ok
+test_retries_count_as_actual_calls (test_benchmark.BenchmarkTests.test_retries_count_as_actual_calls) ... ok
+test_unmatched_or_ambiguous_capture_rejected (test_benchmark.BenchmarkTests.test_unmatched_or_ambiguous_capture_rejected) ... ok
+
+----------------------------------------------------------------------
+Ran 15 tests in 0.533s
+
+OK

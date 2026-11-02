@@ -1,0 +1,90 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 141  of event 'cpu-clock'
+# Event count (approx.): 282565128
+#
+# Overhead  Command  Shared Object      Symbol                                                  
+# ........  .......  .................  ........................................................
+#
+    21.28%  du       [kernel.kallsyms]  [k] __wake_up_sync_key
+    11.35%  du       [kernel.kallsyms]  [k] try_to_wake_up
+     6.38%  du       [kernel.kallsyms]  [k] find_inode
+     4.96%  du       [kernel.kallsyms]  [k] __refill_objects_node
+     2.84%  du       [kernel.kallsyms]  [k] __pi_memset_generic
+     2.84%  du       [kernel.kallsyms]  [k] xas_start
+     2.13%  du       libc.so.6          [.] _int_malloc
+     1.42%  du       [kernel.kallsyms]  [k] el0_svc
+     0.71%  du       [kernel.kallsyms]  [k] __account_obj_stock
+     0.71%  du       [kernel.kallsyms]  [k] __d_lookup
+     0.71%  du       [kernel.kallsyms]  [k] __d_rehash
+     0.71%  du       [kernel.kallsyms]  [k] __dev_forward_skb2
+     0.71%  du       [kernel.kallsyms]  [k] __kmalloc_node_track_caller_noprof
+     0.71%  du       [kernel.kallsyms]  [k] __netif_receive_skb_one_core
+     0.71%  du       [kernel.kallsyms]  [k] __pi_clear_page
+     0.71%  du       [kernel.kallsyms]  [k] __rcu_read_lock
+     0.71%  du       [kernel.kallsyms]  [k] __rpc_execute
+     0.71%  du       [kernel.kallsyms]  [k] __sk_mem_schedule
+     0.71%  du       [kernel.kallsyms]  [k] __tcp_transmit_skb
+     0.71%  du       [kernel.kallsyms]  [k] __try_to_del_timer_sync
+     0.71%  du       [kernel.kallsyms]  [k] _raw_spin_lock
+     0.71%  du       [kernel.kallsyms]  [k] aa_file_perm
+     0.71%  du       [kernel.kallsyms]  [k] apparmor_file_alloc_security
+     0.71%  du       [kernel.kallsyms]  [k] apparmor_ip_localout
+     0.71%  du       [kernel.kallsyms]  [k] block_write_end
+     0.71%  du       [kernel.kallsyms]  [k] call_decode
+     0.71%  du       [kernel.kallsyms]  [k] call_rcu
+     0.71%  du       [kernel.kallsyms]  [k] csum_tcpudp_nofold
+     0.71%  du       [kernel.kallsyms]  [k] d_splice_alias
+     0.71%  du       [kernel.kallsyms]  [k] decode_sequence.isra.0
+     0.71%  du       [kernel.kallsyms]  [k] drain_obj_stock
+     0.71%  du       [kernel.kallsyms]  [k] enqueue_to_backlog
+     0.71%  du       [kernel.kallsyms]  [k] ext4_da_write_begin
+     0.71%  du       [kernel.kallsyms]  [k] find_and_lock_cache_page
+     0.71%  du       [kernel.kallsyms]  [k] ilookup5
+     0.71%  du       [kernel.kallsyms]  [k] inode_permission
+     0.71%  du       [kernel.kallsyms]  [k] inode_set_ctime_to_ts
+     0.71%  du       [kernel.kallsyms]  [k] ip_rcv_core
+     0.71%  du       [kernel.kallsyms]  [k] kmalloc_reserve
+     0.71%  du       [kernel.kallsyms]  [k] lock_timer_base
+     0.71%  du       [kernel.kallsyms]  [k] map_id_range_down
+     0.71%  du       [kernel.kallsyms]  [k] memcmp
+     0.71%  du       [kernel.kallsyms]  [k] nfs4_call_getattr_done
+     0.71%  du       [kernel.kallsyms]  [k] nfs4_decode_dirent
+     0.71%  du       [kernel.kallsyms]  [k] nfs4_free_slot
+     0.71%  du       [kernel.kallsyms]  [k] nfs4_label_alloc
+     0.71%  du       [kernel.kallsyms]  [k] nfs_access_get_cached
+     0.71%  du       [kernel.kallsyms]  [k] out_of_line_wait_on_bit
+     0.71%  du       [kernel.kallsyms]  [k] path_get
+     0.71%  du       [kernel.kallsyms]  [k] percpu_ref_tryget_many.constprop.0
+     0.71%  du       [kernel.kallsyms]  [k] preempt_model_full
+     0.71%  du       [kernel.kallsyms]  [k] rpc_decode_header
+     0.71%  du       [kernel.kallsyms]  [k] rpc_task_release_transport
+     0.71%  du       [kernel.kallsyms]  [k] security_d_instantiate
+     0.71%  du       [kernel.kallsyms]  [k] security_inode_permission
+     0.71%  du       [kernel.kallsyms]  [k] sk_forced_mem_schedule
+     0.71%  du       [kernel.kallsyms]  [k] skb_clone
+     0.71%  du       [kernel.kallsyms]  [k] skb_network_protocol
+     0.71%  du       [kernel.kallsyms]  [k] tcp_ack
+     0.71%  du       [kernel.kallsyms]  [k] tcp_current_mss
+     0.71%  du       [kernel.kallsyms]  [k] tcp_release_cb
+     0.71%  du       [kernel.kallsyms]  [k] tcp_stream_alloc_skb
+     0.71%  du       [kernel.kallsyms]  [k] xas_load
+     0.71%  du       [kernel.kallsyms]  [k] xas_nomem
+     0.71%  du       [kernel.kallsyms]  [k] xdr_stream_decode_opaque_fixed
+     0.71%  du       [kernel.kallsyms]  [k] xprt_request_transmit.isra.0
+     0.71%  du       du                 [.] __aarch64_cas4_acq
+     0.71%  du       du                 [.] hashbrown::map::HashMap<K,V,S,A>::insert
+     0.71%  du       du                 [.] std::sync::mpmc::list::Channel<T>::recv::{{closure}}
+     0.71%  du       du                 [.] uucore::features::safe_traversal::DirFd::read_dir
+     0.71%  du       libc.so.6          [.] __close
+     0.71%  du       libc.so.6          [.] malloc
+     0.71%  du       libc.so.6          [.] syscall
+     0.71%  runuser  [kernel.kallsyms]  [k] __wake_up
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

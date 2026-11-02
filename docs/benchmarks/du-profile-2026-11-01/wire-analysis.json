@@ -1,0 +1,938 @@
+[
+  {
+    "capture": "added-1ms-rtt-capture-00-kernel.pcap.gz",
+    "count": 4669,
+    "max_inflight": 1,
+    "inflight_duration_ms": {
+      "0": 3137.669000000001,
+      "1": 2961.7839999999983
+    },
+    "rpc_span_ms": 6099.4529999999995,
+    "primary_cycle_median_ms": 1.2759999999998328,
+    "primary_cycle_mean_ms": 1.3065115681233934,
+    "groups": {
+      "attributes_or_access": {
+        "count": 3114,
+        "observed_response_total_ms": 1917.9290000000053,
+        "observed_response_median_ms": 0.5959999999998189,
+        "mean_ops": 3.500321130378934,
+        "max_ops": 5
+      },
+      "READDIR": {
+        "count": 1555,
+        "observed_response_total_ms": 1043.8549999999932,
+        "observed_response_median_ms": 0.6490000000001217,
+        "mean_ops": 3,
+        "max_ops": 3
+      }
+    },
+    "opcode_sequences": [
+      [
+        "53,22,9",
+        1557
+      ],
+      [
+        "53,22,3,9",
+        1556
+      ],
+      [
+        "53,22,26",
+        1555
+      ],
+      [
+        "53,22,15,10,9",
+        1
+      ]
+    ],
+    "error_statuses": {}
+  },
+  {
+    "capture": "added-1ms-rtt-capture-00-vfsi.pcap.gz",
+    "count": 3122,
+    "max_inflight": 1,
+    "inflight_duration_ms": {
+      "0": 2301.1630000000077,
+      "1": 1979.8039999999926
+    },
+    "rpc_span_ms": 4280.967000000001,
+    "primary_cycle_median_ms": 1.3390000000000901,
+    "primary_cycle_mean_ms": 1.3707002244309072,
+    "groups": {
+      "attributes_or_access": {
+        "count": 6,
+        "observed_response_total_ms": 3.9259999999999957,
+        "observed_response_median_ms": 0.6324999999999994,
+        "mean_ops": 5.166666666666667,
+        "max_ops": 6
+      },
+      "session_other": {
+        "count": 6,
+        "observed_response_total_ms": 4.586000000000334,
+        "observed_response_median_ms": 0.6525000000001668,
+        "mean_ops": 1.5,
+        "max_ops": 3
+      },
+      "resolve_LOOKUP_GETFH": {
+        "count": 1555,
+        "observed_response_total_ms": 961.3009999999966,
+        "observed_response_median_ms": 0.6019999999999914,
+        "mean_ops": 8.80064308681672,
+        "max_ops": 9
+      },
+      "READDIR": {
+        "count": 1555,
+        "observed_response_total_ms": 1009.9909999999957,
+        "observed_response_median_ms": 0.6309999999998261,
+        "mean_ops": 3,
+        "max_ops": 3
+      }
+    },
+    "opcode_sequences": [
+      [
+        "53,22,26",
+        1555
+      ],
+      [
+        "53,22,15,15,15,15,15,15,10",
+        1296
+      ],
+      [
+        "53,22,15,15,15,15,15,10",
+        216
+      ],
+      [
+        "53,22,15,15,15,15,10",
+        36
+      ],
+      [
+        "53,22,15,15,15,10",
+        6
+      ],
+      [
+        "53,24,32,15,9",
+        2
+      ],
+      [
+        "53,24,15,32,15,9",
+        2
+      ],
+      [
+        "53,22,3,9",
+        1
+      ],
+      [
+        "53,22,15,10,9",
+        1
+      ],
+      [
+        "42",
+        1
+      ],
+      [
+        "43",
+        1
+      ],
+      [
+        "53,58",
+        1
+      ],
+      [
+        "53,24,10",
+        1
+      ],
+      [
+        "53,22,15,15,10",
+        1
+      ],
+      [
+        "44",
+        1
+      ],
+      [
+        "57",
+        1
+      ]
+    ],
+    "error_statuses": {}
+  },
+  {
+    "capture": "added-1ms-rtt-capture-01-kernel.pcap.gz",
+    "count": 4669,
+    "max_inflight": 1,
+    "inflight_duration_ms": {
+      "0": 3087.1790000000083,
+      "1": 2928.2169999999915
+    },
+    "rpc_span_ms": 6015.396,
+    "primary_cycle_median_ms": 1.2559999999997018,
+    "primary_cycle_mean_ms": 1.2885074978577549,
+    "groups": {
+      "attributes_or_access": {
+        "count": 3114,
+        "observed_response_total_ms": 1908.7319999999816,
+        "observed_response_median_ms": 0.592000000000148,
+        "mean_ops": 3.500321130378934,
+        "max_ops": 5
+      },
+      "READDIR": {
+        "count": 1555,
+        "observed_response_total_ms": 1019.48500000001,
+        "observed_response_median_ms": 0.6349999999999967,
+        "mean_ops": 3,
+        "max_ops": 3
+      }
+    },
+    "opcode_sequences": [
+      [
+        "53,22,9",
+        1557
+      ],
+      [
+        "53,22,3,9",
+        1556
+      ],
+      [
+        "53,22,26",
+        1555
+      ],
+      [
+        "53,22,15,10,9",
+        1
+      ]
+    ],
+    "error_statuses": {}
+  },
+  {
+    "capture": "added-1ms-rtt-capture-01-vfsi.pcap.gz",
+    "count": 3122,
+    "max_inflight": 1,
+    "inflight_duration_ms": {
+      "0": 2231.9130000000077,
+      "1": 1931.4049999999927
+    },
+    "rpc_span_ms": 4163.318,
+    "primary_cycle_median_ms": 1.314999999999955,
+    "primary_cycle_mean_ms": 1.3330266110932991,
+    "groups": {
+      "attributes_or_access": {
+        "count": 6,
+        "observed_response_total_ms": 3.673999999999999,
+        "observed_response_median_ms": 0.5964999999999993,
+        "mean_ops": 5.166666666666667,
+        "max_ops": 6
+      },
+      "session_other": {
+        "count": 6,
+        "observed_response_total_ms": 5.820000000000419,
+        "observed_response_median_ms": 0.6250000000000001,
+        "mean_ops": 1.5,
+        "max_ops": 3
+      },
+      "resolve_LOOKUP_GETFH": {
+        "count": 1555,
+        "observed_response_total_ms": 947.4559999999985,
+        "observed_response_median_ms": 0.5979999999998764,
+        "mean_ops": 8.80064308681672,
+        "max_ops": 9
+      },
+      "READDIR": {
+        "count": 1555,
+        "observed_response_total_ms": 974.4549999999937,
+        "observed_response_median_ms": 0.6129999999999747,
+        "mean_ops": 3,
+        "max_ops": 3
+      }
+    },
+    "opcode_sequences": [
+      [
+        "53,22,26",
+        1555
+      ],
+      [
+        "53,22,15,15,15,15,15,15,10",
+        1296
+      ],
+      [
+        "53,22,15,15,15,15,15,10",
+        216
+      ],
+      [
+        "53,22,15,15,15,15,10",
+        36
+      ],
+      [
+        "53,22,15,15,15,10",
+        6
+      ],
+      [
+        "53,24,32,15,9",
+        2
+      ],
+      [
+        "53,24,15,32,15,9",
+        2
+      ],
+      [
+        "53,22,3,9",
+        1
+      ],
+      [
+        "53,22,15,10,9",
+        1
+      ],
+      [
+        "42",
+        1
+      ],
+      [
+        "43",
+        1
+      ],
+      [
+        "53,58",
+        1
+      ],
+      [
+        "53,24,10",
+        1
+      ],
+      [
+        "53,22,15,15,10",
+        1
+      ],
+      [
+        "44",
+        1
+      ],
+      [
+        "57",
+        1
+      ]
+    ],
+    "error_statuses": {}
+  },
+  {
+    "capture": "added-1ms-rtt-capture-02-kernel.pcap.gz",
+    "count": 4668,
+    "max_inflight": 1,
+    "inflight_duration_ms": {
+      "0": 3111.824,
+      "1": 2949.8530000000005
+    },
+    "rpc_span_ms": 6061.677000000001,
+    "primary_cycle_median_ms": 1.2630000000000141,
+    "primary_cycle_mean_ms": 1.2987090207842296,
+    "groups": {
+      "attributes_or_access": {
+        "count": 3113,
+        "observed_response_total_ms": 1926.0179999999916,
+        "observed_response_median_ms": 0.5949999999996791,
+        "mean_ops": 3.500481850305172,
+        "max_ops": 5
+      },
+      "READDIR": {
+        "count": 1555,
+        "observed_response_total_ms": 1023.8350000000088,
+        "observed_response_median_ms": 0.6399999999997519,
+        "mean_ops": 3,
+        "max_ops": 3
+      }
+    },
+    "opcode_sequences": [
+      [
+        "53,22,3,9",
+        1556
+      ],
+      [
+        "53,22,9",
+        1556
+      ],
+      [
+        "53,22,26",
+        1555
+      ],
+      [
+        "53,22,15,10,9",
+        1
+      ]
+    ],
+    "error_statuses": {}
+  },
+  {
+    "capture": "added-1ms-rtt-capture-02-vfsi.pcap.gz",
+    "count": 3122,
+    "max_inflight": 1,
+    "inflight_duration_ms": {
+      "0": 2258.873999999982,
+      "1": 1937.092000000018
+    },
+    "rpc_span_ms": 4195.966,
+    "primary_cycle_median_ms": 1.312000000000424,
+    "primary_cycle_mean_ms": 1.3435646040397564,
+    "groups": {
+      "attributes_or_access": {
+        "count": 6,
+        "observed_response_total_ms": 3.8719999999999946,
+        "observed_response_median_ms": 0.6094999999999986,
+        "mean_ops": 5.166666666666667,
+        "max_ops": 6
+      },
+      "session_other": {
+        "count": 6,
+        "observed_response_total_ms": 6.418999999999269,
+        "observed_response_median_ms": 0.6349999999999707,
+        "mean_ops": 1.5,
+        "max_ops": 3
+      },
+      "resolve_LOOKUP_GETFH": {
+        "count": 1555,
+        "observed_response_total_ms": 953.5560000000067,
+        "observed_response_median_ms": 0.5970000000000003,
+        "mean_ops": 8.80064308681672,
+        "max_ops": 9
+      },
+      "READDIR": {
+        "count": 1555,
+        "observed_response_total_ms": 973.245000000012,
+        "observed_response_median_ms": 0.6140000000000034,
+        "mean_ops": 3,
+        "max_ops": 3
+      }
+    },
+    "opcode_sequences": [
+      [
+        "53,22,26",
+        1555
+      ],
+      [
+        "53,22,15,15,15,15,15,15,10",
+        1296
+      ],
+      [
+        "53,22,15,15,15,15,15,10",
+        216
+      ],
+      [
+        "53,22,15,15,15,15,10",
+        36
+      ],
+      [
+        "53,22,15,15,15,10",
+        6
+      ],
+      [
+        "53,24,32,15,9",
+        2
+      ],
+      [
+        "53,24,15,32,15,9",
+        2
+      ],
+      [
+        "53,22,3,9",
+        1
+      ],
+      [
+        "53,22,15,10,9",
+        1
+      ],
+      [
+        "42",
+        1
+      ],
+      [
+        "43",
+        1
+      ],
+      [
+        "53,58",
+        1
+      ],
+      [
+        "53,24,10",
+        1
+      ],
+      [
+        "53,22,15,15,10",
+        1
+      ],
+      [
+        "44",
+        1
+      ],
+      [
+        "57",
+        1
+      ]
+    ],
+    "error_statuses": {}
+  },
+  {
+    "capture": "native-capture-00-kernel.pcap.gz",
+    "count": 4667,
+    "max_inflight": 1,
+    "inflight_duration_ms": {
+      "0": 727.9460000000072,
+      "1": 525.9769999999928
+    },
+    "rpc_span_ms": 1253.923,
+    "primary_cycle_median_ms": 0.24699999999999722,
+    "primary_cycle_mean_ms": 0.2687147449635662,
+    "groups": {
+      "attributes_or_access": {
+        "count": 3112,
+        "observed_response_total_ms": 318.70799999999593,
+        "observed_response_median_ms": 0.08999999999992347,
+        "mean_ops": 3.5006426735218508,
+        "max_ops": 5
+      },
+      "READDIR": {
+        "count": 1555,
+        "observed_response_total_ms": 207.26899999999682,
+        "observed_response_median_ms": 0.12100000000003774,
+        "mean_ops": 3,
+        "max_ops": 3
+      }
+    },
+    "opcode_sequences": [
+      [
+        "53,22,3,9",
+        1556
+      ],
+      [
+        "53,22,9",
+        1555
+      ],
+      [
+        "53,22,26",
+        1555
+      ],
+      [
+        "53,22,15,10,9",
+        1
+      ]
+    ],
+    "error_statuses": {}
+  },
+  {
+    "capture": "native-capture-00-vfsi.pcap.gz",
+    "count": 3122,
+    "max_inflight": 1,
+    "inflight_duration_ms": {
+      "0": 649.3740000000024,
+      "1": 386.6859999999975
+    },
+    "rpc_span_ms": 1036.06,
+    "primary_cycle_median_ms": 0.3170000000000117,
+    "primary_cycle_mean_ms": 0.33154825264507853,
+    "groups": {
+      "attributes_or_access": {
+        "count": 6,
+        "observed_response_total_ms": 0.8419999999999999,
+        "observed_response_median_ms": 0.1295,
+        "mean_ops": 5.166666666666667,
+        "max_ops": 6
+      },
+      "session_other": {
+        "count": 6,
+        "observed_response_total_ms": 3.1459999999999164,
+        "observed_response_median_ms": 0.12099999999995709,
+        "mean_ops": 1.5,
+        "max_ops": 3
+      },
+      "resolve_LOOKUP_GETFH": {
+        "count": 1555,
+        "observed_response_total_ms": 163.5229999999997,
+        "observed_response_median_ms": 0.09500000000001174,
+        "mean_ops": 8.80064308681672,
+        "max_ops": 9
+      },
+      "READDIR": {
+        "count": 1555,
+        "observed_response_total_ms": 219.17499999999785,
+        "observed_response_median_ms": 0.13099999999999223,
+        "mean_ops": 3,
+        "max_ops": 3
+      }
+    },
+    "opcode_sequences": [
+      [
+        "53,22,26",
+        1555
+      ],
+      [
+        "53,22,15,15,15,15,15,15,10",
+        1296
+      ],
+      [
+        "53,22,15,15,15,15,15,10",
+        216
+      ],
+      [
+        "53,22,15,15,15,15,10",
+        36
+      ],
+      [
+        "53,22,15,15,15,10",
+        6
+      ],
+      [
+        "53,24,32,15,9",
+        2
+      ],
+      [
+        "53,24,15,32,15,9",
+        2
+      ],
+      [
+        "53,22,3,9",
+        1
+      ],
+      [
+        "53,22,15,10,9",
+        1
+      ],
+      [
+        "42",
+        1
+      ],
+      [
+        "43",
+        1
+      ],
+      [
+        "53,58",
+        1
+      ],
+      [
+        "53,24,10",
+        1
+      ],
+      [
+        "53,22,15,15,10",
+        1
+      ],
+      [
+        "44",
+        1
+      ],
+      [
+        "57",
+        1
+      ]
+    ],
+    "error_statuses": {}
+  },
+  {
+    "capture": "native-capture-01-kernel.pcap.gz",
+    "count": 4667,
+    "max_inflight": 1,
+    "inflight_duration_ms": {
+      "0": 646.5669999999982,
+      "1": 463.66600000000176
+    },
+    "rpc_span_ms": 1110.233,
+    "primary_cycle_median_ms": 0.22199999999999998,
+    "primary_cycle_mean_ms": 0.2379219888555508,
+    "groups": {
+      "attributes_or_access": {
+        "count": 3112,
+        "observed_response_total_ms": 283.3850000000003,
+        "observed_response_median_ms": 0.07999999999996898,
+        "mean_ops": 3.5006426735218508,
+        "max_ops": 5
+      },
+      "READDIR": {
+        "count": 1555,
+        "observed_response_total_ms": 180.28100000000148,
+        "observed_response_median_ms": 0.10600000000000886,
+        "mean_ops": 3,
+        "max_ops": 3
+      }
+    },
+    "opcode_sequences": [
+      [
+        "53,22,3,9",
+        1556
+      ],
+      [
+        "53,22,9",
+        1555
+      ],
+      [
+        "53,22,26",
+        1555
+      ],
+      [
+        "53,22,15,10,9",
+        1
+      ]
+    ],
+    "error_statuses": {}
+  },
+  {
+    "capture": "native-capture-01-vfsi.pcap.gz",
+    "count": 3122,
+    "max_inflight": 1,
+    "inflight_duration_ms": {
+      "0": 656.61,
+      "1": 357.6959999999999
+    },
+    "rpc_span_ms": 1014.3059999999999,
+    "primary_cycle_median_ms": 0.3100000000000047,
+    "primary_cycle_mean_ms": 0.32462103238217377,
+    "groups": {
+      "attributes_or_access": {
+        "count": 6,
+        "observed_response_total_ms": 0.9500000000000005,
+        "observed_response_median_ms": 0.15150000000000013,
+        "mean_ops": 5.166666666666667,
+        "max_ops": 6
+      },
+      "session_other": {
+        "count": 6,
+        "observed_response_total_ms": 2.4109999999999863,
+        "observed_response_median_ms": 0.1824999999999981,
+        "mean_ops": 1.5,
+        "max_ops": 3
+      },
+      "resolve_LOOKUP_GETFH": {
+        "count": 1555,
+        "observed_response_total_ms": 162.9249999999988,
+        "observed_response_median_ms": 0.0940000000000385,
+        "mean_ops": 8.80064308681672,
+        "max_ops": 9
+      },
+      "READDIR": {
+        "count": 1555,
+        "observed_response_total_ms": 191.4100000000011,
+        "observed_response_median_ms": 0.11200000000000099,
+        "mean_ops": 3,
+        "max_ops": 3
+      }
+    },
+    "opcode_sequences": [
+      [
+        "53,22,26",
+        1555
+      ],
+      [
+        "53,22,15,15,15,15,15,15,10",
+        1296
+      ],
+      [
+        "53,22,15,15,15,15,15,10",
+        216
+      ],
+      [
+        "53,22,15,15,15,15,10",
+        36
+      ],
+      [
+        "53,22,15,15,15,10",
+        6
+      ],
+      [
+        "53,24,32,15,9",
+        2
+      ],
+      [
+        "53,24,15,32,15,9",
+        2
+      ],
+      [
+        "53,22,3,9",
+        1
+      ],
+      [
+        "53,22,15,10,9",
+        1
+      ],
+      [
+        "42",
+        1
+      ],
+      [
+        "43",
+        1
+      ],
+      [
+        "53,58",
+        1
+      ],
+      [
+        "53,24,10",
+        1
+      ],
+      [
+        "53,22,15,15,10",
+        1
+      ],
+      [
+        "44",
+        1
+      ],
+      [
+        "57",
+        1
+      ]
+    ],
+    "error_statuses": {}
+  },
+  {
+    "capture": "native-capture-02-kernel.pcap.gz",
+    "count": 4667,
+    "max_inflight": 1,
+    "inflight_duration_ms": {
+      "0": 805.0639999999967,
+      "1": 561.8510000000034
+    },
+    "rpc_span_ms": 1366.9150000000002,
+    "primary_cycle_median_ms": 0.2560000000000062,
+    "primary_cycle_mean_ms": 0.29293441920274327,
+    "groups": {
+      "attributes_or_access": {
+        "count": 3112,
+        "observed_response_total_ms": 343.2210000000011,
+        "observed_response_median_ms": 0.09200000000000874,
+        "mean_ops": 3.5006426735218508,
+        "max_ops": 5
+      },
+      "READDIR": {
+        "count": 1555,
+        "observed_response_total_ms": 218.6300000000023,
+        "observed_response_median_ms": 0.12500000000015277,
+        "mean_ops": 3,
+        "max_ops": 3
+      }
+    },
+    "opcode_sequences": [
+      [
+        "53,22,3,9",
+        1556
+      ],
+      [
+        "53,22,9",
+        1555
+      ],
+      [
+        "53,22,26",
+        1555
+      ],
+      [
+        "53,22,15,10,9",
+        1
+      ]
+    ],
+    "error_statuses": {}
+  },
+  {
+    "capture": "native-capture-02-vfsi.pcap.gz",
+    "count": 3122,
+    "max_inflight": 1,
+    "inflight_duration_ms": {
+      "0": 680.2190000000008,
+      "1": 400.9539999999991
+    },
+    "rpc_span_ms": 1081.173,
+    "primary_cycle_median_ms": 0.32799999999999496,
+    "primary_cycle_mean_ms": 0.3461308111574223,
+    "groups": {
+      "attributes_or_access": {
+        "count": 6,
+        "observed_response_total_ms": 0.6969999999999983,
+        "observed_response_median_ms": 0.11099999999999956,
+        "mean_ops": 5.166666666666667,
+        "max_ops": 6
+      },
+      "session_other": {
+        "count": 6,
+        "observed_response_total_ms": 2.2649999999999157,
+        "observed_response_median_ms": 0.1820000000000001,
+        "mean_ops": 1.5,
+        "max_ops": 3
+      },
+      "resolve_LOOKUP_GETFH": {
+        "count": 1555,
+        "observed_response_total_ms": 168.55400000000026,
+        "observed_response_median_ms": 0.09800000000001474,
+        "mean_ops": 8.80064308681672,
+        "max_ops": 9
+      },
+      "READDIR": {
+        "count": 1555,
+        "observed_response_total_ms": 229.4379999999989,
+        "observed_response_median_ms": 0.13599999999999723,
+        "mean_ops": 3,
+        "max_ops": 3
+      }
+    },
+    "opcode_sequences": [
+      [
+        "53,22,26",
+        1555
+      ],
+      [
+        "53,22,15,15,15,15,15,15,10",
+        1296
+      ],
+      [
+        "53,22,15,15,15,15,15,10",
+        216
+      ],
+      [
+        "53,22,15,15,15,15,10",
+        36
+      ],
+      [
+        "53,22,15,15,15,10",
+        6
+      ],
+      [
+        "53,24,32,15,9",
+        2
+      ],
+      [
+        "53,24,15,32,15,9",
+        2
+      ],
+      [
+        "53,22,3,9",
+        1
+      ],
+      [
+        "53,22,15,10,9",
+        1
+      ],
+      [
+        "42",
+        1
+      ],
+      [
+        "43",
+        1
+      ],
+      [
+        "53,58",
+        1
+      ],
+      [
+        "53,24,10",
+        1
+      ],
+      [
+        "53,22,15,15,10",
+        1
+      ],
+      [
+        "44",
+        1
+      ],
+      [
+        "57",
+        1
+      ]
+    ],
+    "error_statuses": {}
+  }
+]

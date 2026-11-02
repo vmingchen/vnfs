@@ -1,11 +1,14 @@
 import importlib.util
 import gzip
+import hashlib
 import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
 import shutil
+import subprocess
+from types import SimpleNamespace
 
 from generate import generate, geometry, fingerprint
 
@@ -19,6 +22,177 @@ def row(src, sport, dport, kind, xid, programs='', procs='', ops=''):
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_comparison_reaches_every_trial_after_building_and_checks_parity(self):
+        import compare
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fixture = root/'fixture'
+            generate(fixture, 1, 0, 1, 1)
+            checkout = root/'candidate'
+            checkout.mkdir()
+            (checkout/'Cargo.lock').write_text('candidate lock')
+            binary = checkout/'du'
+            binary.write_bytes(b'candidate executable')
+            published = root/'published.json'
+            published.write_text(json.dumps({'provenance': {'binary_sha256': 'frozen'}}))
+            args = SimpleNamespace(pairs=3, captures=1, output=root/'results', export='/fixture',
+                frozen=root/'frozen', candidate=checkout, library=root/'library',
+                fixture=fixture, baseline_results=published)
+            payload = b'4096\ttree/f000-metadata-small-file\n8192\ttree\n'
+            parity = hashlib.sha256(b'\n'.join(sorted(payload.splitlines()))+b'\n').hexdigest()
+            commands = []
+            def trial(*command):
+                commands.append(command)
+                stem = Path(command[command.index('--output')+1])
+                with gzip.open(str(stem)+'.stdout.gz', 'wb') as stream:
+                    stream.write(payload)
+                row = dict(stdout_sorted_sha256=parity, stdout_lines=2, elapsed_ns=1000000)
+                if '--capture' in command:
+                    row['wire'] = {'rpc_calls': 1}
+                Path(str(stem)+'.json').write_text(json.dumps(row))
+            link = mock.Mock()
+            link.delay.return_value = {'ping_rtt_median_ms': 1.0}
+            link.client.side_effect = trial
+            with mock.patch.object(compare.run, 'build', return_value=(root/'frozen-du',
+                    {'binary_sha256': 'frozen'})), \
+                 mock.patch.object(compare, 'build_candidate', return_value=(binary,
+                    {'binary_sha256': runner.sha(binary)})), \
+                 mock.patch.object(compare.run, 'checked', return_value='source'), \
+                 mock.patch.object(compare.run, 'Link') as network, \
+                 mock.patch('builtins.print'):
+                network.return_value.__enter__.return_value = link
+                compare.main(args)
+            result = json.loads((args.output/'results.json').read_text())
+            self.assertTrue(result['output_parity'])
+            self.assertTrue(result['post_order'])
+            self.assertEqual(len(commands), 30)
+            self.assertEqual(len(result['samples']), 30)
+            self.assertEqual({s['variant'] for s in result['samples']},
+                {'kernel', 'frozen-vfsi', 'candidate-vfsi'})
+            self.assertEqual(sum(command[command.index('--binary')+1] == str(binary) for command in commands), 10)
+
+    def test_candidate_is_rebuilt_before_source_provenance_is_recorded(self):
+        import compare
+        class SnapshotReached(Exception):
+            pass
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            checkout = root / 'candidate'
+            stale = checkout / 'target/release/du'
+            stale.parent.mkdir(parents=True)
+            stale.write_bytes(b'stale executable')
+            # Cargo can choose another target directory; use its artifact path.
+            rebuilt = root / 'custom-target/release/du'
+            published = root / 'published.json'
+            published.write_text(json.dumps({'provenance': {'binary_sha256': 'frozen'}}))
+            args = SimpleNamespace(pairs=3, captures=1, output=root/'results',
+                frozen=root/'frozen', candidate=checkout, library=root/'library',
+                baseline_results=published)
+            def build(command, **kwargs):
+                self.assertEqual(command[:2], ['cargo', 'build'])
+                for required in ['--release', '--locked', '--features', 'vnfs']:
+                    self.assertIn(required, command)
+                self.assertEqual(kwargs['cwd'], checkout.resolve())
+                self.assertTrue(kwargs['check'])
+                rebuilt.parent.mkdir(parents=True)
+                rebuilt.write_bytes(b'rebuilt executable')
+                kwargs['stdout'].write(json.dumps({'reason': 'compiler-artifact',
+                    'target': {'name': 'du', 'kind': ['bin']}, 'executable': str(rebuilt)})+'\n')
+            def snapshot(command, **kwargs):
+                if command[0] == 'git':
+                    self.assertTrue(rebuilt.exists(), 'candidate must be rebuilt before snapshot')
+                    raise SnapshotReached
+                return 'toolchain'
+            with mock.patch.object(compare.run, 'build', return_value=(root/'frozen-du',
+                    {'binary_sha256': 'frozen'})), \
+                 mock.patch('subprocess.run', side_effect=build) as build_command, \
+                 mock.patch.object(compare.run, 'checked', side_effect=snapshot), \
+                 mock.patch.object(compare.run, 'sha', wraps=compare.run.sha) as digest:
+                with self.assertRaises(SnapshotReached):
+                    compare.main(args)
+                self.assertEqual(build_command.call_count, 1)
+                self.assertIn(mock.call(rebuilt), digest.call_args_list)
+
+    def test_candidate_build_failure_stops_before_source_snapshot_or_measurement(self):
+        import compare
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            checkout = root/'candidate'
+            (checkout/'target/release').mkdir(parents=True)
+            (checkout/'target/release/du').write_bytes(b'stale executable')
+            (checkout/'Cargo.lock').write_text('lock')
+            published = root/'published.json'
+            published.write_text(json.dumps({'provenance': {'binary_sha256': 'frozen'}}))
+            args = SimpleNamespace(pairs=3, captures=1, output=root/'results',
+                frozen=root/'frozen', candidate=checkout, library=root/'library',
+                fixture=root/'fixture', baseline_results=published)
+            with mock.patch.object(compare.run, 'build', return_value=(root/'frozen-du',
+                    {'binary_sha256': 'frozen'})), \
+                 mock.patch('subprocess.run', side_effect=subprocess.CalledProcessError(101, ['cargo','build'])), \
+                 mock.patch.object(compare.run, 'checked', return_value='') as snapshot, \
+                 mock.patch.object(compare.run, 'Link') as link:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    compare.main(args)
+                snapshot.assert_not_called()
+                link.assert_not_called()
+
+    def test_comparison_tables_require_three_timings_and_a_capture_per_variant(self):
+        from report import table
+        variants = ['kernel', 'frozen-vfsi', 'candidate-vfsi']
+        def report():
+            samples = []
+            for variant in variants:
+                for pair in range(3):
+                    samples.append(dict(regime='native', variant=variant, phase='timing',
+                        pair=pair, elapsed_ns=1000000))
+                samples.append(dict(regime='native', variant=variant, phase='capture',
+                    pair=0, wire={'rpc_calls': 1}))
+            return dict(candidate={}, regimes={'native': {}}, samples=samples)
+        self.assertIn('1.000', table(report()))
+        for variant in variants:
+            for count in [0, 1, 2]:
+                with self.subTest(variant=variant, timings=count):
+                    data = report()
+                    data['samples'] = [s for s in data['samples'] if
+                        s['variant'] != variant or s['phase'] != 'timing' or s['pair'] < count]
+                    with self.assertRaisesRegex(ValueError, 'insufficient publishable samples'):
+                        table(data)
+            data = report()
+            data['samples'] = [s for s in data['samples'] if
+                s['variant'] != variant or s['phase'] != 'capture']
+            with self.assertRaisesRegex(ValueError, 'insufficient publishable samples'):
+                table(data)
+
+    def test_candidate_build_without_du_artifact_never_uses_cached_executable(self):
+        from compare import build_candidate
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            checkout = root/'candidate'
+            (checkout/'target/release').mkdir(parents=True)
+            (checkout/'target/release/du').write_bytes(b'stale executable')
+            def build(command, **kwargs):
+                kwargs['stdout'].write(json.dumps({'reason': 'build-finished', 'success': True})+'\n')
+            with mock.patch('subprocess.run', side_effect=build):
+                with self.assertRaisesRegex(RuntimeError, 'exactly one du executable'):
+                    build_candidate(checkout, root)
+
+    def test_candidate_postorder_guard_rejects_parent_before_descendant(self):
+        from compare import postorder
+        with tempfile.TemporaryDirectory() as temp:
+            stem = Path(temp) / 'trial'
+            for data, valid in [
+                (b'1\ttree/sub/file\n2\ttree/sub\n3\ttree\n', True),
+                (b'3\ttree\n1\ttree/sub/file\n2\ttree/sub\n', False),
+                (b'2\ttree/sub\n1\ttree/sub/file\n3\ttree\n', False),
+            ]:
+                with gzip.open(str(stem) + '.stdout.gz', 'wb') as out:
+                    out.write(data)
+                if valid:
+                    postorder(stem)
+                else:
+                    with self.assertRaisesRegex(ValueError, 'directory precedes'):
+                        postorder(stem)
+
     def test_geometry_and_mutation_detection(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / 'fixture'

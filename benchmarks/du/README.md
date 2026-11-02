@@ -102,3 +102,35 @@ and performance tests are explicit lab runs, not ordinary CI timing gates.
 
 See [published results](../../docs/du-benchmark.md) for the retained run and
 its limitations. New package patches do not rewrite this baseline or table.
+
+
+## Explicit development comparison
+
+Keep the frozen checkout and lock intact. Prepare a separate candidate checkout
+with explicit local dependency patches. Before timing, the runner rebuilds both
+binaries with the frozen release/locked build flags. For the candidate it uses
+Cargo's reported executable path, including custom target directories, and
+records the build command, compiler versions, build messages, source patches,
+lock and binary hashes. A build failure or missing executable artifact aborts
+the comparison; an old cached executable is never used as a fallback:
+
+```sh
+python3 benchmarks/du/compare.py \
+  --frozen ~/vfsi-du-baseline-0.0.27 --candidate ~/vfsi-du-candidate \
+  --library ~/vnfs --fixture /srv/vnfs-ci/vfsi-du-v027-20261101 \
+  --export /vfsi-du-v027-20261101 \
+  --baseline-results docs/benchmarks/du-2026-11-01/results.json \
+  --output ~/du-candidate-results --pairs 7 --captures 3
+python3 benchmarks/du/report.py ~/du-candidate-results/results.json
+```
+
+The frozen binary must match the published binary digest. Timings and captures
+are separate; every output is checked for both sorted parity and post-order.
+The additional flat/chain checks use the same generator with `--branches 1
+--depth 0 --files 128` and `--branches 1 --depth 8 --files 1`, respectively,
+then compare with `--pairs 7 --captures 1` on each export. See the
+[development results](../../docs/du-batching.md) for all shapes and limitations.
+
+Comparison tables require at least three timing samples and one captured sample
+for each variant/network, just like frozen-release tables. Smaller pilot runs
+may collect JSON evidence, but cannot be rendered as publishable speedup tables.

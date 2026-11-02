@@ -1,6 +1,25 @@
 use crate::api::{Attributes, DepthLimit, ResourceLimits};
 use std::num::NonZeroUsize;
 
+/// Admission decision for a directory page, before recursive descent.
+/// Pruned paths must name directories in this page. They remain visible in
+/// the page but are never opened or listed by the recursive visitor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ListDirControl {
+    Continue,
+    Stop,
+    Prune(Vec<std::path::PathBuf>),
+}
+
+impl From<std::ops::ControlFlow<()>> for ListDirControl {
+    fn from(value: std::ops::ControlFlow<()>) -> Self {
+        match value {
+            std::ops::ControlFlow::Continue(()) => Self::Continue,
+            std::ops::ControlFlow::Break(()) => Self::Stop,
+        }
+    }
+}
+
 #[bitfields::bitfield(u8)]
 #[derive(PartialEq, Eq)]
 struct VisitFlags {

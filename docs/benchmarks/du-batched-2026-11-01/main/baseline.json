@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "name": "vnfs-0.0.27-coordinated",
+  "release_revision": "7dbee1b76d1cfc999d2d42bf1771d72759c8677e",
+  "port_repository": "https://github.com/vfsi/vfsi-port-coreutils",
+  "port_revision": "3dc073281b1465b479c4f5bd863099b446835064",
+  "cargo_lock_sha256": "4307f31edd20f848f25a8c9540e304366f6d0388f756943520f52deb752cd51e",
+  "build_args": ["build", "--release", "--locked", "-p", "uu_du", "--features", "vnfs"],
+  "packages": {
+    "vnfs": "0.0.27", "vfsi-core": "0.1.14", "vfsi-sync": "0.1.15",
+    "vfsi-local": "0.1.13", "vfsi-posix": "0.1.5", "vfsi-nfs": "0.1.14",
+    "nfsv41-sys": "0.1.14", "libntirpc-sys": "0.3.3"
+  }
+}

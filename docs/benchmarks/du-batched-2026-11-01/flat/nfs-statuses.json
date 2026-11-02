@@ -1,0 +1,120 @@
+[
+  {
+    "raw": "native-capture-00-kernel",
+    "reply_statuses": {
+      "0": 5
+    },
+    "successful_reply_opcodes": {
+      "53": 5,
+      "22": 5,
+      "3": 2,
+      "9": 4,
+      "15": 1,
+      "10": 1,
+      "26": 1
+    }
+  },
+  {
+    "raw": "native-capture-00-frozen-vfsi",
+    "reply_statuses": {
+      "0": 14
+    },
+    "successful_reply_opcodes": {
+      "53": 10,
+      "22": 4,
+      "3": 1,
+      "9": 6,
+      "15": 9,
+      "10": 3,
+      "42": 1,
+      "43": 1,
+      "58": 1,
+      "24": 5,
+      "32": 4,
+      "26": 1,
+      "44": 1,
+      "57": 1
+    }
+  },
+  {
+    "raw": "native-capture-00-candidate-vfsi",
+    "reply_statuses": {
+      "0": 14
+    },
+    "successful_reply_opcodes": {
+      "53": 10,
+      "22": 4,
+      "3": 1,
+      "9": 6,
+      "15": 9,
+      "10": 3,
+      "42": 1,
+      "43": 1,
+      "58": 1,
+      "24": 5,
+      "32": 4,
+      "26": 1,
+      "44": 1,
+      "57": 1
+    }
+  },
+  {
+    "raw": "added-1ms-rtt-capture-00-kernel",
+    "reply_statuses": {
+      "0": 5
+    },
+    "successful_reply_opcodes": {
+      "53": 5,
+      "22": 5,
+      "3": 2,
+      "9": 4,
+      "15": 1,
+      "10": 1,
+      "26": 1
+    }
+  },
+  {
+    "raw": "added-1ms-rtt-capture-00-frozen-vfsi",
+    "reply_statuses": {
+      "0": 14
+    },
+    "successful_reply_opcodes": {
+      "53": 10,
+      "22": 4,
+      "3": 1,
+      "9": 6,
+      "15": 9,
+      "10": 3,
+      "42": 1,
+      "43": 1,
+      "58": 1,
+      "24": 5,
+      "32": 4,
+      "26": 1,
+      "44": 1,
+      "57": 1
+    }
+  },
+  {
+    "raw": "added-1ms-rtt-capture-00-candidate-vfsi",
+    "reply_statuses": {
+      "0": 14
+    },
+    "successful_reply_opcodes": {
+      "53": 10,
+      "22": 4,
+      "3": 1,
+      "9": 6,
+      "15": 9,
+      "10": 3,
+      "42": 1,
+      "43": 1,
+      "58": 1,
+      "24": 5,
+      "32": 4,
+      "26": 1,
+      "44": 1,
+      "57": 1
+    }
+  }
+]

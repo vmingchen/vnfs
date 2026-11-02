@@ -85,11 +85,11 @@ impl Vfsi for Counted {
     fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, p: &[(P, Q)], o: RenameMode) -> Result<()> {
         self.fs.vrename(p, o)
     }
-    fn vlistdirs<P: AsRef<Path>>(
+    fn vlistdirs<P: AsRef<Path>, C: Into<vfsi_core::api::ListDirControl>>(
         &self,
         p: &[P],
         o: ListDirOptions,
-        c: impl FnMut(usize, DirectoryListing) -> Result<ControlFlow<()>>,
+        c: impl FnMut(usize, DirectoryListing) -> Result<C>,
     ) -> Result<Vec<TraversalCompletion>> {
         self.fs.vlistdirs(p, o, c)
     }

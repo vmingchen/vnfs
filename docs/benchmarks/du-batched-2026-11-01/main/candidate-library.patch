@@ -1,0 +1,517 @@
+diff --git a/crates/vfsi-core/src/api/mod.rs b/crates/vfsi-core/src/api/mod.rs
+index 319432f..cba0d88 100644
+--- a/crates/vfsi-core/src/api/mod.rs
++++ b/crates/vfsi-core/src/api/mod.rs
+@@ -55,7 +55,7 @@ pub use read::{ReadOp, ReadOptions, ReadResult};
+ mod write;
+ pub use write::{WriteOp, WriteOptions};
+ mod visit;
+-pub use visit::{ListDirOptions, WalkOptions};
++pub use visit::{ListDirControl, ListDirOptions, WalkOptions};
+ mod support;
+ pub use support::{
+     DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
+@@ -93,9 +93,9 @@ pub mod internal {
+ pub mod prelude {
+     pub use super::{
+         AsTarget, Attributes, AttrsOptions, ControlFlow, CopyOptions, DirHandle, FileHandle,
+-        ListDirOptions, MkDirOp, OpenFlags, OpenOp, ReadOp, ReadOptions, ReadResult, RemoveMode,
+-        RemoveOptions, RenameMode, ResourceLimits, SetAttrsOp, StreamOptions, SyncMode, Target,
+-        Vfsi, VfsiExt, WalkOptions, WriteOp, WriteOptions,
++        ListDirControl, ListDirOptions, MkDirOp, OpenFlags, OpenOp, ReadOp, ReadOptions,
++        ReadResult, RemoveMode, RemoveOptions, RenameMode, ResourceLimits, SetAttrsOp,
++        StreamOptions, SyncMode, Target, Vfsi, VfsiExt, WalkOptions, WriteOp, WriteOptions,
+     };
+ }
+ 
+diff --git a/crates/vfsi-core/src/api/vfsi.rs b/crates/vfsi-core/src/api/vfsi.rs
+index 9dbfdb6..45bc6c6 100644
+--- a/crates/vfsi-core/src/api/vfsi.rs
++++ b/crates/vfsi-core/src/api/vfsi.rs
+@@ -422,7 +422,10 @@ pub trait Vfsi {
+     /// Entry/path-byte limits are shared across roots; recursive visits also
+     /// charge retained directory path bytes. Root index accompanies every owned directory page, including empty directories.
+     /// Callbacks run outside backend locks and may reenter. Entries for one directory may span several pages. Break stops the
+-    /// whole vector. The returned prefix covers every root whose pages reached
++    /// whole vector. Callbacks may also return [`ListDirControl`](crate::api::ListDirControl)
++    /// to prune selected child directories before any descent I/O. Pruned paths
++    /// must be directory entries in the current page. Existing `ControlFlow<()>`
++    /// callbacks continue to work. The returned prefix covers every root whose pages reached
+     /// the callback; unfinished roots are Stopped. Pages may interleave between roots.
+     ///
+     /// Sorting and enter/leave options are rejected before I/O; use VfsiExt::listdir
+@@ -447,11 +450,11 @@ pub trait Vfsi {
+     /// # Ok(())
+     /// # }
+     /// ```
+-    fn vlistdirs<P: AsRef<Path>>(
++    fn vlistdirs<P: AsRef<Path>, C: Into<crate::api::ListDirControl>>(
+         &self,
+         paths: &[P],
+         options: crate::api::ListDirOptions,
+-        callback: impl FnMut(usize, DirectoryListing) -> Result<std::ops::ControlFlow<()>>,
++        callback: impl FnMut(usize, DirectoryListing) -> Result<C>,
+     ) -> Result<Vec<crate::api::TraversalCompletion>>;
+ 
+     /// Stream files through bounded chunks without collecting whole contents.
+diff --git a/crates/vfsi-core/src/api/visit.rs b/crates/vfsi-core/src/api/visit.rs
+index 348aa7e..e3a5fcc 100644
+--- a/crates/vfsi-core/src/api/visit.rs
++++ b/crates/vfsi-core/src/api/visit.rs
+@@ -1,6 +1,25 @@
+ use crate::api::{Attributes, DepthLimit, ResourceLimits};
+ use std::num::NonZeroUsize;
+ 
++/// Admission decision for a directory page, before recursive descent.
++/// Pruned paths must name directories in this page. They remain visible in
++/// the page but are never opened or listed by the recursive visitor.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum ListDirControl {
++    Continue,
++    Stop,
++    Prune(Vec<std::path::PathBuf>),
++}
++
++impl From<std::ops::ControlFlow<()>> for ListDirControl {
++    fn from(value: std::ops::ControlFlow<()>) -> Self {
++        match value {
++            std::ops::ControlFlow::Continue(()) => Self::Continue,
++            std::ops::ControlFlow::Break(()) => Self::Stop,
++        }
++    }
++}
++
+ #[bitfields::bitfield(u8)]
+ #[derive(PartialEq, Eq)]
+ struct VisitFlags {
+diff --git a/crates/vfsi-core/tests/portable_api.rs b/crates/vfsi-core/tests/portable_api.rs
+index 226b333..d0b004b 100644
+--- a/crates/vfsi-core/tests/portable_api.rs
++++ b/crates/vfsi-core/tests/portable_api.rs
+@@ -176,11 +176,11 @@ impl Vfsi for PortableFs {
+     ) -> Result<Vec<StreamCompletion>> {
+         panic!("unexpected stream")
+     }
+-    fn vlistdirs<P: AsRef<Path>>(
++    fn vlistdirs<P: AsRef<Path>, C: Into<vfsi_core::api::ListDirControl>>(
+         &self,
+         paths: &[P],
+         options: ListDirOptions,
+-        mut callback: impl FnMut(usize, DirectoryListing) -> Result<ControlFlow<()>>,
++        mut callback: impl FnMut(usize, DirectoryListing) -> Result<C>,
+     ) -> Result<Vec<TraversalCompletion>> {
+         self.listings.set(self.listings.get() + 1);
+         self.directory_options.borrow_mut().push(options);
+@@ -232,7 +232,8 @@ impl Vfsi for PortableFs {
+                         entries,
+                     },
+                 )?
+-                .is_break();
++                .into()
++                    == vfsi_core::api::ListDirControl::Stop;
+                 if stopped {
+                     break;
+                 }
+diff --git a/crates/vfsi-sync/src/application.rs b/crates/vfsi-sync/src/application.rs
+index d243d79..16095da 100644
+--- a/crates/vfsi-sync/src/application.rs
++++ b/crates/vfsi-sync/src/application.rs
+@@ -160,7 +160,7 @@ pub fn stream_cohorts<F: Vfsi, P: AsRef<Path>>(
+     Ok(output)
+ }
+ 
+-pub fn visit_directory_pages<P: AsRef<Path>>(
++pub fn visit_directory_pages<P: AsRef<Path>, C: Into<ListDirControl>>(
+     roots: &[P],
+     policy: vfsi_core::api::ListDirOptions,
+     limits: ResourceLimits,
+@@ -173,7 +173,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
+         usize,
+         bool,
+     ) -> Result<Vec<crate::DirectoryPage>>,
+-    mut callback: impl FnMut(usize, DirectoryListing) -> Result<std::ops::ControlFlow<()>>,
++    mut callback: impl FnMut(usize, DirectoryListing) -> Result<C>,
+ ) -> Result<Vec<crate::TraversalCompletion>> {
+     let directory = policy.directory_options(limits);
+     let walk = policy.walk_options(limits);
+@@ -275,6 +275,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
+                 }
+                 let mut seeds: std::collections::HashMap<_, _> = seeds.into_iter().collect();
+                 let mut page_error = None;
++                let mut candidates = Vec::new();
+                 let mut accepted = 0;
+                 for entry in &page.entries {
+                     if let Err(error) = budget.charge(entry.path()) {
+@@ -286,22 +287,12 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
+                     }
+                     accepted += 1;
+                     if policy.recursive() && entry.attrs().is_dir() {
+-                        if depth >= walk.max_depth_or(Default::default()).get() {
+-                            if !walk.truncate_at_max_depth() {
+-                                page_error = Some(
+-                                    vfsi_core::api::Error::errno(index, libc::EFBIG as u32)
+-                                        .with_context("visit_dirs", entry.path()),
+-                                );
+-                                break;
+-                            }
+-                        } else {
+-                            children.push((
+-                                index,
+-                                entry.path().to_path_buf(),
+-                                depth + 1,
+-                                seeds.remove(entry.path()),
+-                            ));
+-                        }
++                        candidates.push((
++                            index,
++                            entry.path().to_path_buf(),
++                            depth + 1,
++                            seeds.remove(entry.path()),
++                        ));
+                     }
+                 }
+                 if let Some(error) = &page_error {
+@@ -313,10 +304,10 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
+                 if !policy.recursive() && completed.len() <= index {
+                     completed.resize(index + 1, crate::TraversalCompletion::Stopped);
+                 }
+-                if callback(index, page)
++                let decision = callback(index, page)
+                     .map_err(|error| vector_index(error, index))?
+-                    .is_break()
+-                {
++                    .into();
++                if decision == ListDirControl::Stop {
+                     if policy.recursive() {
+                         completed.truncate(index);
+                         completed.push(crate::TraversalCompletion::Stopped);
+@@ -328,6 +319,26 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
+                 if let Some(error) = page_error {
+                     return Err(error);
+                 }
++                if let ListDirControl::Prune(paths) = decision {
++                    // Admission applies before both depth checks and child I/O.
++                    // Reject unrelated names instead of silently pruning a
++                    // different directory or a later page.
++                    for path in &paths {
++                        if !candidates.iter().any(|candidate| &candidate.1 == path) {
++                            return Err(Error::from_kind(index, std::io::ErrorKind::InvalidInput)
++                                .with_context("vlistdirs prune", path));
++                        }
++                    }
++                    candidates.retain(|candidate| !paths.contains(&candidate.1));
++                }
++                if depth >= walk.max_depth_or(Default::default()).get() && !candidates.is_empty() {
++                    if !walk.truncate_at_max_depth() {
++                        return Err(Error::errno(index, libc::EFBIG as u32)
++                            .with_context("visit_dirs", &candidates[0].1));
++                    }
++                } else {
++                    children.extend(candidates);
++                }
+                 match next {
+                     Some(cursor) => continuations.push(((index, path, depth, false), Some(cursor))),
+                     None if !policy.recursive() => {
+@@ -726,3 +737,152 @@ mod traversal_tests {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod admission_tests {
++    use super::*;
++    use std::cell::RefCell;
++    use std::path::PathBuf;
++
++    struct Seed(PathBuf);
++    struct RootPage;
++    fn entry(path: &str) -> DirEntry {
++        DirEntry::new(
++            path.into(),
++            vfsi_core::metadata_from_attrs(vfsi_core::VfAttrs {
++                file: vfsi_core::FileOperand::from_path(path),
++                masks: vfsi_core::AttrMask::MODE,
++                ftype: vfsi_core::VfType::Directory,
++                ..Default::default()
++            }),
++        )
++    }
++    fn walk(
++        depth: usize,
++        mut callback: impl FnMut(usize, DirectoryListing) -> Result<ListDirControl>,
++    ) -> (Result<Vec<TraversalCompletion>>, Vec<Vec<PathBuf>>) {
++        let waves = RefCell::new(Vec::new());
++        let result = visit_directory_pages(
++            &["/tree"],
++            ListDirOptions::new()
++                .with_recursive(true)
++                .with_max_depth(DepthLimit::new(depth).unwrap()),
++            ResourceLimits::new(),
++            |_| Ok(2),
++            |_| Ok(()),
++            |paths, cursors, size, _, follow| {
++                waves
++                    .borrow_mut()
++                    .push(paths.iter().map(|p| p.to_path_buf()).collect());
++                paths
++                    .iter()
++                    .zip(cursors)
++                    .map(|(path, cursor)| {
++                        let (entries, next) = if *path == Path::new("/tree") {
++                            assert!(follow);
++                            if let Some(cursor) = cursor {
++                                cursor.into_state::<RootPage>()?;
++                                (vec![entry("/tree/prune"), entry("/tree/b")], None)
++                            } else {
++                                assert_eq!(size, 1);
++                                (
++                                    vec![entry("/tree/a")],
++                                    Some(crate::DirPageCursor::new(RootPage)),
++                                )
++                            }
++                        } else {
++                            assert!(!follow);
++                            assert_ne!(*path, Path::new("/tree/prune"), "pruned before child I/O");
++                            let seed = cursor
++                                .expect("must retain anchored child seed")
++                                .into_state::<Seed>()?;
++                            assert_eq!(seed.0, *path);
++                            (Vec::new(), None)
++                        };
++                        let seeds = entries
++                            .iter()
++                            .map(|entry| {
++                                (
++                                    entry.path().to_path_buf(),
++                                    crate::DirPageCursor::new(Seed(entry.path().to_path_buf())),
++                                )
++                            })
++                            .collect();
++                        Ok((
++                            DirectoryListing {
++                                path: path.to_path_buf(),
++                                entries,
++                            },
++                            next,
++                            seeds,
++                        ))
++                    })
++                    .collect()
++            },
++            &mut callback,
++        );
++        (result, waves.into_inner())
++    }
++
++    #[test]
++    fn admission_keeps_anchored_sibling_batches_and_prunes_before_io() {
++        let mut seen = Vec::new();
++        let (result, waves) = walk(1, |index, page| {
++            assert_eq!(index, 0);
++            seen.push(page.path);
++            Ok(ListDirControl::Prune(
++                page.entries
++                    .iter()
++                    .filter(|entry| entry.file_name() == Some(std::ffi::OsStr::new("prune")))
++                    .map(|entry| entry.path().to_path_buf())
++                    .collect(),
++            ))
++        });
++        assert_eq!(result.unwrap(), [TraversalCompletion::Complete]);
++        assert_eq!(
++            seen,
++            ["/tree", "/tree", "/tree/a", "/tree/b"].map(PathBuf::from)
++        );
++        assert_eq!(
++            waves,
++            vec![
++                vec![PathBuf::from("/tree")],
++                vec![PathBuf::from("/tree")],
++                vec![PathBuf::from("/tree/a"), PathBuf::from("/tree/b")]
++            ]
++        );
++    }
++
++    #[test]
++    fn admission_stop_error_and_depth_pruning_never_fetch_children() {
++        for mode in 0..5 {
++            let mut calls = 0;
++            let (result, waves) = walk(0, |_, page| {
++                calls += 1;
++                match mode {
++                    0 => Ok(ListDirControl::Stop),
++                    1 => Err(Error::errno(7, libc::ECANCELED as u32)),
++                    2 => Ok(ListDirControl::Prune(
++                        page.entries
++                            .iter()
++                            .map(|e| e.path().to_path_buf())
++                            .collect(),
++                    )),
++                    3 => Ok(ListDirControl::Prune(vec!["/unrelated".into()])),
++                    _ => Ok(ListDirControl::Continue),
++                }
++            });
++            assert!(waves.iter().flatten().all(|p| p == Path::new("/tree")));
++            match mode {
++                0 => assert_eq!(result.unwrap(), [TraversalCompletion::Stopped]),
++                1 => assert_eq!(result.unwrap_err().index(), Some(0), "input root index"),
++                2 => {
++                    assert_eq!(result.unwrap(), [TraversalCompletion::Complete]);
++                    assert_eq!(calls, 2);
++                }
++                3 => assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput),
++                _ => assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::FileTooLarge),
++            }
++        }
++    }
++}
+diff --git a/crates/vfsi-sync/src/application_macros.rs b/crates/vfsi-sync/src/application_macros.rs
+index f668ea8..66dcfa6 100644
+--- a/crates/vfsi-sync/src/application_macros.rs
++++ b/crates/vfsi-sync/src/application_macros.rs
+@@ -46,11 +46,11 @@ macro_rules! __vfsi_client_methods {
+         ) -> Result<()> {
+             <$client>::$rename($receiver(self), pairs, options)
+         }
+-        fn vlistdirs<P: AsRef<Path>>(
++        fn vlistdirs<P: AsRef<Path>, C: Into<vfsi_core::api::ListDirControl>>(
+             &self,
+             paths: &[P],
+             options: vfsi_core::api::ListDirOptions,
+-            callback: impl FnMut(usize, DirectoryListing) -> Result<std::ops::ControlFlow<()>>,
++            callback: impl FnMut(usize, DirectoryListing) -> Result<C>,
+         ) -> Result<Vec<$crate::TraversalCompletion>> {
+             $crate::application::visit_directory_pages(
+                 paths,
+diff --git a/crates/vnfs/src/application/extension_tests.rs b/crates/vnfs/src/application/extension_tests.rs
+index e496553..7d68bec 100644
+--- a/crates/vnfs/src/application/extension_tests.rs
++++ b/crates/vnfs/src/application/extension_tests.rs
+@@ -37,7 +37,7 @@ fn page_faults_do_not_replay_transport_failures_and_reject_malformed_shapes() {
+                     )]),
+                 }
+             },
+-            |_, _| panic!("invalid pages must not be delivered"),
++            |_, _| -> Result<ControlFlow<()>> { panic!("invalid pages must not be delivered") },
+         );
+         assert!(result.unwrap_err().is_transport());
+         assert_eq!(calls, 1);
+diff --git a/crates/vnfs/src/lib.rs b/crates/vnfs/src/lib.rs
+index 01f9f3a..ac4cdcf 100644
+--- a/crates/vnfs/src/lib.rs
++++ b/crates/vnfs/src/lib.rs
+@@ -77,9 +77,9 @@ pub mod files {
+ pub mod directory {
+     pub use std::ops::ControlFlow;
+     pub use vfsi_core::api::{
+-        AttrsOptions, DepthLimit, DirHandle, DirectoryListing, ListDirOptions, MkDirOp, RemoveMode,
+-        RemoveOptions, RenameMode, SetAttrsOp, TraversalCompletion, WalkControl, WalkEvent,
+-        WalkEventKind, WalkOptions,
++        AttrsOptions, DepthLimit, DirHandle, DirectoryListing, ListDirControl, ListDirOptions,
++        MkDirOp, RemoveMode, RemoveOptions, RenameMode, SetAttrsOp, TraversalCompletion,
++        WalkControl, WalkEvent, WalkEventKind, WalkOptions,
+     };
+     pub use vfsi_core::{
+         AttrMask as Attributes, Attrs, DirEntry, FsObjId, Permissions, VfType as FileType,
+diff --git a/crates/vnfs/tests/nfs.rs b/crates/vnfs/tests/nfs.rs
+index 173d566..b2f4ce6 100644
+--- a/crates/vnfs/tests/nfs.rs
++++ b/crates/vnfs/tests/nfs.rs
+@@ -5235,3 +5235,61 @@ fn ordered_directory_walk_rejects_replaced_children_and_ancestors() {
+         directory_replacement_is_not_followed(DirectoryVisit::Ordered, replacement);
+     }
+ }
++
++#[test]
++fn recursive_admission_batches_anchored_children_without_repeated_path_resolution() {
++    use vnfs::directory::{ListDirControl, ListDirOptions, TraversalCompletion};
++    use vnfs::files::Vfsi;
++    let version = vnfs::nfs::NfsVersion::try_from(
++        std::env::var("VNFS_TEST_MINOR")
++            .ok()
++            .map(|value| value.parse().unwrap()),
++    )
++    .unwrap();
++    let telemetry = vnfs::nfs::Telemetry::default();
++    let fs = Nfs::builder(test_host())
++        .version(version)
++        .telemetry(telemetry.clone())
++        .connect()
++        .unwrap();
++    let root = workdir("recursive-admission");
++    fs.create_dir_all(&root).unwrap();
++    for i in 0..64 {
++        fs.create_dir(format!("{root}/d{i:02}")).unwrap();
++    }
++    let excluded = format!("{root}/excluded");
++    fs.create_dir(&excluded).unwrap();
++    let before = telemetry.snapshot();
++    let mut visited = std::collections::HashSet::new();
++    let result = fs.vlistdirs(
++        &[&root],
++        ListDirOptions::new().with_recursive(true),
++        |index, page| {
++            assert_eq!(index, 0);
++            assert_ne!(page.path, Path::new(&excluded));
++            visited.insert(page.path.clone());
++            Ok(ListDirControl::Prune(
++                page.entries
++                    .iter()
++                    .filter(|entry| entry.path() == Path::new(&excluded))
++                    .map(|entry| entry.path().to_path_buf())
++                    .collect(),
++            ))
++        },
++    );
++    let stats = telemetry.snapshot();
++    let calls = stats.calls - before.calls;
++    let operations = stats.operations - before.operations;
++    fs.remove_dir_all(&root).unwrap();
++    assert_eq!(result.unwrap(), [TraversalCompletion::Complete]);
++    assert_eq!(visited.len(), 65);
++    assert!(
++        calls > 0 && calls < 20,
++        "64 child directories should share compounds: {stats:?}"
++    );
++    eprintln!("recursive admission: calls={calls}, operations={operations}");
++    assert!(
++        operations > 0 && operations < 500,
++        "child descent must reuse anchored seeds: {stats:?}"
++    );
++}
+diff --git a/crates/vnfs/tests/prr_rust20_round01.rs b/crates/vnfs/tests/prr_rust20_round01.rs
+index 2e04b79..aeb41d5 100644
+--- a/crates/vnfs/tests/prr_rust20_round01.rs
++++ b/crates/vnfs/tests/prr_rust20_round01.rs
+@@ -85,11 +85,11 @@ impl Vfsi for Counted {
+     fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, p: &[(P, Q)], o: RenameMode) -> Result<()> {
+         self.fs.vrename(p, o)
+     }
+-    fn vlistdirs<P: AsRef<Path>>(
++    fn vlistdirs<P: AsRef<Path>, C: Into<vfsi_core::api::ListDirControl>>(
+         &self,
+         p: &[P],
+         o: ListDirOptions,
+-        c: impl FnMut(usize, DirectoryListing) -> Result<ControlFlow<()>>,
++        c: impl FnMut(usize, DirectoryListing) -> Result<C>,
+     ) -> Result<Vec<TraversalCompletion>> {
+         self.fs.vlistdirs(p, o, c)
+     }
+diff --git a/crates/vnfs/tests/transfer_helpers.rs b/crates/vnfs/tests/transfer_helpers.rs
+index 88c82e3..4cd05ea 100644
+--- a/crates/vnfs/tests/transfer_helpers.rs
++++ b/crates/vnfs/tests/transfer_helpers.rs
+@@ -221,11 +221,11 @@ impl Vfsi for Harness {
+             _ => self.fs.vrename(p, options),
+         }
+     }
+-    fn vlistdirs<P: AsRef<Path>>(
++    fn vlistdirs<P: AsRef<Path>, C: Into<vfsi_core::api::ListDirControl>>(
+         &self,
+         p: &[P],
+         o: ListDirOptions,
+-        c: impl FnMut(usize, DirectoryListing) -> Result<ControlFlow<()>>,
++        c: impl FnMut(usize, DirectoryListing) -> Result<C>,
+     ) -> Result<Vec<TraversalCompletion>> {
+         self.fs.vlistdirs(p, o, c)
+     }

@@ -37,7 +37,7 @@ fn page_faults_do_not_replay_transport_failures_and_reject_malformed_shapes() {
                     )]),
                 }
             },
-            |_, _| panic!("invalid pages must not be delivered"),
+            |_, _| -> Result<ControlFlow<()>> { panic!("invalid pages must not be delivered") },
         );
         assert!(result.unwrap_err().is_transport());
         assert_eq!(calls, 1);

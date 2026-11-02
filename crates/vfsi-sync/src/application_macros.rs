@@ -46,11 +46,11 @@ macro_rules! __vfsi_client_methods {
         ) -> Result<()> {
             <$client>::$rename($receiver(self), pairs, options)
         }
-        fn vlistdirs<P: AsRef<Path>>(
+        fn vlistdirs<P: AsRef<Path>, C: Into<vfsi_core::api::ListDirControl>>(
             &self,
             paths: &[P],
             options: vfsi_core::api::ListDirOptions,
-            callback: impl FnMut(usize, DirectoryListing) -> Result<std::ops::ControlFlow<()>>,
+            callback: impl FnMut(usize, DirectoryListing) -> Result<C>,
         ) -> Result<Vec<$crate::TraversalCompletion>> {
             $crate::application::visit_directory_pages(
                 paths,

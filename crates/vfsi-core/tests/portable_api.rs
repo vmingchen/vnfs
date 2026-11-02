@@ -176,11 +176,11 @@ impl Vfsi for PortableFs {
     ) -> Result<Vec<StreamCompletion>> {
         panic!("unexpected stream")
     }
-    fn vlistdirs<P: AsRef<Path>>(
+    fn vlistdirs<P: AsRef<Path>, C: Into<vfsi_core::api::ListDirControl>>(
         &self,
         paths: &[P],
         options: ListDirOptions,
-        mut callback: impl FnMut(usize, DirectoryListing) -> Result<ControlFlow<()>>,
+        mut callback: impl FnMut(usize, DirectoryListing) -> Result<C>,
     ) -> Result<Vec<TraversalCompletion>> {
         self.listings.set(self.listings.get() + 1);
         self.directory_options.borrow_mut().push(options);
@@ -232,7 +232,8 @@ impl Vfsi for PortableFs {
                         entries,
                     },
                 )?
-                .is_break();
+                .into()
+                    == vfsi_core::api::ListDirControl::Stop;
                 if stopped {
                     break;
                 }

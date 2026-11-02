@@ -1,0 +1,1330 @@
+{
+  "baseline_commit": "0ed4eedd460a4788e76a63a273f85382ed8328a8",
+  "binary_sha256": "371ac192d4101079fd3b6cf76113e1d98fbebbbf2bf02d6751edb2c7496647ba",
+  "profile_invocations": 20,
+  "existing_captures_analyzed": 12,
+  "output_parity": true,
+  "implementation_modified": false,
+  "methodology": {
+    "counter_repetitions": 3,
+    "cpu_clock_samples_per_second": 499,
+    "hardware_counters": "cycles/instructions unsupported by this VM",
+    "warning": "CPU and syscall instrumentation changes scheduling; these are not replacement benchmark timings."
+  },
+  "baseline_rpc_timing": [
+    {
+      "regime": "native",
+      "median_wall_ms": 948.189579,
+      "median_total_rpc_ms": 887.2,
+      "median_fraction_in_rpc": 0.9365106056060669
+    },
+    {
+      "regime": "added-1ms-rtt",
+      "median_wall_ms": 4101.583529,
+      "median_total_rpc_ms": 4033.8,
+      "median_fraction_in_rpc": 0.9832233128252214
+    }
+  ],
+  "resource_profiles": [
+    {
+      "regime": "native",
+      "method": "kernel",
+      "medians": {
+        "user_s": 0.02,
+        "system_s": 0.33,
+        "max_rss_kib": 6068.0,
+        "voluntary_switches": 6247.0,
+        "involuntary_switches": 1.0,
+        "major_faults": 0.0
+      },
+      "samples": [
+        {
+          "user_s": 0.02,
+          "system_s": 0.39,
+          "max_rss_kib": 6068.0,
+          "voluntary_switches": 6239.0,
+          "involuntary_switches": 0.0,
+          "major_faults": 1.0
+        },
+        {
+          "user_s": 0.03,
+          "system_s": 0.32,
+          "max_rss_kib": 6324.0,
+          "voluntary_switches": 6247.0,
+          "involuntary_switches": 1.0,
+          "major_faults": 0.0
+        },
+        {
+          "user_s": 0.02,
+          "system_s": 0.33,
+          "max_rss_kib": 4384.0,
+          "voluntary_switches": 6285.0,
+          "involuntary_switches": 46.0,
+          "major_faults": 0.0
+        }
+      ]
+    },
+    {
+      "regime": "native",
+      "method": "vfsi",
+      "medians": {
+        "user_s": 0.09,
+        "system_s": 0.39,
+        "max_rss_kib": 13044.0,
+        "voluntary_switches": 14365.0,
+        "involuntary_switches": 73.0,
+        "major_faults": 0.0
+      },
+      "samples": [
+        {
+          "user_s": 0.09,
+          "system_s": 0.39,
+          "max_rss_kib": 10860.0,
+          "voluntary_switches": 15350.0,
+          "involuntary_switches": 1305.0,
+          "major_faults": 0.0
+        },
+        {
+          "user_s": 0.1,
+          "system_s": 0.38,
+          "max_rss_kib": 13044.0,
+          "voluntary_switches": 14305.0,
+          "involuntary_switches": 73.0,
+          "major_faults": 0.0
+        },
+        {
+          "user_s": 0.07,
+          "system_s": 0.41,
+          "max_rss_kib": 14976.0,
+          "voluntary_switches": 14365.0,
+          "involuntary_switches": 10.0,
+          "major_faults": 0.0
+        }
+      ]
+    },
+    {
+      "regime": "added-1ms-rtt",
+      "method": "kernel",
+      "medians": {
+        "user_s": 0.02,
+        "system_s": 0.28,
+        "max_rss_kib": 6324.0,
+        "voluntary_switches": 6249.0,
+        "involuntary_switches": 2.0,
+        "major_faults": 0.0
+      },
+      "samples": [
+        {
+          "user_s": 0.01,
+          "system_s": 0.28,
+          "max_rss_kib": 6324.0,
+          "voluntary_switches": 6249.0,
+          "involuntary_switches": 5.0,
+          "major_faults": 0.0
+        },
+        {
+          "user_s": 0.02,
+          "system_s": 0.2,
+          "max_rss_kib": 6068.0,
+          "voluntary_switches": 6245.0,
+          "involuntary_switches": 0.0,
+          "major_faults": 0.0
+        },
+        {
+          "user_s": 0.03,
+          "system_s": 0.31,
+          "max_rss_kib": 7488.0,
+          "voluntary_switches": 6260.0,
+          "involuntary_switches": 2.0,
+          "major_faults": 0.0
+        }
+      ]
+    },
+    {
+      "regime": "added-1ms-rtt",
+      "method": "vfsi",
+      "medians": {
+        "user_s": 0.11,
+        "system_s": 0.35,
+        "max_rss_kib": 8928.0,
+        "voluntary_switches": 14321.0,
+        "involuntary_switches": 65.0,
+        "major_faults": 0.0
+      },
+      "samples": [
+        {
+          "user_s": 0.09,
+          "system_s": 0.32,
+          "max_rss_kib": 8928.0,
+          "voluntary_switches": 14279.0,
+          "involuntary_switches": 6.0,
+          "major_faults": 0.0
+        },
+        {
+          "user_s": 0.11,
+          "system_s": 0.35,
+          "max_rss_kib": 10936.0,
+          "voluntary_switches": 14402.0,
+          "involuntary_switches": 183.0,
+          "major_faults": 0.0
+        },
+        {
+          "user_s": 0.11,
+          "system_s": 0.35,
+          "max_rss_kib": 8740.0,
+          "voluntary_switches": 14321.0,
+          "involuntary_switches": 65.0,
+          "major_faults": 0.0
+        }
+      ]
+    }
+  ],
+  "syscalls": [
+    {
+      "regime": "native",
+      "method": "kernel",
+      "counts": {
+        "wait4": {
+          "calls": 2,
+          "errors": 0
+        },
+        "futex": {
+          "calls": 11756,
+          "errors": 3037
+        },
+        "write": {
+          "calls": 13996,
+          "errors": 0
+        },
+        "newfstatat": {
+          "calls": 14004,
+          "errors": 0
+        },
+        "openat": {
+          "calls": 1652,
+          "errors": 6
+        },
+        "getdents64": {
+          "calls": 3114,
+          "errors": 0
+        },
+        "close": {
+          "calls": 1658,
+          "errors": 0
+        },
+        "lseek": {
+          "calls": 1574,
+          "errors": 0
+        },
+        "munmap": {
+          "calls": 89,
+          "errors": 0
+        },
+        "mmap": {
+          "calls": 104,
+          "errors": 0
+        },
+        "execve": {
+          "calls": 3,
+          "errors": 0
+        },
+        "read": {
+          "calls": 70,
+          "errors": 0
+        },
+        "mprotect": {
+          "calls": 59,
+          "errors": 0
+        },
+        "clone": {
+          "calls": 2,
+          "errors": 0
+        },
+        "fstat": {
+          "calls": 73,
+          "errors": 0
+        },
+        "sigaltstack": {
+          "calls": 6,
+          "errors": 0
+        },
+        "brk": {
+          "calls": 9,
+          "errors": 0
+        },
+        "rt_sigaction": {
+          "calls": 16,
+          "errors": 0
+        },
+        "rt_sigprocmask": {
+          "calls": 17,
+          "errors": 0
+        },
+        "statx": {
+          "calls": 25,
+          "errors": 3
+        },
+        "ppoll": {
+          "calls": 5,
+          "errors": 0
+        },
+        "prlimit64": {
+          "calls": 26,
+          "errors": 0
+        },
+        "ioctl": {
+          "calls": 14,
+          "errors": 14
+        },
+        "socket": {
+          "calls": 10,
+          "errors": 0
+        },
+        "connect": {
+          "calls": 6,
+          "errors": 4
+        },
+        "epoll_ctl": {
+          "calls": 6,
+          "errors": 0
+        },
+        "sendto": {
+          "calls": 7,
+          "errors": 0
+        },
+        "rseq": {
+          "calls": 4,
+          "errors": 0
+        },
+        "set_robust_list": {
+          "calls": 6,
+          "errors": 0
+        },
+        "recvfrom": {
+          "calls": 9,
+          "errors": 0
+        },
+        "sched_getaffinity": {
+          "calls": 2,
+          "errors": 0
+        },
+        "clone3": {
+          "calls": 1,
+          "errors": 0
+        },
+        "prctl": {
+          "calls": 10,
+          "errors": 4
+        },
+        "membarrier": {
+          "calls": 2,
+          "errors": 0
+        },
+        "faccessat": {
+          "calls": 4,
+          "errors": 4
+        },
+        "readlinkat": {
+          "calls": 2,
+          "errors": 0
+        },
+        "gettid": {
+          "calls": 2,
+          "errors": 0
+        },
+        "madvise": {
+          "calls": 3,
+          "errors": 0
+        },
+        "getrandom": {
+          "calls": 4,
+          "errors": 0
+        },
+        "getuid": {
+          "calls": 6,
+          "errors": 0
+        },
+        "keyctl": {
+          "calls": 2,
+          "errors": 0
+        },
+        "setgroups": {
+          "calls": 1,
+          "errors": 0
+        },
+        "fcntl": {
+          "calls": 3,
+          "errors": 0
+        },
+        "dup": {
+          "calls": 2,
+          "errors": 0
+        },
+        "setreuid": {
+          "calls": 2,
+          "errors": 0
+        },
+        "setregid": {
+          "calls": 2,
+          "errors": 0
+        },
+        "epoll_pwait2": {
+          "calls": 4,
+          "errors": 0
+        },
+        "chdir": {
+          "calls": 1,
+          "errors": 0
+        },
+        "timerfd_settime": {
+          "calls": 1,
+          "errors": 0
+        },
+        "statfs": {
+          "calls": 2,
+          "errors": 2
+        },
+        "set_tid_address": {
+          "calls": 3,
+          "errors": 0
+        },
+        "setpriority": {
+          "calls": 1,
+          "errors": 0
+        },
+        "getpriority": {
+          "calls": 1,
+          "errors": 0
+        },
+        "getgid": {
+          "calls": 1,
+          "errors": 0
+        },
+        "fstatfs": {
+          "calls": 1,
+          "errors": 0
+        },
+        "timerfd_create": {
+          "calls": 1,
+          "errors": 0
+        },
+        "epoll_create1": {
+          "calls": 1,
+          "errors": 0
+        },
+        "geteuid": {
+          "calls": 1,
+          "errors": 0
+        },
+        "getpid": {
+          "calls": 1,
+          "errors": 0
+        },
+        "setgid": {
+          "calls": 1,
+          "errors": 0
+        },
+        "setuid": {
+          "calls": 1,
+          "errors": 0
+        },
+        "total": {
+          "calls": 48391,
+          "errors": 3074
+        }
+      },
+      "scope": "du plus runuser/time wrappers; counts only, not additive time across threads/parents"
+    },
+    {
+      "regime": "native",
+      "method": "vfsi",
+      "counts": {
+        "futex": {
+          "calls": 39028,
+          "errors": 4130
+        },
+        "wait4": {
+          "calls": 2,
+          "errors": 0
+        },
+        "epoll_pwait": {
+          "calls": 3122,
+          "errors": 0
+        },
+        "write": {
+          "calls": 14021,
+          "errors": 0
+        },
+        "recvfrom": {
+          "calls": 6250,
+          "errors": 1
+        },
+        "sendmsg": {
+          "calls": 3120,
+          "errors": 0
+        },
+        "epoll_ctl": {
+          "calls": 3128,
+          "errors": 0
+        },
+        "munmap": {
+          "calls": 89,
+          "errors": 0
+        },
+        "read": {
+          "calls": 117,
+          "errors": 0
+        },
+        "rt_sigprocmask": {
+          "calls": 48,
+          "errors": 0
+        },
+        "openat": {
+          "calls": 103,
+          "errors": 6
+        },
+        "mmap": {
+          "calls": 115,
+          "errors": 0
+        },
+        "clone3": {
+          "calls": 6,
+          "errors": 0
+        },
+        "execve": {
+          "calls": 3,
+          "errors": 0
+        },
+        "close": {
+          "calls": 109,
+          "errors": 0
+        },
+        "statx": {
+          "calls": 41,
+          "errors": 3
+        },
+        "mprotect": {
+          "calls": 63,
+          "errors": 0
+        },
+        "madvise": {
+          "calls": 12,
+          "errors": 0
+        },
+        "readlinkat": {
+          "calls": 9,
+          "errors": 7
+        },
+        "clone": {
+          "calls": 2,
+          "errors": 0
+        },
+        "getgroups": {
+          "calls": 14,
+          "errors": 0
+        },
+        "brk": {
+          "calls": 9,
+          "errors": 0
+        },
+        "fstat": {
+          "calls": 74,
+          "errors": 0
+        },
+        "connect": {
+          "calls": 7,
+          "errors": 5
+        },
+        "set_robust_list": {
+          "calls": 11,
+          "errors": 0
+        },
+        "sigaltstack": {
+          "calls": 6,
+          "errors": 0
+        },
+        "rt_sigaction": {
+          "calls": 16,
+          "errors": 0
+        },
+        "sendto": {
+          "calls": 7,
+          "errors": 0
+        },
+        "rseq": {
+          "calls": 9,
+          "errors": 0
+        },
+        "ioctl": {
+          "calls": 16,
+          "errors": 14
+        },
+        "geteuid": {
+          "calls": 8,
+          "errors": 0
+        },
+        "getegid": {
+          "calls": 7,
+          "errors": 0
+        },
+        "sched_getaffinity": {
+          "calls": 2,
+          "errors": 0
+        },
+        "setfsgid": {
+          "calls": 6,
+          "errors": 0
+        },
+        "ppoll": {
+          "calls": 6,
+          "errors": 0
+        },
+        "socket": {
+          "calls": 11,
+          "errors": 0
+        },
+        "lseek": {
+          "calls": 21,
+          "errors": 0
+        },
+        "fcntl": {
+          "calls": 7,
+          "errors": 0
+        },
+        "getsockname": {
+          "calls": 2,
+          "errors": 0
+        },
+        "prlimit64": {
+          "calls": 26,
+          "errors": 0
+        },
+        "setfsuid": {
+          "calls": 6,
+          "errors": 0
+        },
+        "faccessat": {
+          "calls": 4,
+          "errors": 4
+        },
+        "getpeername": {
+          "calls": 2,
+          "errors": 0
+        },
+        "getrandom": {
+          "calls": 5,
+          "errors": 0
+        },
+        "uname": {
+          "calls": 1,
+          "errors": 0
+        },
+        "set_tid_address": {
+          "calls": 3,
+          "errors": 0
+        },
+        "getpid": {
+          "calls": 2,
+          "errors": 0
+        },
+        "gettid": {
+          "calls": 2,
+          "errors": 0
+        },
+        "getuid": {
+          "calls": 6,
+          "errors": 0
+        },
+        "dup": {
+          "calls": 2,
+          "errors": 0
+        },
+        "epoll_create1": {
+          "calls": 2,
+          "errors": 0
+        },
+        "getdents64": {
+          "calls": 4,
+          "errors": 0
+        },
+        "socketpair": {
+          "calls": 1,
+          "errors": 0
+        },
+        "newfstatat": {
+          "calls": 10,
+          "errors": 0
+        },
+        "membarrier": {
+          "calls": 2,
+          "errors": 0
+        },
+        "getsockopt": {
+          "calls": 1,
+          "errors": 0
+        },
+        "getcwd": {
+          "calls": 2,
+          "errors": 0
+        },
+        "keyctl": {
+          "calls": 2,
+          "errors": 0
+        },
+        "setregid": {
+          "calls": 2,
+          "errors": 0
+        },
+        "setreuid": {
+          "calls": 2,
+          "errors": 0
+        },
+        "epoll_pwait2": {
+          "calls": 4,
+          "errors": 0
+        },
+        "setgroups": {
+          "calls": 1,
+          "errors": 0
+        },
+        "chdir": {
+          "calls": 1,
+          "errors": 0
+        },
+        "timerfd_create": {
+          "calls": 1,
+          "errors": 0
+        },
+        "timerfd_settime": {
+          "calls": 1,
+          "errors": 0
+        },
+        "setpriority": {
+          "calls": 1,
+          "errors": 0
+        },
+        "getpriority": {
+          "calls": 1,
+          "errors": 0
+        },
+        "getgid": {
+          "calls": 1,
+          "errors": 0
+        },
+        "statfs": {
+          "calls": 2,
+          "errors": 2
+        },
+        "fstatfs": {
+          "calls": 1,
+          "errors": 0
+        },
+        "setgid": {
+          "calls": 1,
+          "errors": 0
+        },
+        "setuid": {
+          "calls": 1,
+          "errors": 0
+        },
+        "prctl": {
+          "calls": 10,
+          "errors": 4
+        },
+        "total": {
+          "calls": 69740,
+          "errors": 4176
+        }
+      },
+      "scope": "du plus runuser/time wrappers; counts only, not additive time across threads/parents"
+    },
+    {
+      "regime": "added-1ms-rtt",
+      "method": "kernel",
+      "counts": {
+        "wait4": {
+          "calls": 2,
+          "errors": 0
+        },
+        "futex": {
+          "calls": 11579,
+          "errors": 3006
+        },
+        "write": {
+          "calls": 13996,
+          "errors": 0
+        },
+        "newfstatat": {
+          "calls": 14004,
+          "errors": 0
+        },
+        "openat": {
+          "calls": 1652,
+          "errors": 6
+        },
+        "getdents64": {
+          "calls": 3114,
+          "errors": 0
+        },
+        "close": {
+          "calls": 1658,
+          "errors": 0
+        },
+        "lseek": {
+          "calls": 1574,
+          "errors": 0
+        },
+        "mmap": {
+          "calls": 104,
+          "errors": 0
+        },
+        "munmap": {
+          "calls": 89,
+          "errors": 0
+        },
+        "mprotect": {
+          "calls": 59,
+          "errors": 0
+        },
+        "fstat": {
+          "calls": 73,
+          "errors": 0
+        },
+        "statx": {
+          "calls": 25,
+          "errors": 3
+        },
+        "read": {
+          "calls": 70,
+          "errors": 0
+        },
+        "prlimit64": {
+          "calls": 26,
+          "errors": 0
+        },
+        "rt_sigprocmask": {
+          "calls": 17,
+          "errors": 0
+        },
+        "clone": {
+          "calls": 2,
+          "errors": 0
+        },
+        "recvfrom": {
+          "calls": 9,
+          "errors": 0
+        },
+        "rt_sigaction": {
+          "calls": 16,
+          "errors": 0
+        },
+        "set_robust_list": {
+          "calls": 6,
+          "errors": 0
+        },
+        "ioctl": {
+          "calls": 14,
+          "errors": 14
+        },
+        "sigaltstack": {
+          "calls": 6,
+          "errors": 0
+        },
+        "clone3": {
+          "calls": 1,
+          "errors": 0
+        },
+        "sendto": {
+          "calls": 7,
+          "errors": 0
+        },
+        "socket": {
+          "calls": 10,
+          "errors": 0
+        },
+        "ppoll": {
+          "calls": 5,
+          "errors": 0
+        },
+        "getuid": {
+          "calls": 6,
+          "errors": 0
+        },
+        "connect": {
+          "calls": 6,
+          "errors": 4
+        },
+        "epoll_pwait2": {
+          "calls": 4,
+          "errors": 0
+        },
+        "rseq": {
+          "calls": 4,
+          "errors": 0
+        },
+        "prctl": {
+          "calls": 10,
+          "errors": 4
+        },
+        "epoll_ctl": {
+          "calls": 6,
+          "errors": 0
+        },
+        "brk": {
+          "calls": 9,
+          "errors": 0
+        },
+        "readlinkat": {
+          "calls": 2,
+          "errors": 0
+        },
+        "getrandom": {
+          "calls": 4,
+          "errors": 0
+        },
+        "madvise": {
+          "calls": 3,
+          "errors": 0
+        },
+        "keyctl": {
+          "calls": 2,
+          "errors": 0
+        },
+        "setreuid": {
+          "calls": 2,
+          "errors": 0
+        },
+        "setregid": {
+          "calls": 2,
+          "errors": 0
+        },
+        "gettid": {
+          "calls": 2,
+          "errors": 0
+        },
+        "dup": {
+          "calls": 2,
+          "errors": 0
+        },
+        "getpriority": {
+          "calls": 1,
+          "errors": 0
+        },
+        "getgid": {
+          "calls": 1,
+          "errors": 0
+        },
+        "set_tid_address": {
+          "calls": 3,
+          "errors": 0
+        },
+        "epoll_create1": {
+          "calls": 1,
+          "errors": 0
+        },
+        "statfs": {
+          "calls": 2,
+          "errors": 2
+        },
+        "setgroups": {
+          "calls": 1,
+          "errors": 0
+        },
+        "sched_getaffinity": {
+          "calls": 2,
+          "errors": 0
+        },
+        "faccessat": {
+          "calls": 4,
+          "errors": 4
+        },
+        "fcntl": {
+          "calls": 3,
+          "errors": 0
+        },
+        "getpid": {
+          "calls": 1,
+          "errors": 0
+        },
+        "timerfd_create": {
+          "calls": 1,
+          "errors": 0
+        },
+        "geteuid": {
+          "calls": 1,
+          "errors": 0
+        },
+        "membarrier": {
+          "calls": 2,
+          "errors": 0
+        },
+        "fstatfs": {
+          "calls": 1,
+          "errors": 0
+        },
+        "setpriority": {
+          "calls": 1,
+          "errors": 0
+        },
+        "chdir": {
+          "calls": 1,
+          "errors": 0
+        },
+        "timerfd_settime": {
+          "calls": 1,
+          "errors": 0
+        },
+        "setgid": {
+          "calls": 1,
+          "errors": 0
+        },
+        "setuid": {
+          "calls": 1,
+          "errors": 0
+        },
+        "execve": {
+          "calls": 3,
+          "errors": 0
+        },
+        "total": {
+          "calls": 48214,
+          "errors": 3043
+        }
+      },
+      "scope": "du plus runuser/time wrappers; counts only, not additive time across threads/parents"
+    },
+    {
+      "regime": "added-1ms-rtt",
+      "method": "vfsi",
+      "counts": {
+        "futex": {
+          "calls": 37796,
+          "errors": 3051
+        },
+        "wait4": {
+          "calls": 2,
+          "errors": 0
+        },
+        "epoll_pwait": {
+          "calls": 3121,
+          "errors": 0
+        },
+        "write": {
+          "calls": 14021,
+          "errors": 0
+        },
+        "recvfrom": {
+          "calls": 6249,
+          "errors": 0
+        },
+        "sendmsg": {
+          "calls": 3120,
+          "errors": 0
+        },
+        "epoll_ctl": {
+          "calls": 3128,
+          "errors": 0
+        },
+        "madvise": {
+          "calls": 16,
+          "errors": 0
+        },
+        "mmap": {
+          "calls": 118,
+          "errors": 0
+        },
+        "munmap": {
+          "calls": 91,
+          "errors": 0
+        },
+        "openat": {
+          "calls": 103,
+          "errors": 6
+        },
+        "clone3": {
+          "calls": 7,
+          "errors": 0
+        },
+        "mprotect": {
+          "calls": 65,
+          "errors": 0
+        },
+        "rt_sigprocmask": {
+          "calls": 53,
+          "errors": 0
+        },
+        "read": {
+          "calls": 117,
+          "errors": 0
+        },
+        "statx": {
+          "calls": 41,
+          "errors": 3
+        },
+        "close": {
+          "calls": 109,
+          "errors": 0
+        },
+        "fstat": {
+          "calls": 74,
+          "errors": 0
+        },
+        "rseq": {
+          "calls": 10,
+          "errors": 0
+        },
+        "prlimit64": {
+          "calls": 26,
+          "errors": 0
+        },
+        "getgroups": {
+          "calls": 14,
+          "errors": 0
+        },
+        "clone": {
+          "calls": 2,
+          "errors": 0
+        },
+        "ioctl": {
+          "calls": 16,
+          "errors": 14
+        },
+        "lseek": {
+          "calls": 21,
+          "errors": 0
+        },
+        "connect": {
+          "calls": 7,
+          "errors": 5
+        },
+        "sigaltstack": {
+          "calls": 6,
+          "errors": 0
+        },
+        "socket": {
+          "calls": 11,
+          "errors": 0
+        },
+        "rt_sigaction": {
+          "calls": 16,
+          "errors": 0
+        },
+        "execve": {
+          "calls": 3,
+          "errors": 0
+        },
+        "newfstatat": {
+          "calls": 10,
+          "errors": 0
+        },
+        "sendto": {
+          "calls": 7,
+          "errors": 0
+        },
+        "brk": {
+          "calls": 10,
+          "errors": 0
+        },
+        "readlinkat": {
+          "calls": 9,
+          "errors": 7
+        },
+        "set_robust_list": {
+          "calls": 12,
+          "errors": 0
+        },
+        "epoll_pwait2": {
+          "calls": 4,
+          "errors": 0
+        },
+        "getegid": {
+          "calls": 7,
+          "errors": 0
+        },
+        "prctl": {
+          "calls": 10,
+          "errors": 4
+        },
+        "geteuid": {
+          "calls": 8,
+          "errors": 0
+        },
+        "ppoll": {
+          "calls": 6,
+          "errors": 0
+        },
+        "getpid": {
+          "calls": 2,
+          "errors": 0
+        },
+        "fcntl": {
+          "calls": 7,
+          "errors": 0
+        },
+        "getdents64": {
+          "calls": 4,
+          "errors": 0
+        },
+        "getrandom": {
+          "calls": 5,
+          "errors": 0
+        },
+        "getuid": {
+          "calls": 6,
+          "errors": 0
+        },
+        "setfsuid": {
+          "calls": 6,
+          "errors": 0
+        },
+        "setfsgid": {
+          "calls": 6,
+          "errors": 0
+        },
+        "epoll_create1": {
+          "calls": 2,
+          "errors": 0
+        },
+        "statfs": {
+          "calls": 2,
+          "errors": 2
+        },
+        "setgroups": {
+          "calls": 1,
+          "errors": 0
+        },
+        "chdir": {
+          "calls": 1,
+          "errors": 0
+        },
+        "uname": {
+          "calls": 1,
+          "errors": 0
+        },
+        "gettid": {
+          "calls": 2,
+          "errors": 0
+        },
+        "set_tid_address": {
+          "calls": 3,
+          "errors": 0
+        },
+        "socketpair": {
+          "calls": 1,
+          "errors": 0
+        },
+        "keyctl": {
+          "calls": 2,
+          "errors": 0
+        },
+        "getcwd": {
+          "calls": 2,
+          "errors": 0
+        },
+        "dup": {
+          "calls": 2,
+          "errors": 0
+        },
+        "getpeername": {
+          "calls": 2,
+          "errors": 0
+        },
+        "getsockopt": {
+          "calls": 1,
+          "errors": 0
+        },
+        "sched_getaffinity": {
+          "calls": 2,
+          "errors": 0
+        },
+        "getsockname": {
+          "calls": 2,
+          "errors": 0
+        },
+        "faccessat": {
+          "calls": 4,
+          "errors": 4
+        },
+        "setregid": {
+          "calls": 2,
+          "errors": 0
+        },
+        "setreuid": {
+          "calls": 2,
+          "errors": 0
+        },
+        "setgid": {
+          "calls": 1,
+          "errors": 0
+        },
+        "setuid": {
+          "calls": 1,
+          "errors": 0
+        },
+        "fstatfs": {
+          "calls": 1,
+          "errors": 0
+        },
+        "membarrier": {
+          "calls": 2,
+          "errors": 0
+        },
+        "timerfd_settime": {
+          "calls": 1,
+          "errors": 0
+        },
+        "timerfd_create": {
+          "calls": 1,
+          "errors": 0
+        },
+        "setpriority": {
+          "calls": 1,
+          "errors": 0
+        },
+        "getpriority": {
+          "calls": 1,
+          "errors": 0
+        },
+        "getgid": {
+          "calls": 1,
+          "errors": 0
+        },
+        "total": {
+          "calls": 68526,
+          "errors": 3096
+        }
+      },
+      "scope": "du plus runuser/time wrappers; counts only, not additive time across threads/parents"
+    }
+  ],
+  "cpu_self_profiles": [
+    {
+      "regime": "native",
+      "method": "kernel",
+      "samples": 141,
+      "lost_samples": 0,
+      "flat_report": "native-record-0-kernel.perf-flat.txt"
+    },
+    {
+      "regime": "native",
+      "method": "vfsi",
+      "samples": 176,
+      "lost_samples": 0,
+      "flat_report": "native-record-0-vfsi.perf-flat.txt"
+    },
+    {
+      "regime": "added-1ms-rtt",
+      "method": "kernel",
+      "samples": 111,
+      "lost_samples": 0,
+      "flat_report": "added-1ms-rtt-record-0-kernel.perf-flat.txt"
+    },
+    {
+      "regime": "added-1ms-rtt",
+      "method": "vfsi",
+      "samples": 147,
+      "lost_samples": 0,
+      "flat_report": "added-1ms-rtt-record-0-vfsi.perf-flat.txt"
+    }
+  ]
+}

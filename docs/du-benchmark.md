@@ -74,3 +74,9 @@ Preliminary collection attempts were rejected for a reserved-client-port
 dissector collision and a capture-buffer overrun. The complete retained set was
 rerun with explicit RPC decoding, immediate capture and a 16-MiB buffer. Those
 rejected attempts contribute no samples to this table.
+
+See the [follow-up traversal profile](du-profile.md) for why this release
+reaches 1.43× at added RTT and which bottlenecks remain.
+
+The [batched development candidate](du-batching.md) is a separate comparison;
+the frozen release table above remains unchanged.

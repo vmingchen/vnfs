@@ -1,0 +1,35 @@
+   Compiling uu_du v0.13.0 (/home/ubuntu/vfsi-du-candidate/src/uu/du)
+warning: field `order` is never read
+   --> src/uu/du/src/vnfs.rs:173:9
+    |
+172 |     struct LinkedFile {
+    |            ---------- field in this struct
+173 |         order: Vec<usize>,
+    |         ^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `uu_du` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.79s
+     Running unittests src/du.rs (target/debug/deps/uu_du-aa050e3a2acc6f1c)
+
+running 1 test
+test vnfs::tests::cross_directory_hardlinks_keep_depth_first_attribution ... FAILED
+
+failures:
+
+---- vnfs::tests::cross_directory_hardlinks_keep_depth_first_attribution stdout ----
+
+thread 'vnfs::tests::cross_directory_hardlinks_keep_depth_first_attribution' (3774261) panicked at src/uu/du/src/vnfs.rs:542:13:
+assertion `left == right` failed
+  left: 0
+ right: 5
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    vnfs::tests::cross_directory_hardlinks_keep_depth_first_attribution
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p uu_du --lib`

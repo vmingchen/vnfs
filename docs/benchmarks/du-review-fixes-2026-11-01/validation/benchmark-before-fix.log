@@ -1,0 +1,106 @@
+test_candidate_build_failure_stops_before_source_snapshot_or_measurement (test_benchmark.BenchmarkTests.test_candidate_build_failure_stops_before_source_snapshot_or_measurement) ... ERROR
+test_candidate_is_rebuilt_before_source_provenance_is_recorded (test_benchmark.BenchmarkTests.test_candidate_is_rebuilt_before_source_provenance_is_recorded) ... FAIL
+test_candidate_postorder_guard_rejects_parent_before_descendant (test_benchmark.BenchmarkTests.test_candidate_postorder_guard_rejects_parent_before_descendant) ... ok
+test_cleanup_only_deletes_resources_it_created (test_benchmark.BenchmarkTests.test_cleanup_only_deletes_resources_it_created) ... ok
+test_comparison_tables_require_three_timings_and_a_capture_per_variant (test_benchmark.BenchmarkTests.test_comparison_tables_require_three_timings_and_a_capture_per_variant) ... 
+  test_comparison_tables_require_three_timings_and_a_capture_per_variant (test_benchmark.BenchmarkTests.test_comparison_tables_require_three_timings_and_a_capture_per_variant) (variant='kernel', timings=0) ... FAIL
+  test_comparison_tables_require_three_timings_and_a_capture_per_variant (test_benchmark.BenchmarkTests.test_comparison_tables_require_three_timings_and_a_capture_per_variant) (variant='kernel', timings=1) ... FAIL
+  test_comparison_tables_require_three_timings_and_a_capture_per_variant (test_benchmark.BenchmarkTests.test_comparison_tables_require_three_timings_and_a_capture_per_variant) (variant='kernel', timings=2) ... FAIL
+test_comparison_tables_require_three_timings_and_a_capture_per_variant (test_benchmark.BenchmarkTests.test_comparison_tables_require_three_timings_and_a_capture_per_variant) ... FAIL
+test_count_rpc_pdus_not_tcp_packets (test_benchmark.BenchmarkTests.test_count_rpc_pdus_not_tcp_packets) ... ok
+test_generator_bounds_before_creation (test_benchmark.BenchmarkTests.test_generator_bounds_before_creation) ... ok
+test_geometry_and_mutation_detection (test_benchmark.BenchmarkTests.test_geometry_and_mutation_detection) ... ok
+test_lock_and_release_frozen_together (test_benchmark.BenchmarkTests.test_lock_and_release_frozen_together) ... ok
+test_payload_boundaries (test_benchmark.BenchmarkTests.test_payload_boundaries) ... ok
+test_reserved_client_port_decoded_as_rpc (test_benchmark.BenchmarkTests.test_reserved_client_port_decoded_as_rpc) ... ok
+test_retries_count_as_actual_calls (test_benchmark.BenchmarkTests.test_retries_count_as_actual_calls) ... ok
+test_unmatched_or_ambiguous_capture_rejected (test_benchmark.BenchmarkTests.test_unmatched_or_ambiguous_capture_rejected) ... ok
+
+======================================================================
+ERROR: test_candidate_build_failure_stops_before_source_snapshot_or_measurement (test_benchmark.BenchmarkTests.test_candidate_build_failure_stops_before_source_snapshot_or_measurement)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/ubuntu/vnfs/benchmarks/du/test_benchmark.py", line 85, in test_candidate_build_failure_stops_before_source_snapshot_or_measurement
+    compare.main(args)
+    ~~~~~~~~~~~~^^^^^^
+  File "/home/ubuntu/vnfs/benchmarks/du/compare.py", line 49, in main
+    fixture = json.loads((args.fixture/'fixture.json').read_text())
+                         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.14/pathlib/__init__.py", line 788, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/pathlib/__init__.py", line 772, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/tmpwsj0mxzb/fixture/fixture.json'
+
+======================================================================
+FAIL: test_candidate_is_rebuilt_before_source_provenance_is_recorded (test_benchmark.BenchmarkTests.test_candidate_is_rebuilt_before_source_provenance_is_recorded)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/ubuntu/vnfs/benchmarks/du/test_benchmark.py", line 62, in test_candidate_is_rebuilt_before_source_provenance_is_recorded
+    compare.main(args)
+    ~~~~~~~~~~~~^^^^^^
+  File "/home/ubuntu/vnfs/benchmarks/du/compare.py", line 44, in main
+    source = run.checked(['git','-C', args.candidate,'diff','--binary','HEAD'])
+  File "/usr/lib/python3.14/unittest/mock.py", line 1176, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/unittest/mock.py", line 1180, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/unittest/mock.py", line 1247, in _execute_mock_call
+    result = effect(*args, **kwargs)
+  File "/home/ubuntu/vnfs/benchmarks/du/test_benchmark.py", line 53, in snapshot
+    self.assertTrue(rebuilt.exists(), 'candidate must be rebuilt before snapshot')
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : candidate must be rebuilt before snapshot
+
+======================================================================
+FAIL: test_comparison_tables_require_three_timings_and_a_capture_per_variant (test_benchmark.BenchmarkTests.test_comparison_tables_require_three_timings_and_a_capture_per_variant) (variant='kernel', timings=0)
+----------------------------------------------------------------------
+statistics.StatisticsError: no median for empty data
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/ubuntu/vnfs/benchmarks/du/test_benchmark.py", line 108, in test_comparison_tables_require_three_timings_and_a_capture_per_variant
+    with self.assertRaisesRegex(ValueError, 'insufficient publishable samples'):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "insufficient publishable samples" does not match "no median for empty data"
+
+======================================================================
+FAIL: test_comparison_tables_require_three_timings_and_a_capture_per_variant (test_benchmark.BenchmarkTests.test_comparison_tables_require_three_timings_and_a_capture_per_variant) (variant='kernel', timings=1)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/ubuntu/vnfs/benchmarks/du/test_benchmark.py", line 108, in test_comparison_tables_require_three_timings_and_a_capture_per_variant
+    with self.assertRaisesRegex(ValueError, 'insufficient publishable samples'):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_comparison_tables_require_three_timings_and_a_capture_per_variant (test_benchmark.BenchmarkTests.test_comparison_tables_require_three_timings_and_a_capture_per_variant) (variant='kernel', timings=2)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/ubuntu/vnfs/benchmarks/du/test_benchmark.py", line 108, in test_comparison_tables_require_three_timings_and_a_capture_per_variant
+    with self.assertRaisesRegex(ValueError, 'insufficient publishable samples'):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_comparison_tables_require_three_timings_and_a_capture_per_variant (test_benchmark.BenchmarkTests.test_comparison_tables_require_three_timings_and_a_capture_per_variant)
+----------------------------------------------------------------------
+statistics.StatisticsError: no median for empty data
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/ubuntu/vnfs/benchmarks/du/test_benchmark.py", line 113, in test_comparison_tables_require_three_timings_and_a_capture_per_variant
+    with self.assertRaisesRegex(ValueError, 'insufficient publishable samples'):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "insufficient publishable samples" does not match "no median for empty data"
+
+----------------------------------------------------------------------
+Ran 13 tests in 0.404s
+
+FAILED (failures=5, errors=1)

@@ -1,0 +1,27 @@
+{
+  "elapsed_ns": 6987022,
+  "stdout_lines": 18,
+  "stdout_sorted_sha256": "6d9d971fec812f01d4621a30b12e7b5d22dbd9fefafe9d863eb04d679c233baa",
+  "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+  "library_rpc_calls": null,
+  "library_diagnostics": "",
+  "wire": {
+    "rpc_calls": 29,
+    "unique_rpc_calls": 29,
+    "repeated_xids": 0,
+    "retransmitted_rpc_frames": 0,
+    "procedures": {
+      "1": 29
+    },
+    "request_opcodes": {
+      "53": 29,
+      "22": 29,
+      "3": 10,
+      "9": 20,
+      "15": 1,
+      "10": 1,
+      "26": 9
+    },
+    "pcap_sha256": "b14648ae0e78a920bbab4044f4ea585a3a9bc7b718e9921aed11ecb79572402a"
+  }
+}

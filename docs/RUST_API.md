@@ -450,6 +450,12 @@ and `WalkOptions::with_sort_by_name(true)` for sorted
 siblings; those modes retain bounded directory buffers. The default entry-only
 mode stays paged and retains native anchored child cursors and batching. With
 lifecycle events enabled, `SkipSubtree` on Enter prevents descent.
+For pruning with native recursive sibling batching, return
+`ListDirControl::Prune(paths)` from `Vfsi::vlistdirs`. Each path must be a
+directory entry in the current page; admission happens before descendant I/O.
+This separates admission from presentation, so applications can reduce totals
+in post-order without speculative reads of excluded directories. Ordinary
+`ControlFlow<()>` page callbacks continue to work.
 `visit_dirs_ordered` still supplies custom ordering and complete listings. Sorting and enter/leave controls belong to `WalkOptions`, accepted by `listdir`;
 page primitives and collecting helpers accept only `ListDirOptions`.
 The shallow read_dir_with_options helper also rejects recursive options; use

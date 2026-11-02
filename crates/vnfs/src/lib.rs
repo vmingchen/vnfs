@@ -77,9 +77,9 @@ pub mod files {
 pub mod directory {
     pub use std::ops::ControlFlow;
     pub use vfsi_core::api::{
-        AttrsOptions, DepthLimit, DirHandle, DirectoryListing, ListDirOptions, MkDirOp, RemoveMode,
-        RemoveOptions, RenameMode, SetAttrsOp, TraversalCompletion, WalkControl, WalkEvent,
-        WalkEventKind, WalkOptions,
+        AttrsOptions, DepthLimit, DirHandle, DirectoryListing, ListDirControl, ListDirOptions,
+        MkDirOp, RemoveMode, RemoveOptions, RenameMode, SetAttrsOp, TraversalCompletion,
+        WalkControl, WalkEvent, WalkEventKind, WalkOptions,
     };
     pub use vfsi_core::{
         AttrMask as Attributes, Attrs, DirEntry, FsObjId, Permissions, VfType as FileType,

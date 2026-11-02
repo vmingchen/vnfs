@@ -5235,3 +5235,61 @@ fn ordered_directory_walk_rejects_replaced_children_and_ancestors() {
         directory_replacement_is_not_followed(DirectoryVisit::Ordered, replacement);
     }
 }
+
+#[test]
+fn recursive_admission_batches_anchored_children_without_repeated_path_resolution() {
+    use vnfs::directory::{ListDirControl, ListDirOptions, TraversalCompletion};
+    use vnfs::files::Vfsi;
+    let version = vnfs::nfs::NfsVersion::try_from(
+        std::env::var("VNFS_TEST_MINOR")
+            .ok()
+            .map(|value| value.parse().unwrap()),
+    )
+    .unwrap();
+    let telemetry = vnfs::nfs::Telemetry::default();
+    let fs = Nfs::builder(test_host())
+        .version(version)
+        .telemetry(telemetry.clone())
+        .connect()
+        .unwrap();
+    let root = workdir("recursive-admission");
+    fs.create_dir_all(&root).unwrap();
+    for i in 0..64 {
+        fs.create_dir(format!("{root}/d{i:02}")).unwrap();
+    }
+    let excluded = format!("{root}/excluded");
+    fs.create_dir(&excluded).unwrap();
+    let before = telemetry.snapshot();
+    let mut visited = std::collections::HashSet::new();
+    let result = fs.vlistdirs(
+        &[&root],
+        ListDirOptions::new().with_recursive(true),
+        |index, page| {
+            assert_eq!(index, 0);
+            assert_ne!(page.path, Path::new(&excluded));
+            visited.insert(page.path.clone());
+            Ok(ListDirControl::Prune(
+                page.entries
+                    .iter()
+                    .filter(|entry| entry.path() == Path::new(&excluded))
+                    .map(|entry| entry.path().to_path_buf())
+                    .collect(),
+            ))
+        },
+    );
+    let stats = telemetry.snapshot();
+    let calls = stats.calls - before.calls;
+    let operations = stats.operations - before.operations;
+    fs.remove_dir_all(&root).unwrap();
+    assert_eq!(result.unwrap(), [TraversalCompletion::Complete]);
+    assert_eq!(visited.len(), 65);
+    assert!(
+        calls > 0 && calls < 20,
+        "64 child directories should share compounds: {stats:?}"
+    );
+    eprintln!("recursive admission: calls={calls}, operations={operations}");
+    assert!(
+        operations > 0 && operations < 500,
+        "child descent must reuse anchored seeds: {stats:?}"
+    );
+}

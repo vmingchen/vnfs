@@ -1,0 +1,24 @@
+   Compiling uu_du v0.13.0 (/home/ubuntu/vfsi-du-candidate/src/uu/du)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.75s
+     Running unittests src/du.rs (target/debug/deps/uu_du-aa050e3a2acc6f1c)
+
+running 1 test
+test vnfs::tests::changing_names_and_link_counts_count_each_file_identity_once ... FAILED
+
+failures:
+
+---- vnfs::tests::changing_names_and_link_counts_count_each_file_identity_once stdout ----
+
+thread 'vnfs::tests::changing_names_and_link_counts_count_each_file_identity_once' (3781019) panicked at src/uu/du/src/vnfs.rs:621:17:
+assertion `left == right` failed: nlink 1->1, count_links=false
+  left: 10
+ right: 5
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    vnfs::tests::changing_names_and_link_counts_count_each_file_identity_once
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p uu_du --lib`

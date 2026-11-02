@@ -1,0 +1,17 @@
+E
+======================================================================
+ERROR: test_comparison_reaches_every_trial_after_building_and_checks_parity (test_benchmark.BenchmarkTests.test_comparison_reaches_every_trial_after_building_and_checks_parity)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/ubuntu/vnfs/benchmarks/du/test_benchmark.py", line 64, in test_comparison_reaches_every_trial_after_building_and_checks_parity
+    compare.main(args)
+    ~~~~~~~~~~~~^^^^^^
+  File "/home/ubuntu/vnfs/benchmarks/du/compare.py", line 101, in main
+    '--user',pwd.getpwuid(os.getuid()).pw_name,'--output',str(stem.resolve()),
+                          ^^
+NameError: name 'os' is not defined. Did you forget to import 'os'?
+
+----------------------------------------------------------------------
+Ran 1 test in 0.004s
+
+FAILED (errors=1)

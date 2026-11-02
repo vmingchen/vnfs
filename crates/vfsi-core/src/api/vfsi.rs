@@ -422,7 +422,10 @@ pub trait Vfsi {
     /// Entry/path-byte limits are shared across roots; recursive visits also
     /// charge retained directory path bytes. Root index accompanies every owned directory page, including empty directories.
     /// Callbacks run outside backend locks and may reenter. Entries for one directory may span several pages. Break stops the
-    /// whole vector. The returned prefix covers every root whose pages reached
+    /// whole vector. Callbacks may also return [`ListDirControl`](crate::api::ListDirControl)
+    /// to prune selected child directories before any descent I/O. Pruned paths
+    /// must be directory entries in the current page. Existing `ControlFlow<()>`
+    /// callbacks continue to work. The returned prefix covers every root whose pages reached
     /// the callback; unfinished roots are Stopped. Pages may interleave between roots.
     ///
     /// Sorting and enter/leave options are rejected before I/O; use VfsiExt::listdir
@@ -447,11 +450,11 @@ pub trait Vfsi {
     /// # Ok(())
     /// # }
     /// ```
-    fn vlistdirs<P: AsRef<Path>>(
+    fn vlistdirs<P: AsRef<Path>, C: Into<crate::api::ListDirControl>>(
         &self,
         paths: &[P],
         options: crate::api::ListDirOptions,
-        callback: impl FnMut(usize, DirectoryListing) -> Result<std::ops::ControlFlow<()>>,
+        callback: impl FnMut(usize, DirectoryListing) -> Result<C>,
     ) -> Result<Vec<crate::api::TraversalCompletion>>;
 
     /// Stream files through bounded chunks without collecting whole contents.
