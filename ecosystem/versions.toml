@@ -5,24 +5,24 @@ schema_version = 1
 [platform]
 canonical = "https://github.com/vmingchen/vnfs"
 mirror = "https://github.com/vfsi/vfsi"
-code_revision = "59ac336f902175d7ca15aefb3d6e0cf54824eda1"
+code_revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3"
 
 [rust]
-nfsv41-sys = { version = "0.1.14", revision = "5ed13dbb8796a5869b6794401e15bfe4ea4c7866" }
-vfsi-core = { version = "0.1.15", revision = "59ac336f902175d7ca15aefb3d6e0cf54824eda1" }
-vfsi-local = { version = "0.1.14", revision = "59ac336f902175d7ca15aefb3d6e0cf54824eda1" }
-vfsi-nfs = { version = "0.1.15", revision = "59ac336f902175d7ca15aefb3d6e0cf54824eda1" }
-vfsi-posix = { version = "0.1.5", revision = "7dbee1b76d1cfc999d2d42bf1771d72759c8677e" }
-vfsi-smb = { version = "0.1.13", revision = "59ac336f902175d7ca15aefb3d6e0cf54824eda1" }
-vfsi-sync = { version = "0.1.16", revision = "59ac336f902175d7ca15aefb3d6e0cf54824eda1" }
-vfsi-uring = { version = "0.1.5", revision = "7dbee1b76d1cfc999d2d42bf1771d72759c8677e" }
-vnfs = { version = "0.0.27", revision = "7dbee1b76d1cfc999d2d42bf1771d72759c8677e" }
+nfsv41-sys = { version = "0.1.15", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
+vfsi-core = { version = "0.1.16", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
+vfsi-local = { version = "0.1.15", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
+vfsi-nfs = { version = "0.1.16", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
+vfsi-posix = { version = "0.1.6", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
+vfsi-smb = { version = "0.1.14", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
+vfsi-sync = { version = "0.1.17", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
+vfsi-uring = { version = "0.1.6", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
+vnfs = { version = "0.0.28", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
 
 [c]
 package = "vfsi-c"
-version = "0.3.11"
+version = "0.3.12"
 abi = 3
-revision = "59ac336f902175d7ca15aefb3d6e0cf54824eda1"
+revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3"
 # First implementation commit; shipped in vfsi-c 0.3.11 while preserving ABI v3.
 scoped_identity_revision = "037759665d9857e216702b6a92d53e37ff8f4fb5"
 scoped_identity_published = true

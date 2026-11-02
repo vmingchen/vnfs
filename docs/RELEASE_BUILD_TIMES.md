@@ -11,6 +11,41 @@ step, or complete publish command. Record cache/verification conditions when
 known. Do not compare warm, cold, emulated, and verification-skipping runs as
 though they measured the same work. Preserve older records unchanged.
 
+## 2026-11-01 coordinated Rust traversal release
+
+Source: `dc477f5a3609a4becb5904d2d08dd4bcdafdcce3`. The exact release commit's
+[18-job CI run](https://github.com/vmingchen/vnfs/actions/runs/41368625006)
+passed before publication. The release started at `2026-11-02T00:49:47.367029+00:00`.
+
+All ten crates were published sequentially from the VM's clean canonical
+checkout using `cargo publish -p PACKAGE --locked`, with Cargo verification
+enabled and the existing build/download caches. These are complete command
+wall times, including packaging, verification, upload, and index wait:
+
+| Crate | Complete publish command wall time |
+|---|---:|
+| vfsi-core 0.1.16 | 3.827s |
+| vfsi-sync 0.1.17 | 4.597s |
+| nfsv41-sys 0.1.15 | 7.683s |
+| vfsi-local 0.1.15 | 4.090s |
+| vfsi-posix 0.1.6 | 3.097s |
+| vfsi-uring 0.1.6 | 2.823s |
+| vfsi-nfs 0.1.16 | 11.961s |
+| vfsi-smb 0.1.14 | 6.521s |
+| vnfs 0.0.28 | 7.821s |
+| vfsi-c 0.3.12 | 15.829s |
+| Sequential total | 68.248s |
+
+Every published archive's registry checksum and `.cargo_vcs_info.json` were
+verified against this clean source revision. The source bump and all detached
+adapter/fuzz lockfiles were tested locally before pushing. The NFSv4.1 and
+NFSv4.2 traversal regressions each observed ten RPCs for 64 admitted children.
+Python package versions and the frozen vnfs 0.0.27 du benchmark are unchanged.
+
+Per-crate logs, command timestamps, checksums, downloaded crate archives, and
+source provenance are retained at `/home/ubuntu/vfsi-release-2026-11-01/`.
+These warm-cache command times are not cold-build estimates.
+
 ## 2026-11-01 scoped C identity release
 
 Source: `59ac336f902175d7ca15aefb3d6e0cf54824eda1`. The exact release commit's
