@@ -103,6 +103,14 @@ impl<F: HandleBackend> FsClient<F> {
         self.limits
     }
 
+    fn validate_owner(&self, file: &OpenFile<F>, index: usize) -> VfResult<()> {
+        if Arc::ptr_eq(&self.inner, &file.inner) {
+            Ok(())
+        } else {
+            Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput))
+        }
+    }
+
     fn lock(&self) -> VfResult<BackendGuard<'_, F>> {
         self.inner.lock().map_err(|_| poisoned())
     }
@@ -243,14 +251,6 @@ impl<F: VectorBackend> FsClient<F> {
     #[doc(hidden)]
     pub fn vclose_owned(&self, mut files: Vec<OpenFile<F>>) -> VfResult<()> {
         self.vclose(&mut files)
-    }
-
-    fn validate_owner(&self, file: &OpenFile<F>, index: usize) -> VfResult<()> {
-        if Arc::ptr_eq(&self.inner, &file.inner) {
-            Ok(())
-        } else {
-            Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput))
-        }
     }
 }
 

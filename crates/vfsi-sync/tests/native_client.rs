@@ -3559,17 +3559,21 @@ fn projected_io_errors_allow_client_reentry() {
     });
     let file = fs.open("/file").unwrap();
     let reads = [file.read_request_at(0, 1)];
+    let projections = std::cell::Cell::new(0);
     let error = fs
         .vread_with_limit_projected_native(&reads, 1, |request| {
+            projections.set(projections.get() + 1);
             fs.capabilities().unwrap();
             request
         })
         .unwrap_err();
     assert_eq!(error.index(), Some(0));
     assert_eq!(error.path(), Some(std::path::Path::new("/file")));
+    assert_eq!(projections.replace(0), 1);
     let writes = [file.write_request_at(0, b"x")];
     let error = fs
         .vwrite_mapped_native(&writes, |request| {
+            projections.set(projections.get() + 1);
             fs.capabilities().unwrap();
             *request
         })
@@ -3577,6 +3581,7 @@ fn projected_io_errors_allow_client_reentry() {
     assert_eq!(error.raw_code(), libc::ENOSPC as u32);
     assert_eq!(error.index(), Some(0));
     assert_eq!(error.path(), Some(std::path::Path::new("/file")));
+    assert_eq!(projections.get(), 1);
 }
 
 #[test]
@@ -3769,4 +3774,45 @@ fn complete_append_ignores_overflowing_offsets_in_planning_and_short_repairs() {
         .unwrap();
     file.close().unwrap();
     assert_eq!(client.into_inner().unwrap().data, b"baseabcde");
+}
+
+#[test]
+fn mapped_io_projects_each_operand_once_on_success_and_invalid_replies() {
+    for invalid_reply in [false, true] {
+        let fs = FsClient::new(ScalarOnly {
+            data: b"abc".to_vec(),
+            wrong_result_offset: invalid_reply,
+            ..Default::default()
+        });
+        let a = fs.open("/a").unwrap();
+        let b = fs.open("/b").unwrap();
+        let reads = [a.read_request_at(0, 1), b.read_request_at(1, 1)];
+        let calls = std::cell::Cell::new(0);
+        let result = fs.vread_with_limit_projected_native(&reads, 2, |request| {
+            calls.set(calls.get() + 1);
+            fs.capabilities().unwrap();
+            request
+        });
+        assert_eq!(calls.get(), 2);
+        if invalid_reply {
+            assert_eq!(result.unwrap_err().path(), Some(std::path::Path::new("/a")));
+        } else {
+            assert_eq!(result.unwrap().len(), 2);
+        }
+        let writes = [a.write_request_at(0, b"x"), b.write_request_at(1, b"y")];
+        calls.set(0);
+        let result = fs.vwrite_mapped_native(&writes, |request| {
+            calls.set(calls.get() + 1);
+            fs.capabilities().unwrap();
+            *request
+        });
+        assert_eq!(calls.get(), 2);
+        if invalid_reply {
+            assert_eq!(result.unwrap_err().path(), Some(std::path::Path::new("/a")));
+        } else {
+            assert_eq!(result.unwrap().len(), 2);
+        }
+        a.close().unwrap();
+        b.close().unwrap();
+    }
 }

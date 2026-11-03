@@ -31,10 +31,8 @@ impl<F: HandleBackend> FsClient<F> {
         let mut projected = Vec::with_capacity(files.len());
         for (index, file) in files.iter().enumerate() {
             let file = project(file);
-            if !Arc::ptr_eq(&self.inner, &file.inner) {
-                return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput)
-                    .with_context("vfsync", &file.path));
-            }
+            self.validate_owner(file, index)
+                .map_err(|error| error.with_context("vfsync", &file.path))?;
             raw.push(
                 file.raw()
                     .map_err(|e| e.with_index(index).with_context("vfsync", &file.path))?
@@ -84,10 +82,8 @@ impl<F: HandleBackend> FsClient<F> {
             let (raw, path) = match project(target) {
                 Target::Path(path) => (FileOperand::from_os_path(path), path),
                 Target::File(file) => {
-                    if !Arc::ptr_eq(&self.inner, &file.inner) {
-                        return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput)
-                            .with_context("vstatfs", &file.path));
-                    }
+                    self.validate_owner(file, index)
+                        .map_err(|error| error.with_context("vstatfs", &file.path))?;
                     (
                         file.raw()
                             .map_err(|e| e.with_index(index).with_context("vstatfs", &file.path))?
@@ -147,10 +143,8 @@ impl<F: HandleBackend> FsClient<F> {
             let (raw, path) = match project(target) {
                 Target::Path(path) => (Target::Path(path), path),
                 Target::File(file) => {
-                    if !Arc::ptr_eq(&self.inner, &file.inner) {
-                        return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput)
-                            .with_context("vsetattrs", &file.path));
-                    }
+                    self.validate_owner(file, index)
+                        .map_err(|error| error.with_context("vsetattrs", &file.path))?;
                     (
                         Target::File(file.raw().map_err(|e| {
                             e.with_index(index).with_context("vsetattrs", &file.path)
