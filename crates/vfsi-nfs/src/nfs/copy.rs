@@ -45,6 +45,21 @@ fn server_copy_failure_allows_fallback(status: u32, active_index: usize, totals:
         && totals.iter().all(|&total| total == 0)
 }
 
+// Compare borrowed object identities, never stateids or allocation addresses.
+// A source/destination alias within one pair is handled by that pair's copier.
+fn copy_pairs_alias<'a>(pairs: impl ExactSizeIterator<Item = (&'a NfsFh, &'a NfsFh)>) -> bool {
+    if pairs.len() < 2 {
+        return false;
+    }
+    let mut seen = std::collections::HashSet::with_capacity(pairs.len().saturating_mul(2));
+    for (source, destination) in pairs {
+        if !seen.insert(source) || (source != destination && !seen.insert(destination)) {
+            return true;
+        }
+    }
+    false
+}
+
 fn open_destination_with_create_fallback<C, T>(
     client: &mut C,
     mut open: impl FnMut(&mut C, crate::client::OpenCreate) -> VfResult<T>,
@@ -212,21 +227,13 @@ impl NfsVecFs {
         // earlier OPEN of the same object, including read-only fanout. Filehandle
         // identity also catches hardlink and symlink aliases without another RPC.
         // Keep independent pairs batched; aliases must complete in caller order.
-        let aliases = (0..pairs.len()).any(|i| {
-            let source = &self.open_files[&src_tmp[i].expect("path source was opened")].fh;
-            let destination =
-                &self.open_files[&dst_tmp[i].expect("path destination was opened")].fh;
-            (i + 1..pairs.len()).any(|j| {
-                let other_source =
-                    &self.open_files[&src_tmp[j].expect("path source was opened")].fh;
-                let other_destination =
-                    &self.open_files[&dst_tmp[j].expect("path destination was opened")].fh;
-                source == other_source
-                    || source == other_destination
-                    || destination == other_source
-                    || destination == other_destination
-            })
-        });
+        let aliases =
+            copy_pairs_alias(src_tmp.iter().zip(&dst_tmp).map(|(source, destination)| {
+                (
+                    &self.open_files[&source.expect("path source was opened")].fh,
+                    &self.open_files[&destination.expect("path destination was opened")].fh,
+                )
+            }));
         if aliases {
             // Obsolete stateids can fail CLOSE. Attempt every descriptor so
             // one such error cannot skip cleanup of later independent objects.
@@ -418,6 +425,57 @@ impl NfsVecFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_alias_detection_matches_cross_pair_identity_conflicts() {
+        let handles: Vec<_> = (0u64..128)
+            .map(|value| NfsFh::test_from_bytes(value.to_be_bytes().to_vec()))
+            .collect();
+        for seed in 0usize..32 {
+            for count in 0..64 {
+                let pairs: Vec<_> = (0..count)
+                    .map(|i| {
+                        let source = (i * 17 + seed) % handles.len();
+                        let destination = (i * (seed + 1) + 7) % handles.len();
+                        (&handles[source], &handles[destination])
+                    })
+                    .collect();
+                let expected = pairs.iter().enumerate().any(|(i, (source, destination))| {
+                    pairs[i + 1..]
+                        .iter()
+                        .any(|(other_source, other_destination)| {
+                            source == other_source
+                                || source == other_destination
+                                || destination == other_source
+                                || destination == other_destination
+                        })
+                });
+                assert_eq!(copy_pairs_alias(pairs.into_iter()), expected);
+            }
+        }
+        let same_bytes = handles[0].clone();
+        assert!(!copy_pairs_alias([(&handles[0], &same_bytes)].into_iter()));
+        assert!(copy_pairs_alias(
+            [(&handles[0], &handles[1]), (&handles[2], &same_bytes),].into_iter()
+        ));
+    }
+
+    #[test]
+    fn copy_alias_detection_handles_large_independent_and_fanout_batches() {
+        let handles: Vec<_> = (0u64..8192)
+            .map(|value| NfsFh::test_from_bytes(value.to_be_bytes().to_vec()))
+            .collect();
+        assert!(!copy_pairs_alias(
+            handles
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| (&pair[0], &pair[1]))
+        ));
+        assert!(copy_pairs_alias(
+            (1..4096).map(|index| (&handles[0], &handles[index]))
+        ));
+    }
 
     #[test]
     fn failed_guarded_destination_open_closes_the_source() {
