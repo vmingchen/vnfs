@@ -1356,3 +1356,36 @@ fn client_extent_copy_preserves_safe_shifted_ranges() {
     }
     cleanup_test_tree(&root);
 }
+
+#[test]
+fn positioned_descriptor_io_preserves_cursor_and_cursor_io_advances() {
+    let Some(mut fs) = connect() else { return };
+    let root = PathBuf::from(format!(
+        "/vfsi-smb-positioned-cursor-{}",
+        std::process::id()
+    ));
+    fs.create_dir_impl(&root, 0o777).unwrap();
+    let path = root.join("file");
+    let fd = fs
+        .open_raw_impl(&path, libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o666)
+        .unwrap();
+    let operation = (|| -> VfResult<()> {
+        fs.vwrite_impl(&[WriteOp::new(&fd, VfOffset::At(0), b"abcdef".as_slice())])?;
+        fs.seek_raw_impl(&fd, 1, SeekFrom::Set)?;
+        let read = fs.vread_impl(&[ReadOp::at(fd.clone(), 4, 1)])?;
+        assert_eq!(read[0].data, b"e");
+        assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur)?, 1);
+        fs.vwrite_impl(&[WriteOp::new(&fd, VfOffset::At(4), b"X".as_slice())])?;
+        assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur)?, 1);
+        let read = fs.vread_impl(&[ReadOp::new(fd.clone(), VfOffset::Cur, 1)])?;
+        assert_eq!(read[0].data, b"b");
+        assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur)?, 2);
+        fs.vwrite_impl(&[WriteOp::new(&fd, VfOffset::Cur, b"Y".as_slice())])?;
+        assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur)?, 3);
+        Ok(())
+    })();
+    let close = fs.close_impl(&fd);
+    cleanup_test_tree(&root);
+    operation.unwrap();
+    close.unwrap();
+}

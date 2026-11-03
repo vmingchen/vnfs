@@ -1419,7 +1419,8 @@ impl SmbVecFs {
         if let Some(close) = close_result {
             close?;
         }
-        if let Some(fd) = descriptor
+        if op.offset == VfOffset::Cur
+            && let Some(fd) = descriptor
             && let Some(open) = self.open_files.get_mut(&fd)
         {
             open.cur_offset = end;
@@ -1491,7 +1492,8 @@ impl SmbVecFs {
             let write_result = self.raw_write_progress(file_id, offset, op.data(), |written| {
                 confirmed = written;
             });
-            if let Some(fd) = descriptor
+            if (append || !matches!(op.offset(), VfOffset::At(_)))
+                && let Some(fd) = descriptor
                 && let Some(open) = self.open_files.get_mut(&fd)
             {
                 open.cur_offset = checked_offset(offset, confirmed as u64, 0)?;
