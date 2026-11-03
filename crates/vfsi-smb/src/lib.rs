@@ -939,6 +939,8 @@ impl SmbVecFs {
     }
 
     fn query_size(&mut self, file_id: FileId) -> VfResult<u64> {
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::BeforeSizeQuery)?;
         use smb2::msg::query_info::{InfoType, QueryInfoRequest, QueryInfoResponse};
         let request = QueryInfoRequest {
             info_type: InfoType::File,
@@ -1482,7 +1484,11 @@ impl SmbVecFs {
             }
         };
         let result = (|| {
-            let size = self.query_size(file_id)?;
+            let size = if append || op.offset() == VfOffset::End {
+                self.query_size(file_id)?
+            } else {
+                0
+            };
             let offset = if append {
                 size
             } else {
