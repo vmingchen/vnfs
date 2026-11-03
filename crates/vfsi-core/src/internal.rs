@@ -111,7 +111,7 @@ impl<T> ManyResults<T> {
         if reported > requested {
             return Err(result_count_error(reported, requested));
         }
-        let mut values = Vec::with_capacity(requested);
+        let mut values = Vec::with_capacity(reported);
         for (index, result) in self.results.into_iter().enumerate() {
             values.push(result.map_err(|error| error.with_index(index))?);
         }
@@ -134,7 +134,7 @@ impl<T> ManyResults<T> {
     ) -> VfResult<Vec<T>> {
         let declared = self.requested;
         let reported = self.results.len();
-        let mut values = Vec::with_capacity(expected);
+        let mut values = Vec::with_capacity(expected.min(reported));
         let mut first_error = None;
 
         for (index, result) in self.results.into_iter().enumerate() {
