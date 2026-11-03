@@ -254,12 +254,19 @@ impl<F: VectorBackend> FsClient<F> {
                 return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput)
                     .with_context("vwrite_all_native", request.file().path()));
             };
-            offset
-                .checked_add(request.data().len() as u64)
-                .ok_or_else(|| {
-                    VfError::errno(index, libc::EOVERFLOW as u32)
-                        .with_context("vwrite_all_native", request.file().path())
-                })?;
+            let offset = if request.file().append && !request.data().is_empty() {
+                // Append selects EOF at execution. Its supplied position must
+                // not participate in validation or dependency arithmetic.
+                0
+            } else {
+                offset
+                    .checked_add(request.data().len() as u64)
+                    .ok_or_else(|| {
+                        VfError::errno(index, libc::EOVERFLOW as u32)
+                            .with_context("vwrite_all_native", request.file().path())
+                    })?;
+                offset
+            };
             // Reuse the offset allocation to retain the cheap borrowed request.
             prepared.push((request, offset));
             if !request.data().is_empty() {
@@ -394,10 +401,14 @@ impl<F: VectorBackend> FsClient<F> {
                         return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput)
                             .with_context("vwrite_all_native", request.file().path()));
                     };
-                    let offset = offset.checked_add(totals[index] as u64).ok_or_else(|| {
-                        VfError::errno(index, libc::EOVERFLOW as u32)
-                            .with_context("vwrite_all_native", request.file().path())
-                    })?;
+                    let offset = if request.file().append {
+                        0 // write_ops resolves fresh EOF for every continuation.
+                    } else {
+                        offset.checked_add(totals[index] as u64).ok_or_else(|| {
+                            VfError::errno(index, libc::EOVERFLOW as u32)
+                                .with_context("vwrite_all_native", request.file().path())
+                        })?
+                    };
                     Ok(FsWrite::new(
                         request.file(),
                         VfOffset::At(offset),

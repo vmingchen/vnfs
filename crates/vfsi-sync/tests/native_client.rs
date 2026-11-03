@@ -3708,3 +3708,65 @@ fn generic_path_conversion_can_reenter_namespace_operations() {
         dir.close().unwrap();
     }
 }
+
+#[test]
+fn complete_append_ignores_overflowing_offsets_in_planning_and_short_repairs() {
+    use vfsi_core::api::{WriteOp as PublicWrite, WriteOptions};
+    for offset in [u64::MAX, u64::MAX - 1] {
+        for failure in [None, Some(VfError::transport(None, "lost append reply"))] {
+            let backend = WriteBoundaryProbe {
+                append_end: Some(3),
+                append_gap: 3,
+                failure: failure.clone(),
+                failure_after: 1,
+                ..Default::default()
+            };
+            let calls = backend.calls.clone();
+            let client = FsClient::new(backend);
+            let first = client.open_options().append(true).open("/same").unwrap();
+            let alias = client.open_options().append(true).open("/same").unwrap();
+            let result = client.vwrite(
+                &[
+                    PublicWrite::at(&first, offset, b"abcde"),
+                    PublicWrite::at(&alias, offset, b"XY"),
+                ],
+                WriteOptions::new().with_write_all(true),
+            );
+            if let Some(failure) = failure {
+                let error = result.unwrap_err();
+                assert_eq!(error.transport_message(), failure.transport_message());
+                assert_eq!(error.index(), None);
+                assert_eq!(
+                    calls.lock().unwrap().len(),
+                    2,
+                    "never replay a failed append"
+                );
+            } else {
+                let values = result.unwrap();
+                assert_eq!((values[0].offset, values[0].bytes_written), (9, 5));
+                assert_eq!((values[1].offset, values[1].bytes_written), (17, 2));
+                let calls = calls.lock().unwrap();
+                assert_eq!(calls.len(), 4);
+                assert!(
+                    calls
+                        .iter()
+                        .all(|wave| wave.len() == 1 && wave[0].offset == VfOffset::End)
+                );
+            }
+        }
+    }
+    let client = FsClient::new(ScalarOnly {
+        data: b"base".to_vec(),
+        max_write_once: Some(2),
+        ..Default::default()
+    });
+    let file = client.open_options().append(true).open("/file").unwrap();
+    client
+        .vwrite(
+            &[PublicWrite::at(&file, u64::MAX, b"abcde")],
+            WriteOptions::new().with_write_all(true),
+        )
+        .unwrap();
+    file.close().unwrap();
+    assert_eq!(client.into_inner().unwrap().data, b"baseabcde");
+}
