@@ -1,0 +1,112 @@
+{
+  "added-1ms-rtt-capture-00-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "added-1ms-rtt-capture-01-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "added-1ms-rtt-capture-02-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "added-1ms-rtt-timing-00-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "added-1ms-rtt-timing-01-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "added-1ms-rtt-timing-02-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "added-1ms-rtt-timing-03-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "added-1ms-rtt-timing-04-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "added-1ms-rtt-timing-05-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "added-1ms-rtt-timing-06-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "added-1ms-rtt-warmup-00-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "native-capture-00-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "native-capture-01-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "native-capture-02-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "native-timing-00-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "native-timing-01-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "native-timing-02-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "native-timing-03-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "native-timing-04-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "native-timing-05-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "native-timing-06-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  },
+  "native-warmup-00-vfsi.stderr.gz": {
+    "entries": 13994,
+    "stderr_sha256": "7d8a8cc9d21fbd5b40954008c6d7ee634bbde0df106c11d519551df77a0501b9",
+    "diagnostics_clean": true
+  }
+}

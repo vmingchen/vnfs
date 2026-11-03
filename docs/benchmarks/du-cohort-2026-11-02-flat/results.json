@@ -1,0 +1,792 @@
+{
+  "schema_version": 1,
+  "frozen": {
+    "baseline": {
+      "schema_version": 1,
+      "name": "vnfs-0.0.27-coordinated",
+      "release_revision": "7dbee1b76d1cfc999d2d42bf1771d72759c8677e",
+      "port_repository": "https://github.com/vfsi/vfsi-port-coreutils",
+      "port_revision": "3dc073281b1465b479c4f5bd863099b446835064",
+      "cargo_lock_sha256": "4307f31edd20f848f25a8c9540e304366f6d0388f756943520f52deb752cd51e",
+      "build_args": [
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "uu_du",
+        "--features",
+        "vnfs"
+      ],
+      "packages": {
+        "vnfs": "0.0.27",
+        "vfsi-core": "0.1.14",
+        "vfsi-sync": "0.1.15",
+        "vfsi-local": "0.1.13",
+        "vfsi-posix": "0.1.5",
+        "vfsi-nfs": "0.1.14",
+        "nfsv41-sys": "0.1.14",
+        "libntirpc-sys": "0.3.3"
+      }
+    },
+    "binary_sha256": "371ac192d4101079fd3b6cf76113e1d98fbebbbf2bf02d6751edb2c7496647ba",
+    "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11) (built from a source tarball)\nbinary: rustc\ncommit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\ncommit-date: 2026-02-11\nhost: aarch64-unknown-linux-gnu\nrelease: 1.93.1\nLLVM version: 21.1.8\n",
+    "cargo": "cargo 1.93.1 (083ac5135 2025-12-15) (built from a source tarball)\n",
+    "resolved_packages": {
+      "libntirpc-sys": {
+        "version": "0.3.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "nfsv41-sys": {
+        "version": "0.1.14",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "vfsi-core": {
+        "version": "0.1.14",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "vfsi-local": {
+        "version": "0.1.13",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "vfsi-nfs": {
+        "version": "0.1.14",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "vfsi-posix": {
+        "version": "0.1.5",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "vfsi-sync": {
+        "version": "0.1.15",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "vnfs": {
+        "version": "0.0.27",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      }
+    },
+    "build_environment": {}
+  },
+  "fixture": {
+    "schema_version": 1,
+    "branches": 1,
+    "depth": 0,
+    "files_per_directory": 128,
+    "file_bytes": 128,
+    "payload_sha256": "b2169d4d0046ec4f9ea3c11ea8f2a2581c9c786b4acc3344cdf47af85974f242",
+    "identity_sha256": "878856bca639a69dfdf70486d6705f2067d0b11a4f96f578ba012dfa58d5833f",
+    "directories": 1,
+    "regular_files": 128,
+    "logical_file_bytes": 16384,
+    "allocated_bytes": 536576,
+    "symlinks": 0,
+    "hard_link_aliases": 0
+  },
+  "samples": [
+    {
+      "elapsed_ns": 10923987,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": null,
+      "library_diagnostics": "",
+      "regime": "native",
+      "phase": "warmup",
+      "pair": 0,
+      "variant": "kernel",
+      "raw": "native-warmup-00-kernel"
+    },
+    {
+      "elapsed_ns": 7637687,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": 12,
+      "library_diagnostics": "[vnfs] compounds=12 avg_ops=3.25 max_ops=6 avg_bytes=100 total_bytes=1196\n[vnfs] rpc_calls=12 avg_rpc_ms=0.37 total_rpc_ms=4.5",
+      "regime": "native",
+      "phase": "warmup",
+      "pair": 0,
+      "variant": "frozen-vfsi",
+      "raw": "native-warmup-00-frozen-vfsi"
+    },
+    {
+      "elapsed_ns": 8852273,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": 12,
+      "library_diagnostics": "[vnfs] compounds=12 avg_ops=3.25 max_ops=6 avg_bytes=100 total_bytes=1196\n[vnfs] rpc_calls=12 avg_rpc_ms=0.43 total_rpc_ms=5.2",
+      "regime": "native",
+      "phase": "warmup",
+      "pair": 0,
+      "variant": "candidate-vfsi",
+      "raw": "native-warmup-00-candidate-vfsi"
+    },
+    {
+      "elapsed_ns": 4107969,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": null,
+      "library_diagnostics": "",
+      "regime": "native",
+      "phase": "timing",
+      "pair": 0,
+      "variant": "kernel",
+      "raw": "native-timing-00-kernel"
+    },
+    {
+      "elapsed_ns": 7128061,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": 12,
+      "library_diagnostics": "[vnfs] compounds=12 avg_ops=3.25 max_ops=6 avg_bytes=100 total_bytes=1196\n[vnfs] rpc_calls=12 avg_rpc_ms=0.33 total_rpc_ms=4.0",
+      "regime": "native",
+      "phase": "timing",
+      "pair": 0,
+      "variant": "frozen-vfsi",
+      "raw": "native-timing-00-frozen-vfsi"
+    },
+    {
+      "elapsed_ns": 7799188,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": 12,
+      "library_diagnostics": "[vnfs] compounds=12 avg_ops=3.25 max_ops=6 avg_bytes=100 total_bytes=1196\n[vnfs] rpc_calls=12 avg_rpc_ms=0.40 total_rpc_ms=4.8",
+      "regime": "native",
+      "phase": "timing",
+      "pair": 0,
+      "variant": "candidate-vfsi",
+      "raw": "native-timing-00-candidate-vfsi"
+    },
+    {
+      "elapsed_ns": 3207550,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": null,
+      "library_diagnostics": "",
+      "regime": "native",
+      "phase": "timing",
+      "pair": 1,
+      "variant": "kernel",
+      "raw": "native-timing-01-kernel"
+    },
+    {
+      "elapsed_ns": 6224349,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": 12,
+      "library_diagnostics": "[vnfs] compounds=12 avg_ops=3.25 max_ops=6 avg_bytes=100 total_bytes=1196\n[vnfs] rpc_calls=12 avg_rpc_ms=0.27 total_rpc_ms=3.2",
+      "regime": "native",
+      "phase": "timing",
+      "pair": 1,
+      "variant": "candidate-vfsi",
+      "raw": "native-timing-01-candidate-vfsi"
+    },
+    {
+      "elapsed_ns": 8058147,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": 12,
+      "library_diagnostics": "[vnfs] compounds=12 avg_ops=3.25 max_ops=6 avg_bytes=100 total_bytes=1196\n[vnfs] rpc_calls=12 avg_rpc_ms=0.39 total_rpc_ms=4.6",
+      "regime": "native",
+      "phase": "timing",
+      "pair": 1,
+      "variant": "frozen-vfsi",
+      "raw": "native-timing-01-frozen-vfsi"
+    },
+    {
+      "elapsed_ns": 7700896,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": 12,
+      "library_diagnostics": "[vnfs] compounds=12 avg_ops=3.25 max_ops=6 avg_bytes=100 total_bytes=1196\n[vnfs] rpc_calls=12 avg_rpc_ms=0.41 total_rpc_ms=4.9",
+      "regime": "native",
+      "phase": "timing",
+      "pair": 2,
+      "variant": "candidate-vfsi",
+      "raw": "native-timing-02-candidate-vfsi"
+    },
+    {
+      "elapsed_ns": 3721593,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": null,
+      "library_diagnostics": "",
+      "regime": "native",
+      "phase": "timing",
+      "pair": 2,
+      "variant": "kernel",
+      "raw": "native-timing-02-kernel"
+    },
+    {
+      "elapsed_ns": 6407475,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": 12,
+      "library_diagnostics": "[vnfs] compounds=12 avg_ops=3.25 max_ops=6 avg_bytes=100 total_bytes=1196\n[vnfs] rpc_calls=12 avg_rpc_ms=0.30 total_rpc_ms=3.6",
+      "regime": "native",
+      "phase": "timing",
+      "pair": 2,
+      "variant": "frozen-vfsi",
+      "raw": "native-timing-02-frozen-vfsi"
+    },
+    {
+      "elapsed_ns": 4032844,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": null,
+      "library_diagnostics": "",
+      "wire": {
+        "rpc_calls": 5,
+        "unique_rpc_calls": 5,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 5
+        },
+        "request_opcodes": {
+          "53": 5,
+          "22": 5,
+          "3": 2,
+          "9": 4,
+          "15": 1,
+          "10": 1,
+          "26": 1
+        },
+        "pcap_sha256": "826643250b097e3310776e9cf658eea3f9f7cc2e42783377664af972fb7bc513"
+      },
+      "regime": "native",
+      "phase": "capture",
+      "pair": 0,
+      "variant": "kernel",
+      "raw": "native-capture-00-kernel"
+    },
+    {
+      "elapsed_ns": 7650770,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": 12,
+      "library_diagnostics": "[vnfs] compounds=12 avg_ops=3.25 max_ops=6 avg_bytes=100 total_bytes=1196\n[vnfs] rpc_calls=12 avg_rpc_ms=0.36 total_rpc_ms=4.4",
+      "wire": {
+        "rpc_calls": 14,
+        "unique_rpc_calls": 14,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 14
+        },
+        "request_opcodes": {
+          "53": 10,
+          "22": 4,
+          "3": 1,
+          "9": 6,
+          "15": 9,
+          "10": 3,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 5,
+          "32": 4,
+          "26": 1,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "db166bd4d81c9b87ac42e58a30148a4946087bca7790164ae41a051d39033cd6"
+      },
+      "regime": "native",
+      "phase": "capture",
+      "pair": 0,
+      "variant": "frozen-vfsi",
+      "raw": "native-capture-00-frozen-vfsi"
+    },
+    {
+      "elapsed_ns": 7201519,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": 12,
+      "library_diagnostics": "[vnfs] compounds=12 avg_ops=3.25 max_ops=6 avg_bytes=100 total_bytes=1196\n[vnfs] rpc_calls=12 avg_rpc_ms=0.33 total_rpc_ms=3.9",
+      "wire": {
+        "rpc_calls": 14,
+        "unique_rpc_calls": 14,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 14
+        },
+        "request_opcodes": {
+          "53": 10,
+          "22": 4,
+          "3": 1,
+          "9": 6,
+          "15": 9,
+          "10": 3,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 5,
+          "32": 4,
+          "26": 1,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "a026858f4ba9a8889f26f1e285058b968d78f8870ffd35742fefc85a10f9d3c9"
+      },
+      "regime": "native",
+      "phase": "capture",
+      "pair": 0,
+      "variant": "candidate-vfsi",
+      "raw": "native-capture-00-candidate-vfsi"
+    },
+    {
+      "elapsed_ns": 10031193,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": null,
+      "library_diagnostics": "",
+      "regime": "added-1ms-rtt",
+      "phase": "warmup",
+      "pair": 0,
+      "variant": "kernel",
+      "raw": "added-1ms-rtt-warmup-00-kernel"
+    },
+    {
+      "elapsed_ns": 22671101,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": 12,
+      "library_diagnostics": "[vnfs] compounds=12 avg_ops=3.25 max_ops=6 avg_bytes=100 total_bytes=1196\n[vnfs] rpc_calls=12 avg_rpc_ms=1.38 total_rpc_ms=16.6",
+      "regime": "added-1ms-rtt",
+      "phase": "warmup",
+      "pair": 0,
+      "variant": "frozen-vfsi",
+      "raw": "added-1ms-rtt-warmup-00-frozen-vfsi"
+    },
+    {
+      "elapsed_ns": 21396057,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": 12,
+      "library_diagnostics": "[vnfs] compounds=12 avg_ops=3.25 max_ops=6 avg_bytes=100 total_bytes=1196\n[vnfs] rpc_calls=12 avg_rpc_ms=1.25 total_rpc_ms=15.0",
+      "regime": "added-1ms-rtt",
+      "phase": "warmup",
+      "pair": 0,
+      "variant": "candidate-vfsi",
+      "raw": "added-1ms-rtt-warmup-00-candidate-vfsi"
+    },
+    {
+      "elapsed_ns": 9210775,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": null,
+      "library_diagnostics": "",
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 0,
+      "variant": "kernel",
+      "raw": "added-1ms-rtt-timing-00-kernel"
+    },
+    {
+      "elapsed_ns": 21285182,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": 12,
+      "library_diagnostics": "[vnfs] compounds=12 avg_ops=3.25 max_ops=6 avg_bytes=100 total_bytes=1196\n[vnfs] rpc_calls=12 avg_rpc_ms=1.26 total_rpc_ms=15.1",
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 0,
+      "variant": "frozen-vfsi",
+      "raw": "added-1ms-rtt-timing-00-frozen-vfsi"
+    },
+    {
+      "elapsed_ns": 23806105,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": 12,
+      "library_diagnostics": "[vnfs] compounds=12 avg_ops=3.25 max_ops=6 avg_bytes=100 total_bytes=1196\n[vnfs] rpc_calls=12 avg_rpc_ms=1.45 total_rpc_ms=17.4",
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 0,
+      "variant": "candidate-vfsi",
+      "raw": "added-1ms-rtt-timing-00-candidate-vfsi"
+    },
+    {
+      "elapsed_ns": 10356778,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": null,
+      "library_diagnostics": "",
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 1,
+      "variant": "kernel",
+      "raw": "added-1ms-rtt-timing-01-kernel"
+    },
+    {
+      "elapsed_ns": 21487265,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": 12,
+      "library_diagnostics": "[vnfs] compounds=12 avg_ops=3.25 max_ops=6 avg_bytes=100 total_bytes=1196\n[vnfs] rpc_calls=12 avg_rpc_ms=1.29 total_rpc_ms=15.5",
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 1,
+      "variant": "candidate-vfsi",
+      "raw": "added-1ms-rtt-timing-01-candidate-vfsi"
+    },
+    {
+      "elapsed_ns": 23482729,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": 12,
+      "library_diagnostics": "[vnfs] compounds=12 avg_ops=3.25 max_ops=6 avg_bytes=100 total_bytes=1196\n[vnfs] rpc_calls=12 avg_rpc_ms=1.44 total_rpc_ms=17.3",
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 1,
+      "variant": "frozen-vfsi",
+      "raw": "added-1ms-rtt-timing-01-frozen-vfsi"
+    },
+    {
+      "elapsed_ns": 22294809,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": 12,
+      "library_diagnostics": "[vnfs] compounds=12 avg_ops=3.25 max_ops=6 avg_bytes=100 total_bytes=1196\n[vnfs] rpc_calls=12 avg_rpc_ms=1.35 total_rpc_ms=16.2",
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 2,
+      "variant": "candidate-vfsi",
+      "raw": "added-1ms-rtt-timing-02-candidate-vfsi"
+    },
+    {
+      "elapsed_ns": 9841652,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": null,
+      "library_diagnostics": "",
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 2,
+      "variant": "kernel",
+      "raw": "added-1ms-rtt-timing-02-kernel"
+    },
+    {
+      "elapsed_ns": 20801847,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": 12,
+      "library_diagnostics": "[vnfs] compounds=12 avg_ops=3.25 max_ops=6 avg_bytes=100 total_bytes=1196\n[vnfs] rpc_calls=12 avg_rpc_ms=1.24 total_rpc_ms=14.9",
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 2,
+      "variant": "frozen-vfsi",
+      "raw": "added-1ms-rtt-timing-02-frozen-vfsi"
+    },
+    {
+      "elapsed_ns": 10186527,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": null,
+      "library_diagnostics": "",
+      "wire": {
+        "rpc_calls": 5,
+        "unique_rpc_calls": 5,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 5
+        },
+        "request_opcodes": {
+          "53": 5,
+          "22": 5,
+          "3": 2,
+          "9": 4,
+          "15": 1,
+          "10": 1,
+          "26": 1
+        },
+        "pcap_sha256": "5afaa8bd887d58c88f77f532fc5b7557f467c95f76f4b132ebd278e64cc4b230"
+      },
+      "regime": "added-1ms-rtt",
+      "phase": "capture",
+      "pair": 0,
+      "variant": "kernel",
+      "raw": "added-1ms-rtt-capture-00-kernel"
+    },
+    {
+      "elapsed_ns": 23810272,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": 12,
+      "library_diagnostics": "[vnfs] compounds=12 avg_ops=3.25 max_ops=6 avg_bytes=100 total_bytes=1196\n[vnfs] rpc_calls=12 avg_rpc_ms=1.45 total_rpc_ms=17.4",
+      "wire": {
+        "rpc_calls": 14,
+        "unique_rpc_calls": 14,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 14
+        },
+        "request_opcodes": {
+          "53": 10,
+          "22": 4,
+          "3": 1,
+          "9": 6,
+          "15": 9,
+          "10": 3,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 5,
+          "32": 4,
+          "26": 1,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "d66faed90049774890d90ab9b2f87f6320a26e2332f2bc6ec1b5a5e3f05a480f"
+      },
+      "regime": "added-1ms-rtt",
+      "phase": "capture",
+      "pair": 0,
+      "variant": "frozen-vfsi",
+      "raw": "added-1ms-rtt-capture-00-frozen-vfsi"
+    },
+    {
+      "elapsed_ns": 22841061,
+      "stdout_lines": 129,
+      "stdout_sorted_sha256": "2b94d126ee1183714ad275009ca3cb219e49457608e8c7fb4c3297eda603576d",
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "library_rpc_calls": 12,
+      "library_diagnostics": "[vnfs] compounds=12 avg_ops=3.25 max_ops=6 avg_bytes=100 total_bytes=1196\n[vnfs] rpc_calls=12 avg_rpc_ms=1.39 total_rpc_ms=16.6",
+      "wire": {
+        "rpc_calls": 14,
+        "unique_rpc_calls": 14,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 14
+        },
+        "request_opcodes": {
+          "53": 10,
+          "22": 4,
+          "3": 1,
+          "9": 6,
+          "15": 9,
+          "10": 3,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 5,
+          "32": 4,
+          "26": 1,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "d348a1174ceac5ed79acbfc4e9e5dfc5cc70d7f353206853ddd8020053251b68"
+      },
+      "regime": "added-1ms-rtt",
+      "phase": "capture",
+      "pair": 0,
+      "variant": "candidate-vfsi",
+      "raw": "added-1ms-rtt-capture-00-candidate-vfsi"
+    }
+  ],
+  "regimes": {
+    "native": {
+      "added_one_way_us": 0,
+      "ping_rtt_median_ms": 0.066,
+      "ping_raw": "PING 169.254.241.1 (169.254.241.1) 56(84) bytes of data.\n64 bytes from 169.254.241.1: icmp_seq=1 ttl=64 time=0.380 ms\n64 bytes from 169.254.241.1: icmp_seq=2 ttl=64 time=0.009 ms\n64 bytes from 169.254.241.1: icmp_seq=3 ttl=64 time=0.053 ms\n64 bytes from 169.254.241.1: icmp_seq=4 ttl=64 time=0.073 ms\n64 bytes from 169.254.241.1: icmp_seq=5 ttl=64 time=0.066 ms\n64 bytes from 169.254.241.1: icmp_seq=6 ttl=64 time=0.072 ms\n64 bytes from 169.254.241.1: icmp_seq=7 ttl=64 time=0.062 ms\n64 bytes from 169.254.241.1: icmp_seq=8 ttl=64 time=0.068 ms\n64 bytes from 169.254.241.1: icmp_seq=9 ttl=64 time=0.059 ms\n\n--- 169.254.241.1 ping statistics ---\n9 packets transmitted, 9 received, 0% packet loss, time 949ms\nrtt min/avg/max/mdev = 0.009/0.093/0.380/0.102 ms\n",
+      "host_qdisc": [
+        {
+          "kind": "noqueue",
+          "handle": "0:",
+          "root": true,
+          "refcnt": 2,
+          "options": {},
+          "bytes": 0,
+          "packets": 0,
+          "drops": 0,
+          "overlimits": 0,
+          "requeues": 0,
+          "backlog": 0,
+          "qlen": 0
+        }
+      ],
+      "client_qdisc": [
+        {
+          "kind": "noqueue",
+          "handle": "0:",
+          "root": true,
+          "refcnt": 2,
+          "options": {},
+          "bytes": 0,
+          "packets": 0,
+          "drops": 0,
+          "overlimits": 0,
+          "requeues": 0,
+          "backlog": 0,
+          "qlen": 0
+        }
+      ]
+    },
+    "added-1ms-rtt": {
+      "added_one_way_us": 500,
+      "ping_rtt_median_ms": 1.14,
+      "ping_raw": "PING 169.254.241.1 (169.254.241.1) 56(84) bytes of data.\n64 bytes from 169.254.241.1: icmp_seq=1 ttl=64 time=1.12 ms\n64 bytes from 169.254.241.1: icmp_seq=2 ttl=64 time=1.09 ms\n64 bytes from 169.254.241.1: icmp_seq=3 ttl=64 time=1.04 ms\n64 bytes from 169.254.241.1: icmp_seq=4 ttl=64 time=1.16 ms\n64 bytes from 169.254.241.1: icmp_seq=5 ttl=64 time=1.12 ms\n64 bytes from 169.254.241.1: icmp_seq=6 ttl=64 time=1.14 ms\n64 bytes from 169.254.241.1: icmp_seq=7 ttl=64 time=1.17 ms\n64 bytes from 169.254.241.1: icmp_seq=8 ttl=64 time=1.57 ms\n64 bytes from 169.254.241.1: icmp_seq=9 ttl=64 time=1.14 ms\n\n--- 169.254.241.1 ping statistics ---\n9 packets transmitted, 9 received, 0% packet loss, time 939ms\nrtt min/avg/max/mdev = 1.035/1.173/1.572/0.146 ms\n",
+      "host_qdisc": [
+        {
+          "kind": "netem",
+          "handle": "802f:",
+          "root": true,
+          "refcnt": 5,
+          "options": {
+            "limit": 1000,
+            "delay": {
+              "delay": 0.0005,
+              "jitter": 0,
+              "correlation": 0
+            },
+            "seed": 6145640517499834269,
+            "ecn": false,
+            "gap": 0
+          },
+          "bytes": 882,
+          "packets": 9,
+          "drops": 0,
+          "overlimits": 0,
+          "requeues": 0,
+          "backlog": 0,
+          "qlen": 0
+        }
+      ],
+      "client_qdisc": [
+        {
+          "kind": "netem",
+          "handle": "8030:",
+          "root": true,
+          "refcnt": 5,
+          "options": {
+            "limit": 1000,
+            "delay": {
+              "delay": 0.0005,
+              "jitter": 0,
+              "correlation": 0
+            },
+            "seed": 12284227154831256396,
+            "ecn": false,
+            "gap": 0
+          },
+          "bytes": 882,
+          "packets": 9,
+          "drops": 0,
+          "overlimits": 0,
+          "requeues": 0,
+          "backlog": 0,
+          "qlen": 0
+        }
+      ]
+    }
+  },
+  "candidate": {
+    "binary_sha256": "21f8449ff9c3cb8726bef2f168595682a3abc10d0bb31c8c545c7c97695d2f0c",
+    "build": {
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "uu_du",
+        "--features",
+        "vnfs",
+        "--message-format=json-render-diagnostics"
+      ],
+      "executable": "/home/ubuntu/vfsi-du-candidate/target/release/du",
+      "binary_sha256": "21f8449ff9c3cb8726bef2f168595682a3abc10d0bb31c8c545c7c97695d2f0c",
+      "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11) (built from a source tarball)\nbinary: rustc\ncommit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\ncommit-date: 2026-02-11\nhost: aarch64-unknown-linux-gnu\nrelease: 1.93.1\nLLVM version: 21.1.8\n",
+      "cargo": "cargo 1.93.1 (083ac5135 2025-12-15) (built from a source tarball)\n"
+    },
+    "port_head": "4627c5600daeb9c135be77a1ad69c1d19fddd35c",
+    "library_head": "5341bf9abd5e0f5217bfb3623b099b0401982713",
+    "port_patch_sha256": "b9e97a246e96073fb46bc29982f28da38e66144b7342e51879b0f460a83126fb",
+    "library_patch_sha256": "a9753c92cbc11b8b6778e52cc15820a6d2a6793f849b68681736ef24108745c0",
+    "lock_sha256": "fe0e14e6a9f5a28e64d89fcd3f8edc182d7a835347eb3c4cc959cfe94f55b572"
+  },
+  "output_parity": true,
+  "post_order": true,
+  "summary": [
+    {
+      "regime": "native",
+      "variant": "kernel",
+      "median_wall_ms": 3.721593,
+      "median_rpc_calls": 5,
+      "rpc_min": 5,
+      "rpc_max": 5
+    },
+    {
+      "regime": "native",
+      "variant": "frozen-vfsi",
+      "median_wall_ms": 7.128061,
+      "median_rpc_calls": 14,
+      "rpc_min": 14,
+      "rpc_max": 14
+    },
+    {
+      "regime": "native",
+      "variant": "candidate-vfsi",
+      "median_wall_ms": 7.700896,
+      "median_rpc_calls": 14,
+      "rpc_min": 14,
+      "rpc_max": 14
+    },
+    {
+      "regime": "added-1ms-rtt",
+      "variant": "kernel",
+      "median_wall_ms": 9.841652,
+      "median_rpc_calls": 5,
+      "rpc_min": 5,
+      "rpc_max": 5
+    },
+    {
+      "regime": "added-1ms-rtt",
+      "variant": "frozen-vfsi",
+      "median_wall_ms": 21.285182,
+      "median_rpc_calls": 14,
+      "rpc_min": 14,
+      "rpc_max": 14
+    },
+    {
+      "regime": "added-1ms-rtt",
+      "variant": "candidate-vfsi",
+      "median_wall_ms": 22.294809,
+      "median_rpc_calls": 14,
+      "rpc_min": 14,
+      "rpc_max": 14
+    }
+  ]
+}

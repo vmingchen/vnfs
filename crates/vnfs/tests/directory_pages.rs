@@ -508,3 +508,25 @@ fn recursive_paged_walk_rejects_swapped_ancestors() {
         }
     }
 }
+
+#[test]
+fn shared_pruning_contract_on_posix_and_auto() {
+    if vfsi_sync::test_support::supervise_with_deadline("shared_pruning_contract_on_posix_and_auto")
+    {
+        return;
+    }
+    for auto in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = Posix::new(root.path()).unwrap();
+        if auto {
+            vfsi_sync::test_support::run_pruning_suite(
+                &vnfs::mounted::Auto::new(root.path()).unwrap(),
+                &fixture,
+                "/pruning",
+                true,
+            );
+        } else {
+            vfsi_sync::test_support::run_pruning_suite(&fixture, &fixture, "/pruning", true);
+        }
+    }
+}

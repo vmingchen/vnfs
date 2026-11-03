@@ -1424,3 +1424,13 @@ fn optional_operation_capabilities_match_local_and_routed_dispatch() {
         );
     }
 }
+
+#[test]
+fn shared_pruning_contract_on_dummy() {
+    if vfsi_sync::test_support::supervise_with_deadline("shared_pruning_contract_on_dummy") {
+        return;
+    }
+    let (_root, backend) = dummy();
+    let fs = FsClient::new(backend);
+    common::run_pruning_suite(&fs, &fs, "/pruning", true);
+}

@@ -1,0 +1,5 @@
+   Compiling vfsi-nfs v0.1.16 (/home/ubuntu/vnfs/crates/vfsi-nfs)
+   Compiling vnfs v0.0.28 (/home/ubuntu/vnfs/crates/vnfs)
+   Compiling uucore v0.13.0 (/home/ubuntu/vfsi-du-candidate/src/uucore)
+   Compiling uu_du v0.13.0 (/home/ubuntu/vfsi-du-candidate/src/uu/du)
+    Finished `release` profile [optimized] target(s) in 29.12s

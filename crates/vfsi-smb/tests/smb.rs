@@ -1356,3 +1356,15 @@ fn client_extent_copy_preserves_safe_shifted_ranges() {
     }
     cleanup_test_tree(&root);
 }
+
+#[test]
+fn shared_pruning_contract_on_smb() {
+    if vfsi_sync::test_support::supervise_with_deadline("shared_pruning_contract_on_smb") {
+        return;
+    }
+    let Some(backend) = connect() else { return };
+    let base = format!("/pruning-contract-{}", std::process::id());
+    let fs = FsClient::new(backend);
+    common::run_pruning_suite(&fs, &fs, &base, false);
+    cleanup_test_tree(Path::new(&base));
+}

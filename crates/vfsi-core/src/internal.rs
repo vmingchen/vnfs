@@ -205,6 +205,7 @@ pub mod faults {
         BeforeCloseDispatch { index: usize },
         AfterWriteChunk { chunk: usize },
         BeforeReadRepair { index: usize },
+        BeforeDirectoryPage { continuation: bool },
         BeforeFollowSymlink { index: usize },
         BeforeSetPermissions { index: usize },
         AfterNoFollowSetattrTypeCheck { index: usize },

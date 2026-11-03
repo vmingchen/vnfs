@@ -20,6 +20,8 @@ with the [Rust crate guides](../crates/vnfs/src/guides) and compiled into rustdo
 
 | Record | Scope |
 |---|---|
+| [Prunable traversal release candidate](traversal-release-candidate.md) | November 2 conformance coverage, directory-cohort tuning, release gates and raw benchmark links. |
+| [Frozen rsync sender-scan baseline](rsync-benchmark.md) | vnfs 0.0.28/vfsi-c 0.3.12; output parity, fallback checks, actual RPC counts and the slower released scan path. |
 | [Frozen du traversal baseline](du-benchmark.md) | vnfs 0.0.27; kernel/VFSI output parity, paired timings, actual RPC captures, and controlled delay on one metadata-heavy NFS tree. |
 | [Rust performance notes and audits](RUST_PERFORMANCE.md) | Current implementation notes, dated allocation/scheduler audits, and follow-up candidates. |
 | [io_uring versus POSIX](uring-benchmark.md) | October 10–11, 2026 experiments; distinguish borrowed/owned reads and ring/adaptive execution. |

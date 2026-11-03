@@ -493,7 +493,11 @@ impl VectorBackend for NfsVecFs {
     }
 
     fn directory_page_batch_size(&self) -> usize {
-        32
+        // Bound speculative siblings, not the negotiated protocol maximum.
+        // Anchored descent uses four ops per child plus SEQUENCE. A 24-child
+        // cohort stays below 100 ops even after adaptive growth, while larger
+        // cohorts repeatedly probe that boundary on metadata-heavy trees.
+        24
     }
 
     fn vlistdir_pages_impl(
@@ -523,6 +527,10 @@ impl VectorBackend for NfsVecFs {
                 )
             });
         }
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::BeforeDirectoryPage {
+            continuation: cursors.iter().any(Option::is_some),
+        })?;
         let fresh: Vec<usize> = cursors
             .iter()
             .enumerate()

@@ -227,7 +227,8 @@ maturity, required ABI, and compatibility-test entry point. Platform CI must
 never build an unpinned external branch.
 
 Fast platform CI validates the registry and public API compatibility. The
-scheduled/manually dispatched [Port compatibility workflow](../.github/workflows/ports.yml)
+[Port compatibility workflow](../.github/workflows/ports.yml), triggered by relevant
+main pushes and pull requests as well as schedule and manual dispatch,
 derives its matrix from every registered application port: Git, rsync, coreutils,
 and findutils. It fetches the exact committed revisions into disposable checkouts.
 Git and rsync build against this checkout's C SDK and run their parity scripts.
@@ -236,6 +237,7 @@ and run integration unit tests and feature-enabled application builds; findutils
 also compares CLI results against its ordinary traversal. This local/POSIX
 coverage does not establish live NFS or SMB behavior. The registry separately
 pins Ganesha infrastructure, which is not an application-matrix entry.
+The workflow also checks a frozen ABI-v3 old client and optional-symbol loading.
 Local runners and live coverage are documented in [scripts/README.md](../scripts/README.md).
 
 ABI changes require the registered C ports to pass or explicitly move to a new
@@ -277,7 +279,12 @@ build costs; it is historical telemetry, not a release procedure or a speed
 guarantee.
 
 The `Promote VFSI mirror` workflow requires an explicit canonical commit and a
-successful canonical-main push CI run for that exact commit. It runs only in
+successful canonical-main push CI run **and** a successful four-port workflow
+for that exact commit. The latest eligible run of each workflow must be complete
+and green; an older success cannot hide a newer failure or pending run. Docs-only
+commits need a manual port-workflow dispatch when path filters do not trigger it.
+`python3 ci/check-promotion.py COMMIT` checks readiness without writing the mirror.
+The workflow runs only in
 the canonical repository and uses the `vfsi-publish` environment's
 `VFSI_MIRROR_SSH_KEY`: an SSH write deploy key restricted to `vfsi/vfsi`.
 Checkout credentials are not persisted; missing keys fail explicitly. Configure

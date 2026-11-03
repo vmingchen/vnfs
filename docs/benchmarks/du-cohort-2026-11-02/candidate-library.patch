@@ -1,0 +1,349 @@
+diff --git a/crates/vfsi-nfs/src/nfs/vector_backend.rs b/crates/vfsi-nfs/src/nfs/vector_backend.rs
+index e98aedb..ef14a3c 100644
+--- a/crates/vfsi-nfs/src/nfs/vector_backend.rs
++++ b/crates/vfsi-nfs/src/nfs/vector_backend.rs
+@@ -493,7 +493,11 @@ impl VectorBackend for NfsVecFs {
+     }
+ 
+     fn directory_page_batch_size(&self) -> usize {
+-        32
++        // Bound speculative siblings, not the negotiated protocol maximum.
++        // Anchored descent uses four ops per child plus SEQUENCE. A 24-child
++        // cohort stays below 100 ops even after adaptive growth, while larger
++        // cohorts repeatedly probe that boundary on metadata-heavy trees.
++        24
+     }
+ 
+     fn vlistdir_pages_impl(
+diff --git a/crates/vfsi-nfs/tests/nfs.rs b/crates/vfsi-nfs/tests/nfs.rs
+index f1cf940..7516c39 100644
+--- a/crates/vfsi-nfs/tests/nfs.rs
++++ b/crates/vfsi-nfs/tests/nfs.rs
+@@ -1736,3 +1736,65 @@ fn reconnect_restores_independent_opens_after_rename() {
+     fs.vremove_impl(&[FileOperand::from_path(&renamed)])
+         .unwrap();
+ }
++
++#[test]
++fn shared_pruning_contract_on_nfs() {
++    let Some(backend) = connect() else { return };
++    let fs = vfsi_sync::FsClient::new(backend);
++    let base = format!("/pruning-contract-{}", std::process::id());
++    test_support::run_pruning_suite(&fs, &base, true);
++    fs.remove_dir_all(&base).unwrap();
++}
++
++#[cfg(feature = "test-faults")]
++#[test]
++fn paged_traversal_callbacks_are_not_replayed_during_initial_reconnect() {
++    use vfsi_core::api::ListDirControl;
++    let Some(mut backend) = connect() else { return };
++    let root = format!("/pruning-reconnect-{}", std::process::id());
++    backend
++        .ensure_dir_impl(Path::new(&format!("{root}/target/child")), 0o777)
++        .unwrap();
++    backend
++        .vsymlink_impl(
++            &[Path::new("target")],
++            &[Path::new(&format!("{root}/link"))],
++        )
++        .unwrap();
++    backend.set_auto_reconnect(true);
++    let fault = Arc::new(FaultScript::one(
++        OpenFaultPoint::BeforeFollowSymlink { index: 1 },
++        VfError::transport_with_kind(
++            None,
++            vfsi_core::TransportKind::Connection,
++            "initial traversal connection lost",
++        ),
++    ));
++    backend.set_fault_injector(fault.clone());
++    let fs = FsClient::new(backend);
++    let paths = [format!("{root}/target"), format!("{root}/link")];
++    let mut calls = [0; 2];
++    let done = fs
++        .vlistdirs(&paths, ListDirOptions::new(), |index, page| {
++            calls[index] += 1;
++            assert_eq!(page.entries.len(), 1);
++            Ok(ListDirControl::Continue)
++        })
++        .unwrap();
++    assert_eq!(done, [TraversalCompletion::Complete; 2]);
++    assert_eq!(
++        calls,
++        [1, 1],
++        "each root callback runs once, after successful recovery"
++    );
++    assert!(fault.is_consumed());
++    assert_eq!(
++        fault
++            .visited()
++            .iter()
++            .filter(|p| matches!(p, OpenFaultPoint::BeforeFollowSymlink { index: 1 }))
++            .count(),
++        2
++    );
++    fs.remove_dir_all(&root).unwrap();
++}
+diff --git a/crates/vfsi-smb/tests/smb.rs b/crates/vfsi-smb/tests/smb.rs
+index 241fbd1..e466da3 100644
+--- a/crates/vfsi-smb/tests/smb.rs
++++ b/crates/vfsi-smb/tests/smb.rs
+@@ -1356,3 +1356,12 @@ fn client_extent_copy_preserves_safe_shifted_ranges() {
+     }
+     cleanup_test_tree(&root);
+ }
++
++#[test]
++fn shared_pruning_contract_on_smb() {
++    let Some(backend) = connect() else { return };
++    let base = format!("/pruning-contract-{}", std::process::id());
++    let fs = FsClient::new(backend);
++    common::run_pruning_suite(&fs, &base, false);
++    cleanup_test_tree(Path::new(&base));
++}
+diff --git a/crates/vfsi-sync/src/test_support.rs b/crates/vfsi-sync/src/test_support.rs
+index 02882a9..3496ac2 100644
+--- a/crates/vfsi-sync/src/test_support.rs
++++ b/crates/vfsi-sync/src/test_support.rs
+@@ -773,3 +773,161 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
+         assert!(fs.exists_impl(Path::new(&dir)).unwrap());
+     }
+ }
++
++/// Shared page-admission conformance for local, mount-routed and network clients.
++/// SMB's legacy snapshot listing cannot enforce no-follow descendant lookup;
++/// `recursive_supported = false` asserts that limitation instead of bypassing it.
++pub fn run_pruning_suite(fs: &impl Vfsi, base: &str, recursive_supported: bool) {
++    use crate::api::{DepthLimit, ListDirControl, MkDirOp};
++    use std::collections::HashSet;
++    fs.create_dir(base).unwrap();
++    let roots = [format!("{base}/a"), format!("{base}/b")];
++    for root in &roots {
++        fs.create_dir(root).unwrap();
++    }
++    let children: Vec<_> = (0..270)
++        .map(|i| PathBuf::from(format!("{}/d{i:03}", roots[0])))
++        .collect();
++    fs.vmkdir(
++        &children
++            .iter()
++            .map(|path| MkDirOp::new(path, 0o777))
++            .collect::<Vec<_>>(),
++    )
++    .unwrap();
++    fs.write(format!("{}/file", roots[1]), b"x").unwrap();
++    let options = ListDirOptions::new();
++    let mut counts = [0; 2];
++    let mut pages = 0;
++    let done = fs
++        .vlistdirs(&roots, options, |index, page| {
++            assert_eq!(page.path, Path::new(&roots[index]));
++            counts[index] += page.entries.len();
++            pages += 1;
++            // Callbacks are unlocked; nested metadata must not deadlock.
++            assert!(fs.attrs(&page.path)?.is_dir());
++            Ok(ListDirControl::Continue)
++        })
++        .unwrap();
++    assert_eq!(done, [TraversalCompletion::Complete; 2]);
++    assert_eq!(counts, [270, 1]);
++    assert!(pages >= 4, "fixture must cross directory page boundaries");
++    for policy in [
++        options.with_max_entries(270),
++        options.with_max_path_bytes(children.iter().map(|p| p.as_os_str().len()).sum()),
++    ] {
++        let mut delivered_entries = 0;
++        let mut delivered_bytes = 0;
++        let error = fs
++            .vlistdirs(&roots, policy, |_, page| {
++                delivered_entries += page.entries.len();
++                delivered_bytes += page
++                    .entries
++                    .iter()
++                    .map(|e| e.path().as_os_str().len())
++                    .sum::<usize>();
++                Ok(ListDirControl::Continue)
++            })
++            .unwrap_err();
++        // Backends can interleave root pages differently. The error must
++        // identify the root of the rejected entry, not an assumed fetch order.
++        let owner = error.index().expect("budget error retains root index");
++        assert!(owner < roots.len());
++        assert!(error.path().unwrap().starts_with(&roots[owner]));
++        assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge);
++        assert!(delivered_entries <= 270);
++        if policy.max_entries().is_some() {
++            assert_eq!(delivered_entries, 270);
++        }
++        if let Some(max) = policy.max_path_bytes() {
++            assert!(delivered_bytes <= max);
++        }
++    }
++    for fail in [false, true] {
++        let mut calls = 0;
++        let result = fs.vlistdirs(
++            &roots,
++            options.with_recursive(recursive_supported),
++            |_, _| {
++                calls += 1;
++                if fail {
++                    Err(VfError::errno(17, libc::ECANCELED as u32))
++                } else {
++                    Ok(ListDirControl::Stop)
++                }
++            },
++        );
++        assert_eq!(
++            calls, 1,
++            "no callback replay or later root after stop/error"
++        );
++        if fail {
++            let error = result.unwrap_err();
++            assert_eq!(error.index(), Some(0));
++            assert_eq!(error.raw_code(), libc::ECANCELED as u32);
++        } else {
++            assert_eq!(result.unwrap(), [TraversalCompletion::Stopped]);
++        }
++    }
++    if !recursive_supported {
++        let error = fs
++            .vlistdirs(&roots, options.with_recursive(true), |_, _| {
++                panic!("unsupported recursive safety contract must fail before callbacks");
++                #[allow(unreachable_code)]
++                Ok(ListDirControl::Continue)
++            })
++            .unwrap_err();
++        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
++        return;
++    }
++    // Pruning on *every* page precedes the depth check and all child I/O,
++    // even on backends which cannot safely reopen a child directory.
++    fs.vlistdirs(
++        &roots[..1],
++        options
++            .with_recursive(true)
++            .with_max_depth(DepthLimit::new(0).unwrap()),
++        |_, page| {
++            assert_eq!(page.path, Path::new(&roots[0]));
++            Ok(ListDirControl::Prune(
++                page.entries
++                    .iter()
++                    .map(|e| e.path().to_path_buf())
++                    .collect(),
++            ))
++        },
++    )
++    .unwrap();
++    let mut admitted = HashSet::new();
++    let mut pruned = HashSet::new();
++    let mut visited = HashSet::new();
++    let result = fs.vlistdirs(&roots[..1], options.with_recursive(true), |_, page| {
++        visited.insert(page.path.clone());
++        let mut excluded = Vec::new();
++        for entry in page.entries {
++            if entry
++                .file_name()
++                .unwrap()
++                .as_encoded_bytes()
++                .last()
++                .unwrap()
++                % 2
++                == 0
++            {
++                pruned.insert(entry.path().to_path_buf());
++                excluded.push(entry.path().to_path_buf());
++            } else {
++                admitted.insert(entry.path().to_path_buf());
++            }
++        }
++        Ok(ListDirControl::Prune(excluded))
++    });
++    assert_eq!(result.unwrap(), [TraversalCompletion::Complete]);
++    assert!(!admitted.is_empty() && !pruned.is_empty());
++    assert!(pruned.is_disjoint(&visited));
++    admitted.insert(PathBuf::from(&roots[0]));
++    assert_eq!(
++        visited, admitted,
++        "visit exactly the admitted directory set"
++    );
++}
+diff --git a/crates/vnfs/tests/directory_pages.rs b/crates/vnfs/tests/directory_pages.rs
+index f8a07b7..b32ff18 100644
+--- a/crates/vnfs/tests/directory_pages.rs
++++ b/crates/vnfs/tests/directory_pages.rs
+@@ -508,3 +508,23 @@ fn recursive_paged_walk_rejects_swapped_ancestors() {
+         }
+     }
+ }
++
++#[test]
++fn shared_pruning_contract_on_posix_and_auto() {
++    for auto in [false, true] {
++        let root = tempfile::tempdir().unwrap();
++        if auto {
++            vfsi_sync::test_support::run_pruning_suite(
++                &vnfs::mounted::Auto::new(root.path()).unwrap(),
++                "/pruning",
++                true,
++            );
++        } else {
++            vfsi_sync::test_support::run_pruning_suite(
++                &Posix::new(root.path()).unwrap(),
++                "/pruning",
++                true,
++            );
++        }
++    }
++}
+diff --git a/crates/vnfs/tests/nfs.rs b/crates/vnfs/tests/nfs.rs
+index b2f4ce6..2a34b42 100644
+--- a/crates/vnfs/tests/nfs.rs
++++ b/crates/vnfs/tests/nfs.rs
+@@ -5288,8 +5288,32 @@ fn recursive_admission_batches_anchored_children_without_repeated_path_resolutio
+         "64 child directories should share compounds: {stats:?}"
+     );
+     eprintln!("recursive admission: calls={calls}, operations={operations}");
++    assert_eq!(
++        stats.nfs_errors - before.nfs_errors,
++        0,
++        "no RESOURCE probes on directory cohorts"
++    );
++    assert!(
++        stats.max_operations <= 100,
++        "bounded anchored directory cohorts: {stats:?}"
++    );
+     assert!(
+         operations > 0 && operations < 500,
+         "child descent must reuse anchored seeds: {stats:?}"
+     );
+ }
++
++#[cfg(all(feature = "auto", target_os = "linux"))]
++#[test]
++#[ignore = "requires VFSI_AUTO_TEST_MOUNT pointing to a direct NFS mount"]
++fn shared_pruning_contract_on_auto_nfs() {
++    let mount = std::env::var("VFSI_AUTO_TEST_MOUNT").expect("NFS mount fixture");
++    let root = tempfile::tempdir_in(mount).unwrap();
++    let fs = vnfs::mounted::Auto::new(root.path()).unwrap();
++    assert!(matches!(
++        fs.route_for("/"),
++        vnfs::mounted::AutoRoute::DirectNfs { .. }
++    ));
++    vfsi_sync::test_support::run_pruning_suite(&fs, "/pruning", true);
++    fs.remove_dir_all("/pruning").unwrap();
++}
+diff --git a/crates/vnfs/tests/posix_backend.rs b/crates/vnfs/tests/posix_backend.rs
+index d8c8700..7530d31 100644
+--- a/crates/vnfs/tests/posix_backend.rs
++++ b/crates/vnfs/tests/posix_backend.rs
+@@ -1424,3 +1424,9 @@ fn optional_operation_capabilities_match_local_and_routed_dispatch() {
+         );
+     }
+ }
++
++#[test]
++fn shared_pruning_contract_on_dummy() {
++    let (_root, backend) = dummy();
++    common::run_pruning_suite(&FsClient::new(backend), "/pruning", true);
++}

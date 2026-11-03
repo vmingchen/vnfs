@@ -646,5 +646,46 @@ class EcosystemBaselineTests(unittest.TestCase):
             retarget(manifest, self.root)
 
 
+class PromotionGateTests(unittest.TestCase):
+    def setUp(self):
+        import runpy
+        self.verify = runpy.run_path(str(Path(__file__).resolve().parents[1] / "ci/check-promotion.py"))["verify"]
+        self.sha = "a" * 40
+
+    def row(self, **overrides):
+        row = dict(databaseId=1, headSha=self.sha, headBranch="main", status="completed",
+                   conclusion="success", event="push", createdAt="2026-11-02T00:00:00Z", url="https://example.invalid/run/1")
+        return dict(row, **overrides)
+
+    def check(self, ci, ports):
+        from unittest.mock import patch
+        with patch("subprocess.check_output", side_effect=[json.dumps(ci), json.dumps(ports)]):
+            return self.verify("vmingchen/vnfs", self.sha)
+
+    def test_both_exact_main_runs_are_required(self):
+        self.assertEqual(self.check([self.row()], [self.row()])["commit"], self.sha)
+        for bad in ([], [self.row(headSha="b"*40)], [self.row(headBranch="other")],
+                    [self.row(event="pull_request")], [self.row(conclusion="failure")],
+                    [self.row(status="in_progress", conclusion="")]):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.check([self.row()], bad)
+            with self.subTest(ci=bad), self.assertRaises(ValueError):
+                self.check(bad, [self.row()])
+
+    def test_new_pending_or_failed_run_does_not_reuse_older_success(self):
+        for state in (dict(status="in_progress", conclusion=""), dict(conclusion="failure")):
+            with self.subTest(state=state), self.assertRaises(ValueError):
+                self.check([self.row()], [self.row(), self.row(databaseId=2, **state)])
+        self.check([self.row()], [self.row(event="workflow_dispatch")])
+        with self.assertRaises(ValueError):
+            self.check([self.row(event="workflow_dispatch")], [self.row()])
+
+    def test_invalid_commit_fails_before_running_gh(self):
+        from unittest.mock import patch
+        with patch("subprocess.check_output") as query, self.assertRaises(ValueError):
+            self.verify("vmingchen/vnfs", "main")
+        query.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

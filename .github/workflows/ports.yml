@@ -1,6 +1,23 @@
 name: Port compatibility
 
 on:
+  push:
+    branches: [main]
+    paths: &compatibility-paths
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - "bindings/c/**"
+      - "ecosystem/**"
+      - "ci/ports/**"
+      - "ci/check-ecosystem.py"
+      - "ci/check-promotion.py"
+      - "scripts/test-ci-scripts.py"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/ports.yml"
+      - ".github/workflows/promote-vfsi.yml"
+  pull_request:
+    paths: *compatibility-paths
   schedule:
     - cron: "17 4 * * *"
   workflow_dispatch:
@@ -26,6 +43,22 @@ jobs:
           print('ports=' + json.dumps([c['id'] for c in registry['component']
                                       if c['kind'] == 'application-port']))
           PY
+  abi-v3:
+    needs: registry
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ports-abi
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev liburcu-dev
+      - name: ABI v3 old-client and optional-symbol contracts
+        run: |
+          cargo build -p vfsi-c
+          ci/ports/check-c-abi.sh target/debug/libvfsi_c.so
   ports:
     needs: registry
     runs-on: ubuntu-26.04

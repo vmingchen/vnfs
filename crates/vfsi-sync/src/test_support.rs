@@ -773,3 +773,173 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         assert!(fs.exists_impl(Path::new(&dir)).unwrap());
     }
 }
+
+/// Shared page-admission conformance for local, mount-routed and network clients.
+/// `fixture_fs` prepares the namespace before traversal: for Auto over NFS,
+/// use the kernel mount here rather than assuming kernel/direct cache coherence.
+/// SMB's legacy snapshot listing cannot enforce no-follow descendant lookup;
+/// `recursive_supported = false` asserts that limitation instead of bypassing it.
+pub fn run_pruning_suite(
+    fs: &impl Vfsi,
+    fixture_fs: &impl Vfsi,
+    base: &str,
+    recursive_supported: bool,
+) {
+    use crate::api::{DepthLimit, ListDirControl, MkDirOp};
+    use std::collections::HashSet;
+    fixture_fs.create_dir(base).unwrap();
+    let roots = [format!("{base}/a"), format!("{base}/b")];
+    for root in &roots {
+        fixture_fs.create_dir(root).unwrap();
+    }
+    let children: Vec<_> = (0..270)
+        .map(|i| PathBuf::from(format!("{}/d{i:03}", roots[0])))
+        .collect();
+    fixture_fs
+        .vmkdir(
+            &children
+                .iter()
+                .map(|path| MkDirOp::new(path, 0o777))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    fixture_fs
+        .write(format!("{}/file", roots[1]), b"x")
+        .unwrap();
+    let options = ListDirOptions::new();
+    let mut counts = [0; 2];
+    let mut pages = 0;
+    let done = fs
+        .vlistdirs(&roots, options, |index, page| {
+            assert_eq!(page.path, Path::new(&roots[index]));
+            counts[index] += page.entries.len();
+            pages += 1;
+            // Callbacks are unlocked; nested metadata must not deadlock.
+            assert!(fs.attrs(&page.path)?.is_dir());
+            Ok(ListDirControl::Continue)
+        })
+        .unwrap();
+    assert_eq!(done, [TraversalCompletion::Complete; 2]);
+    assert_eq!(counts, [270, 1]);
+    assert!(pages >= 4, "fixture must cross directory page boundaries");
+    for policy in [
+        options.with_max_entries(270),
+        options.with_max_path_bytes(children.iter().map(|p| p.as_os_str().len()).sum()),
+    ] {
+        let mut delivered_entries = 0;
+        let mut delivered_bytes = 0;
+        let error = fs
+            .vlistdirs(&roots, policy, |_, page| {
+                delivered_entries += page.entries.len();
+                delivered_bytes += page
+                    .entries
+                    .iter()
+                    .map(|e| e.path().as_os_str().len())
+                    .sum::<usize>();
+                Ok(ListDirControl::Continue)
+            })
+            .unwrap_err();
+        // Backends can interleave root pages differently. The error must
+        // identify the root of the rejected entry, not an assumed fetch order.
+        let owner = error.index().expect("budget error retains root index");
+        assert!(owner < roots.len());
+        assert!(error.path().unwrap().starts_with(&roots[owner]));
+        assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge);
+        assert!(delivered_entries <= 270);
+        if policy.max_entries().is_some() {
+            assert_eq!(delivered_entries, 270);
+        }
+        if let Some(max) = policy.max_path_bytes() {
+            assert!(delivered_bytes <= max);
+        }
+    }
+    for fail in [false, true] {
+        let mut calls = 0;
+        let result = fs.vlistdirs(
+            &roots,
+            options.with_recursive(recursive_supported),
+            |_, _| {
+                calls += 1;
+                if fail {
+                    Err(VfError::errno(17, libc::ECANCELED as u32))
+                } else {
+                    Ok(ListDirControl::Stop)
+                }
+            },
+        );
+        assert_eq!(
+            calls, 1,
+            "no callback replay or later root after stop/error"
+        );
+        if fail {
+            let error = result.unwrap_err();
+            assert_eq!(error.index(), Some(0));
+            assert_eq!(error.raw_code(), libc::ECANCELED as u32);
+        } else {
+            assert_eq!(result.unwrap(), [TraversalCompletion::Stopped]);
+        }
+    }
+    if !recursive_supported {
+        let error = fs
+            .vlistdirs(
+                &roots,
+                options.with_recursive(true),
+                |_, _| -> VfResult<ListDirControl> {
+                    panic!("unsupported recursive safety contract must fail before callbacks");
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        return;
+    }
+    // Pruning on *every* page precedes the depth check and all child I/O,
+    // even on backends which cannot safely reopen a child directory.
+    fs.vlistdirs(
+        &roots[..1],
+        options
+            .with_recursive(true)
+            .with_max_depth(DepthLimit::new(0).unwrap()),
+        |_, page| {
+            assert_eq!(page.path, Path::new(&roots[0]));
+            Ok(ListDirControl::Prune(
+                page.entries
+                    .iter()
+                    .map(|e| e.path().to_path_buf())
+                    .collect(),
+            ))
+        },
+    )
+    .unwrap();
+    let mut admitted = HashSet::new();
+    let mut pruned = HashSet::new();
+    let mut visited = HashSet::new();
+    let result = fs.vlistdirs(&roots[..1], options.with_recursive(true), |_, page| {
+        visited.insert(page.path.clone());
+        let mut excluded = Vec::new();
+        for entry in page.entries {
+            if entry
+                .file_name()
+                .unwrap()
+                .as_encoded_bytes()
+                .last()
+                .unwrap()
+                % 2
+                == 0
+            {
+                pruned.insert(entry.path().to_path_buf());
+                excluded.push(entry.path().to_path_buf());
+            } else {
+                admitted.insert(entry.path().to_path_buf());
+            }
+        }
+        Ok(ListDirControl::Prune(excluded))
+    });
+    assert_eq!(result.unwrap(), [TraversalCompletion::Complete]);
+    assert!(!admitted.is_empty() && !pruned.is_empty());
+    assert!(pruned.is_disjoint(&visited));
+    admitted.insert(PathBuf::from(&roots[0]));
+    assert_eq!(
+        visited, admitted,
+        "visit exactly the admitted directory set"
+    );
+}

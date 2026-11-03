@@ -1,0 +1,83 @@
+{
+  "source_base": "5341bf9abd5e0f5217bfb3623b099b0401982713",
+  "public_release": {
+    "vnfs": "0.0.28",
+    "vfsi-c": "0.3.12",
+    "abi": 3
+  },
+  "port_revisions": {
+    "git": "68f9ca46918ae608854a8cc54f31e63f7625ec77",
+    "rsync": "6d08d3b8f9fe25fae0292f31ec07c2d939b0a077",
+    "coreutils": "375255bc1dbdf2a867e99a66942afff0f0eac405",
+    "findutils": "c211440a76e83155a872206026732869ba353ac3"
+  },
+  "local_matrix": {
+    "port-git": {
+      "status": 0,
+      "seconds": 62.934147180989385,
+      "command": [
+        "ci/ports/check-git.sh",
+        "https://github.com/vfsi/vfsi-port-git",
+        "68f9ca46918ae608854a8cc54f31e63f7625ec77",
+        "git"
+      ]
+    },
+    "port-rsync": {
+      "status": 0,
+      "command": [
+        "ci/ports/check-rsync.sh",
+        "/home/ubuntu/gh/vfsi-port-rsync",
+        "6d08d3b8f9fe25fae0292f31ec07c2d939b0a077",
+        "rsync"
+      ],
+      "seconds": null,
+      "final_log": "port-rsync-final.log",
+      "baseline_timing": {
+        "revision": "5f211b8b9c78b682782953f4306d48122eb3ee7b",
+        "seconds": 26.112279920838773,
+        "status": 0
+      }
+    },
+    "port-coreutils": {
+      "status": 0,
+      "seconds": 129.68426507059485,
+      "command": [
+        "ci/ports/check-rust.py",
+        "https://github.com/vfsi/vfsi-port-coreutils",
+        "375255bc1dbdf2a867e99a66942afff0f0eac405",
+        "coreutils"
+      ]
+    },
+    "port-findutils": {
+      "status": 0,
+      "seconds": 126.18660217896104,
+      "command": [
+        "ci/ports/check-rust.py",
+        "https://github.com/vfsi/vfsi-port-findutils",
+        "c211440a76e83155a872206026732869ba353ac3",
+        "findutils"
+      ]
+    }
+  },
+  "validation": {
+    "smoke": "passed; rerun after final Rust edits",
+    "full_server_independent_rust": "passed; rerun after final Rust edits, including detached Python Rust workspaces",
+    "clippy": "passed; changed packages, all targets/features, warnings denied",
+    "native_nfs_4_1": "36 passed, 0 ignored, after final Rust edits",
+    "native_nfs_4_2": "36 passed, 0 ignored, after final Rust edits",
+    "public_nfs_4_1": "136 passed, 2 ignored; existing rename/symlink race cases included",
+    "public_nfs_4_2": "136 passed, 2 ignored; existing rename/symlink race cases included",
+    "auto_direct_nfs": "ignored shared-pruning target explicitly run against isolated NFSv4.1 and v4.2 mounts; both passed",
+    "smb": "shared shallow contract passed; recursive no-follow explicitly Unsupported",
+    "abi_v3": "old-client canaries and optional-symbol loader cases passed",
+    "ci_script_tests": 44,
+    "du_harness_tests": 15,
+    "rsync_harness_tests": 2
+  },
+  "notes": [
+    "Initial Git matrix attempt inherited CARGO_TARGET_DIR, redirecting Git internal Rust archive. check-git.sh now isolates that variable; exact Git pin passed afterward.",
+    "The registered rsync documentation-only head was retested from the local Git object repository; its parent runtime source and SDK are unchanged.",
+    "Findutils uncommitted work was excluded and preserved; the matrix uses the committed registered head.",
+    "No GitHub push, workflow dispatch, promotion or package publication performed. Remote same-commit checks remain pending approval."
+  ]
+}

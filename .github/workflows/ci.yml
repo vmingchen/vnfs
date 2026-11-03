@@ -113,6 +113,10 @@ jobs:
           grep -q 'id="execution-and-limits"' target/doc/vnfs/uring/index.html
           grep -q 'id="reproduce-the-comparison"' target/doc/vnfs/uring/index.html
           test -f target/doc/vfsi_nfs/nfs/struct.NfsVecFs.html
+      - name: Check benchmark measurement contracts
+        run: |
+          python3 -m unittest discover -s benchmarks/du
+          python3 -m unittest discover -s benchmarks/rsync
       - name: Run the repository Rust test suite
         run: ./scripts/test-rust.sh
       - name: Report test command timings
@@ -689,6 +693,8 @@ jobs:
             cargo test -p vnfs --lib native_nfs::mount_tests -- --ignored --nocapture --test-threads=1
           VFSI_NFS_TEST_MOUNT=/mnt/vnfs-ci-auto VFSI_NFS_TEST_MOUNT_RO=/mnt/vnfs-ci-discovery-ro \
             cargo test -p vfsi-nfs --lib nfs::tests::live_read_only_mount -- --ignored --nocapture
+          VFSI_AUTO_TEST_MOUNT=/mnt/vnfs-ci-auto \
+            cargo test -p vnfs --test nfs shared_pruning_contract_on_auto_nfs -- --exact --ignored --nocapture --test-threads=1
       - name: Run NFS integration suite
         env:
           VNFS_TEST_MINOR: ${{ matrix.minor-version }}

@@ -1,0 +1,10 @@
+   Compiling vfsi-core v0.1.16 (/home/ubuntu/vnfs/crates/vfsi-core)
+   Compiling nfsv41-sys v0.1.15 (/home/ubuntu/vnfs/crates/nfsv41-sys)
+   Compiling vfsi-sync v0.1.17 (/home/ubuntu/vnfs/crates/vfsi-sync)
+   Compiling vfsi-nfs v0.1.16 (/home/ubuntu/vnfs/crates/vfsi-nfs)
+   Compiling vfsi-local v0.1.15 (/home/ubuntu/vnfs/crates/vfsi-local)
+   Compiling vfsi-posix v0.1.6 (/home/ubuntu/vnfs/crates/vfsi-posix)
+   Compiling vnfs v0.0.28 (/home/ubuntu/vnfs/crates/vnfs)
+   Compiling uucore v0.13.0 (/home/ubuntu/vfsi-du-candidate/src/uucore)
+   Compiling uu_du v0.13.0 (/home/ubuntu/vfsi-du-candidate/src/uu/du)
+    Finished `release` profile [optimized] target(s) in 33.28s

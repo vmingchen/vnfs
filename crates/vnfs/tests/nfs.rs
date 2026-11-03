@@ -5288,8 +5288,33 @@ fn recursive_admission_batches_anchored_children_without_repeated_path_resolutio
         "64 child directories should share compounds: {stats:?}"
     );
     eprintln!("recursive admission: calls={calls}, operations={operations}");
+    assert_eq!(
+        stats.nfs_errors - before.nfs_errors,
+        0,
+        "no RESOURCE probes on directory cohorts"
+    );
+    assert!(
+        stats.max_operations <= 100,
+        "bounded anchored directory cohorts: {stats:?}"
+    );
     assert!(
         operations > 0 && operations < 500,
         "child descent must reuse anchored seeds: {stats:?}"
     );
+}
+
+#[cfg(all(feature = "auto", target_os = "linux"))]
+#[test]
+#[ignore = "requires VFSI_AUTO_TEST_MOUNT pointing to a direct NFS mount"]
+fn shared_pruning_contract_on_auto_nfs() {
+    let mount = std::env::var("VFSI_AUTO_TEST_MOUNT").expect("NFS mount fixture");
+    let root = tempfile::tempdir_in(mount).unwrap();
+    let fs = vnfs::mounted::Auto::new(root.path()).unwrap();
+    assert!(matches!(
+        fs.route_for("/"),
+        vnfs::mounted::AutoRoute::DirectNfs { .. }
+    ));
+    let fixture = vnfs::posix::Posix::new(root.path()).unwrap();
+    vfsi_sync::test_support::run_pruning_suite(&fs, &fixture, "/pruning", true);
+    fs.remove_dir_all("/pruning").unwrap();
 }

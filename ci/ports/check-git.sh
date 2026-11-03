@@ -14,7 +14,9 @@ git -C "$checkout" remote add origin "$repository"
 git -C "$checkout" fetch --quiet --depth=1 origin "$revision"
 git -C "$checkout" checkout --quiet --detach FETCH_HEAD
 
-make -C "$checkout" -j2 \
+# Git's Rust archive rule links checkout/target/release/libgitcore.a.
+# The platform SDK's shared target directory must not redirect that artifact.
+env -u CARGO_TARGET_DIR make -C "$checkout" -j2 \
     USE_VFSI=YesPlease \
     VFSI_CFLAGS="-I$root/bindings/c/include" \
     NO_CURL=YesPlease \

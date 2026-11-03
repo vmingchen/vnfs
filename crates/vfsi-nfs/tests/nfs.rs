@@ -1736,3 +1736,148 @@ fn reconnect_restores_independent_opens_after_rename() {
     fs.vremove_impl(&[FileOperand::from_path(&renamed)])
         .unwrap();
 }
+
+#[test]
+fn shared_pruning_contract_on_nfs() {
+    if vfsi_sync::test_support::supervise_with_deadline("shared_pruning_contract_on_nfs") {
+        return;
+    }
+    let Some(backend) = connect() else { return };
+    let fs = vfsi_sync::FsClient::new(backend);
+    let base = format!("/pruning-contract-{}", std::process::id());
+    test_support::run_pruning_suite(&fs, &fs, &base, true);
+    fs.remove_dir_all(&base).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn paged_traversal_callbacks_are_not_replayed_during_initial_reconnect() {
+    use vfsi_core::api::ListDirControl;
+    let Some(mut backend) = connect() else { return };
+    let root = format!("/pruning-reconnect-{}", std::process::id());
+    backend
+        .ensure_dir_impl(Path::new(&format!("{root}/target/child")), 0o777)
+        .unwrap();
+    backend
+        .vsymlink_impl(
+            &[Path::new("target")],
+            &[Path::new(&format!("{root}/link"))],
+        )
+        .unwrap();
+    backend.set_auto_reconnect(true);
+    let fault = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeFollowSymlink { index: 1 },
+        VfError::transport_with_kind(
+            None,
+            vfsi_core::TransportKind::Connection,
+            "initial traversal connection lost",
+        ),
+    ));
+    backend.set_fault_injector(fault.clone());
+    let fs = FsClient::new(backend);
+    let paths = [format!("{root}/target"), format!("{root}/link")];
+    let mut calls = [0; 2];
+    let done = fs
+        .vlistdirs(&paths, ListDirOptions::new(), |index, page| {
+            calls[index] += 1;
+            assert_eq!(page.entries.len(), 1);
+            Ok(ListDirControl::Continue)
+        })
+        .unwrap();
+    assert_eq!(done, [TraversalCompletion::Complete; 2]);
+    assert_eq!(
+        calls,
+        [1, 1],
+        "each root callback runs once, after successful recovery"
+    );
+    assert!(fault.is_consumed());
+    assert_eq!(
+        fault
+            .visited()
+            .iter()
+            .filter(|p| matches!(p, OpenFaultPoint::BeforeFollowSymlink { index: 1 }))
+            .count(),
+        2
+    );
+    fs.remove_dir_all(&root).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn pruning_pages_retry_only_before_delivery_and_fail_closed_after_delivery() {
+    use vfsi_core::api::ListDirControl;
+    for continuation in [false, true] {
+        let Some(mut backend) = connect() else { return };
+        let root = format!("/pruning-page-fault-{}-{continuation}", std::process::id());
+        for child in ["a", "b"] {
+            backend
+                .ensure_dir_impl(Path::new(&format!("{root}/{child}")), 0o777)
+                .unwrap();
+        }
+        let fault = Arc::new(FaultScript::one(
+            OpenFaultPoint::BeforeDirectoryPage { continuation },
+            VfError::transport_with_kind(
+                None,
+                vfsi_core::TransportKind::Connection,
+                "directory page connection lost",
+            ),
+        ));
+        backend.set_auto_reconnect(true);
+        backend.set_fault_injector(fault.clone());
+        let fs = FsClient::new(backend);
+        let mut calls = 0;
+        let result = fs.vlistdirs(
+            &[&root],
+            ListDirOptions::new().with_recursive(true),
+            |_, page| {
+                calls += 1;
+                assert_eq!(
+                    page.path,
+                    Path::new(&root),
+                    "pruned children are never visited"
+                );
+                Ok(ListDirControl::Prune(
+                    page.entries
+                        .iter()
+                        .map(|e| e.path().to_path_buf())
+                        .collect(),
+                ))
+            },
+        );
+        assert!(fault.is_consumed(), "page fault must actually fire");
+        if continuation {
+            let error = result.unwrap_err();
+            assert_eq!(
+                error.transport_kind(),
+                Some(vfsi_core::TransportKind::Connection)
+            );
+            assert_eq!(
+                error.index(),
+                None,
+                "whole-page transport failure has no invented item index"
+            );
+            assert_eq!(
+                calls, 1,
+                "do not replay an already delivered admission page"
+            );
+        } else {
+            assert_eq!(result.unwrap(), [TraversalCompletion::Complete]);
+            assert_eq!(
+                calls, 2,
+                "first page plus continuation, each delivered once"
+            );
+            assert_eq!(
+                fault
+                    .visited()
+                    .iter()
+                    .filter(|point| **point
+                        == OpenFaultPoint::BeforeDirectoryPage {
+                            continuation: false
+                        })
+                    .count(),
+                2
+            );
+        }
+        fs.remove_dir_all(&root).unwrap();
+    }
+}

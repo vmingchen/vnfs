@@ -55,13 +55,18 @@ fetch, reset, patch, commit or publish application checkouts. Build artifacts an
 Cargo lockfiles may be updated. This checks local/kernel-backed behavior; run
 `scripts/test-ports-nfs.sh` separately for NFSv4.1/v4.2 parity with a live export.
 
-The scheduled compatibility workflow derives all four application jobs from
+The compatibility workflow runs on relevant main pushes and pull requests,
+schedule and manual dispatch. It derives all four application jobs from
 `ecosystem/ports.toml`. It tests their exact committed revisions in disposable
 checkouts against the platform source, not just their published dependencies.
 Uncommitted port edits are excluded. Git/rsync use the development C SDK;
 coreutils/findutils run library tests and feature-enabled builds, and findutils
 has CLI parity checks. This is local/POSIX coverage; live NFS remains separate.
 `ecosystem/versions.toml` records the published package and registered port baseline.
+A separate workflow job retains frozen ABI-v3 old-client and optional-symbol checks.
+Mirror promotion requires successful CI and compatibility runs for the same main
+commit. Check readiness with `python3 ci/check-promotion.py COMMIT`; for a
+path-filtered docs-only commit, manually dispatch the port workflow first.
 
 Run these commands from the repository root:
 

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "name": "vnfs-0.0.28-vfsi-c-0.3.12",
+  "release_revision": "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3",
+  "port_repository": "https://github.com/vfsi/vfsi-port-rsync",
+  "port_revision": "5f211b8b9c78b682782953f4306d48122eb3ee7b",
+  "vnfs": "0.0.28",
+  "vfsi_c": "0.3.12",
+  "archive_sha256": "3528d76bd13d10174bc489ccacf26d7dcc179a847e2455497e161e3a9db21d42",
+  "sdk_manifest_sha256": "ee14b03578eb9524f9ccd7e86f9d2b65f19ccc586a1d26d0a36a5a1571b3494c",
+  "sdk_lock_sha256": "43cf904e39dfaec8b47772952005d59859e097adf3ed18b6b6a0f4f79fd26120",
+  "packages": {
+    "vnfs": "0.0.28",
+    "vfsi-core": "0.1.16",
+    "vfsi-sync": "0.1.17",
+    "vfsi-local": "0.1.15",
+    "vfsi-posix": "0.1.6",
+    "vfsi-nfs": "0.1.16",
+    "vfsi-smb": "0.1.14",
+    "nfsv41-sys": "0.1.15",
+    "libntirpc-sys": "0.3.3"
+  }
+}

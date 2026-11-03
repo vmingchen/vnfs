@@ -1,0 +1,40 @@
+{
+  "elapsed_ns": 8081796163,
+  "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+  "stdout_lines": 13995,
+  "traced_entries": 13994,
+  "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+  "command": [
+    "/home/ubuntu/gh/vfsi-port-rsync/rsync",
+    "-ani",
+    "--out-format=%i %n%L",
+    "tree/",
+    "/tmp/vfsi-rsync-imhmcrji/destination/"
+  ],
+  "wire": {
+    "rpc_calls": 6231,
+    "unique_rpc_calls": 6231,
+    "repeated_xids": 0,
+    "retransmitted_rpc_frames": 0,
+    "procedures": {
+      "1": 6231
+    },
+    "request_opcodes": {
+      "53": 6227,
+      "22": 6223,
+      "3": 2,
+      "9": 3115,
+      "15": 9025,
+      "10": 3112,
+      "42": 1,
+      "43": 1,
+      "58": 1,
+      "24": 3,
+      "32": 2,
+      "26": 1555,
+      "44": 1,
+      "57": 1
+    },
+    "pcap_sha256": "5c0bdda9484d8e794740ef84493a9809c00767a606aad6c3cf4926c8fab5ff53"
+  }
+}

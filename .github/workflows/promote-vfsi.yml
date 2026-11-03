@@ -31,7 +31,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Validate canonical commit and CI
+      - name: Validate canonical commit and release gates
         env:
           GH_TOKEN: ${{ github.token }}
           PROMOTE_COMMIT: ${{ inputs.commit }}
@@ -43,13 +43,7 @@ jobs:
           git fetch origin main --tags
           git cat-file -e "$PROMOTE_COMMIT^{commit}"
           git merge-base --is-ancestor "$PROMOTE_COMMIT" origin/main
-          success=$(gh run list --repo vmingchen/vnfs \
-            --workflow ci.yml --branch main --event push \
-            --commit "$PROMOTE_COMMIT" \
-            --status completed \
-            --json conclusion \
-            --jq 'any(.[]; .conclusion == "success")')
-          test "$success" = true
+          python3 ci/check-promotion.py "$PROMOTE_COMMIT"
       - name: Promote approved commit and tags
         env:
           PROMOTE_COMMIT: ${{ inputs.commit }}

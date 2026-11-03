@@ -1,0 +1,110 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 9aa1e7a15..c9de02d76 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2003,11 +2003,10 @@ dependencies = [
+ 
+ [[package]]
+ name = "nfsv41-sys"
+-version = "0.1.14"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "7d0a443627b51bcc294956632e3c95a36b9cf185aac798137d830897b0fccc9f"
++version = "0.1.15"
+ dependencies = [
+  "bindgen 0.73.2",
++ "cc",
+  "libntirpc-sys",
+ ]
+ 
+@@ -4682,9 +4681,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+ 
+ [[package]]
+ name = "vfsi-core"
+-version = "0.1.14"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "d8889271da48c3a739ba80a450de1c8d8c0d6ae7d485d8fb699acfb830354a71"
++version = "0.1.16"
+ dependencies = [
+  "bitfields",
+  "bitflags 2.13.2",
+@@ -4693,9 +4690,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "vfsi-local"
+-version = "0.1.13"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "4f05dda5199b1190418f50ea6ab1844fc144f4bb97072e19c210063e9668c792"
++version = "0.1.15"
+ dependencies = [
+  "libc",
+  "vfsi-core",
+@@ -4704,9 +4699,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "vfsi-nfs"
+-version = "0.1.14"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "599e627fca8806af408e7f81734e9f2c461ccaab09b92466c648d06f8712dc68"
++version = "0.1.16"
+ dependencies = [
+  "bitfields",
+  "libc",
+@@ -4718,9 +4711,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "vfsi-posix"
+-version = "0.1.5"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "cd727c4a66e98666d42e73ba1727070c40b513c0e681da1cd13813085fbd2cef"
++version = "0.1.6"
+ dependencies = [
+  "vfsi-core",
+  "vfsi-local",
+@@ -4729,9 +4720,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "vfsi-sync"
+-version = "0.1.15"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "eb710abac31616f01f0a913a213f891f61d7818dfdc45e2c0aad34f7f65d11c3"
++version = "0.1.17"
+ dependencies = [
+  "libc",
+  "vfsi-core",
+@@ -4739,9 +4728,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "vnfs"
+-version = "0.0.27"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "497d505645bd2718fedbf13480942b2402d87403a7ea0e1aaecc29eb69cdfd6d"
++version = "0.0.28"
+ dependencies = [
+  "bitfields",
+  "libc",
+diff --git a/Cargo.toml b/Cargo.toml
+index cf59ad0c8..3826de753 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -131,7 +131,7 @@ unindent = "0.2.3"
+ unit-prefix = "0.5"
+ utmp-classic = "0.2"
+ uutils_term_grid = "0.8"
+-vnfs = { version = "0.0.27", features = ["posix"] }
++vnfs = { version = "0.0.28", features = ["posix"] }
+ walkdir = "2.5"
+ wild = "2.2.1"
+ windows-sys = { version = ">=0.60, <0.62", default-features = false }
+@@ -715,3 +715,12 @@ strip = true
+ inherits = "release"
+ panic = "unwind"
+ debug = true
++
++[patch.crates-io]
++vnfs = { path = "/home/ubuntu/vnfs/crates/vnfs" }
++vfsi-core = { path = "/home/ubuntu/vnfs/crates/vfsi-core" }
++vfsi-sync = { path = "/home/ubuntu/vnfs/crates/vfsi-sync" }
++vfsi-local = { path = "/home/ubuntu/vnfs/crates/vfsi-local" }
++vfsi-posix = { path = "/home/ubuntu/vnfs/crates/vfsi-posix" }
++vfsi-nfs = { path = "/home/ubuntu/vnfs/crates/vfsi-nfs" }
++nfsv41-sys = { path = "/home/ubuntu/vnfs/crates/nfsv41-sys" }
