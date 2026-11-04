@@ -852,7 +852,10 @@ pub(super) fn collect_compound(
 
 pub(super) fn smb_error(error: SmbError, index: impl Into<Option<usize>>) -> VfError {
     let index = index.into();
-    if let SmbError::DfsReferralRequired { path } = &error {
+    if let SmbError::DfsReferralRequired { path }
+    | SmbError::DfsTargetNotAllowed { path, .. }
+    | SmbError::DfsTargetUnreachable { path, .. } = &error
+    {
         return VfError::smb(index, NtStatus::PATH_NOT_COVERED.0)
             .with_context("SMB DFS referral", path);
     }

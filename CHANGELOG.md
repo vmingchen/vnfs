@@ -5,6 +5,9 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+- Upgrade the Rust and Python SMB backend to `smb2 0.39.0`, retaining disabled
+  DFS referral following and classifying its new referral errors as unsupported.
+
 ## Coordinated Rust patch release (2026-11-01)
 
 Rust: `nfsv41-sys 0.1.15`, `vfsi-core 0.1.16`, `vfsi-sync 0.1.17`,

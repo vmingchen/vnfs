@@ -533,6 +533,16 @@ fn referral_errors_are_unsupported_without_losing_the_request_index() {
         SmbError::DfsReferralRequired {
             path: "projects/file".into(),
         },
+        SmbError::DfsTargetNotAllowed {
+            path: "projects/file".into(),
+            server: "primary".into(),
+            target: "other".into(),
+        },
+        SmbError::DfsTargetUnreachable {
+            path: "projects/file".into(),
+            target_count: 1,
+            source: Box::new(SmbError::Disconnected),
+        },
     ] {
         let error = smb_error(error, 7);
         assert_eq!(error.index(), Some(7));

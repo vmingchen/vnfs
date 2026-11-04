@@ -55,6 +55,7 @@ impl SmbVecFs {
             // Custom compounds are bound to the primary connection. Never let
             // the dependency redirect a tree to an untracked DFS connection.
             dfs_enabled: false,
+            dfs_target_policy: smb2::client::DfsTargetPolicy::SameServerOnly,
             dfs_target_overrides: HashMap::new(),
             connect_options: None,
             previous_session_id: None,
