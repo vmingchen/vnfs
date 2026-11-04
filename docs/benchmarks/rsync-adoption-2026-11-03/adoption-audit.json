@@ -1,0 +1,465 @@
+{
+  "schema_version": 1,
+  "collected_at": "2026-11-03T20:53:28.430420-05:00",
+  "selection": "published vfsi-c 0.3.12 / vnfs 0.0.28 only; development vnfs02 excluded",
+  "runs": 46,
+  "accelerated_runs": 22,
+  "captures": [
+    {
+      "sample": "native-capture-00-kernel",
+      "rpc_calls": 4668,
+      "unique_rpc_calls": 4668,
+      "repeated_xids": 0,
+      "retransmitted_rpc_frames": 0,
+      "procedures": {
+        "1": 4668
+      },
+      "request_opcodes": {
+        "53": 4668,
+        "22": 4668,
+        "3": 1556,
+        "9": 3113,
+        "15": 1,
+        "10": 1,
+        "46": 1,
+        "26": 1555
+      }
+    },
+    {
+      "sample": "native-capture-00-vfsi",
+      "rpc_calls": 6231,
+      "unique_rpc_calls": 6231,
+      "repeated_xids": 0,
+      "retransmitted_rpc_frames": 0,
+      "procedures": {
+        "1": 6231
+      },
+      "request_opcodes": {
+        "53": 6227,
+        "22": 6223,
+        "3": 2,
+        "9": 3115,
+        "15": 9025,
+        "10": 3112,
+        "42": 1,
+        "43": 1,
+        "58": 1,
+        "24": 3,
+        "32": 2,
+        "26": 1555,
+        "44": 1,
+        "57": 1
+      }
+    },
+    {
+      "sample": "native-capture-01-vfsi",
+      "rpc_calls": 6231,
+      "unique_rpc_calls": 6231,
+      "repeated_xids": 0,
+      "retransmitted_rpc_frames": 0,
+      "procedures": {
+        "1": 6231
+      },
+      "request_opcodes": {
+        "53": 6227,
+        "22": 6223,
+        "3": 2,
+        "9": 3115,
+        "15": 9025,
+        "10": 3112,
+        "42": 1,
+        "43": 1,
+        "58": 1,
+        "24": 3,
+        "32": 2,
+        "26": 1555,
+        "44": 1,
+        "57": 1
+      }
+    },
+    {
+      "sample": "native-capture-01-kernel",
+      "rpc_calls": 4668,
+      "unique_rpc_calls": 4668,
+      "repeated_xids": 0,
+      "retransmitted_rpc_frames": 0,
+      "procedures": {
+        "1": 4668
+      },
+      "request_opcodes": {
+        "53": 4668,
+        "22": 4668,
+        "3": 1556,
+        "9": 3113,
+        "15": 1,
+        "10": 1,
+        "46": 1,
+        "26": 1555
+      }
+    },
+    {
+      "sample": "native-capture-02-kernel",
+      "rpc_calls": 4668,
+      "unique_rpc_calls": 4668,
+      "repeated_xids": 0,
+      "retransmitted_rpc_frames": 0,
+      "procedures": {
+        "1": 4668
+      },
+      "request_opcodes": {
+        "53": 4668,
+        "22": 4668,
+        "3": 1556,
+        "9": 3113,
+        "15": 1,
+        "10": 1,
+        "46": 1,
+        "26": 1555
+      }
+    },
+    {
+      "sample": "native-capture-02-vfsi",
+      "rpc_calls": 6231,
+      "unique_rpc_calls": 6231,
+      "repeated_xids": 0,
+      "retransmitted_rpc_frames": 0,
+      "procedures": {
+        "1": 6231
+      },
+      "request_opcodes": {
+        "53": 6227,
+        "22": 6223,
+        "3": 2,
+        "9": 3115,
+        "15": 9025,
+        "10": 3112,
+        "42": 1,
+        "43": 1,
+        "58": 1,
+        "24": 3,
+        "32": 2,
+        "26": 1555,
+        "44": 1,
+        "57": 1
+      }
+    },
+    {
+      "sample": "added-1ms-rtt-capture-00-kernel",
+      "rpc_calls": 4668,
+      "unique_rpc_calls": 4668,
+      "repeated_xids": 0,
+      "retransmitted_rpc_frames": 0,
+      "procedures": {
+        "1": 4668
+      },
+      "request_opcodes": {
+        "53": 4668,
+        "22": 4668,
+        "3": 1556,
+        "9": 3113,
+        "15": 1,
+        "10": 1,
+        "46": 1,
+        "26": 1555
+      }
+    },
+    {
+      "sample": "added-1ms-rtt-capture-00-vfsi",
+      "rpc_calls": 6231,
+      "unique_rpc_calls": 6231,
+      "repeated_xids": 0,
+      "retransmitted_rpc_frames": 0,
+      "procedures": {
+        "1": 6231
+      },
+      "request_opcodes": {
+        "53": 6227,
+        "22": 6223,
+        "3": 2,
+        "9": 3115,
+        "15": 9025,
+        "10": 3112,
+        "42": 1,
+        "43": 1,
+        "58": 1,
+        "24": 3,
+        "32": 2,
+        "26": 1555,
+        "44": 1,
+        "57": 1
+      }
+    },
+    {
+      "sample": "added-1ms-rtt-capture-01-vfsi",
+      "rpc_calls": 6231,
+      "unique_rpc_calls": 6231,
+      "repeated_xids": 0,
+      "retransmitted_rpc_frames": 0,
+      "procedures": {
+        "1": 6231
+      },
+      "request_opcodes": {
+        "53": 6227,
+        "22": 6223,
+        "3": 2,
+        "9": 3115,
+        "15": 9025,
+        "10": 3112,
+        "42": 1,
+        "43": 1,
+        "58": 1,
+        "24": 3,
+        "32": 2,
+        "26": 1555,
+        "44": 1,
+        "57": 1
+      }
+    },
+    {
+      "sample": "added-1ms-rtt-capture-01-kernel",
+      "rpc_calls": 4668,
+      "unique_rpc_calls": 4668,
+      "repeated_xids": 0,
+      "retransmitted_rpc_frames": 0,
+      "procedures": {
+        "1": 4668
+      },
+      "request_opcodes": {
+        "53": 4668,
+        "22": 4668,
+        "3": 1556,
+        "9": 3113,
+        "15": 1,
+        "10": 1,
+        "46": 1,
+        "26": 1555
+      }
+    },
+    {
+      "sample": "added-1ms-rtt-capture-02-kernel",
+      "rpc_calls": 4668,
+      "unique_rpc_calls": 4668,
+      "repeated_xids": 0,
+      "retransmitted_rpc_frames": 0,
+      "procedures": {
+        "1": 4668
+      },
+      "request_opcodes": {
+        "53": 4668,
+        "22": 4668,
+        "3": 1556,
+        "9": 3113,
+        "15": 1,
+        "10": 1,
+        "46": 1,
+        "26": 1555
+      }
+    },
+    {
+      "sample": "added-1ms-rtt-capture-02-vfsi",
+      "rpc_calls": 6231,
+      "unique_rpc_calls": 6231,
+      "repeated_xids": 0,
+      "retransmitted_rpc_frames": 0,
+      "procedures": {
+        "1": 6231
+      },
+      "request_opcodes": {
+        "53": 6227,
+        "22": 6223,
+        "3": 2,
+        "9": 3115,
+        "15": 9025,
+        "10": 3112,
+        "42": 1,
+        "43": 1,
+        "58": 1,
+        "24": 3,
+        "32": 2,
+        "26": 1555,
+        "44": 1,
+        "57": 1
+      }
+    }
+  ],
+  "output_lines_per_run": 13995,
+  "output_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+  "all_outputs_identical": true,
+  "positive_vfsi_traces": true,
+  "mixed_fallback_diagnostics": false,
+  "fallback_checks": [
+    "missing-library",
+    "unsupported --hard-links"
+  ],
+  "fresh_destination_empty_gate": "enforced by every successful trial worker",
+  "fixture_unchanged": true,
+  "binary_and_library_unchanged": true,
+  "host_qdiscs_unchanged": true,
+  "benchmark_route_removed": true,
+  "baseline": {
+    "schema_version": 1,
+    "name": "vnfs-0.0.28-vfsi-c-0.3.12",
+    "release_revision": "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3",
+    "port_repository": "https://github.com/vfsi/vfsi-port-rsync",
+    "port_revision": "5f211b8b9c78b682782953f4306d48122eb3ee7b",
+    "vnfs": "0.0.28",
+    "vfsi_c": "0.3.12",
+    "archive_sha256": "3528d76bd13d10174bc489ccacf26d7dcc179a847e2455497e161e3a9db21d42",
+    "sdk_manifest_sha256": "ee14b03578eb9524f9ccd7e86f9d2b65f19ccc586a1d26d0a36a5a1571b3494c",
+    "sdk_lock_sha256": "43cf904e39dfaec8b47772952005d59859e097adf3ed18b6b6a0f4f79fd26120",
+    "packages": {
+      "vnfs": "0.0.28",
+      "vfsi-core": "0.1.16",
+      "vfsi-sync": "0.1.17",
+      "vfsi-local": "0.1.15",
+      "vfsi-posix": "0.1.6",
+      "vfsi-nfs": "0.1.16",
+      "vfsi-smb": "0.1.14",
+      "nfsv41-sys": "0.1.15",
+      "libntirpc-sys": "0.3.3"
+    }
+  },
+  "regimes": {
+    "native": {
+      "added_one_way_us": 0,
+      "ping_rtt_median_ms": 0.076,
+      "ping_raw": "PING 169.254.241.1 (169.254.241.1) 56(84) bytes of data.\n64 bytes from 169.254.241.1: icmp_seq=1 ttl=64 time=0.304 ms\n64 bytes from 169.254.241.1: icmp_seq=2 ttl=64 time=0.041 ms\n64 bytes from 169.254.241.1: icmp_seq=3 ttl=64 time=0.041 ms\n64 bytes from 169.254.241.1: icmp_seq=4 ttl=64 time=0.045 ms\n64 bytes from 169.254.241.1: icmp_seq=5 ttl=64 time=0.076 ms\n64 bytes from 169.254.241.1: icmp_seq=6 ttl=64 time=0.186 ms\n64 bytes from 169.254.241.1: icmp_seq=7 ttl=64 time=0.190 ms\n64 bytes from 169.254.241.1: icmp_seq=8 ttl=64 time=0.072 ms\n64 bytes from 169.254.241.1: icmp_seq=9 ttl=64 time=0.142 ms\n\n--- 169.254.241.1 ping statistics ---\n9 packets transmitted, 9 received, 0% packet loss, time 428ms\nrtt min/avg/max/mdev = 0.041/0.121/0.304/0.085 ms\n",
+      "host_qdisc": [
+        {
+          "kind": "noqueue",
+          "handle": "0:",
+          "root": true,
+          "refcnt": 2,
+          "options": {},
+          "bytes": 0,
+          "packets": 0,
+          "drops": 0,
+          "overlimits": 0,
+          "requeues": 0,
+          "backlog": 0,
+          "qlen": 0
+        }
+      ],
+      "client_qdisc": [
+        {
+          "kind": "noqueue",
+          "handle": "0:",
+          "root": true,
+          "refcnt": 2,
+          "options": {},
+          "bytes": 0,
+          "packets": 0,
+          "drops": 0,
+          "overlimits": 0,
+          "requeues": 0,
+          "backlog": 0,
+          "qlen": 0
+        }
+      ]
+    },
+    "added-1ms-rtt": {
+      "added_one_way_us": 500,
+      "ping_rtt_median_ms": 1.14,
+      "ping_raw": "PING 169.254.241.1 (169.254.241.1) 56(84) bytes of data.\n64 bytes from 169.254.241.1: icmp_seq=1 ttl=64 time=1.07 ms\n64 bytes from 169.254.241.1: icmp_seq=2 ttl=64 time=1.08 ms\n64 bytes from 169.254.241.1: icmp_seq=3 ttl=64 time=1.02 ms\n64 bytes from 169.254.241.1: icmp_seq=4 ttl=64 time=1.02 ms\n64 bytes from 169.254.241.1: icmp_seq=5 ttl=64 time=5.42 ms\n64 bytes from 169.254.241.1: icmp_seq=6 ttl=64 time=1.15 ms\n64 bytes from 169.254.241.1: icmp_seq=7 ttl=64 time=1.14 ms\n64 bytes from 169.254.241.1: icmp_seq=8 ttl=64 time=1.46 ms\n64 bytes from 169.254.241.1: icmp_seq=9 ttl=64 time=1.34 ms\n\n--- 169.254.241.1 ping statistics ---\n9 packets transmitted, 9 received, 0% packet loss, time 495ms\nrtt min/avg/max/mdev = 1.019/1.632/5.421/1.346 ms\n",
+      "host_qdisc": [
+        {
+          "kind": "netem",
+          "handle": "8033:",
+          "root": true,
+          "refcnt": 5,
+          "options": {
+            "limit": 1000,
+            "delay": {
+              "delay": 0.0005,
+              "jitter": 0,
+              "correlation": 0
+            },
+            "seed": 3052995057059507138,
+            "ecn": false,
+            "gap": 0
+          },
+          "bytes": 882,
+          "packets": 9,
+          "drops": 0,
+          "overlimits": 0,
+          "requeues": 0,
+          "backlog": 0,
+          "qlen": 0
+        }
+      ],
+      "client_qdisc": [
+        {
+          "kind": "netem",
+          "handle": "8034:",
+          "root": true,
+          "refcnt": 5,
+          "options": {
+            "limit": 1000,
+            "delay": {
+              "delay": 0.0005,
+              "jitter": 0,
+              "correlation": 0
+            },
+            "seed": 5905422119460784327,
+            "ecn": false,
+            "gap": 0
+          },
+          "bytes": 882,
+          "packets": 9,
+          "drops": 0,
+          "overlimits": 0,
+          "requeues": 0,
+          "backlog": 0,
+          "qlen": 0
+        }
+      ]
+    }
+  },
+  "summary": [
+    {
+      "regime": "native",
+      "method": "kernel",
+      "median_wall_ms": 1179.39793,
+      "rpc_counts": [
+        4668,
+        4668,
+        4668
+      ]
+    },
+    {
+      "regime": "native",
+      "method": "vfsi",
+      "median_wall_ms": 1838.995381,
+      "rpc_counts": [
+        6231,
+        6231,
+        6231
+      ]
+    },
+    {
+      "regime": "added-1ms-rtt",
+      "method": "kernel",
+      "median_wall_ms": 5841.414687,
+      "rpc_counts": [
+        4668,
+        4668,
+        4668
+      ]
+    },
+    {
+      "regime": "added-1ms-rtt",
+      "method": "vfsi",
+      "median_wall_ms": 8112.912735,
+      "rpc_counts": [
+        6231,
+        6231,
+        6231
+      ]
+    }
+  ],
+  "published_source_revisions": {
+    "vfsi-c": "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3",
+    "vnfs": "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3"
+  },
+  "c_abi": 3
+}

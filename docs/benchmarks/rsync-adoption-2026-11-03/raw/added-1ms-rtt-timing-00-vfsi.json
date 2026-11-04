@@ -1,0 +1,14 @@
+{
+  "elapsed_ns": 7775350069,
+  "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+  "stdout_lines": 13995,
+  "traced_entries": 13994,
+  "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+  "command": [
+    "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+    "-ani",
+    "--out-format=%i %n%L",
+    "tree/",
+    "/tmp/vfsi-rsync-swcg82a6/destination/"
+  ]
+}
