@@ -9,12 +9,12 @@ code_revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3"
 
 [rust]
 nfsv41-sys = { version = "0.1.15", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
-vfsi-core = { version = "0.1.16", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
+vfsi-core = { version = "0.1.17", revision = "b6b1ef0ed14109762a46d130af1f8a7e7223e9c5" }
 vfsi-local = { version = "0.1.15", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
 vfsi-nfs = { version = "0.1.16", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
 vfsi-posix = { version = "0.1.6", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
-vfsi-smb = { version = "0.1.14", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
-vfsi-sync = { version = "0.1.17", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
+vfsi-smb = { version = "0.1.15", revision = "b6b1ef0ed14109762a46d130af1f8a7e7223e9c5" }
+vfsi-sync = { version = "0.1.18", revision = "b6b1ef0ed14109762a46d130af1f8a7e7223e9c5" }
 vfsi-uring = { version = "0.1.6", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
 vnfs = { version = "0.0.28", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
 
@@ -30,8 +30,8 @@ scoped_identity_published = true
 [python]
 nfs4fs = { version = "0.3.12", revision = "7dbee1b76d1cfc999d2d42bf1771d72759c8677e" }
 vfsi-fsspec = { version = "0.1.12", revision = "7dbee1b76d1cfc999d2d42bf1771d72759c8677e" }
-vsmb = { version = "0.1.5", revision = "7dbee1b76d1cfc999d2d42bf1771d72759c8677e" }
-vsmbfs = { version = "0.1.5", revision = "7dbee1b76d1cfc999d2d42bf1771d72759c8677e" }
+vsmb = { version = "0.1.6", revision = "b6b1ef0ed14109762a46d130af1f8a7e7223e9c5" }
+vsmbfs = { version = "0.1.6", revision = "b6b1ef0ed14109762a46d130af1f8a7e7223e9c5" }
 
 [ports]
 coreutils = "375255bc1dbdf2a867e99a66942afff0f0eac405"
