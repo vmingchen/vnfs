@@ -5309,12 +5309,25 @@ fn recursive_admission_batches_anchored_children_without_repeated_path_resolutio
 fn shared_pruning_contract_on_auto_nfs() {
     let mount = std::env::var("VFSI_AUTO_TEST_MOUNT").expect("NFS mount fixture");
     let root = tempfile::tempdir_in(mount).unwrap();
-    let fs = vnfs::mounted::Auto::new(root.path()).unwrap();
-    assert!(matches!(
-        fs.route_for("/"),
-        vnfs::mounted::AutoRoute::DirectNfs { .. }
-    ));
-    let fixture = vnfs::posix::Posix::new(root.path()).unwrap();
-    vfsi_sync::test_support::run_pruning_suite(&fs, &fixture, "/pruning", true);
-    fs.remove_dir_all("/pruning").unwrap();
+    // Match the live Auto fixtures: retain a stable host root and allow the
+    // kernel/server metadata view of a freshly created NFS directory to settle.
+    // Retry only this read-only eligibility probe, never traversal or mutations.
+    let fs = vnfs::mounted::Auto::new("/").unwrap();
+    let mut route = fs.route_for(root.path());
+    for delay_ms in [5, 20, 100] {
+        if matches!(route, vnfs::mounted::AutoRoute::DirectNfs { .. }) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        route = fs.route_for(root.path());
+    }
+    assert!(
+        matches!(route, vnfs::mounted::AutoRoute::DirectNfs { .. }),
+        "expected direct NFS for {:?}, got {route:?}",
+        root.path()
+    );
+    let fixture = vnfs::posix::Posix::new("/").unwrap();
+    let base = root.path().join("pruning");
+    vfsi_sync::test_support::run_pruning_suite(&fs, &fixture, base.to_str().unwrap(), true);
+    fs.remove_dir_all(&base).unwrap();
 }

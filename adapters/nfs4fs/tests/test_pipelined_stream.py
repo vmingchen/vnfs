@@ -179,12 +179,15 @@ def test_pipelined_stream_recovers_one_dropped_read(fs, monkeypatch):
     original = fs._client.pread
     failures = []
     reconnects = []
+    fault_lock = threading.Lock()
     original_reconnect = fs._client.reconnect_descriptor
 
     def dropped_once(fd, length, offset):
-        if offset >= 10 and not failures:
-            failures.append((fd, offset))
-            raise ConnectionError("dropped read reply")
+        # Workers share this one-shot fault, including on free-threaded Python.
+        with fault_lock:
+            if offset >= 10 and not failures:
+                failures.append((fd, offset))
+                raise ConnectionError("dropped read reply")
         return original(fd, length, offset)
 
     def record_reconnect(fd):
