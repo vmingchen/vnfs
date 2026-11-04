@@ -75,8 +75,8 @@ impl<F: VectorBackend> FsClient<F> {
         self.vread_with_limit_projected_native(requests, max_total_bytes, |request| request)
     }
 
-    /// Backend adapter for opaque application requests; projection does not allocate.
-    /// The projection must return the same embedded request on every invocation.
+    /// Project each request once, outside the backend lock. Retain borrowed
+    /// paths for diagnostics without invoking caller code again after I/O.
     #[doc(hidden)]
     pub fn vread_with_limit_projected_native<'b, T>(
         &self,
@@ -88,7 +88,9 @@ impl<F: VectorBackend> FsClient<F> {
         F: 'b,
     {
         let mut requested = 0usize;
-        for (index, request) in requests.iter().map(&project).enumerate() {
+        let mut reads = Vec::with_capacity(requests.len());
+        let mut paths = Vec::with_capacity(requests.len());
+        for (index, request) in requests.iter().map(project).enumerate() {
             requested = requested
                 .checked_add(request.length)
                 .ok_or_else(|| VfError::errno(index, libc::EFBIG as u32))?;
@@ -96,46 +98,6 @@ impl<F: VectorBackend> FsClient<F> {
                 return Err(VfError::errno(index, libc::EFBIG as u32)
                     .with_context("vread_native", request.file.path()));
             }
-        }
-        let reads = self.read_ops(requests, &project)?;
-        // Drop the backend guard before invoking caller projection code.
-        let result = self.lock()?.vread_impl(&reads);
-        let results = result.map_err(|error| {
-            with_indexed_context(error, "vread_native", |index| {
-                requests
-                    .get(index)
-                    .map(&project)
-                    .map(|request| request.file.path())
-            })
-        })?;
-        if results.len() != requests.len() {
-            return Err(wrong_result_count(
-                "vread_native",
-                requests.len(),
-                results.len(),
-            ));
-        }
-        validate_read_results("vread_native", &reads, &results).map_err(|error| {
-            with_indexed_context(error, "vread_native", |index| {
-                requests
-                    .get(index)
-                    .map(&project)
-                    .map(|request| request.file.path())
-            })
-        })?;
-        Ok(results.into_iter().map(read_result).collect())
-    }
-
-    fn read_ops<'b, T>(
-        &self,
-        requests: &[T],
-        project: impl for<'r> Fn(&'r T) -> &'r FsRead<'b, F>,
-    ) -> VfResult<Vec<ReadOp>>
-    where
-        F: 'b,
-    {
-        let mut reads = Vec::with_capacity(requests.len());
-        for (index, request) in requests.iter().map(&project).enumerate() {
             self.validate_owner(request.file, index)?;
             reads.push(ReadOp::new(
                 request
@@ -150,8 +112,24 @@ impl<F: VectorBackend> FsClient<F> {
                 request.offset,
                 request.length,
             ));
+            paths.push(request.file.path());
         }
-        Ok(reads)
+        // Drop the backend guard before invoking caller projection code.
+        let result = self.lock()?.vread_impl(&reads);
+        let results = result.map_err(|error| {
+            with_indexed_context(error, "vread_native", |index| paths.get(index).copied())
+        })?;
+        if results.len() != requests.len() {
+            return Err(wrong_result_count(
+                "vread_native",
+                requests.len(),
+                results.len(),
+            ));
+        }
+        validate_read_results("vread_native", &reads, &results).map_err(|error| {
+            with_indexed_context(error, "vread_native", |index| paths.get(index).copied())
+        })?;
+        Ok(results.into_iter().map(read_result).collect())
     }
 
     #[doc(hidden)]

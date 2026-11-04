@@ -1368,3 +1368,99 @@ fn shared_pruning_contract_on_smb() {
     common::run_pruning_suite(&fs, &fs, &base, false);
     cleanup_test_tree(Path::new(&base));
 }
+
+#[test]
+fn positioned_descriptor_io_preserves_cursor_and_cursor_io_advances() {
+    let Some(mut fs) = connect() else { return };
+    let root = PathBuf::from(format!(
+        "/vfsi-smb-positioned-cursor-{}",
+        std::process::id()
+    ));
+    fs.create_dir_impl(&root, 0o777).unwrap();
+    let path = root.join("file");
+    let fd = fs
+        .open_raw_impl(&path, libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o666)
+        .unwrap();
+    let operation = (|| -> VfResult<()> {
+        fs.vwrite_impl(&[WriteOp::new(&fd, VfOffset::At(0), b"abcdef".as_slice())])?;
+        fs.seek_raw_impl(&fd, 1, SeekFrom::Set)?;
+        let read = fs.vread_impl(&[ReadOp::at(fd.clone(), 4, 1)])?;
+        assert_eq!(read[0].data, b"e");
+        assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur)?, 1);
+        fs.vwrite_impl(&[WriteOp::new(&fd, VfOffset::At(4), b"X".as_slice())])?;
+        assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur)?, 1);
+        let read = fs.vread_impl(&[ReadOp::new(fd.clone(), VfOffset::Cur, 1)])?;
+        assert_eq!(read[0].data, b"b");
+        assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur)?, 2);
+        fs.vwrite_impl(&[WriteOp::new(&fd, VfOffset::Cur, b"Y".as_slice())])?;
+        assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur)?, 3);
+        Ok(())
+    })();
+    let close = fs.close_impl(&fd);
+    cleanup_test_tree(&root);
+    operation.unwrap();
+    close.unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn ordinary_descriptor_writes_skip_size_queries_but_end_and_append_require_them() {
+    let Some(mut fs) = connect() else { return };
+    let root = PathBuf::from(format!("/vfsi-smb-lazy-size-{}", std::process::id()));
+    fs.create_dir_impl(&root, 0o777).unwrap();
+    let path = root.join("file");
+    let fd = fs
+        .open_raw_impl(&path, libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o666)
+        .unwrap();
+    let operation = (|| -> VfResult<()> {
+        fs.vwrite_impl(&[WriteOp::new(&fd, VfOffset::At(0), b"abcdef".as_slice())])?;
+        fs.seek_raw_impl(&fd, 1, SeekFrom::Set)?;
+        let query = Arc::new(FaultScript::one(
+            OpenFaultPoint::BeforeSizeQuery,
+            VfError::errno(0, libc::EIO as u32),
+        ));
+        fs.set_fault_injector(query.clone());
+        fs.vwrite_impl(&[WriteOp::new(&fd, VfOffset::At(4), b"X".as_slice())])?;
+        assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur)?, 1);
+        fs.vwrite_impl(&[WriteOp::new(&fd, VfOffset::Cur, b"Y".as_slice())])?;
+        assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur)?, 2);
+        assert!(!query.is_consumed(), "ordinary writes issue no size query");
+        let error = fs
+            .vwrite_impl(&[WriteOp::new(&fd, VfOffset::End, b"!".as_slice())])
+            .unwrap_err();
+        assert_eq!(error.raw_code(), libc::EIO as u32);
+        assert!(
+            query.is_consumed(),
+            "EOF-relative writes still query fresh size"
+        );
+        let append = fs.open_raw_impl(&path, libc::O_RDWR | libc::O_APPEND, 0o666)?;
+        let query = Arc::new(FaultScript::one(
+            OpenFaultPoint::BeforeSizeQuery,
+            VfError::errno(0, libc::EIO as u32),
+        ));
+        fs.set_fault_injector(query.clone());
+        let error = fs
+            .vwrite_impl(&[WriteOp::new(
+                &append,
+                VfOffset::At(u64::MAX),
+                b"!".as_slice(),
+            )])
+            .unwrap_err();
+        assert_eq!(error.raw_code(), libc::EIO as u32);
+        assert!(query.is_consumed(), "append writes still query fresh size");
+        fs.vwrite_impl(&[WriteOp::new(
+            &append,
+            VfOffset::At(u64::MAX),
+            b"Z".as_slice(),
+        )])?;
+        assert_eq!(fs.seek_raw_impl(&append, 0, SeekFrom::Cur)?, 7);
+        fs.close_impl(&append)?;
+        let data = fs.vread_impl(&[ReadOp::at(fd.clone(), 0, 8)])?;
+        assert_eq!(data[0].data, b"aYcdXfZ");
+        Ok(())
+    })();
+    let close = fs.close_impl(&fd);
+    cleanup_test_tree(&root);
+    operation.unwrap();
+    close.unwrap();
+}

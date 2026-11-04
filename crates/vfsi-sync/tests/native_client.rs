@@ -3559,17 +3559,21 @@ fn projected_io_errors_allow_client_reentry() {
     });
     let file = fs.open("/file").unwrap();
     let reads = [file.read_request_at(0, 1)];
+    let projections = std::cell::Cell::new(0);
     let error = fs
         .vread_with_limit_projected_native(&reads, 1, |request| {
+            projections.set(projections.get() + 1);
             fs.capabilities().unwrap();
             request
         })
         .unwrap_err();
     assert_eq!(error.index(), Some(0));
     assert_eq!(error.path(), Some(std::path::Path::new("/file")));
+    assert_eq!(projections.replace(0), 1);
     let writes = [file.write_request_at(0, b"x")];
     let error = fs
         .vwrite_mapped_native(&writes, |request| {
+            projections.set(projections.get() + 1);
             fs.capabilities().unwrap();
             *request
         })
@@ -3577,6 +3581,7 @@ fn projected_io_errors_allow_client_reentry() {
     assert_eq!(error.raw_code(), libc::ENOSPC as u32);
     assert_eq!(error.index(), Some(0));
     assert_eq!(error.path(), Some(std::path::Path::new("/file")));
+    assert_eq!(projections.get(), 1);
 }
 
 #[test]
@@ -3706,5 +3711,108 @@ fn generic_path_conversion_can_reenter_namespace_operations() {
     assert_eq!(closed.len(), 2);
     for dir in closed {
         dir.close().unwrap();
+    }
+}
+
+#[test]
+fn complete_append_ignores_overflowing_offsets_in_planning_and_short_repairs() {
+    use vfsi_core::api::{WriteOp as PublicWrite, WriteOptions};
+    for offset in [u64::MAX, u64::MAX - 1] {
+        for failure in [None, Some(VfError::transport(None, "lost append reply"))] {
+            let backend = WriteBoundaryProbe {
+                append_end: Some(3),
+                append_gap: 3,
+                failure: failure.clone(),
+                failure_after: 1,
+                ..Default::default()
+            };
+            let calls = backend.calls.clone();
+            let client = FsClient::new(backend);
+            let first = client.open_options().append(true).open("/same").unwrap();
+            let alias = client.open_options().append(true).open("/same").unwrap();
+            let result = client.vwrite(
+                &[
+                    PublicWrite::at(&first, offset, b"abcde"),
+                    PublicWrite::at(&alias, offset, b"XY"),
+                ],
+                WriteOptions::new().with_write_all(true),
+            );
+            if let Some(failure) = failure {
+                let error = result.unwrap_err();
+                assert_eq!(error.transport_message(), failure.transport_message());
+                assert_eq!(error.index(), None);
+                assert_eq!(
+                    calls.lock().unwrap().len(),
+                    2,
+                    "never replay a failed append"
+                );
+            } else {
+                let values = result.unwrap();
+                assert_eq!((values[0].offset, values[0].bytes_written), (9, 5));
+                assert_eq!((values[1].offset, values[1].bytes_written), (17, 2));
+                let calls = calls.lock().unwrap();
+                assert_eq!(calls.len(), 4);
+                assert!(
+                    calls
+                        .iter()
+                        .all(|wave| wave.len() == 1 && wave[0].offset == VfOffset::End)
+                );
+            }
+        }
+    }
+    let client = FsClient::new(ScalarOnly {
+        data: b"base".to_vec(),
+        max_write_once: Some(2),
+        ..Default::default()
+    });
+    let file = client.open_options().append(true).open("/file").unwrap();
+    client
+        .vwrite(
+            &[PublicWrite::at(&file, u64::MAX, b"abcde")],
+            WriteOptions::new().with_write_all(true),
+        )
+        .unwrap();
+    file.close().unwrap();
+    assert_eq!(client.into_inner().unwrap().data, b"baseabcde");
+}
+
+#[test]
+fn mapped_io_projects_each_operand_once_on_success_and_invalid_replies() {
+    for invalid_reply in [false, true] {
+        let fs = FsClient::new(ScalarOnly {
+            data: b"abc".to_vec(),
+            wrong_result_offset: invalid_reply,
+            ..Default::default()
+        });
+        let a = fs.open("/a").unwrap();
+        let b = fs.open("/b").unwrap();
+        let reads = [a.read_request_at(0, 1), b.read_request_at(1, 1)];
+        let calls = std::cell::Cell::new(0);
+        let result = fs.vread_with_limit_projected_native(&reads, 2, |request| {
+            calls.set(calls.get() + 1);
+            fs.capabilities().unwrap();
+            request
+        });
+        assert_eq!(calls.get(), 2);
+        if invalid_reply {
+            assert_eq!(result.unwrap_err().path(), Some(std::path::Path::new("/a")));
+        } else {
+            assert_eq!(result.unwrap().len(), 2);
+        }
+        let writes = [a.write_request_at(0, b"x"), b.write_request_at(1, b"y")];
+        calls.set(0);
+        let result = fs.vwrite_mapped_native(&writes, |request| {
+            calls.set(calls.get() + 1);
+            fs.capabilities().unwrap();
+            *request
+        });
+        assert_eq!(calls.get(), 2);
+        if invalid_reply {
+            assert_eq!(result.unwrap_err().path(), Some(std::path::Path::new("/a")));
+        } else {
+            assert_eq!(result.unwrap().len(), 2);
+        }
+        a.close().unwrap();
+        b.close().unwrap();
     }
 }

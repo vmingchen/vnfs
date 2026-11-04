@@ -241,9 +241,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.6.0"
+version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f74872d07caf508b30a21f6836e7d7016a2eaf7d9ff4f48deaa58cd8a0407630"
+checksum = "86e055fa6e3e40ad6187ba25b6855eeb635d5271f8e0f0e1e9a5826b8d75bea0"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -498,9 +498,9 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.14"
+version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
+checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
 
 [[package]]
 name = "fnv"
@@ -672,9 +672,9 @@ dependencies = [
 
 [[package]]
 name = "libntirpc-sys"
-version = "0.3.3"
+version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53598d8ac548008245e75c0c70370f8553aa882bd0dd9e6f75135fd6976fc5ff"
+checksum = "28a8c9abeed61b5a9879bcd0b6a4422dbbd0b39a6a6c2a71160652914ac1dedf"
 dependencies = [
  "bindgen",
  "cc",
@@ -1092,9 +1092,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "smb2"
-version = "0.35.0"
+version = "0.36.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "191e0bf6d61480771778dd0fb7c34ca0dbec2c2f66eb8f06aa2bafddfd1b5374"
+checksum = "9d745873c4f58f5c2abbed8219999b38829d69f94d517116723e22646775ba42"
 dependencies = [
  "aes",
  "aes-gcm",

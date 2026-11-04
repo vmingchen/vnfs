@@ -178,8 +178,8 @@ impl<F: VectorBackend> FsClient<F> {
         self.vwrite_mapped_native(requests, |request| *request)
     }
 
-    /// Adapter constructing cheap borrowed requests without a temporary vector.
-    /// The mapper must return the same file, offset, and payload on each call.
+    /// Project each borrowed request once before locking. Borrow diagnostic
+    /// paths so failures never need to invoke the mapper again.
     #[doc(hidden)]
     pub fn vwrite_mapped_native<'b, T>(
         &self,
@@ -189,16 +189,26 @@ impl<F: VectorBackend> FsClient<F> {
     where
         F: 'b,
     {
-        let writes = self.write_ops(requests, &project)?;
+        let mut writes = Vec::with_capacity(requests.len());
+        let mut paths = Vec::with_capacity(requests.len());
+        for (index, request) in requests.iter().map(project).enumerate() {
+            let file = request.file();
+            self.validate_owner(file, index)?;
+            writes.push(WriteOp::new(
+                file.raw().map_err(|error| error.with_index(index))?,
+                if file.append {
+                    VfOffset::End
+                } else {
+                    request.offset()
+                },
+                request.data(),
+            ));
+            paths.push(file.path());
+        }
         // Drop the backend guard before invoking caller projection code.
         let result = self.lock()?.vwrite_impl(&writes);
         let results = result.map_err(|error| {
-            with_indexed_context(error, "vwrite_native", |index| {
-                requests
-                    .get(index)
-                    .map(&project)
-                    .map(|request| request.file().path())
-            })
+            with_indexed_context(error, "vwrite_native", |index| paths.get(index).copied())
         })?;
         if results.len() != requests.len() {
             return Err(wrong_result_count(
@@ -208,12 +218,7 @@ impl<F: VectorBackend> FsClient<F> {
             ));
         }
         validate_write_results("vwrite_native", &writes, &results).map_err(|error| {
-            with_indexed_context(error, "vwrite_native", |index| {
-                requests
-                    .get(index)
-                    .map(&project)
-                    .map(|request| request.file().path())
-            })
+            with_indexed_context(error, "vwrite_native", |index| paths.get(index).copied())
         })?;
         Ok(results.into_iter().map(write_result).collect())
     }
@@ -254,12 +259,19 @@ impl<F: VectorBackend> FsClient<F> {
                 return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput)
                     .with_context("vwrite_all_native", request.file().path()));
             };
-            offset
-                .checked_add(request.data().len() as u64)
-                .ok_or_else(|| {
-                    VfError::errno(index, libc::EOVERFLOW as u32)
-                        .with_context("vwrite_all_native", request.file().path())
-                })?;
+            let offset = if request.file().append && !request.data().is_empty() {
+                // Append selects EOF at execution. Its supplied position must
+                // not participate in validation or dependency arithmetic.
+                0
+            } else {
+                offset
+                    .checked_add(request.data().len() as u64)
+                    .ok_or_else(|| {
+                        VfError::errno(index, libc::EOVERFLOW as u32)
+                            .with_context("vwrite_all_native", request.file().path())
+                    })?;
+                offset
+            };
             // Reuse the offset allocation to retain the cheap borrowed request.
             prepared.push((request, offset));
             if !request.data().is_empty() {
@@ -394,10 +406,14 @@ impl<F: VectorBackend> FsClient<F> {
                         return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput)
                             .with_context("vwrite_all_native", request.file().path()));
                     };
-                    let offset = offset.checked_add(totals[index] as u64).ok_or_else(|| {
-                        VfError::errno(index, libc::EOVERFLOW as u32)
-                            .with_context("vwrite_all_native", request.file().path())
-                    })?;
+                    let offset = if request.file().append {
+                        0 // write_ops resolves fresh EOF for every continuation.
+                    } else {
+                        offset.checked_add(totals[index] as u64).ok_or_else(|| {
+                            VfError::errno(index, libc::EOVERFLOW as u32)
+                                .with_context("vwrite_all_native", request.file().path())
+                        })?
+                    };
                     Ok(FsWrite::new(
                         request.file(),
                         VfOffset::At(offset),
@@ -463,35 +479,5 @@ impl<F: VectorBackend> FsClient<F> {
                 stable: stable[index],
             })
             .collect())
-    }
-
-    fn write_ops<'a, 'b, T>(
-        &self,
-        requests: &'a [T],
-        project: impl Fn(&T) -> FsWrite<'b, F>,
-    ) -> VfResult<Vec<WriteOp<&'a FileOperand, &'a [u8]>>>
-    where
-        F: 'b,
-        'b: 'a,
-    {
-        let mut writes = Vec::with_capacity(requests.len());
-        for (index, request) in requests.iter().map(&project).enumerate() {
-            self.validate_owner(request.file(), index)?;
-            writes.push(WriteOp::new(
-                request
-                    .file()
-                    .raw()
-                    .map_err(|error| error.with_index(index))?,
-                // Canonicalize append requests before common result validation:
-                // the backend selects EOF, not the caller's positional offset.
-                if request.file().append {
-                    VfOffset::End
-                } else {
-                    request.offset()
-                },
-                request.data(),
-            ));
-        }
-        Ok(writes)
     }
 }

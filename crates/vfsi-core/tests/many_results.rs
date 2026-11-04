@@ -231,3 +231,28 @@ proptest! {
         prop_assert_eq!(closed, expected);
     }
 }
+
+#[test]
+fn short_failure_reports_do_not_reserve_the_declared_request_count() {
+    let error = ManyResults::new(
+        usize::MAX,
+        vec![Ok(10u8), Err(VfError::errno(0, libc::EACCES as u32))],
+    )
+    .try_collect()
+    .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(error.raw_code(), libc::EACCES as u32);
+}
+
+#[test]
+fn short_owned_reports_clean_every_value_without_reserving_the_missing_suffix() {
+    let mut closed = Vec::new();
+    let error = ManyResults::new(usize::MAX, vec![Ok(10u8), Ok(20u8)])
+        .try_collect_with_cleanup(usize::MAX, |index, value| {
+            closed.push((index, *value));
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(error.is_transport());
+    assert_eq!(closed, [(0, 10), (1, 20)]);
+}
