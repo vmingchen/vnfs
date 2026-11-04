@@ -5,6 +5,14 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+## SMB patch release (2026-11-03)
+
+Rust: `vfsi-core 0.1.17`, `vfsi-sync 0.1.18`, and `vfsi-smb 0.1.15`.
+Python: `vsmb 0.1.6` and `vsmbfs 0.1.6`.
+
+- Include the current shared result-allocation and contiguous append-write fixes,
+  plus the directory-pruning conformance and fault-injection support.
+- Require `vsmb>=0.1.6` in `vsmbfs` so installations receive the updated backend.
 - Upgrade the Rust and Python SMB backend to `smb2 0.39.0`, retaining disabled
   DFS referral following and classifying its new referral errors as unsupported.
 
