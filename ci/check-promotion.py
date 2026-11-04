@@ -23,6 +23,23 @@ def verify(repository, commit):
         latest = max(eligible, key=lambda r: (r["createdAt"], r["databaseId"]))
         if latest["status"] != "completed" or latest["conclusion"] != "success":
             raise ValueError(f"{workflow}: latest run is {latest['status']}/{latest['conclusion']}: {latest['url']}")
+        if workflow == "ports.yml":
+            # A green workflow can hide skipped jobs or an incomplete matrix.
+            jobs = json.loads(subprocess.check_output([
+                "gh", "run", "view", str(latest["databaseId"]), "--repo", repository,
+                "--json", "jobs",
+            ], text=True, timeout=60))["jobs"]
+            required = ("registry", "abi-v3",
+                        *(f"ports ({port})" for port in ("git", "rsync", "coreutils", "findutils")))
+            for name in required:
+                matches = [job for job in jobs if job["name"] == name]
+                if len(matches) != 1:
+                    raise ValueError(f"ports.yml: expected exactly one {name} job: {latest['url']}")
+                job = matches[0]
+                if job["status"] != "completed" or job["conclusion"] != "success":
+                    raise ValueError(
+                        f"ports.yml: {name} is {job['status']}/{job['conclusion']}: {latest['url']}"
+                    )
         evidence[workflow] = latest
     return {"commit": commit, "checks": evidence}
 

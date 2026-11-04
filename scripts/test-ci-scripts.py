@@ -646,6 +646,28 @@ class EcosystemBaselineTests(unittest.TestCase):
             retarget(manifest, self.root)
 
 
+class PortWorkflowTriggerTests(unittest.TestCase):
+    def test_relevant_pushes_are_not_limited_to_main(self):
+        import fnmatch
+        import re
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ports.yml").read_text()
+        push = re.search(r"(?ms)^  push:\n(.*?)(?=^  [a-z_]+:)", workflow).group(1)
+        # Keep tag pushes excluded: GitHub does not apply path filters to tags.
+        branches = json.loads(re.search(r"(?m)^    branches: (.+)$", push).group(1))
+        self.assertEqual(branches, ["**"])
+        self.assertNotRegex(push, r"(?m)^    (?:branches-ignore|tags|tags-ignore):")
+        paths = [json.loads(line.strip()[2:]) for line in push.splitlines()
+                 if line.strip().startswith("- ")]
+        for path in ("Cargo.toml", "Cargo.lock", "crates/vfsi-sync/src/client/mod.rs",
+                     "bindings/c/include/vfsi_dynamic.h", "ecosystem/ports.toml",
+                     "ci/ports/check-c-abi.sh", "ci/check-promotion.py",
+                     "scripts/test-ci-scripts.py", ".github/workflows/ports.yml",
+                     ".github/workflows/ci.yml", ".github/workflows/promote-vfsi.yml"):
+            with self.subTest(path=path):
+                self.assertTrue(any(fnmatch.fnmatchcase(path, pattern) for pattern in paths))
+        self.assertFalse(any(fnmatch.fnmatchcase("docs/unrelated.md", pattern) for pattern in paths))
+
+
 class PromotionGateTests(unittest.TestCase):
     def setUp(self):
         import runpy
@@ -657,9 +679,16 @@ class PromotionGateTests(unittest.TestCase):
                    conclusion="success", event="push", createdAt="2026-11-02T00:00:00Z", url="https://example.invalid/run/1")
         return dict(row, **overrides)
 
-    def check(self, ci, ports):
+    def jobs(self):
+        return [dict(name=name, status="completed", conclusion="success")
+                for name in ("registry", "abi-v3", "ports (git)", "ports (rsync)",
+                             "ports (coreutils)", "ports (findutils)")]
+
+    def check(self, ci, ports, jobs=None):
         from unittest.mock import patch
-        with patch("subprocess.check_output", side_effect=[json.dumps(ci), json.dumps(ports)]):
+        replies = [json.dumps(ci), json.dumps(ports),
+                   json.dumps({"jobs": self.jobs() if jobs is None else jobs})]
+        with patch("subprocess.check_output", side_effect=replies):
             return self.verify("vmingchen/vnfs", self.sha)
 
     def test_both_exact_main_runs_are_required(self):
@@ -676,9 +705,58 @@ class PromotionGateTests(unittest.TestCase):
         for state in (dict(status="in_progress", conclusion=""), dict(conclusion="failure")):
             with self.subTest(state=state), self.assertRaises(ValueError):
                 self.check([self.row()], [self.row(), self.row(databaseId=2, **state)])
+            with self.subTest(ci=state), self.assertRaises(ValueError):
+                self.check([self.row(), self.row(databaseId=2, **state)], [self.row()])
         self.check([self.row()], [self.row(event="workflow_dispatch")])
         with self.assertRaises(ValueError):
             self.check([self.row(event="workflow_dispatch")], [self.row()])
+
+    def test_green_workflow_cannot_omit_any_port_or_abi_gate(self):
+        for required in self.jobs():
+            with self.subTest(job=required["name"]), self.assertRaises(ValueError):
+                self.check([self.row()], [self.row()],
+                           [job for job in self.jobs() if job["name"] != required["name"]])
+        with self.assertRaises(ValueError):
+            self.check([self.row()], [self.row()], [])
+
+    def test_required_jobs_must_complete_successfully(self):
+        for required in self.jobs():
+            for state in (dict(conclusion="skipped"), dict(conclusion="failure"),
+                          dict(conclusion="cancelled"), dict(conclusion="neutral"),
+                          dict(conclusion="timed_out"),
+                          dict(status="in_progress", conclusion="")):
+                jobs = [dict(job, **state) if job["name"] == required["name"] else job
+                        for job in self.jobs()]
+                with self.subTest(job=required["name"], state=state), self.assertRaises(ValueError):
+                    self.check([self.row()], [self.row()], jobs)
+
+    def test_duplicate_job_evidence_is_rejected(self):
+        for required in self.jobs():
+            with self.subTest(job=required["name"]), self.assertRaises(ValueError):
+                self.check([self.row()], [self.row()], [*self.jobs(), required])
+
+    def test_job_evidence_comes_from_the_latest_eligible_port_run(self):
+        from unittest.mock import patch
+        replies = [json.dumps([self.row()]),
+                   json.dumps([self.row(), self.row(databaseId=2),
+                               self.row(databaseId=3, headSha="b" * 40)]),
+                   json.dumps({"jobs": [*self.jobs(),
+                                        dict(name="optional", status="completed",
+                                             conclusion="skipped")]})]
+        with patch("subprocess.check_output", side_effect=replies) as query:
+            result = self.verify("vmingchen/vnfs", self.sha)
+        self.assertEqual(result["checks"]["ports.yml"]["databaseId"], 2)
+        self.assertEqual(query.call_args.args[0],
+                         ["gh", "run", "view", "2", "--repo", "vmingchen/vnfs",
+                          "--json", "jobs"])
+
+    def test_job_query_failure_cannot_promote(self):
+        from unittest.mock import patch
+        with patch("subprocess.check_output",
+                   side_effect=[json.dumps([self.row()]), json.dumps([self.row()]),
+                                subprocess.CalledProcessError(1, ["gh", "run", "view"])]):
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.verify("vmingchen/vnfs", self.sha)
 
     def test_invalid_commit_fails_before_running_gh(self):
         from unittest.mock import patch
