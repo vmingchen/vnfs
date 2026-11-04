@@ -1,0 +1,88 @@
+native-warmup-00-kernel 2601.598 None
+native-warmup-00-vfsi 2325.92 None
+native-timing-00-kernel 1920.258 None
+native-timing-00-vfsi 2270.927 None
+native-timing-01-vfsi 1753.286 None
+native-timing-01-kernel 1369.114 None
+native-timing-02-kernel 1179.398 None
+native-timing-02-vfsi 1838.995 None
+native-timing-03-vfsi 1823.962 None
+native-timing-03-kernel 1158.124 None
+native-timing-04-kernel 1345.432 None
+native-timing-04-vfsi 1669.22 None
+native-timing-05-vfsi 1923.57 None
+native-timing-05-kernel 1120.999 None
+native-timing-06-kernel 1092.525 None
+native-timing-06-vfsi 2095.338 None
+native-capture-00-kernel 1419.699 4668
+native-capture-00-vfsi 1669.398 6231
+native-capture-01-vfsi 1744.86 6231
+native-capture-01-kernel 1168.41 4668
+native-capture-02-kernel 1067.792 4668
+native-capture-02-vfsi 1669.324 6231
+native-fallback-00-missing-library 1199.656 None
+native-fallback-00-unsupported 1184.648 None
+added-1ms-rtt-warmup-00-kernel 5817.38 None
+added-1ms-rtt-warmup-00-vfsi 7930.886 None
+added-1ms-rtt-timing-00-kernel 6006.442 None
+added-1ms-rtt-timing-00-vfsi 7775.35 None
+added-1ms-rtt-timing-01-vfsi 8112.913 None
+added-1ms-rtt-timing-01-kernel 5841.415 None
+added-1ms-rtt-timing-02-kernel 5811.111 None
+added-1ms-rtt-timing-02-vfsi 7889.196 None
+added-1ms-rtt-timing-03-vfsi 8425.681 None
+added-1ms-rtt-timing-03-kernel 5766.912 None
+added-1ms-rtt-timing-04-kernel 5826.339 None
+added-1ms-rtt-timing-04-vfsi 7861.077 None
+added-1ms-rtt-timing-05-vfsi 8392.991 None
+added-1ms-rtt-timing-05-kernel 5933.201 None
+added-1ms-rtt-timing-06-kernel 6182.674 None
+added-1ms-rtt-timing-06-vfsi 9263.082 None
+added-1ms-rtt-capture-00-kernel 6047.029 4668
+added-1ms-rtt-capture-00-vfsi 8396.615 6231
+added-1ms-rtt-capture-01-vfsi 8673.081 6231
+added-1ms-rtt-capture-01-kernel 6385.308 4668
+added-1ms-rtt-capture-02-kernel 7318.757 4668
+added-1ms-rtt-capture-02-vfsi 8689.784 6231
+[
+  {
+    "regime": "native",
+    "method": "kernel",
+    "median_wall_ms": 1179.39793,
+    "rpc_counts": [
+      4668,
+      4668,
+      4668
+    ]
+  },
+  {
+    "regime": "native",
+    "method": "vfsi",
+    "median_wall_ms": 1838.995381,
+    "rpc_counts": [
+      6231,
+      6231,
+      6231
+    ]
+  },
+  {
+    "regime": "added-1ms-rtt",
+    "method": "kernel",
+    "median_wall_ms": 5841.414687,
+    "rpc_counts": [
+      4668,
+      4668,
+      4668
+    ]
+  },
+  {
+    "regime": "added-1ms-rtt",
+    "method": "vfsi",
+    "median_wall_ms": 8112.912735,
+    "rpc_counts": [
+      6231,
+      6231,
+      6231
+    ]
+  }
+]

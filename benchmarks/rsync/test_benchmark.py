@@ -11,6 +11,12 @@ spec.loader.exec_module(benchmark)
 
 
 class FrozenScanTests(unittest.TestCase):
+    def test_frozen_sdk_lock_is_available_and_matches_the_release_pin(self):
+        baseline = json.loads((benchmark.HERE / "baseline.json").read_text())
+        lock = benchmark.HERE / "Cargo.lock"
+        self.assertTrue(lock.is_file(), "the frozen SDK lock must ship with the benchmark")
+        self.assertEqual(benchmark.sha(lock), baseline["sdk_lock_sha256"])
+
     def test_parity_gate_rejects_changed_output_missing_entries_and_silent_fallback(self):
         row = dict(stdout_sha256='same', stdout_lines=10, traced_entries=20)
         self.assertEqual(benchmark.validate_sample(row, 'vfsi', 10, 'same'), 'same')

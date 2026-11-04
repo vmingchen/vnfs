@@ -2,7 +2,7 @@ name: Port compatibility
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
     paths: &compatibility-paths
       - "Cargo.toml"
       - "Cargo.lock"

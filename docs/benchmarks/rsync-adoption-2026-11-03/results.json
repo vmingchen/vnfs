@@ -1,0 +1,1901 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "baseline": {
+      "schema_version": 1,
+      "name": "vnfs-0.0.28-vfsi-c-0.3.12",
+      "release_revision": "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3",
+      "port_repository": "https://github.com/vfsi/vfsi-port-rsync",
+      "port_revision": "5f211b8b9c78b682782953f4306d48122eb3ee7b",
+      "vnfs": "0.0.28",
+      "vfsi_c": "0.3.12",
+      "archive_sha256": "3528d76bd13d10174bc489ccacf26d7dcc179a847e2455497e161e3a9db21d42",
+      "sdk_manifest_sha256": "ee14b03578eb9524f9ccd7e86f9d2b65f19ccc586a1d26d0a36a5a1571b3494c",
+      "sdk_lock_sha256": "43cf904e39dfaec8b47772952005d59859e097adf3ed18b6b6a0f4f79fd26120",
+      "packages": {
+        "vnfs": "0.0.28",
+        "vfsi-core": "0.1.16",
+        "vfsi-sync": "0.1.17",
+        "vfsi-local": "0.1.15",
+        "vfsi-posix": "0.1.6",
+        "vfsi-nfs": "0.1.16",
+        "vfsi-smb": "0.1.14",
+        "nfsv41-sys": "0.1.15",
+        "libntirpc-sys": "0.3.3"
+      }
+    },
+    "binary_sha256": "2ba84621cf65a7f52823c67373026d11605e7dc6a32102b9ca76818cd24cd4a7",
+    "library_sha256": "ab77527d85807aa717a4f1fa8455a0886a84b42c05fe7b2d533950b8d12d7cec",
+    "sdk_lock_sha256": "43cf904e39dfaec8b47772952005d59859e097adf3ed18b6b6a0f4f79fd26120",
+    "packages": {
+      "aead": {
+        "version": "0.6.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "aes": {
+        "version": "0.9.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "aes-gcm": {
+        "version": "0.11.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "aho-corasick": {
+        "version": "1.1.5",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "anstream": {
+        "version": "1.0.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "anstyle": {
+        "version": "1.0.14",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "anstyle-parse": {
+        "version": "1.0.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "anstyle-query": {
+        "version": "1.1.5",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "anstyle-wincon": {
+        "version": "3.0.11",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "async-trait": {
+        "version": "0.1.92",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "bindgen": {
+        "version": "0.73.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "bitfields": {
+        "version": "3.2.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "bitfields-impl": {
+        "version": "3.2.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "bitflags": {
+        "version": "2.13.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "block-buffer": {
+        "version": "0.12.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "bytes": {
+        "version": "1.12.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "cbindgen": {
+        "version": "0.29.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "cc": {
+        "version": "1.6.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "ccm": {
+        "version": "0.6.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "cexpr": {
+        "version": "0.6.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "cfg-if": {
+        "version": "1.0.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "cipher": {
+        "version": "0.5.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "clang-sys": {
+        "version": "1.9.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "clap": {
+        "version": "4.6.7",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "clap_builder": {
+        "version": "4.6.7",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "clap_lex": {
+        "version": "1.1.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "cmac": {
+        "version": "0.8.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "cmov": {
+        "version": "0.5.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "colorchoice": {
+        "version": "1.0.5",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "const-oid": {
+        "version": "0.10.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "convert_case": {
+        "version": "0.10.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "cpubits": {
+        "version": "0.1.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "cpufeatures": {
+        "version": "0.3.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "crypto-common": {
+        "version": "0.2.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "ctr": {
+        "version": "0.10.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "ctutils": {
+        "version": "0.4.5",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "dbl": {
+        "version": "0.5.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "derive_more": {
+        "version": "2.1.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "derive_more-impl": {
+        "version": "2.1.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "digest": {
+        "version": "0.11.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "equivalent": {
+        "version": "1.0.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "errno": {
+        "version": "0.3.14",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "fastrand": {
+        "version": "2.5.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "find-msvc-tools": {
+        "version": "0.1.14",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "futures-core": {
+        "version": "0.3.34",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "futures-macro": {
+        "version": "0.3.34",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "futures-task": {
+        "version": "0.3.34",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "futures-util": {
+        "version": "0.3.34",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "getrandom": {
+        "version": "0.4.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "getset": {
+        "version": "0.1.7",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "ghash": {
+        "version": "0.6.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "glob": {
+        "version": "0.3.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "hashbrown": {
+        "version": "0.17.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "heck": {
+        "version": "0.5.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "hmac": {
+        "version": "0.13.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "hybrid-array": {
+        "version": "0.4.14",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "indexmap": {
+        "version": "2.14.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "inout": {
+        "version": "0.2.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "is_terminal_polyfill": {
+        "version": "1.70.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "itoa": {
+        "version": "1.0.18",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "libc": {
+        "version": "0.2.191",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "libloading": {
+        "version": "0.8.9",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "libntirpc-sys": {
+        "version": "0.3.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "linux-raw-sys": {
+        "version": "0.12.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "log": {
+        "version": "0.4.33",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "lz4_flex": {
+        "version": "0.14.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "md-5": {
+        "version": "0.11.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "md4": {
+        "version": "0.11.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "memchr": {
+        "version": "2.8.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "minimal-lexical": {
+        "version": "0.2.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "mio": {
+        "version": "1.2.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "nfsv41-sys": {
+        "version": "0.1.15",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "nom": {
+        "version": "7.1.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "num_enum": {
+        "version": "0.7.6",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "num_enum_derive": {
+        "version": "0.7.6",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "once_cell": {
+        "version": "1.21.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "once_cell_polyfill": {
+        "version": "1.70.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "pbkdf2": {
+        "version": "0.13.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "pin-project-lite": {
+        "version": "0.2.17",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "pkg-config": {
+        "version": "0.3.34",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "polyval": {
+        "version": "0.7.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "proc-macro-crate": {
+        "version": "3.5.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "proc-macro2": {
+        "version": "1.0.107",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "quote": {
+        "version": "1.0.47",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "r-efi": {
+        "version": "6.0.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "rand_core": {
+        "version": "0.10.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "regex": {
+        "version": "1.13.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "regex-automata": {
+        "version": "0.4.18",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "regex-syntax": {
+        "version": "0.8.11",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "rustc-hash": {
+        "version": "2.1.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "rustc_version": {
+        "version": "0.4.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "rustix": {
+        "version": "1.1.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "rustversion": {
+        "version": "1.0.23",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "semver": {
+        "version": "1.0.28",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "serde": {
+        "version": "1.0.229",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "serde_core": {
+        "version": "1.0.229",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "serde_derive": {
+        "version": "1.0.229",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "serde_json": {
+        "version": "1.0.154",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "serde_spanned": {
+        "version": "1.1.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "sha1": {
+        "version": "0.11.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "sha2": {
+        "version": "0.11.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "shlex": {
+        "version": "2.0.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "slab": {
+        "version": "0.4.12",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "smb2": {
+        "version": "0.35.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "socket2": {
+        "version": "0.6.5",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "strsim": {
+        "version": "0.11.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "strum": {
+        "version": "0.28.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "strum_macros": {
+        "version": "0.28.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "syn": {
+        "version": "3.0.9",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "tempfile": {
+        "version": "3.27.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "thiserror": {
+        "version": "2.0.21",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "thiserror-impl": {
+        "version": "2.0.21",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "tokio": {
+        "version": "1.54.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "toml": {
+        "version": "0.9.12+spec-1.1.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "toml_datetime": {
+        "version": "1.1.1+spec-1.1.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "toml_edit": {
+        "version": "0.25.13+spec-1.1.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "toml_parser": {
+        "version": "1.1.3+spec-1.1.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "toml_writer": {
+        "version": "1.1.2+spec-1.1.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "twox-hash": {
+        "version": "2.1.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "typenum": {
+        "version": "1.20.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "unicode-ident": {
+        "version": "1.0.24",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "unicode-segmentation": {
+        "version": "1.13.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "unicode-xid": {
+        "version": "0.2.6",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "universal-hash": {
+        "version": "0.6.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "utf8parse": {
+        "version": "0.2.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "vfsi-c": {
+        "version": "0.3.12",
+        "source": null
+      },
+      "vfsi-core": {
+        "version": "0.1.16",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "vfsi-local": {
+        "version": "0.1.15",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "vfsi-nfs": {
+        "version": "0.1.16",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "vfsi-posix": {
+        "version": "0.1.6",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "vfsi-smb": {
+        "version": "0.1.14",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "vfsi-sync": {
+        "version": "0.1.17",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "vnfs": {
+        "version": "0.0.28",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "wasi": {
+        "version": "0.11.1+wasi-snapshot-preview1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "windows-link": {
+        "version": "0.2.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "windows-sys": {
+        "version": "0.61.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "winnow": {
+        "version": "1.0.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "zmij": {
+        "version": "1.0.23",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      }
+    },
+    "port_diff": "",
+    "compiler": "cc (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+    "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11) (built from a source tarball)\nbinary: rustc\ncommit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\ncommit-date: 2026-02-11\nhost: aarch64-unknown-linux-gnu\nrelease: 1.93.1\nLLVM version: 21.1.8\n"
+  },
+  "fixture": {
+    "schema_version": 1,
+    "branches": 6,
+    "depth": 4,
+    "files_per_directory": 8,
+    "file_bytes": 128,
+    "payload_sha256": "b2169d4d0046ec4f9ea3c11ea8f2a2581c9c786b4acc3344cdf47af85974f242",
+    "identity_sha256": "8b054ac6860c86a6c98ddf06e659262a719d758191185e70ddcf5267419a0853",
+    "directories": 1555,
+    "regular_files": 12440,
+    "logical_file_bytes": 1592320,
+    "allocated_bytes": 57323520,
+    "symlinks": 0,
+    "hard_link_aliases": 0
+  },
+  "samples": [
+    {
+      "elapsed_ns": 2601597734,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-ybb7bbl_/destination/"
+      ],
+      "regime": "native",
+      "phase": "warmup",
+      "pair": 0,
+      "method": "kernel",
+      "raw": "native-warmup-00-kernel"
+    },
+    {
+      "elapsed_ns": 2325920384,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-g2w14c08/destination/"
+      ],
+      "regime": "native",
+      "phase": "warmup",
+      "pair": 0,
+      "method": "vfsi",
+      "raw": "native-warmup-00-vfsi"
+    },
+    {
+      "elapsed_ns": 1920257673,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-xqnlm15f/destination/"
+      ],
+      "regime": "native",
+      "phase": "timing",
+      "pair": 0,
+      "method": "kernel",
+      "raw": "native-timing-00-kernel"
+    },
+    {
+      "elapsed_ns": 2270927380,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-6p0wx37m/destination/"
+      ],
+      "regime": "native",
+      "phase": "timing",
+      "pair": 0,
+      "method": "vfsi",
+      "raw": "native-timing-00-vfsi"
+    },
+    {
+      "elapsed_ns": 1753285658,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-8fc9vfz7/destination/"
+      ],
+      "regime": "native",
+      "phase": "timing",
+      "pair": 1,
+      "method": "vfsi",
+      "raw": "native-timing-01-vfsi"
+    },
+    {
+      "elapsed_ns": 1369113682,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-aew7h70e/destination/"
+      ],
+      "regime": "native",
+      "phase": "timing",
+      "pair": 1,
+      "method": "kernel",
+      "raw": "native-timing-01-kernel"
+    },
+    {
+      "elapsed_ns": 1179397930,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-c9_s3eo5/destination/"
+      ],
+      "regime": "native",
+      "phase": "timing",
+      "pair": 2,
+      "method": "kernel",
+      "raw": "native-timing-02-kernel"
+    },
+    {
+      "elapsed_ns": 1838995381,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-9vxz_wi4/destination/"
+      ],
+      "regime": "native",
+      "phase": "timing",
+      "pair": 2,
+      "method": "vfsi",
+      "raw": "native-timing-02-vfsi"
+    },
+    {
+      "elapsed_ns": 1823962168,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-llh9wgu9/destination/"
+      ],
+      "regime": "native",
+      "phase": "timing",
+      "pair": 3,
+      "method": "vfsi",
+      "raw": "native-timing-03-vfsi"
+    },
+    {
+      "elapsed_ns": 1158123573,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-jv4zjrzx/destination/"
+      ],
+      "regime": "native",
+      "phase": "timing",
+      "pair": 3,
+      "method": "kernel",
+      "raw": "native-timing-03-kernel"
+    },
+    {
+      "elapsed_ns": 1345432192,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-fvdym8lf/destination/"
+      ],
+      "regime": "native",
+      "phase": "timing",
+      "pair": 4,
+      "method": "kernel",
+      "raw": "native-timing-04-kernel"
+    },
+    {
+      "elapsed_ns": 1669220358,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-4tl9x8xv/destination/"
+      ],
+      "regime": "native",
+      "phase": "timing",
+      "pair": 4,
+      "method": "vfsi",
+      "raw": "native-timing-04-vfsi"
+    },
+    {
+      "elapsed_ns": 1923569767,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-itllxts4/destination/"
+      ],
+      "regime": "native",
+      "phase": "timing",
+      "pair": 5,
+      "method": "vfsi",
+      "raw": "native-timing-05-vfsi"
+    },
+    {
+      "elapsed_ns": 1120999416,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-b4zo479b/destination/"
+      ],
+      "regime": "native",
+      "phase": "timing",
+      "pair": 5,
+      "method": "kernel",
+      "raw": "native-timing-05-kernel"
+    },
+    {
+      "elapsed_ns": 1092525120,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-iowv6c3m/destination/"
+      ],
+      "regime": "native",
+      "phase": "timing",
+      "pair": 6,
+      "method": "kernel",
+      "raw": "native-timing-06-kernel"
+    },
+    {
+      "elapsed_ns": 2095337963,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-grusja85/destination/"
+      ],
+      "regime": "native",
+      "phase": "timing",
+      "pair": 6,
+      "method": "vfsi",
+      "raw": "native-timing-06-vfsi"
+    },
+    {
+      "elapsed_ns": 1419698797,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-3vtzc664/destination/"
+      ],
+      "wire": {
+        "rpc_calls": 4668,
+        "unique_rpc_calls": 4668,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 4668
+        },
+        "request_opcodes": {
+          "53": 4668,
+          "22": 4668,
+          "3": 1556,
+          "9": 3113,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1555
+        },
+        "pcap_sha256": "42853c7c22b569b8bf094e9f8e180a51c10f6b046f7aa96b36945f6665784d48"
+      },
+      "regime": "native",
+      "phase": "capture",
+      "pair": 0,
+      "method": "kernel",
+      "raw": "native-capture-00-kernel"
+    },
+    {
+      "elapsed_ns": 1669397734,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-1hvia8fx/destination/"
+      ],
+      "wire": {
+        "rpc_calls": 6231,
+        "unique_rpc_calls": 6231,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 6231
+        },
+        "request_opcodes": {
+          "53": 6227,
+          "22": 6223,
+          "3": 2,
+          "9": 3115,
+          "15": 9025,
+          "10": 3112,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1555,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "ab18cebdf6fb6c04b10f5b578b4322f75bbd4a7533a28b6031904fc63ab321eb"
+      },
+      "regime": "native",
+      "phase": "capture",
+      "pair": 0,
+      "method": "vfsi",
+      "raw": "native-capture-00-vfsi"
+    },
+    {
+      "elapsed_ns": 1744860174,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-iqwek32e/destination/"
+      ],
+      "wire": {
+        "rpc_calls": 6231,
+        "unique_rpc_calls": 6231,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 6231
+        },
+        "request_opcodes": {
+          "53": 6227,
+          "22": 6223,
+          "3": 2,
+          "9": 3115,
+          "15": 9025,
+          "10": 3112,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1555,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "89585e1359d67e5cef330cda64fb89a1b4e1285e7c25cf844cf1e313f3ea7252"
+      },
+      "regime": "native",
+      "phase": "capture",
+      "pair": 1,
+      "method": "vfsi",
+      "raw": "native-capture-01-vfsi"
+    },
+    {
+      "elapsed_ns": 1168409730,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-dbt1vbaz/destination/"
+      ],
+      "wire": {
+        "rpc_calls": 4668,
+        "unique_rpc_calls": 4668,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 4668
+        },
+        "request_opcodes": {
+          "53": 4668,
+          "22": 4668,
+          "3": 1556,
+          "9": 3113,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1555
+        },
+        "pcap_sha256": "aa84b9077cd0af0a3e88d485a49370fc43396fb73f74f2139f0a7f169289c917"
+      },
+      "regime": "native",
+      "phase": "capture",
+      "pair": 1,
+      "method": "kernel",
+      "raw": "native-capture-01-kernel"
+    },
+    {
+      "elapsed_ns": 1067792336,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-wix0l73h/destination/"
+      ],
+      "wire": {
+        "rpc_calls": 4668,
+        "unique_rpc_calls": 4668,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 4668
+        },
+        "request_opcodes": {
+          "53": 4668,
+          "22": 4668,
+          "3": 1556,
+          "9": 3113,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1555
+        },
+        "pcap_sha256": "fd7e66b45ddd8a43257124a3ab8ac4a078de319c5b1696e94bea0e4576dbd8f0"
+      },
+      "regime": "native",
+      "phase": "capture",
+      "pair": 2,
+      "method": "kernel",
+      "raw": "native-capture-02-kernel"
+    },
+    {
+      "elapsed_ns": 1669323900,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-wyc9xw52/destination/"
+      ],
+      "wire": {
+        "rpc_calls": 6231,
+        "unique_rpc_calls": 6231,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 6231
+        },
+        "request_opcodes": {
+          "53": 6227,
+          "22": 6223,
+          "3": 2,
+          "9": 3115,
+          "15": 9025,
+          "10": 3112,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1555,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "b508787959dda86fa333d0351bf5ffaff58807d6b23b2b76745cd014b47f8a97"
+      },
+      "regime": "native",
+      "phase": "capture",
+      "pair": 2,
+      "method": "vfsi",
+      "raw": "native-capture-02-vfsi"
+    },
+    {
+      "elapsed_ns": 1199656201,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-lwxeckc2/destination/"
+      ],
+      "regime": "native",
+      "phase": "fallback",
+      "pair": 0,
+      "method": "missing-library",
+      "raw": "native-fallback-00-missing-library"
+    },
+    {
+      "elapsed_ns": 1184647572,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "--hard-links",
+        "tree/",
+        "/tmp/vfsi-rsync-8lg7yfst/destination/"
+      ],
+      "regime": "native",
+      "phase": "fallback",
+      "pair": 0,
+      "method": "unsupported",
+      "raw": "native-fallback-00-unsupported"
+    },
+    {
+      "elapsed_ns": 5817379654,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-11vkg0t7/destination/"
+      ],
+      "regime": "added-1ms-rtt",
+      "phase": "warmup",
+      "pair": 0,
+      "method": "kernel",
+      "raw": "added-1ms-rtt-warmup-00-kernel"
+    },
+    {
+      "elapsed_ns": 7930886341,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-kx0zrga0/destination/"
+      ],
+      "regime": "added-1ms-rtt",
+      "phase": "warmup",
+      "pair": 0,
+      "method": "vfsi",
+      "raw": "added-1ms-rtt-warmup-00-vfsi"
+    },
+    {
+      "elapsed_ns": 6006441655,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-rq_9m7to/destination/"
+      ],
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 0,
+      "method": "kernel",
+      "raw": "added-1ms-rtt-timing-00-kernel"
+    },
+    {
+      "elapsed_ns": 7775350069,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-swcg82a6/destination/"
+      ],
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 0,
+      "method": "vfsi",
+      "raw": "added-1ms-rtt-timing-00-vfsi"
+    },
+    {
+      "elapsed_ns": 8112912735,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-1djndvi2/destination/"
+      ],
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 1,
+      "method": "vfsi",
+      "raw": "added-1ms-rtt-timing-01-vfsi"
+    },
+    {
+      "elapsed_ns": 5841414687,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-ng61w924/destination/"
+      ],
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 1,
+      "method": "kernel",
+      "raw": "added-1ms-rtt-timing-01-kernel"
+    },
+    {
+      "elapsed_ns": 5811110802,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-1a9yre4q/destination/"
+      ],
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 2,
+      "method": "kernel",
+      "raw": "added-1ms-rtt-timing-02-kernel"
+    },
+    {
+      "elapsed_ns": 7889195795,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-ewkd3hzh/destination/"
+      ],
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 2,
+      "method": "vfsi",
+      "raw": "added-1ms-rtt-timing-02-vfsi"
+    },
+    {
+      "elapsed_ns": 8425680825,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-n9rwmtwe/destination/"
+      ],
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 3,
+      "method": "vfsi",
+      "raw": "added-1ms-rtt-timing-03-vfsi"
+    },
+    {
+      "elapsed_ns": 5766911957,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-eyztlccv/destination/"
+      ],
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 3,
+      "method": "kernel",
+      "raw": "added-1ms-rtt-timing-03-kernel"
+    },
+    {
+      "elapsed_ns": 5826339015,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-qsitg6yd/destination/"
+      ],
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 4,
+      "method": "kernel",
+      "raw": "added-1ms-rtt-timing-04-kernel"
+    },
+    {
+      "elapsed_ns": 7861076500,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-ecl47gc6/destination/"
+      ],
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 4,
+      "method": "vfsi",
+      "raw": "added-1ms-rtt-timing-04-vfsi"
+    },
+    {
+      "elapsed_ns": 8392991017,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-n9z3j0b1/destination/"
+      ],
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 5,
+      "method": "vfsi",
+      "raw": "added-1ms-rtt-timing-05-vfsi"
+    },
+    {
+      "elapsed_ns": 5933201137,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-28wueozz/destination/"
+      ],
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 5,
+      "method": "kernel",
+      "raw": "added-1ms-rtt-timing-05-kernel"
+    },
+    {
+      "elapsed_ns": 6182673740,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-aawr5jqe/destination/"
+      ],
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 6,
+      "method": "kernel",
+      "raw": "added-1ms-rtt-timing-06-kernel"
+    },
+    {
+      "elapsed_ns": 9263081701,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-ica07b5d/destination/"
+      ],
+      "regime": "added-1ms-rtt",
+      "phase": "timing",
+      "pair": 6,
+      "method": "vfsi",
+      "raw": "added-1ms-rtt-timing-06-vfsi"
+    },
+    {
+      "elapsed_ns": 6047029446,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-l1lq5ten/destination/"
+      ],
+      "wire": {
+        "rpc_calls": 4668,
+        "unique_rpc_calls": 4668,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 4668
+        },
+        "request_opcodes": {
+          "53": 4668,
+          "22": 4668,
+          "3": 1556,
+          "9": 3113,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1555
+        },
+        "pcap_sha256": "581c3da656778cc63398ca27c5c9ad1f22ca7c823665d07f76457e21c9fed8f0"
+      },
+      "regime": "added-1ms-rtt",
+      "phase": "capture",
+      "pair": 0,
+      "method": "kernel",
+      "raw": "added-1ms-rtt-capture-00-kernel"
+    },
+    {
+      "elapsed_ns": 8396615402,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-iictapw_/destination/"
+      ],
+      "wire": {
+        "rpc_calls": 6231,
+        "unique_rpc_calls": 6231,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 6231
+        },
+        "request_opcodes": {
+          "53": 6227,
+          "22": 6223,
+          "3": 2,
+          "9": 3115,
+          "15": 9025,
+          "10": 3112,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1555,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "f37d691b8a00204bf6470cd6f05d4465f86e9fe386798608827f00e63c3989eb"
+      },
+      "regime": "added-1ms-rtt",
+      "phase": "capture",
+      "pair": 0,
+      "method": "vfsi",
+      "raw": "added-1ms-rtt-capture-00-vfsi"
+    },
+    {
+      "elapsed_ns": 8673080881,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-yyfd6v56/destination/"
+      ],
+      "wire": {
+        "rpc_calls": 6231,
+        "unique_rpc_calls": 6231,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 6231
+        },
+        "request_opcodes": {
+          "53": 6227,
+          "22": 6223,
+          "3": 2,
+          "9": 3115,
+          "15": 9025,
+          "10": 3112,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1555,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "acb9d2aaa5cccd95b18171e1bcb5d527ad57a786562240a75c9566287774b182"
+      },
+      "regime": "added-1ms-rtt",
+      "phase": "capture",
+      "pair": 1,
+      "method": "vfsi",
+      "raw": "added-1ms-rtt-capture-01-vfsi"
+    },
+    {
+      "elapsed_ns": 6385308448,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-6ldkjmy7/destination/"
+      ],
+      "wire": {
+        "rpc_calls": 4668,
+        "unique_rpc_calls": 4668,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 4668
+        },
+        "request_opcodes": {
+          "53": 4668,
+          "22": 4668,
+          "3": 1556,
+          "9": 3113,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1555
+        },
+        "pcap_sha256": "49cbe2332d7715c0df955ee1029b6f7cc5e5f03fb4546bc50e324db7893504aa"
+      },
+      "regime": "added-1ms-rtt",
+      "phase": "capture",
+      "pair": 1,
+      "method": "kernel",
+      "raw": "added-1ms-rtt-capture-01-kernel"
+    },
+    {
+      "elapsed_ns": 7318757328,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 0,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-ox38cu9i/destination/"
+      ],
+      "wire": {
+        "rpc_calls": 4668,
+        "unique_rpc_calls": 4668,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 4668
+        },
+        "request_opcodes": {
+          "53": 4668,
+          "22": 4668,
+          "3": 1556,
+          "9": 3113,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1555
+        },
+        "pcap_sha256": "2364eb3a729b6b511bcb0af0e52200da76af362f17c6484ddebf0e68a54f9a15"
+      },
+      "regime": "added-1ms-rtt",
+      "phase": "capture",
+      "pair": 2,
+      "method": "kernel",
+      "raw": "added-1ms-rtt-capture-02-kernel"
+    },
+    {
+      "elapsed_ns": 8689783932,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "traced_entries": 13994,
+      "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+      "command": [
+        "/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference/rsync",
+        "-ani",
+        "--out-format=%i %n%L",
+        "tree/",
+        "/tmp/vfsi-rsync-coi6ih95/destination/"
+      ],
+      "wire": {
+        "rpc_calls": 6231,
+        "unique_rpc_calls": 6231,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 6231
+        },
+        "request_opcodes": {
+          "53": 6227,
+          "22": 6223,
+          "3": 2,
+          "9": 3115,
+          "15": 9025,
+          "10": 3112,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1555,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "12484eb0c6aa9102f925659afcf9374fa4b81c1782b409d164c33ff5564822b4"
+      },
+      "regime": "added-1ms-rtt",
+      "phase": "capture",
+      "pair": 2,
+      "method": "vfsi",
+      "raw": "added-1ms-rtt-capture-02-vfsi"
+    }
+  ],
+  "regimes": {
+    "native": {
+      "added_one_way_us": 0,
+      "ping_rtt_median_ms": 0.076,
+      "ping_raw": "PING 169.254.241.1 (169.254.241.1) 56(84) bytes of data.\n64 bytes from 169.254.241.1: icmp_seq=1 ttl=64 time=0.304 ms\n64 bytes from 169.254.241.1: icmp_seq=2 ttl=64 time=0.041 ms\n64 bytes from 169.254.241.1: icmp_seq=3 ttl=64 time=0.041 ms\n64 bytes from 169.254.241.1: icmp_seq=4 ttl=64 time=0.045 ms\n64 bytes from 169.254.241.1: icmp_seq=5 ttl=64 time=0.076 ms\n64 bytes from 169.254.241.1: icmp_seq=6 ttl=64 time=0.186 ms\n64 bytes from 169.254.241.1: icmp_seq=7 ttl=64 time=0.190 ms\n64 bytes from 169.254.241.1: icmp_seq=8 ttl=64 time=0.072 ms\n64 bytes from 169.254.241.1: icmp_seq=9 ttl=64 time=0.142 ms\n\n--- 169.254.241.1 ping statistics ---\n9 packets transmitted, 9 received, 0% packet loss, time 428ms\nrtt min/avg/max/mdev = 0.041/0.121/0.304/0.085 ms\n",
+      "host_qdisc": [
+        {
+          "kind": "noqueue",
+          "handle": "0:",
+          "root": true,
+          "refcnt": 2,
+          "options": {},
+          "bytes": 0,
+          "packets": 0,
+          "drops": 0,
+          "overlimits": 0,
+          "requeues": 0,
+          "backlog": 0,
+          "qlen": 0
+        }
+      ],
+      "client_qdisc": [
+        {
+          "kind": "noqueue",
+          "handle": "0:",
+          "root": true,
+          "refcnt": 2,
+          "options": {},
+          "bytes": 0,
+          "packets": 0,
+          "drops": 0,
+          "overlimits": 0,
+          "requeues": 0,
+          "backlog": 0,
+          "qlen": 0
+        }
+      ]
+    },
+    "added-1ms-rtt": {
+      "added_one_way_us": 500,
+      "ping_rtt_median_ms": 1.14,
+      "ping_raw": "PING 169.254.241.1 (169.254.241.1) 56(84) bytes of data.\n64 bytes from 169.254.241.1: icmp_seq=1 ttl=64 time=1.07 ms\n64 bytes from 169.254.241.1: icmp_seq=2 ttl=64 time=1.08 ms\n64 bytes from 169.254.241.1: icmp_seq=3 ttl=64 time=1.02 ms\n64 bytes from 169.254.241.1: icmp_seq=4 ttl=64 time=1.02 ms\n64 bytes from 169.254.241.1: icmp_seq=5 ttl=64 time=5.42 ms\n64 bytes from 169.254.241.1: icmp_seq=6 ttl=64 time=1.15 ms\n64 bytes from 169.254.241.1: icmp_seq=7 ttl=64 time=1.14 ms\n64 bytes from 169.254.241.1: icmp_seq=8 ttl=64 time=1.46 ms\n64 bytes from 169.254.241.1: icmp_seq=9 ttl=64 time=1.34 ms\n\n--- 169.254.241.1 ping statistics ---\n9 packets transmitted, 9 received, 0% packet loss, time 495ms\nrtt min/avg/max/mdev = 1.019/1.632/5.421/1.346 ms\n",
+      "host_qdisc": [
+        {
+          "kind": "netem",
+          "handle": "8033:",
+          "root": true,
+          "refcnt": 5,
+          "options": {
+            "limit": 1000,
+            "delay": {
+              "delay": 0.0005,
+              "jitter": 0,
+              "correlation": 0
+            },
+            "seed": 3052995057059507138,
+            "ecn": false,
+            "gap": 0
+          },
+          "bytes": 882,
+          "packets": 9,
+          "drops": 0,
+          "overlimits": 0,
+          "requeues": 0,
+          "backlog": 0,
+          "qlen": 0
+        }
+      ],
+      "client_qdisc": [
+        {
+          "kind": "netem",
+          "handle": "8034:",
+          "root": true,
+          "refcnt": 5,
+          "options": {
+            "limit": 1000,
+            "delay": {
+              "delay": 0.0005,
+              "jitter": 0,
+              "correlation": 0
+            },
+            "seed": 5905422119460784327,
+            "ecn": false,
+            "gap": 0
+          },
+          "bytes": 882,
+          "packets": 9,
+          "drops": 0,
+          "overlimits": 0,
+          "requeues": 0,
+          "backlog": 0,
+          "qlen": 0
+        }
+      ]
+    }
+  },
+  "environment": {
+    "uname": "Linux ubuntu 7.0.0-28-generic #28-Ubuntu SMP PREEMPT_DYNAMIC Sun Jun 21 00:50:10 UTC 2026 aarch64 GNU/Linux\n",
+    "server_sha256": "87843e5dde18af61ed517f1a4a4b3693499cf440b68d7c2a0f78509980f48857",
+    "server_config_sha256": "2e911dbbee373e1f4819aadf123995d5f38b3dafeaeffd76ade3dd1387f42c3b"
+  },
+  "output_parity": true,
+  "safe_fallback": true,
+  "summary": [
+    {
+      "regime": "native",
+      "method": "kernel",
+      "median_wall_ms": 1179.39793,
+      "rpc_counts": [
+        4668,
+        4668,
+        4668
+      ]
+    },
+    {
+      "regime": "native",
+      "method": "vfsi",
+      "median_wall_ms": 1838.995381,
+      "rpc_counts": [
+        6231,
+        6231,
+        6231
+      ]
+    },
+    {
+      "regime": "added-1ms-rtt",
+      "method": "kernel",
+      "median_wall_ms": 5841.414687,
+      "rpc_counts": [
+        4668,
+        4668,
+        4668
+      ]
+    },
+    {
+      "regime": "added-1ms-rtt",
+      "method": "vfsi",
+      "median_wall_ms": 8112.912735,
+      "rpc_counts": [
+        6231,
+        6231,
+        6231
+      ]
+    }
+  ]
+}

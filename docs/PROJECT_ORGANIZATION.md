@@ -228,7 +228,7 @@ never build an unpinned external branch.
 
 Fast platform CI validates the registry and public API compatibility. The
 [Port compatibility workflow](../.github/workflows/ports.yml), triggered by relevant
-main pushes and pull requests as well as schedule and manual dispatch,
+pushes on any branch and pull requests as well as schedule and manual dispatch,
 derives its matrix from every registered application port: Git, rsync, coreutils,
 and findutils. It fetches the exact committed revisions into disposable checkouts.
 Git and rsync build against this checkout's C SDK and run their parity scripts.
@@ -280,8 +280,11 @@ guarantee.
 
 The `Promote VFSI mirror` workflow requires an explicit canonical commit and a
 successful canonical-main push CI run **and** a successful four-port workflow
-for that exact commit. The latest eligible run of each workflow must be complete
-and green; an older success cannot hide a newer failure or pending run. Docs-only
+for that exact commit. The port run must contain completed, successful registry,
+ABI-v3, Git, rsync, coreutils, and findutils jobs; missing or skipped jobs fail
+promotion. The latest eligible run of each workflow must be complete and green;
+an older success cannot hide a newer failure or pending run. Feature-branch
+success does not replace the required main-commit evidence. Docs-only
 commits need a manual port-workflow dispatch when path filters do not trigger it.
 `python3 ci/check-promotion.py COMMIT` checks readiness without writing the mirror.
 The workflow runs only in
