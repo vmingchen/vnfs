@@ -1,0 +1,34 @@
+{
+  "capture": "raw/native-capture-00-vfsi.pcap.gz",
+  "command": [
+    "tshark",
+    "-n",
+    "-r",
+    "-",
+    "-d",
+    "tcp.port==2049,rpc",
+    "-Y",
+    "rpc.msgtyp == 0 && rpc.program == 100003 && rpc.procedure == 1",
+    "-T",
+    "fields",
+    "-E",
+    "occurrence=a",
+    "-E",
+    "aggregator=,",
+    "-e",
+    "nfs.tag"
+  ],
+  "compound_tag_counts": {
+    "exchange_id": 1,
+    "create_session": 1,
+    "reclaim_complete": 1,
+    "mount": 1,
+    "getattrv1": 2,
+    "resolve": 1555,
+    "getattr": 1555,
+    "lookup_typev": 1555,
+    "readdir_pages": 1555,
+    "destroy_session": 1,
+    "destroy_clientid": 1
+  }
+}

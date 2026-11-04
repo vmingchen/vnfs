@@ -92,3 +92,81 @@ provide the request-shape breakdown above. For example, decode a capture with
 `gzip -dc CAPTURE.pcap.gz | tshark -n -r - -d tcp.port==2049,rpc -Y
 'rpc.msgtyp == 0 && rpc.program == 100003 && rpc.procedure == 1' -T fields
 -e nfs.tag`.
+
+
+## Published-baseline adoption rerun — November 3, 2026
+
+The benchmark target is settled by the explicit choice to use **only published
+vfsi-c 0.3.12 / vnfs 0.0.28**. The hold is cleared for that reference; this run
+does not use development code from `vnfs02` or evaluate its disposition.
+The November 2 baseline and evidence above remain unchanged.
+
+| Network | Ordinary rsync median | VFSI rsync median | VFSI / ordinary time | Wire RPCs: ordinary / VFSI |
+|---|---:|---:|---:|---:|
+| Native, measured 0.076 ms | 1,179.398 ms | 1,838.995 ms | **1.56× slower** | 4,668 / 6,231 |
+| Added nominal 1 ms RTT, measured 1.140 ms | 5,841.415 ms | 8,112.913 ms | **1.39× slower** | 4,668 / 6,231 |
+
+These are seven timing pairs per network in alternating AB/BA order, one warmup
+pair, and three separate capture pairs. Every capture has the RPC count shown.
+Wall times include process and connection startup and exclude mount setup and
+capture overhead. The added-latency case applies 500 microseconds in each
+direction on the owned veth namespace; the actual calibrated RTT is reported.
+
+### Required checks
+
+All **46 runs** produced byte-identical output with **13,995 lines**. All 22
+accelerated runs had positive `VFSI_TRACE` listing records, with no mixed
+POSIX-fallback diagnostics. Missing-library and unsupported `--hard-links`
+fallback each produced ordinary output without successful-acceleration records.
+Every worker enforced an empty destination after its dry-run. The 12 captures
+had no kernel drops, repeated RPC IDs, or retransmitted RPC frames, and every
+decoded call had a matching reply.
+
+Both paths used the same isolated VFSI-enabled rsync binary with
+`-ani --out-format='%i %n%L' tree/ destination/`; `-n` is `--dry-run`.
+The existing fixture remains at
+`/srv/vnfs-ci/vfsi-du-v027-20261101`, exported as
+`/vfsi-du-v027-20261101`. Its fingerprint remains
+`8b054ac6860c86a6c98ddf06e659262a719d758191185e70ddcf5267419a0853`.
+Each worker used a fresh private NFSv4.2 AUTH_SYS mount and an empty local
+destination. Server data was warm. This does not measure file-transfer
+throughput or establish performance for other tree shapes or rsync options.
+
+The checksummed SDK and complete registry dependency graph were rebuilt from
+the frozen inputs. The C SDK and vnfs published source revisions are both
+`dc477f5a3609a4becb5904d2d08dd4bcdafdcce3`, and the port is frozen at
+`5f211b8b9c78b682782953f4306d48122eb3ee7b`. ABI v3 was verified.
+The [restored SDK lockfile](../benchmarks/rsync/Cargo.lock) matches the original
+recorded checksum; it is now included in the repository. The active rsync
+checkout, fixture, measured binary/library, host qdiscs and existing NFS mount
+were preserved; the owned benchmark interfaces and route were removed.
+
+### Adoption result and evidence
+
+On this fixture, the released acceleration remains slower and sends **33.5%
+more wire RPCs**. The [request-tag breakdown](benchmarks/rsync-adoption-2026-11-03/request-tags.json)
+confirms 1,555 each of `resolve`, `getattr`, `lookup_typev` and
+`readdir_pages`: four compounds per directory, plus setup/teardown. These
+results do not support enabling the released sender-scan acceleration by
+default for this workload. They make no claim about unpublished traversal
+improvements.
+
+[Raw results](benchmarks/rsync-adoption-2026-11-03/results.json) retain every
+sample, calibrated latency, resolved packages and binary/library hashes.
+The [independent audit](benchmarks/rsync-adoption-2026-11-03/adoption-audit.json)
+rechecks all compressed outputs, traces, captures and decoded RPC fields.
+The same directory includes the build log, collection log and per-run raw
+artifacts. The isolated build and selection manifest remain on `vm` under
+`/home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx`.
+
+To replay the same published reference, choose a new output directory:
+
+```sh
+cd /home/ubuntu/vnfs02
+CARGO_BUILD_JOBS=2 python3 benchmarks/rsync/run.py run \
+  --checkout /home/ubuntu/vfsi-benchmarks/rsync-adoption-2026-11-03-bdwjwxxx/rsync-reference \
+  --fixture /srv/vnfs-ci/vfsi-du-v027-20261101 \
+  --export /vfsi-du-v027-20261101 \
+  --output /path/to/new-results \
+  --pairs 7 --captures 3
+```
