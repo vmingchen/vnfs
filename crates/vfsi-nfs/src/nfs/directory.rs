@@ -327,11 +327,8 @@ impl NfsVecFs {
                     if let Some(children) = ready.remove(&dir.fh) {
                         let _ = self.remove_list(&dir.fh, &children, first_error, options)?;
                     }
-                    if let Some(parent) = &dir.parent {
-                        ready
-                            .entry(parent.clone())
-                            .or_default()
-                            .push((dir.name.clone(), dir.root));
+                    if let Some(parent) = dir.parent {
+                        ready.entry(parent).or_default().push((dir.name, dir.root));
                     }
                 }
             }
@@ -470,12 +467,8 @@ impl NfsVecFs {
             Err(error) if error.status == nfsstat4_NFS4ERR_NOTDIR => {
                 // Race: it is no longer a directory. Remove the entry instead.
                 if let Some(parent) = &dir.parent {
-                    let removed = self.remove_list(
-                        parent,
-                        &[(dir.name.clone(), dir.root)],
-                        first_error,
-                        options,
-                    )?;
+                    let removed =
+                        self.remove_list(parent, &[(dir.name, dir.root)], first_error, options)?;
                     if removed {
                         changed_parents.insert(parent.clone());
                     }
@@ -582,15 +575,15 @@ impl NfsVecFs {
                     let status = error.status;
                     let index = error.op_index.min(take.saturating_sub(1));
                     removed |= index > 0;
-                    let name = names[start + index].clone();
+                    let name = &names[start + index];
                     if status == nfsstat4_NFS4ERR_NOTEMPTY {
-                        subdirs.push(name);
+                        subdirs.push(name.clone());
                     } else if status == nfsstat4_NFS4ERR_NOENT {
                         // Already gone.
                         removed = true;
                     } else if remove_status_is_retryable(status) {
                         removed |=
-                            self.retry_remove_name(dir, &name, root, first_error, options, error)?;
+                            self.retry_remove_name(dir, name, root, first_error, options, error)?;
                     } else {
                         note_error(first_error, vfsi_core::error_from_rpc(error, root), options)?;
                     }
@@ -637,15 +630,15 @@ impl NfsVecFs {
                     let status = error.status;
                     let index = error.op_index.min(take.saturating_sub(1));
                     removed |= index > 0;
-                    let (name, root) = chunk[index].clone();
+                    let (name, root) = &chunk[index];
                     if status == nfsstat4_NFS4ERR_NOENT {
                         // Already gone.
                         removed = true;
                     } else if remove_status_is_retryable(status) {
                         removed |= self.retry_remove_name(
                             parent,
-                            &name,
-                            root,
+                            name,
+                            *root,
                             first_error,
                             options,
                             error,
@@ -653,7 +646,11 @@ impl NfsVecFs {
                     } else {
                         // A non-empty directory here means a concurrent actor
                         // added entries; record it and move on.
-                        note_error(first_error, vfsi_core::error_from_rpc(error, root), options)?;
+                        note_error(
+                            first_error,
+                            vfsi_core::error_from_rpc(error, *root),
+                            options,
+                        )?;
                     }
                     start += index + 1;
                 }

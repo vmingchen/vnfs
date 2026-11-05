@@ -1,6 +1,7 @@
 //! Backend-independent mapping from local paths into a rooted client namespace.
 
 use crate::{Error, Result};
+use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 
 fn io_error(path: &Path, error: std::io::Error) -> Error {
@@ -71,9 +72,6 @@ impl PathMapper {
                 let name = path
                     .file_name()
                     .ok_or_else(|| Error::from_kind(0, std::io::ErrorKind::InvalidInput))?;
-                if path.components().next_back() != Some(std::path::Component::Normal(name)) {
-                    return Err(Error::from_kind(0, std::io::ErrorKind::InvalidInput));
-                }
                 let parent = path
                     .parent()
                     .filter(|p| !p.as_os_str().is_empty())
@@ -114,12 +112,13 @@ impl PathMapper {
                         .parent()
                         .filter(|p| !p.as_os_str().is_empty())
                         .unwrap_or(Path::new("."));
-                    if !parents.contains_key(parent) {
-                        let resolved =
-                            std::fs::canonicalize(parent).map_err(|e| io_error(parent, e))?;
-                        parents.insert(parent.to_path_buf(), resolved);
-                    }
-                    let absolute = parents[parent].join(name);
+                    let resolved = match parents.entry(parent) {
+                        Entry::Occupied(entry) => entry.into_mut(),
+                        Entry::Vacant(entry) => entry.insert(
+                            std::fs::canonicalize(parent).map_err(|e| io_error(parent, e))?,
+                        ),
+                    };
+                    let absolute = resolved.join(name);
                     let suffix = absolute
                         .strip_prefix(&self.local_root)
                         .map_err(|_| Error::errno(0, libc::EXDEV as u32))?;

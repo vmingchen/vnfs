@@ -177,11 +177,7 @@ pub fn vlistdirs_impl_default<F: VectorBackend + ?Sized>(
             /* A recursive list contains descendants too, so report each
              * entry's actual parent rather than attributing every row to the
              * original root. VectorBackend overrides follow the same contract. */
-            let entry_dir = if recursive {
-                e.file.path().and_then(Path::parent).unwrap_or(d)
-            } else {
-                d
-            };
+            let entry_dir = e.file.path().and_then(Path::parent).unwrap_or(d);
             if !cb(e, entry_dir) {
                 return Ok(());
             }
