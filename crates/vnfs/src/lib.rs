@@ -183,6 +183,42 @@ pub mod diagnostics {
         pub rpc_micros: u64,
     }
 
+    /// Stable human-readable counters for optional command diagnostics.
+    /// Empty snapshots render nothing; successful compounds and RPC attempts
+    /// remain separate measurements.
+    impl std::fmt::Display for Snapshot {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            if self.compounds > 0 {
+                let bytes = self
+                    .compound_bytes
+                    .map_or_else(|| "unknown".into(), |n| n.to_string());
+                let average = self.compound_bytes.map_or_else(
+                    || "unknown".into(),
+                    |n| format!("{:.0}", n as f64 / self.compounds as f64),
+                );
+                writeln!(
+                    f,
+                    "[vnfs] compounds={} avg_ops={:.2} max_ops={} avg_bytes={} total_bytes={}",
+                    self.compounds,
+                    self.operations as f64 / self.compounds as f64,
+                    self.max_operations,
+                    average,
+                    bytes
+                )?;
+            }
+            if self.rpc_calls > 0 {
+                writeln!(
+                    f,
+                    "[vnfs] rpc_calls={} avg_rpc_ms={:.2} total_rpc_ms={:.1}",
+                    self.rpc_calls,
+                    self.rpc_micros as f64 / self.rpc_calls as f64 / 1000.0,
+                    self.rpc_micros as f64 / 1000.0
+                )?;
+            }
+            Ok(())
+        }
+    }
+
     /// Drain process-wide counters. Consumers must coordinate: another call
     /// drains the same counters. Fields are sampled independently, so
     /// concurrent activity can straddle measurement windows.

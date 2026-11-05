@@ -639,11 +639,95 @@ pub unsafe extern "C" fn vfsi_listdirs(
     userdata: *mut c_void,
     results: *mut vfsi_listing_result,
 ) -> c_int {
+    let Some(cb) = cb else { return libc::EINVAL };
+    // SAFETY: forwards the documented caller-owned pointer contract.
+    unsafe {
+        listdirs_snapshot(
+            fs,
+            dirs,
+            count,
+            options,
+            false,
+            |i, dir, name, attrs, _| cb(i, dir, name, attrs, userdata),
+            results,
+        )
+    }
+}
+
+/// Version of the additive listing callback with scoped object identity.
+pub const VFSI_LISTDIR_IDS_VERSION: u32 = 1;
+pub type vfsi_indexed_listdir_ids_cb = Option<
+    unsafe extern "C" fn(
+        usize,
+        *const c_char,
+        *const c_char,
+        *const vfsi_attrs,
+        *const vfsi_object_id,
+        *mut c_void,
+    ) -> bool,
+>;
+
+/// Bounded listings with attributes and scoped identity from the same READDIR
+/// observation. ABI-v3 vfsi_attrs is unchanged. Unsupported identity fails
+/// before any delivery; budgets, cancellation and lock behavior match listdirs.
+/// No additional per-entry GETATTR pass is performed.
+///
+/// # Safety
+/// Same pointer and lifetime contract as vfsi_listdirs. The identity pointer
+/// is borrowed only for the callback invocation; copy it before returning.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_listdirs_with_ids(
+    fs: *mut vfsi_fs,
+    dirs: *const *const c_char,
+    count: usize,
+    options: *const vfsi_listing_options,
+    cb: vfsi_indexed_listdir_ids_cb,
+    userdata: *mut c_void,
+    results: *mut vfsi_listing_result,
+) -> c_int {
+    let Some(cb) = cb else { return libc::EINVAL };
+    // SAFETY: forwards the documented caller-owned pointer contract.
+    unsafe {
+        listdirs_snapshot(
+            fs,
+            dirs,
+            count,
+            options,
+            true,
+            |i, dir, name, attrs, id| {
+                cb(
+                    i,
+                    dir,
+                    name,
+                    attrs,
+                    id.map_or(std::ptr::null(), |id| id),
+                    userdata,
+                )
+            },
+            results,
+        )
+    }
+}
+
+unsafe fn listdirs_snapshot(
+    fs: *mut vfsi_fs,
+    dirs: *const *const c_char,
+    count: usize,
+    options: *const vfsi_listing_options,
+    include_identity: bool,
+    mut cb: impl FnMut(
+        usize,
+        *const c_char,
+        *const c_char,
+        &vfsi_attrs,
+        Option<&vfsi_object_id>,
+    ) -> bool,
+    results: *mut vfsi_listing_result,
+) -> c_int {
     ffi_guard!(libc::EIO, {
         // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
         // mutable outputs are exclusive.
-        let (Some(fs), Some(options), Some(cb)) =
-            (unsafe { fs.as_ref() }, unsafe { options.as_ref() }, cb)
+        let (Some(fs), Some(options)) = (unsafe { fs.as_ref() }, unsafe { options.as_ref() })
         else {
             return libc::EINVAL;
         };
@@ -664,6 +748,12 @@ pub unsafe extern "C" fn vfsi_listdirs(
         if !mask().contains(fields | AttrMask::MODE) {
             return libc::ENOTSUP;
         }
+        let fields = fields
+            | if include_identity {
+                AttrMask::identity()
+            } else {
+                AttrMask::empty()
+            };
         // Bound planning storage as well as returned entries; empty inputs can
         // otherwise bypass every payload quota.
         if count > vfsi_sync::DEFAULT_DIRECTORY_MAX_ENTRIES {
@@ -773,6 +863,8 @@ pub unsafe extern "C" fn vfsi_listdirs(
         // Validate the entire snapshot before invoking user callbacks. A bad
         // row must not leave applications with a seemingly complete prefix.
         let mut prepared = Vec::with_capacity(rows.len());
+        // Keep ABI-v3 callers' per-entry storage unchanged.
+        let mut identities = include_identity.then(|| Vec::with_capacity(rows.len()));
         for (attrs, dir) in rows {
             if !attrs.returned.contains(fields | AttrMask::MODE) {
                 return libc::ENOTSUP;
@@ -785,6 +877,12 @@ pub unsafe extern "C" fn vfsi_listdirs(
             else {
                 return libc::EIO;
             };
+            if let Some(identities) = &mut identities {
+                match vfsi_object_id::from_attrs(fs.namespace_id, &attrs) {
+                    Ok(id) => identities.push(id),
+                    Err(error) => return vf_code(&error),
+                }
+            }
             prepared.push((vfsi_attrs::from_vf(&attrs), dir, name));
         }
         let paths: Vec<_> = paths
@@ -797,13 +895,19 @@ pub unsafe extern "C" fn vfsi_listdirs(
         for result in results.iter_mut() {
             result.completion = 1;
         }
-        for (attrs, dir, name) in prepared {
+        for (row, (attrs, dir, name)) in prepared.into_iter().enumerate() {
             for &i in &index[&dir] {
                 let path = paths[i].as_ref().expect("validated C paths");
                 results[i].delivered += 1;
                 // SAFETY: the caller provides this callback; borrowed strings, attributes
                 // and bytes remain live until it returns.
-                if !unsafe { cb(i, path.as_ptr(), name.as_ptr(), &attrs, userdata) } {
+                if !cb(
+                    i,
+                    path.as_ptr(),
+                    name.as_ptr(),
+                    &attrs,
+                    identities.as_ref().map(|ids| &ids[row]),
+                ) {
                     for result in results.iter_mut() {
                         result.completion = 2;
                     }
@@ -1230,6 +1334,57 @@ pub unsafe extern "C" fn vfsi_nfs_from_mount(path: *const c_char, out: *mut *mut
                 0
             }
             Err(error) => vf_code(&error),
+        }
+    })
+}
+
+/// Version of the additive validated Linux NFS mount discovery callback.
+pub const VFSI_MOUNT_INFO_VERSION: u32 = 1;
+/// Borrowed server endpoint, export root and local mount point, respectively.
+pub type vfsi_nfs_mount_cb =
+    Option<unsafe extern "C" fn(*const c_char, *const c_char, *const c_char, *mut c_void)>;
+
+/// Discover a supported Linux NFS mount without connecting. Uses the same
+/// security/version/covering-mount checks as nfs_from_mount. Callback strings
+/// preserve path bytes and are borrowed only during one successful invocation.
+/// Errors invoke no callback. Other platforms return ENOTSUP.
+///
+/// # Safety
+/// path must be a live NUL-terminated absolute directory path. The callback
+/// and userdata must remain valid; copy any returned strings before returning.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_nfs_mount_info(
+    path: *const c_char,
+    cb: vfsi_nfs_mount_cb,
+    userdata: *mut c_void,
+) -> c_int {
+    ffi_guard!(libc::EIO, {
+        let Some(cb) = cb else { return libc::EINVAL };
+        // SAFETY: forwards the caller-owned NUL-terminated input contract.
+        let Some(path) = (unsafe { cstr_path(path) }) else {
+            return libc::EINVAL;
+        };
+        #[cfg(target_os = "linux")]
+        {
+            let mount = match vfsi_nfs::mount::NfsMount::discover(&path) {
+                Ok(mount) => mount,
+                Err(error) => return vf_code(&error),
+            };
+            let (Ok(host), Ok(export), Ok(point)) = (
+                CString::new(mount.host()),
+                CString::new(mount.export_root().as_os_str().as_bytes()),
+                CString::new(mount.mount_point().as_os_str().as_bytes()),
+            ) else {
+                return libc::EINVAL;
+            };
+            // SAFETY: all strings remain live through the supplied callback.
+            unsafe { cb(host.as_ptr(), export.as_ptr(), point.as_ptr(), userdata) };
+            0
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (path, cb, userdata);
+            libc::ENOTSUP
         }
     })
 }

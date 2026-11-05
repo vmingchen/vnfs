@@ -129,6 +129,30 @@ impl VectorBackend for IdentityBackend {
         }
         Ok(())
     }
+    fn vlistdirs_impl(
+        &mut self,
+        dirs: &[&Path],
+        fields: AttrMask,
+        _: usize,
+        _: bool,
+        cb: &mut dyn FnMut(&VfAttrs, &Path) -> bool,
+    ) -> vfsi_sync::VfRes {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        for dir in dirs {
+            let attrs = VfAttrs {
+                file: FileOperand::from_os_path(&dir.join("entry")),
+                masks: fields,
+                returned: fields & !self.missing,
+                fs_id: (1u128 << 100) | 9,
+                fileid: 0,
+                ..VfAttrs::default()
+            };
+            if !cb(&attrs, dir) {
+                break;
+            }
+        }
+        Ok(())
+    }
     fn vgetattrs_nofollow_impl(&mut self, attrs: &mut [VfAttrs]) -> Result<(), VfError> {
         self.vgetattrs_impl(attrs)
     }
@@ -397,5 +421,234 @@ fn live_nfs_retained_identity_survives_rename_replacement_and_reconnect() {
     unsafe {
         vfsi_free(fs);
         vfsi_free(alias);
+    }
+}
+
+#[test]
+fn identity_listings_share_aliases_and_validate_cohort_before_delivery() {
+    unsafe extern "C" fn collect(
+        index: usize,
+        _dir: *const c_char,
+        name: *const c_char,
+        attrs: *const vfsi_attrs,
+        id: *const vfsi_object_id,
+        data: *mut c_void,
+    ) -> bool {
+        let seen = &mut *(data as *mut Vec<(usize, String, vfsi_attrs, vfsi_object_id)>);
+        assert!(!id.is_null());
+        seen.push((
+            index,
+            CStr::from_ptr(name).to_string_lossy().into_owned(),
+            *attrs,
+            *id,
+        ));
+        true
+    }
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("source"), b"contents").unwrap();
+    std::fs::hard_link(root.path().join("source"), root.path().join("alias")).unwrap();
+    let fs = local(root.path(), "/view");
+    let dirs = [c"/view".as_ptr(), c"/view".as_ptr()];
+    let mut options = vfsi_listing_options {
+        max_entries: 4,
+        max_path_bytes: 4096,
+        attributes: VFSI_ATTR_MODE | VFSI_ATTR_SIZE | VFSI_ATTR_FILEID,
+    };
+    let mut results = [vfsi_listing_result::default(); 2];
+    let mut rows = Vec::<(usize, String, vfsi_attrs, vfsi_object_id)>::new();
+    let data = &mut rows as *mut _ as *mut c_void;
+    let run = |options: &vfsi_listing_options, results: &mut [vfsi_listing_result; 2]| unsafe {
+        vfsi_listdirs_with_ids(
+            fs,
+            dirs.as_ptr(),
+            2,
+            options,
+            Some(collect),
+            data,
+            results.as_mut_ptr(),
+        )
+    };
+    assert_eq!(run(&options, &mut results), 0);
+    assert_eq!(rows.len(), 4);
+    let expected = query(fs, "/view/source", 0);
+    for (_, _, attrs, identity) in &rows {
+        assert_eq!(*identity, expected);
+        assert_eq!(attrs.fileid, identity.fileid);
+        assert_eq!(attrs.size, 8);
+    }
+    assert!(results
+        .iter()
+        .all(|r| r.completion == 1 && r.delivered == 2));
+    rows.clear();
+    options.max_entries = 3;
+    assert_eq!(run(&options, &mut results), libc::EFBIG);
+    assert!(rows.is_empty(), "quota failure must precede every callback");
+    assert!(results
+        .iter()
+        .all(|r| r.completion == 0 && r.delivered == 0));
+    unsafe { vfsi_free(fs) };
+}
+
+#[test]
+fn identity_listings_never_query_attrs_and_missing_identity_fails_before_delivery() {
+    unsafe extern "C" fn collect(
+        _: usize,
+        _: *const c_char,
+        _: *const c_char,
+        _: *const vfsi_attrs,
+        id: *const vfsi_object_id,
+        data: *mut c_void,
+    ) -> bool {
+        *(data as *mut usize) += 1;
+        assert_eq!((*id).fileid, 0, "zero file IDs are valid");
+        true
+    }
+    for missing in [AttrMask::empty(), AttrMask::FS_ID] {
+        let (fs, calls) = fake(missing, false, false);
+        let dirs = [c"/".as_ptr()];
+        let options = vfsi_listing_options {
+            max_entries: 10,
+            max_path_bytes: 4096,
+            attributes: VFSI_ATTR_MODE,
+        };
+        let mut result = vfsi_listing_result::default();
+        let mut delivered = 0usize;
+        let status = unsafe {
+            vfsi_listdirs_with_ids(
+                fs,
+                dirs.as_ptr(),
+                1,
+                &options,
+                Some(collect),
+                &mut delivered as *mut _ as *mut c_void,
+                &mut result,
+            )
+        };
+        assert_eq!(status, if missing.is_empty() { 0 } else { libc::ENOTSUP });
+        assert_eq!(delivered, usize::from(missing.is_empty()));
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "one listing, no GETATTR pass"
+        );
+        unsafe { vfsi_free(fs) };
+    }
+}
+
+#[test]
+fn mount_discovery_rejects_invalid_inputs_before_callback() {
+    unsafe extern "C" fn collect(
+        _: *const c_char,
+        _: *const c_char,
+        _: *const c_char,
+        data: *mut c_void,
+    ) {
+        *(data as *mut usize) += 1;
+    }
+    let mut calls = 0usize;
+    for path in [std::ptr::null(), c"relative/directory".as_ptr()] {
+        let status = unsafe {
+            vfsi_nfs_mount_info(path, Some(collect), &mut calls as *mut _ as *mut c_void)
+        };
+        assert_ne!(status, 0);
+        assert_eq!(calls, 0);
+    }
+}
+
+#[test]
+#[ignore = "requires VFSI_NFS_TEST_MOUNT pointing to a direct NFS mount"]
+fn live_mount_discovery_reports_the_supported_mount_once() {
+    unsafe extern "C" fn collect(
+        host: *const c_char,
+        export: *const c_char,
+        mount: *const c_char,
+        data: *mut c_void,
+    ) {
+        let rows = &mut *(data as *mut Vec<(String, PathBuf, PathBuf)>);
+        rows.push((
+            CStr::from_ptr(host).to_str().unwrap().to_owned(),
+            cstr_path(export).unwrap(),
+            cstr_path(mount).unwrap(),
+        ));
+    }
+    let path =
+        PathBuf::from(std::env::var_os("VFSI_NFS_TEST_MOUNT").expect("NFS fixture required"));
+    let cpath = CString::new(path.as_os_str().as_bytes()).unwrap();
+    let mut rows = Vec::<(String, PathBuf, PathBuf)>::new();
+    assert_eq!(
+        unsafe {
+            vfsi_nfs_mount_info(
+                cpath.as_ptr(),
+                Some(collect),
+                &mut rows as *mut _ as *mut c_void,
+            )
+        },
+        0
+    );
+    assert_eq!(rows.len(), 1);
+    assert!(!rows[0].0.is_empty());
+    assert!(rows[0].1.is_absolute());
+    assert!(path.canonicalize().unwrap().starts_with(&rows[0].2));
+}
+
+#[test]
+#[ignore = "requires VFSI_NFS_TEST_MOUNT pointing to a writable direct NFS mount"]
+fn live_inline_listing_identity_matches_queries_on_both_nfs_versions() {
+    unsafe extern "C" fn collect(
+        _: usize,
+        _: *const c_char,
+        _: *const c_char,
+        attrs: *const vfsi_attrs,
+        id: *const vfsi_object_id,
+        data: *mut c_void,
+    ) -> bool {
+        let rows = &mut *(data as *mut Vec<(vfsi_attrs, vfsi_object_id)>);
+        rows.push((*attrs, *id));
+        true
+    }
+    let mount =
+        PathBuf::from(std::env::var_os("VFSI_NFS_TEST_MOUNT").expect("NFS fixture required"));
+    let root = tempfile::tempdir_in(&mount).unwrap();
+    std::fs::write(root.path().join("source"), b"contents").unwrap();
+    std::fs::hard_link(root.path().join("source"), root.path().join("alias")).unwrap();
+    let discovered = vfsi_nfs::mount::NfsMount::discover(root.path()).unwrap();
+    let croot = CString::new(root.path().as_os_str().as_bytes()).unwrap();
+    let source = root.path().join("source");
+    let options = vfsi_listing_options {
+        max_entries: 2,
+        max_path_bytes: 4096,
+        attributes: VFSI_ATTR_MODE | VFSI_ATTR_SIZE | VFSI_ATTR_FILEID,
+    };
+    for minor in [1, 2] {
+        let backend = NfsVecFs::connect_minor(discovered.host(), minor).unwrap();
+        let fs = make_fs(
+            Box::new(backend),
+            root.path().to_path_buf(),
+            discovered.root().to_path_buf(),
+        );
+        let mut rows = Vec::<(vfsi_attrs, vfsi_object_id)>::new();
+        let mut result = vfsi_listing_result::default();
+        assert_eq!(
+            unsafe {
+                vfsi_listdirs_with_ids(
+                    fs,
+                    &croot.as_ptr(),
+                    1,
+                    &options,
+                    Some(collect),
+                    &mut rows as *mut _ as *mut c_void,
+                    &mut result,
+                )
+            },
+            0
+        );
+        assert_eq!(rows.len(), 2, "NFSv4.{minor}");
+        let expected = query(fs, source.to_str().unwrap(), 0);
+        assert!(rows
+            .iter()
+            .all(|(attrs, id)| *id == expected && attrs.fileid == id.fileid && attrs.size == 8));
+        assert_eq!((result.completion, result.delivered), (1, 2));
+        unsafe { vfsi_free(fs) };
+        eprintln!("inline identity parity passed on NFSv4.{minor}");
     }
 }

@@ -33,7 +33,7 @@ find="$ports_root/vfsi-port-findutils"
 (
     cd "$core"
     cargo test -p uu_cp -p uu_du -p uu_ls -p uucore --lib \
-        --features uu_cp/vnfs,uu_du/vnfs,uu_ls/vnfs,uucore/vnfs -- vfsi:: vnfs:: nfs::
+        --features uu_cp/vnfs,uu_du/vnfs,uu_ls/vnfs,uucore/vnfs -- vfsi:: vnfs:: nfs:: colors::vfsi_colors::
     cargo check -p uu_rm -p uu_rmdir --features uu_rm/vnfs,uu_rmdir/vnfs
 )
 (

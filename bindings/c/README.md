@@ -163,3 +163,22 @@ when enabled, Kerberos. The build retains an origin-relative RUNPATH to
 overrides; deploy that directory only if your override requires it.
 Static-library consumers must link the remaining platform dependencies.
 Use `cargo rustc -p vfsi-c --lib -- --print native-static-libs` to inspect them.
+
+### Building an SDK
+
+Run `python3 build-sdk.py --registry-only --prefix /path/to/sdk` from a
+published `vfsi-c` crate checkout. The recipe uses the locked dependency graph,
+rejects non-registry dependencies, installs headers and the shared library with
+its optional native runtime directory, and writes `versions.json` with actual
+dependency versions. `--profile dev` selects a development build. For a workspace
+checkout omit `--registry-only`; `--target-dir` can reuse an existing build cache.
+Ports can use `VFSI_SDK_SOURCE` to opt into this local recipe while retaining their
+published SDK pin for default builds.
+
+The optional identity-listing export returns filesystem-scoped identity with
+the attributes from the same directory observation, without a subsequent
+GETATTR pass. The optional mount-info callback shares discovery validation with
+the mount constructor, so port adapters do not need to parse mount tables.
+The native POSIX header contains checked scalar field projection only; callers
+still supply scoped identity separately and must not confuse synthetic device
+values with kernel device IDs.

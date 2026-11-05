@@ -41,7 +41,7 @@ impl vfsi_object_id {
             fileid: 0,
         }
     }
-    fn from_attrs(namespace_id: u64, attrs: &VfAttrs) -> Result<Self, VfError> {
+    pub(super) fn from_attrs(namespace_id: u64, attrs: &VfAttrs) -> Result<Self, VfError> {
         if !attrs.returned.contains(AttrMask::identity()) {
             return Err(VfError::unsupported(0));
         }

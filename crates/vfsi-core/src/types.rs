@@ -742,6 +742,24 @@ impl Attrs {
         self.absent_mask(requested).is_empty()
     }
 
+    /// Validate fields before projecting sparse attributes into concrete values.
+    /// Real zero values are valid. Missing or unrepresentable requested fields
+    /// return Unsupported; this performs no I/O and never fabricates defaults.
+    pub fn require(&self, fields: AttrMask) -> crate::VfResult<&Self> {
+        let invalid_time = [
+            (AttrMask::ATIME, self.accessed()),
+            (AttrMask::MTIME, self.modified()),
+            (AttrMask::CTIME, self.changed()),
+        ]
+        .into_iter()
+        .any(|(field, value)| fields.contains(field) && value.is_none());
+        if !self.contains(fields) || invalid_time {
+            return Err(crate::VfError::unsupported(None)
+                .with_message("required attributes are missing or cannot be represented"));
+        }
+        Ok(self)
+    }
+
     /// Full POSIX mode, including the file type bits, when returned.
     pub fn mode(&self) -> Option<u32> {
         self.returned.contains(AttrMask::MODE).then_some(self.mode)
@@ -1661,6 +1679,34 @@ mod sparse_metadata_tests {
         assert!(attrs.contains(returned));
         #[cfg(target_os = "linux")]
         assert_eq!(expected, None);
+    }
+
+    #[test]
+    fn required_attributes_accept_zero_but_reject_missing_and_unrepresentable_values() {
+        let attrs = metadata_from_attrs(VfAttrs {
+            returned: AttrMask::SIZE | AttrMask::UID | AttrMask::MTIME,
+            mtime_sec: 0,
+            mtime_nsec: 0,
+            ..VfAttrs::default()
+        });
+        assert!(std::ptr::eq(
+            attrs.require(AttrMask::SIZE | AttrMask::UID).unwrap(),
+            &attrs
+        ));
+        assert!(attrs.require(AttrMask::empty()).is_ok());
+        assert_eq!(
+            attrs.require(AttrMask::GID).unwrap_err().kind(),
+            std::io::ErrorKind::Unsupported
+        );
+        let invalid = metadata_from_attrs(VfAttrs {
+            returned: AttrMask::MTIME,
+            mtime_sec: i64::MAX,
+            mtime_nsec: u32::MAX,
+            ..VfAttrs::default()
+        });
+        if invalid.modified().is_none() {
+            assert!(invalid.require(AttrMask::MTIME).is_err());
+        }
     }
 
     #[test]

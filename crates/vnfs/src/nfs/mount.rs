@@ -60,6 +60,15 @@ impl NfsMountSession {
         self.paths.map(path, policy)
     }
 
+    /// Map a cohort while sharing no-follow parent resolution within the call.
+    pub fn map_many<P: AsRef<Path>>(
+        &self,
+        paths: &[P],
+        policy: ResolvePath,
+    ) -> Result<Vec<PathBuf>> {
+        self.paths.map_many(paths, policy)
+    }
+
     /// Map a root-relative backend path back into the local namespace.
     pub fn local_path(&self, path: impl AsRef<Path>) -> Result<PathBuf> {
         self.paths.local_path(path)

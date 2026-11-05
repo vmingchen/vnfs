@@ -423,3 +423,36 @@ fn ordered_walk_preserves_the_input_roots_component_policy() {
         }
     }
 }
+
+#[test]
+fn cohort_mapping_matches_scalar_mapping_and_rejects_links_escapes_and_dot_operands() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("file"), b"x").unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.path().join("escape")).unwrap();
+    let mapper = PathMapper::new(root.path()).unwrap();
+    let paths = [
+        root.path().join("file"),
+        root.path().join("new"),
+        root.path().join("file"),
+    ];
+    let expected: Vec<_> = paths
+        .iter()
+        .map(|p| mapper.map(p, ResolvePath::NoFollow).unwrap())
+        .collect();
+    assert_eq!(
+        mapper.map_many(&paths, ResolvePath::NoFollow).unwrap(),
+        expected
+    );
+    for bad in [root.path().join("escape/child"), root.path().join("file/.")] {
+        let error = mapper
+            .map_many(&[paths[0].clone(), bad], ResolvePath::NoFollow)
+            .unwrap_err();
+        assert_eq!(error.index(), Some(1));
+    }
+    assert!(
+        mapper
+            .map_many(&[root.path().join("new")], ResolvePath::Follow)
+            .is_err()
+    );
+}

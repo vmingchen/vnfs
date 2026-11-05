@@ -20,11 +20,16 @@ typedef struct vfsi_dynamic_api {
   int (*nfs_open_mount_export)(const char *, const char *, const char *,
                                struct vfsi_fs **);
   int (*nfs_from_mount)(const char *, struct vfsi_fs **);
+  int (*nfs_mount_info)(const char *, vfsi_nfs_mount_cb, void *);
   int (*listdir)(struct vfsi_fs *, const char *, vfsi_listdir_cb, void *);
   int (*listdirs)(struct vfsi_fs *, const char *const *, size_t,
                   const struct vfsi_listing_options *,
                   vfsi_indexed_listdir_cb, void *,
                   struct vfsi_listing_result *);
+  int (*listdirs_with_ids)(struct vfsi_fs *, const char *const *, size_t,
+                           const struct vfsi_listing_options *,
+                           vfsi_indexed_listdir_ids_cb, void *,
+                           struct vfsi_listing_result *);
   int (*read_paths)(struct vfsi_fs *, const char *const *, size_t,
                     vfsi_read_paths_cb, void *);
   int (*read_paths_with_limit)(struct vfsi_fs *, const char *const *, size_t,
@@ -78,8 +83,10 @@ static inline int vfsi_dynamic_load(vfsi_dynamic_api *api, void *handle) {
   VFSI_DYNAMIC_SYMBOL(dummy_open_mount, 0);
   VFSI_DYNAMIC_SYMBOL(nfs_open_mount_export, 0);
   VFSI_DYNAMIC_SYMBOL(nfs_from_mount, 0);
+  VFSI_DYNAMIC_SYMBOL(nfs_mount_info, 0);
   VFSI_DYNAMIC_SYMBOL(listdir, 0);
   VFSI_DYNAMIC_SYMBOL(listdirs, 0);
+  VFSI_DYNAMIC_SYMBOL(listdirs_with_ids, 0);
   VFSI_DYNAMIC_SYMBOL(read_paths, 0);
   VFSI_DYNAMIC_SYMBOL(read_paths_with_limit, 0);
   VFSI_DYNAMIC_SYMBOL(get_object_id, 0);

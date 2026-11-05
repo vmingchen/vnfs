@@ -27,7 +27,7 @@ pub struct MountInfo {
 /// A discovered connection configuration pinned to one directory and mount.
 /// Discovery supports NFSv4.1/4.2 over TCP with AUTH_SYS. It does not share
 /// the kernel client's caches, state, or locks.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NfsMount {
     info: MountInfo,
     local_path: PathBuf,

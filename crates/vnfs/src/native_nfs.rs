@@ -109,7 +109,7 @@ impl Nfs {
 
 /// Opaque discovered mount configuration; no backend extraction or credentials.
 #[cfg(target_os = "linux")]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NfsMount {
     inner: vfsi_nfs::mount::NfsMount,
 }

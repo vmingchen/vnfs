@@ -126,6 +126,16 @@
 #define VFSI_CAP_ANCHORED_REMOVAL (1 << 9)
 
 /**
+ * Version of the additive listing callback with scoped object identity.
+ */
+#define VFSI_LISTDIR_IDS_VERSION 1
+
+/**
+ * Version of the additive validated Linux NFS mount discovery callback.
+ */
+#define VFSI_MOUNT_INFO_VERSION 1
+
+/**
  * Layout version of vfsi_object_id (independent of the library ABI version).
  */
 #define VFSI_OBJECT_ID_VERSION 1
@@ -192,6 +202,39 @@ typedef struct vfsi_listing_result {
   uint32_t completion;
   size_t delivered;
 } vfsi_listing_result;
+
+/**
+ * Complete object identity, not an open-instance ID or a durable global ID.
+ * Initialize struct_size=sizeof(vfsi_object_id), version=VFSI_OBJECT_ID_VERSION.
+ * Compare namespace_id, both fs_id words and fileid; zero values in fs_id or
+ * fileid are valid. namespace_id is an opaque nonzero token scoped to this
+ * process and loaded library instance; never persist it across reloads.
+ * Local mount views share one namespace; NFS views share a configured endpoint
+ * regardless of export root/minor version. Different endpoint spellings are
+ * conservatively distinct. IDs may be reused after deletion/server changes.
+ */
+typedef struct vfsi_object_id {
+  uint32_t struct_size;
+  uint32_t version;
+  uint64_t namespace_id;
+  /**
+   * Full 128-bit backend filesystem ID, high word first. Never truncate it.
+   */
+  uint64_t fs_id[2];
+  uint64_t fileid;
+} vfsi_object_id;
+
+typedef bool (*vfsi_indexed_listdir_ids_cb)(size_t,
+                                            const char*,
+                                            const char*,
+                                            const struct vfsi_attrs*,
+                                            const struct vfsi_object_id*,
+                                            void*);
+
+/**
+ * Borrowed server endpoint, export root and local mount point, respectively.
+ */
+typedef void (*vfsi_nfs_mount_cb)(const char*, const char*, const char*, void*);
 
 /**
  * Resource policy for an incremental tree traversal. Zero is a zero limit,
@@ -310,27 +353,6 @@ typedef bool (*vfsi_listdirv_cb)(const char *dir,
 typedef bool (*vfsi_read_paths_cb)(const char *path, const uint8_t *data, size_t len, void *userdata);
 
 /**
- * Complete object identity, not an open-instance ID or a durable global ID.
- * Initialize struct_size=sizeof(vfsi_object_id), version=VFSI_OBJECT_ID_VERSION.
- * Compare namespace_id, both fs_id words and fileid; zero values in fs_id or
- * fileid are valid. namespace_id is an opaque nonzero token scoped to this
- * process and loaded library instance; never persist it across reloads.
- * Local mount views share one namespace; NFS views share a configured endpoint
- * regardless of export root/minor version. Different endpoint spellings are
- * conservatively distinct. IDs may be reused after deletion/server changes.
- */
-typedef struct vfsi_object_id {
-  uint32_t struct_size;
-  uint32_t version;
-  uint64_t namespace_id;
-  /**
-   * Full 128-bit backend filesystem ID, high word first. Never truncate it.
-   */
-  uint64_t fs_id[2];
-  uint64_t fileid;
-} vfsi_object_id;
-
-/**
  * Exactly one target: path != NULL and fd == -1, or path == NULL and fd >= 0.
  * flags is zero or VFSI_OBJECT_ID_NOFOLLOW (paths only). out points to an
  * initialized version/size header. attrs is optional output-only ABI-v3 storage;
@@ -376,6 +398,24 @@ int vfsi_listdirs(struct vfsi_fs *fs,
                   vfsi_indexed_listdir_cb cb,
                   void *userdata,
                   struct vfsi_listing_result *results);
+
+/**
+ * Bounded listings with attributes and scoped identity from the same READDIR
+ * observation. ABI-v3 vfsi_attrs is unchanged. Unsupported identity fails
+ * before any delivery; budgets, cancellation and lock behavior match listdirs.
+ * No additional per-entry GETATTR pass is performed.
+ *
+ * # Safety
+ * Same pointer and lifetime contract as vfsi_listdirs. The identity pointer
+ * is borrowed only for the callback invocation; copy it before returning.
+ */
+int vfsi_listdirs_with_ids(struct vfsi_fs *fs,
+                           const char *const *dirs,
+                           size_t count,
+                           const struct vfsi_listing_options *options,
+                           vfsi_indexed_listdir_ids_cb cb,
+                           void *userdata,
+                           struct vfsi_listing_result *results);
 
 /**
  * Return the ABI version implemented by the loaded library.
@@ -472,6 +512,18 @@ int vfsi_nfs_open_mount(const char *host, const char *mountpoint, struct vfsi_fs
  * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_nfs_from_mount(const char *path, struct vfsi_fs **out);
+
+/**
+ * Discover a supported Linux NFS mount without connecting. Uses the same
+ * security/version/covering-mount checks as nfs_from_mount. Callback strings
+ * preserve path bytes and are borrowed only during one successful invocation.
+ * Errors invoke no callback. Other platforms return ENOTSUP.
+ *
+ * # Safety
+ * path must be a live NUL-terminated absolute directory path. The callback
+ * and userdata must remain valid; copy any returned strings before returning.
+ */
+int vfsi_nfs_mount_info(const char *path, vfsi_nfs_mount_cb cb, void *userdata);
 
 /**
  * Incremental no-follow traversal. Callbacks run outside the filesystem lock.

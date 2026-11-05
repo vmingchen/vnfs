@@ -568,3 +568,23 @@ root and preserve lookup failures. Create directories explicitly before connecti
 - Capability bits distinguish optional native rename modes, retained directory
   handles, and handle-anchored contents removal. They describe implementation
   support, not path authorization or universal filesystem support.
+
+## Port adapters and fallback
+
+Keep command ordering, filters, prompts and output formatting in the application.
+Use a command-scoped NFS mount session for discovery and path mapping; a
+connection cache must also respect credentials, mount policy and root identity.
+Use filesystem-scoped object IDs only within their backend/server namespace.
+
+An adapter may return an unhandled result before submission, or discard buffered
+read/listing results before delivering any of them and use the kernel path.
+Once output, side-effectful callbacks or mutations have started, report the
+error instead of replaying through another backend. An error index identifies
+an operand; it does not prove a completed prefix or a safe suffix to retry.
+In particular, batching removal requires preserving all per-operand diagnostics;
+connection reuse alone does not justify changing that contract.
+
+Required sparse attributes can be checked with Attrs::require before projecting
+them into concrete application values. Preserve optional fields as absent rather
+than inventing ownership, sizes or timestamps. Direct NFS and kernel accesses
+retain separate caches; session reuse and staging do not establish coherence.

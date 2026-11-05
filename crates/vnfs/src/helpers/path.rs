@@ -16,6 +16,21 @@ pub enum ResolvePath {
     NoFollow,
 }
 
+fn validate_terminal(path: &Path) -> Result<()> {
+    let spelling = path.as_os_str().as_encoded_bytes();
+    if spelling.ends_with(b"/.")
+        || spelling.ends_with(b"/..")
+        || spelling.ends_with(b"/")
+        || !matches!(
+            path.components().next_back(),
+            Some(std::path::Component::Normal(_))
+        )
+    {
+        return Err(Error::from_kind(0, std::io::ErrorKind::InvalidInput));
+    }
+    Ok(())
+}
+
 /// Standalone local-to-root-relative path mapping. It owns no filesystem and
 /// makes no claim that a client is rooted here. This maps namespace spellings;
 /// it is not race-free confinement or kernel/direct-client coherence.
@@ -52,13 +67,7 @@ impl PathMapper {
             ResolvePath::NoFollow => {
                 // Reject dot/dot-dot terminal operands instead of normalizing
                 // destructive requests into a different object.
-                let spelling = path.as_os_str().as_encoded_bytes();
-                if spelling.ends_with(b"/.")
-                    || spelling.ends_with(b"/..")
-                    || spelling.ends_with(b"/")
-                {
-                    return Err(Error::from_kind(0, std::io::ErrorKind::InvalidInput));
-                }
+                validate_terminal(path)?;
                 let name = path
                     .file_name()
                     .ok_or_else(|| Error::from_kind(0, std::io::ErrorKind::InvalidInput))?;
@@ -79,6 +88,48 @@ impl PathMapper {
             .map_err(|_| Error::errno(0, libc::EXDEV as u32))?;
         Ok(Path::new("/").join(suffix))
     }
+    /// Map a cohort, resolving each distinct parent once for no-follow operands.
+    /// Follow mode retains ordinary per-operand canonicalization. This is a
+    /// bounded caller-owned cohort, not a persistent path or metadata cache.
+    pub fn map_many<P: AsRef<Path>>(
+        &self,
+        paths: &[P],
+        policy: ResolvePath,
+    ) -> Result<Vec<PathBuf>> {
+        let mut parents = std::collections::HashMap::new();
+        paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                let path = path.as_ref();
+                let result = (|| {
+                    if policy == ResolvePath::Follow {
+                        return self.map(path, policy);
+                    }
+                    validate_terminal(path)?;
+                    let name = path
+                        .file_name()
+                        .ok_or_else(|| Error::from_kind(0, std::io::ErrorKind::InvalidInput))?;
+                    let parent = path
+                        .parent()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .unwrap_or(Path::new("."));
+                    if !parents.contains_key(parent) {
+                        let resolved =
+                            std::fs::canonicalize(parent).map_err(|e| io_error(parent, e))?;
+                        parents.insert(parent.to_path_buf(), resolved);
+                    }
+                    let absolute = parents[parent].join(name);
+                    let suffix = absolute
+                        .strip_prefix(&self.local_root)
+                        .map_err(|_| Error::errno(0, libc::EXDEV as u32))?;
+                    Ok(Path::new("/").join(suffix))
+                })();
+                result.map_err(|error: Error| error.with_index(index))
+            })
+            .collect()
+    }
+
     /// Restore the absolute local spelling of a backend path. Does not stat it.
     pub fn local_path(&self, path: impl AsRef<Path>) -> Result<PathBuf> {
         let path = path.as_ref();
