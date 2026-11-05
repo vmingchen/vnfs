@@ -533,16 +533,10 @@ fn copy_independent_roots(
 ) -> Result<()> {
     let limits = fs.limits();
     let mut pending = Vec::new();
-    for batch in roots.chunks(options.batch_size) {
-        dispatch(
-            fs,
-            batch.to_vec(),
-            &mut pending,
-            options,
-            summary,
-            progress,
-            skipped,
-        )?;
+    let mut roots = roots.into_iter();
+    while roots.len() != 0 {
+        let batch = roots.by_ref().take(options.batch_size).collect();
+        dispatch(fs, batch, &mut pending, options, summary, progress, skipped)?;
         if summary.stopped {
             return Ok(());
         }
@@ -1004,7 +998,7 @@ fn prepare_replace(fs: &impl Vfsi, tasks: &[Task]) -> Result<()> {
             {
                 return Err(invalid(task.root, &task.destination));
             }
-            Ok(_) => existing.push(task.clone()),
+            Ok(_) => existing.push(task),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(mapped(e, std::slice::from_ref(task))),
         }

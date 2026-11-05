@@ -22,9 +22,8 @@
 use std::collections::HashMap;
 use std::fs::{File, FileTimes, OpenOptions};
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{
-    FileExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink,
+    DirBuilderExt, FileExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -407,7 +406,7 @@ impl LocalBackend {
             let std::path::Component::Normal(name) = component else {
                 continue;
             };
-            let name = cstring_from_bytes(name.as_bytes())
+            let name = cstring_from_bytes(path_bytes(Path::new(name)))
                 .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
             // SAFETY: anchor owns the live directory descriptor and name is NUL-
             // terminated for this synchronous openat.
@@ -837,24 +836,15 @@ impl LocalBackend {
 
     /// Build `OpenOptions` from fcntl-style flags.
     fn open_options(flags: i32) -> OpenOptions {
-        use libc::{O_APPEND, O_CREAT, O_EXCL, O_RDWR, O_TRUNC, O_WRONLY};
-        let mut o = OpenOptions::new();
+        use libc::{O_RDWR, O_WRONLY};
+        let mut options = OpenOptions::new();
         let read = (flags & (O_RDWR | O_WRONLY)) == 0 || (flags & O_RDWR) != 0;
         let write = (flags & (O_RDWR | O_WRONLY)) != 0;
-        o.read(read).write(write);
-        if flags & O_CREAT != 0 {
-            o.create(true);
-        }
-        if flags & O_EXCL != 0 {
-            o.create_new(true);
-        }
-        if flags & O_TRUNC != 0 {
-            o.truncate(true);
-        }
-        if flags & O_APPEND != 0 {
-            o.append(true);
-        }
-        o
+        options.read(read).write(write);
+        // Preserve raw creation/truncation/append bits. Builder setters reject
+        // read-only creation and append+truncate; append(true) also enables writes.
+        options.custom_flags(flags);
+        options
     }
 
     /// The real path a `FileOperand` refers to.
@@ -1429,10 +1419,10 @@ impl LocalBackend {
                 if reached_limit(out) {
                     break;
                 }
-                let name = entry.file_name().as_bytes().to_vec();
-                let path = current.join(path_from_bytes(&name));
+                let name = entry.file_name();
+                let path = current.join(&name);
                 let attrs = self
-                    .directory_entry_attrs(&p, &path, &entry.file_name(), masks)
+                    .directory_entry_attrs(&p, &path, &name, masks)
                     .map_err(|error| error.with_index(out.len()))?;
                 if recursive && attrs.ftype == VfType::Directory {
                     children.push(path);
@@ -1633,23 +1623,27 @@ impl HandleBackend for LocalBackend {
                 .join(path_from_bytes(&normalize_bytes(path_bytes(pathname)))),
             VfPathBase::Cwd => self.resolve(pathname),
         };
-        let p = if flags & O_CREAT != 0 && flags & libc::O_EXCL != 0 {
-            // Exclusive creation treats even a dangling final symlink as an
-            // existing directory entry. Keep the leaf unresolved so
-            // create_new sees it and the anchored open cannot follow it.
-            self.no_follow_path(&resolved)?
-        } else {
-            self.real_path(&resolved)?
-        };
-        // The mode only applies when O_CREAT actually creates the file
-        // (POSIX ignores it for existing files). Try create_new to detect
-        // creation, then fall back to a plain open on EEXIST.
+        let p =
+            if flags & libc::O_NOFOLLOW != 0 || flags & O_CREAT != 0 && flags & libc::O_EXCL != 0 {
+                // Preserve the final entry for exclusive creation and O_NOFOLLOW.
+                // Resolving it to a procfs target first would erase a symlink.
+                self.no_follow_path(&resolved)?
+            } else {
+                self.real_path(&resolved)?
+            };
+        let flags = flags
+            | if p.nofollow_on_open {
+                libc::O_NOFOLLOW
+            } else {
+                0
+            };
+        // Existing files retain their permissions. For O_CREAT, try
+        // exclusive creation to detect new files, then fall back on EEXIST.
         let file = if flags & O_CREAT != 0 {
             let mut opts = Self::open_options(flags);
-            opts.create_new(true);
+            opts.custom_flags(flags | libc::O_EXCL);
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(mode & 0o7777);
-            Self::protect_create_open(&p, &mut opts);
             match opts.open(&p) {
                 Ok(f) => {
                     // The creation mode is now applied atomically by OPEN.
@@ -1665,14 +1659,14 @@ impl HandleBackend for LocalBackend {
                     let mut fallback = Self::open_options(flags);
                     use std::os::unix::fs::OpenOptionsExt;
                     fallback.mode(mode & 0o7777);
-                    Self::protect_create_open(&p, &mut fallback);
                     fallback.open(&p).map_err(|e| VfError::from_io(0, e))?
                 }
                 Err(e) => return Err(VfError::from_io(0, e)),
             }
         } else {
             let mut options = Self::open_options(flags);
-            Self::protect_create_open(&p, &mut options);
+            // O_TMPFILE also consumes a creation mode without O_CREAT.
+            options.mode(mode & 0o7777);
             options.open(&p).map_err(|e| VfError::from_io(0, e))?
         };
         let fd = self.insert_open_file(LocalOpen {
@@ -2280,9 +2274,10 @@ impl VectorBackend for LocalBackend {
                 return Ok((page, None));
             };
             let entry = entry.map_err(|error| VfError::from_io(0, error))?;
-            let path = state.virtual_dir.join(entry.file_name());
+            let name = entry.file_name();
+            let path = state.virtual_dir.join(&name);
             let attrs = self
-                .directory_entry_attrs(&state._anchor, &path, &entry.file_name(), masks)
+                .directory_entry_attrs(&state._anchor, &path, &name, masks)
                 .map_err(|error| error.with_index(page.len()))?;
             page.push(attrs);
         }
@@ -2303,9 +2298,10 @@ impl VectorBackend for LocalBackend {
                 return Ok(());
             }
             let entry = entry.map_err(|error| VfError::from_io(0, error))?;
-            let path = dir.join(entry.file_name());
+            let name = entry.file_name();
+            let path = dir.join(&name);
             let attrs = self
-                .directory_entry_attrs(&p, &path, &entry.file_name(), masks)
+                .directory_entry_attrs(&p, &path, &name, masks)
                 .map_err(|error| error.with_index(count))?;
             if !cb(&attrs) {
                 return Ok(());
@@ -2427,7 +2423,17 @@ impl VectorBackend for LocalBackend {
                         .join(self.vf_path(&a.file).map_err(|e| e.with_index(i))?),
                 )
                 .map_err(|e| e.with_index(i))?;
-            std::fs::create_dir(&p).map_err(|e| VfError::from_io(i, e))?;
+            // Restrict the directory at creation, including if the later
+            // exact-mode adjustment fails or another process observes it.
+            let mode = if a.masks.contains(AttrMask::MODE) {
+                a.mode & 0o7777
+            } else {
+                0o777
+            };
+            std::fs::DirBuilder::new()
+                .mode(mode)
+                .create(&p)
+                .map_err(|e| VfError::from_io(i, e))?;
             if a.masks.contains(AttrMask::MODE) {
                 #[cfg(feature = "test-faults")]
                 self.inject_open_fault(OpenFaultPoint::BeforeSetPermissions { index: i })?;

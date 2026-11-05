@@ -165,31 +165,56 @@ impl NfsVecFs {
             },
         )?;
 
-        let result = copy_extent_data(
-            &mut self.nfs,
-            p.src_offset,
-            p.dst_offset,
-            p.length,
-            |nfs, offset, count| {
-                nfs.read(&sfh, &ssid, offset, count)
-                    .map_err(|error| vfsi_core::error_from_rpc(error, 0))
-            },
-            |nfs, offset, data| {
-                nfs.write(&dfh, &dsid, offset, data)
-                    .map(|(written, _)| written as usize)
-                    .map_err(|error| vfsi_core::error_from_rpc(error, 0))
-            },
-        )
-        .and_then(|final_size| {
+        // Temporary path OPENs share one owner. Opening an alias for writing
+        // advances the source's stateid; use and close only the latest state.
+        let same_file = sfh == dfh;
+        let read_state = if same_file { &dsid } else { &ssid };
+        let result = (|| {
+            let length = if same_file && p.dst_offset > p.src_offset {
+                // Forward writes can extend their own source. Bound both the
+                // overlap check and every READ by the original available data.
+                let Some(length) = p.length else {
+                    return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+                };
+                let length = if length == 0 {
+                    0
+                } else {
+                    length.min(self.file_size(&sfh)?.saturating_sub(p.src_offset))
+                };
+                if p.dst_offset - p.src_offset < length {
+                    return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+                }
+                Some(length)
+            } else {
+                p.length
+            };
+            let final_size = copy_extent_data(
+                &mut self.nfs,
+                p.src_offset,
+                p.dst_offset,
+                length,
+                |nfs, offset, count| {
+                    nfs.read(&sfh, read_state, offset, count)
+                        .map_err(|error| vfsi_core::error_from_rpc(error, 0))
+                },
+                |nfs, offset, data| {
+                    nfs.write(&dfh, &dsid, offset, data)
+                        .map(|(written, _)| written as usize)
+                        .map_err(|error| vfsi_core::error_from_rpc(error, 0))
+                },
+            )?;
             // Truncate any stale tail beyond what was copied (cp semantics).
             self.nfs
                 .setattr(&dfh, None, Some(final_size))
                 .map_err(|error| vfsi_core::error_from_rpc(error, 0))
-        });
-        let source_close = self
-            .nfs
-            .close_path(&sfh, &ssid)
-            .map_err(|e| vfsi_core::error_from_rpc(e, 0));
+        })();
+        let source_close = if same_file {
+            Ok(())
+        } else {
+            self.nfs
+                .close_path(&sfh, &ssid)
+                .map_err(|e| vfsi_core::error_from_rpc(e, 0))
+        };
         let destination_close = self
             .nfs
             .close_path(&dfh, &dsid)

@@ -1967,3 +1967,211 @@ fn file_review_mixed_descriptor_end_reads_work_like_descriptor_only_reads() {
 fn file_review_mixed_descriptor_end_writes_work_like_descriptor_only_writes() {
     file_review_mixed_descriptor_end_offsets(true);
 }
+
+#[test]
+fn client_extent_copy_rejects_forward_aliases_without_mutating_source() {
+    let Some(mut fs) = connect() else { return };
+    let root = format!("/vfsi-client-copy-alias-{}", std::process::id());
+    fs.ensure_dir_impl(Path::new(&root), 0o700).unwrap();
+    let source = Path::new(&root).join("source");
+    let alias = Path::new(&root).join("alias");
+    let payload: Vec<u8> = (0..(2 * 1024 * 1024 + 17))
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let mut outcomes = Vec::new();
+    #[cfg(feature = "test-faults")]
+    let mut close_counts = Vec::new();
+    for hardlink in [false, true] {
+        fs.vwrite_impl(&borrow_writes(&[vfsi_sync::WriteOp::from_os_path(
+            &source,
+            VfOffset::At(0),
+            payload.clone(),
+        )
+        .with_creation()
+        .with_truncate()]))
+            .unwrap();
+        if hardlink {
+            fs.vhardlink_impl(&[&source], &[&alias]).unwrap();
+        }
+        let destination = if hardlink { &alias } else { &source };
+        for length in [Some(payload.len() as u64), None] {
+            #[cfg(feature = "test-faults")]
+            let before = fs.test_confirmed_path_closes();
+            let result = fs.vcopy_data_impl(&[ExtentPair::from_os_paths(
+                &source,
+                0,
+                destination,
+                1,
+                length,
+            )]);
+            #[cfg(feature = "test-faults")]
+            close_counts.push(fs.test_confirmed_path_closes() - before);
+            let actual = fs
+                .read_file_impl(&FileOperand::from_os_path(&source), payload.len() + 128)
+                .unwrap();
+            outcomes.push((hardlink, result, actual));
+        }
+    }
+    fs.remove_paths_impl(&[Path::new(&root)], true).unwrap();
+    #[cfg(feature = "test-faults")]
+    for closes in close_counts {
+        assert_eq!(
+            closes, 1,
+            "rejected alias copies must still close current state"
+        );
+    }
+    for (hardlink, result, actual) in outcomes {
+        assert!(
+            actual == payload,
+            "copy changed its own source (hardlink={hardlink}, len={})",
+            actual.len()
+        );
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+    }
+}
+
+#[test]
+fn client_extent_copy_bounds_forward_aliases_by_original_eof() {
+    let Some(mut fs) = connect() else { return };
+    let root = format!("/vfsi-client-copy-eof-alias-{}", std::process::id());
+    fs.ensure_dir_impl(Path::new(&root), 0o700).unwrap();
+    let source = Path::new(&root).join("source");
+    let alias = Path::new(&root).join("alias");
+    let payload: Vec<u8> = (0..(2 * 1024 * 1024 + 17))
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let original_size = payload.len() as u64;
+    #[cfg(feature = "test-faults")]
+    let mut close_counts = Vec::new();
+    let outcomes: VfResult<Vec<_>> = (|| {
+        let mut outcomes = Vec::new();
+        for hardlink in [false, true] {
+            if hardlink {
+                fs.vhardlink_impl(&[&source], &[&alias])?;
+            }
+            for (source_offset, destination_offset) in [
+                (0, original_size + 1),
+                (0, original_size + 128),
+                (17, original_size + 1),
+            ] {
+                fs.vwrite_impl(&borrow_writes(&[vfsi_sync::WriteOp::from_os_path(
+                    &source,
+                    VfOffset::At(0),
+                    payload.clone(),
+                )
+                .with_creation()
+                .with_truncate()]))?;
+                let destination = if hardlink { &alias } else { &source };
+                let requested = original_size + 100;
+                #[cfg(feature = "test-faults")]
+                let before = fs.test_confirmed_path_closes();
+                fs.vcopy_data_impl(&[ExtentPair::from_os_paths(
+                    &source,
+                    source_offset,
+                    destination,
+                    destination_offset,
+                    Some(requested),
+                )])?;
+                #[cfg(feature = "test-faults")]
+                close_counts.push(fs.test_confirmed_path_closes() - before);
+                // Leave room for a buggy copy to read bytes appended by itself.
+                let actual = fs.read_file_impl(
+                    &FileOperand::from_os_path(&source),
+                    (destination_offset + requested + 128) as usize,
+                )?;
+                let mut expected = payload.clone();
+                expected.resize(destination_offset as usize, 0);
+                expected.extend_from_slice(&payload[source_offset as usize..]);
+                outcomes.push((
+                    hardlink,
+                    source_offset,
+                    destination_offset,
+                    actual,
+                    expected,
+                ));
+            }
+        }
+        Ok(outcomes)
+    })();
+    let cleanup = fs.remove_paths_impl(&[Path::new(&root)], true);
+    let outcomes = outcomes.unwrap();
+    cleanup.unwrap();
+    #[cfg(feature = "test-faults")]
+    for closes in close_counts {
+        assert_eq!(closes, 1, "one latest CLOSE for one shared path OPEN state");
+    }
+    for (hardlink, source_offset, destination_offset, actual, expected) in outcomes {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "copy read past original EOF (hardlink={hardlink}, src={source_offset}, dst={destination_offset})"
+        );
+        assert!(
+            actual == expected,
+            "copy changed bytes (hardlink={hardlink}, src={source_offset}, dst={destination_offset})"
+        );
+    }
+}
+
+#[test]
+fn client_extent_copy_reuses_current_state_for_safe_aliases() {
+    let Some(mut fs) = connect() else { return };
+    let root = format!("/vfsi-client-copy-safe-alias-{}", std::process::id());
+    fs.ensure_dir_impl(Path::new(&root), 0o700).unwrap();
+    let source = Path::new(&root).join("source");
+    let alias = Path::new(&root).join("alias");
+    let mut outcomes = Vec::new();
+    #[cfg(feature = "test-faults")]
+    let mut close_counts = Vec::new();
+    for hardlink in [false, true] {
+        if hardlink {
+            fs.vhardlink_impl(&[&source], &[&alias]).unwrap();
+        }
+        for (offset, destination_offset, length, expected) in [
+            (4, 0, Some(3), b"456".as_slice()),
+            (0, 10, Some(5), b"012345678901234".as_slice()),
+            (4, 0, None, b"456789".as_slice()),
+            (0, 0, Some(3), b"012".as_slice()),
+            (0, 10, Some(20), b"01234567890123456789".as_slice()),
+            (0, 1, Some(0), b"0".as_slice()),
+        ] {
+            fs.vwrite_impl(&borrow_writes(&[vfsi_sync::WriteOp::from_os_path(
+                &source,
+                VfOffset::At(0),
+                b"0123456789".to_vec(),
+            )
+            .with_creation()
+            .with_truncate()]))
+                .unwrap();
+            let destination = if hardlink { &alias } else { &source };
+            #[cfg(feature = "test-faults")]
+            let before = fs.test_confirmed_path_closes();
+            let result = fs.vcopy_data_impl(&[ExtentPair::from_os_paths(
+                &source,
+                offset,
+                destination,
+                destination_offset,
+                length,
+            )]);
+            #[cfg(feature = "test-faults")]
+            let closes = fs.test_confirmed_path_closes() - before;
+            let actual = fs
+                .read_file_impl(&FileOperand::from_os_path(&source), 64)
+                .unwrap();
+            outcomes.push((hardlink, result, actual, expected));
+            #[cfg(feature = "test-faults")]
+            close_counts.push(closes);
+        }
+    }
+    fs.remove_paths_impl(&[Path::new(&root)], true).unwrap();
+    #[cfg(feature = "test-faults")]
+    for closes in close_counts {
+        assert_eq!(closes, 1, "one latest CLOSE for one shared path OPEN state");
+    }
+    for (hardlink, result, actual, expected) in outcomes {
+        result.unwrap_or_else(|error| {
+            panic!("safe alias copy failed (hardlink={hardlink}): {error}")
+        });
+        assert_eq!(actual, expected);
+    }
+}

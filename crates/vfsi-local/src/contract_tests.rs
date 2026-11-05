@@ -2801,4 +2801,170 @@ mod tests {
             assert_eq!(std::fs::read(root.0.join("source")).unwrap(), data);
         }
     }
+
+    #[cfg(all(feature = "test-faults", target_os = "linux"))]
+    #[test]
+    fn mkdir_initial_mode_never_exposes_unrequested_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Arc;
+        use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+        const CHILD: &str = "VFSI_LOCAL_MKDIR_INITIAL_MODE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            run_filtered_test_child(
+                "contract_tests::tests::mkdir_initial_mode_never_exposes_unrequested_permissions",
+                CHILD,
+            );
+            return;
+        }
+        let (root, mut backend) = fs("mkdir-initial-mode");
+        for mode in [0o700, 0o750] {
+            let path = format!("/dir-{mode:o}");
+            let script = Arc::new(FaultScript::one(
+                OpenFaultPoint::BeforeSetPermissions { index: 0 },
+                VfError::errno(0, libc::EIO as u32),
+            ));
+            backend.set_fault_injector(script.clone());
+            let attrs = VfAttrs {
+                file: FileOperand::from_path(&path),
+                masks: AttrMask::MODE,
+                mode,
+                ..VfAttrs::default()
+            };
+            // SAFETY: this isolated child runs only this test; restore its
+            // process-wide umask immediately after the mkdir operation.
+            let previous = unsafe { libc::umask(0) };
+            let result = backend.vmkdir_impl(&[attrs]);
+            unsafe { libc::umask(previous) };
+            assert_eq!(result.unwrap_err().raw_code(), libc::EIO as u32);
+            assert!(script.is_consumed());
+            assert_eq!(
+                std::fs::metadata(root.0.join(path.trim_start_matches('/')))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                mode,
+                "the directory must be private even before post-creation chmod"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn raw_open_honors_directory_and_nofollow_flags() {
+        let (root, mut backend) = fs("raw-open-flags");
+        std::fs::write(root.0.join("file"), b"preserved").unwrap();
+        std::fs::create_dir(root.0.join("directory")).unwrap();
+        std::os::unix::fs::symlink("file", root.0.join("link")).unwrap();
+        for (path, flags, expected) in [
+            ("/file", libc::O_RDONLY | libc::O_DIRECTORY, libc::ENOTDIR),
+            (
+                "/link",
+                libc::O_WRONLY | libc::O_TRUNC | libc::O_NOFOLLOW,
+                libc::ELOOP,
+            ),
+        ] {
+            let result = backend.open_raw_impl(Path::new(path), flags, 0);
+            if let Ok(file) = &result {
+                backend.close_impl(file).unwrap();
+            }
+            assert_eq!(result.unwrap_err().raw_code(), expected as u32);
+            assert_eq!(std::fs::read(root.0.join("file")).unwrap(), b"preserved");
+        }
+        // Directory flags still permit directories, and no-follow constrains
+        // only the final component, preserving ordinary ancestor resolution.
+        std::os::unix::fs::symlink(".", root.0.join("ancestor")).unwrap();
+        for (path, flags) in [
+            ("/directory", libc::O_RDONLY | libc::O_DIRECTORY),
+            ("/ancestor/file", libc::O_RDONLY | libc::O_NOFOLLOW),
+        ] {
+            let file = backend.open_raw_impl(Path::new(path), flags, 0).unwrap();
+            backend.close_impl(&file).unwrap();
+        }
+    }
+
+    #[test]
+    fn raw_read_only_append_keeps_the_descriptor_read_only() {
+        use std::os::fd::AsRawFd;
+
+        let (root, mut backend) = fs("raw-readonly-append");
+        std::fs::write(root.0.join("file"), b"preserved").unwrap();
+        let file = backend
+            .open_raw_impl(Path::new("/file"), libc::O_RDONLY | libc::O_APPEND, 0)
+            .unwrap();
+        let descriptor = backend.open_files[&file.fd().unwrap()].file.as_raw_fd();
+        // SAFETY: the backend retains this descriptor; F_GETFL reads its flags
+        // without taking ownership or changing the descriptor.
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_eq!(flags & libc::O_ACCMODE, libc::O_RDONLY);
+        assert_ne!(flags & libc::O_APPEND, 0);
+        assert_eq!(backend.read_raw_impl(&file, 0, 9).unwrap(), b"preserved");
+        let error = backend
+            .vwrite_impl(&[WriteOp::new(&file, VfOffset::Cur, b"bad".as_slice())])
+            .unwrap_err();
+        assert_eq!(error.raw_code(), libc::EBADF as u32);
+        backend.close_impl(&file).unwrap();
+        assert_eq!(std::fs::read(root.0.join("file")).unwrap(), b"preserved");
+    }
+
+    #[test]
+    fn typed_append_and_truncate_open_an_existing_file() {
+        let (root, mut backend) = fs("typed-append-truncate");
+        for readable in [false, true] {
+            std::fs::write(root.0.join("file"), b"stale").unwrap();
+            let mut flags = OpenFlags::WRITE | OpenFlags::APPEND | OpenFlags::TRUNCATE;
+            flags.set(OpenFlags::READ, readable);
+            let file = backend.open_impl(&OpenOp::new("/file", flags)).unwrap();
+            assert!(std::fs::read(root.0.join("file")).unwrap().is_empty());
+            for (offset, data) in [(0, b"new".as_slice()), (3, b" tail".as_slice())] {
+                let result = backend
+                    .vwrite_impl(&[WriteOp::new(&file, VfOffset::Cur, data)])
+                    .unwrap();
+                assert_eq!(result[0].offset, offset);
+                assert_eq!(result[0].bytes_written, data.len());
+            }
+            backend.close_impl(&file).unwrap();
+            assert_eq!(std::fs::read(root.0.join("file")).unwrap(), b"new tail");
+        }
+    }
+
+    #[test]
+    fn raw_read_only_creation_keeps_access_and_existing_contents() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+
+        let (root, mut backend) = fs("raw-readonly-create");
+        for append in [0, libc::O_APPEND] {
+            let path = format!("/file-{append}");
+            let native_path = root.0.join(path.trim_start_matches('/'));
+            let flags = libc::O_RDONLY | libc::O_CREAT | append;
+            let file = backend
+                .open_raw_impl(Path::new(&path), flags, 0o600)
+                .unwrap();
+            let descriptor = backend.open_files[&file.fd().unwrap()].file.as_raw_fd();
+            // SAFETY: the backend keeps this descriptor live; F_GETFL only reads flags.
+            let actual = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+            assert!(actual >= 0);
+            assert_eq!(actual & libc::O_ACCMODE, libc::O_RDONLY);
+            assert_eq!(actual & libc::O_APPEND, append);
+            backend.close_impl(&file).unwrap();
+
+            std::fs::write(&native_path, b"preserved").unwrap();
+            let mode = std::fs::metadata(&native_path)
+                .unwrap()
+                .permissions()
+                .mode();
+            let file = backend.open_raw_impl(Path::new(&path), flags, 0).unwrap();
+            assert_eq!(backend.read_raw_impl(&file, 0, 9).unwrap(), b"preserved");
+            backend.close_impl(&file).unwrap();
+            assert_eq!(
+                std::fs::metadata(&native_path)
+                    .unwrap()
+                    .permissions()
+                    .mode(),
+                mode
+            );
+        }
+    }
 }

@@ -1,5 +1,15 @@
 use super::*;
 
+fn validate_entry_name(name: &str) -> VfRes {
+    if name.is_empty() || matches!(name, "." | "..") || name.bytes().any(|b| b == b'/' || b == 0) {
+        return Err(VfError::invalid_reply(
+            None,
+            "invalid SMB directory entry name",
+        ));
+    }
+    Ok(())
+}
+
 impl SmbVecFs {
     pub(super) fn probe_reparse_point_batch(
         &mut self,
@@ -56,6 +66,7 @@ impl SmbVecFs {
                     break;
                 }
                 remaining -= 1;
+                validate_entry_name(&entry.name)?;
                 if !entry.is_directory && !probe_file_reparse_points {
                     continue;
                 }
@@ -152,5 +163,48 @@ impl SmbVecFs {
             &mut output,
         )?;
         Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directory_names_cannot_replace_the_parent_or_introduce_components() {
+        for name in [
+            "",
+            "/outside",
+            "../sibling",
+            "nested/child",
+            "bad\0name",
+            ".",
+            "..",
+        ] {
+            let error = validate_entry_name(name).unwrap_err();
+            assert_eq!(
+                error.transport_kind(),
+                Some(vfsi_core::TransportKind::InvalidReply),
+                "invalid directory entry {name:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn directory_names_preserve_valid_unix_and_smb_mapped_characters() {
+        for name in [
+            "entry",
+            "dots..",
+            "é",
+            "name\\with-backslash",
+            "file:stream",
+            "trailing ",
+            "\u{f000}",
+        ] {
+            validate_entry_name(name).unwrap();
+            let path = Path::new("parent").join(name);
+            assert_eq!(path.parent(), Some(Path::new("parent")));
+            assert_eq!(path.file_name().unwrap(), name);
+        }
     }
 }

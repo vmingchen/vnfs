@@ -528,6 +528,7 @@ impl Auto {
                 }
             })
             .collect();
+        let mut first_error = None;
         let mut start = 0;
         while start < paths.len() {
             let end = cohort_end(&resolved, start);
@@ -535,16 +536,22 @@ impl Auto {
                 .iter()
                 .map(|route| route.path.as_path())
                 .collect();
-            match &resolved[start].route {
+            let result = match &resolved[start].route {
                 Route::Posix => self.mounted.vremove_impl(&batch, recursive, options),
                 Route::Nfs(connection) => {
                     connection.client.vremove_impl(&batch, recursive, options)
                 }
             }
-            .map_err(|error| indexed(error, start))?;
+            .map_err(|error| indexed(error, start));
+            if let Err(error) = result {
+                if error.is_transport() || !options.continue_on_error() {
+                    return Err(error);
+                }
+                first_error.get_or_insert(error);
+            }
             start = end;
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     pub(crate) fn vcopy_impl<P: AsRef<Path>, Q: AsRef<Path>>(

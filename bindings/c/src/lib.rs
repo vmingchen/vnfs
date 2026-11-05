@@ -3373,6 +3373,55 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn c_scalar_and_vector_opens_honor_directory_and_nofollow_flags() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("file"), b"preserved").unwrap();
+        std::os::unix::fs::symlink("file", root.path().join("link")).unwrap();
+        let fs = make_fs(
+            Box::new(vfsi_posix::backend(root.path()).unwrap()),
+            PathBuf::from("/"),
+            PathBuf::from("/"),
+        );
+        for vector in [false, true] {
+            for (path, flags, expected) in [
+                ("/file", libc::O_RDONLY | libc::O_DIRECTORY, libc::ENOTDIR),
+                (
+                    "/link",
+                    libc::O_WRONLY | libc::O_TRUNC | libc::O_NOFOLLOW,
+                    libc::ELOOP,
+                ),
+            ] {
+                let path = CString::new(path).unwrap();
+                if vector {
+                    let mut op = vfsi_open_op {
+                        path: path.as_ptr(),
+                        flags,
+                        mode: 0o600,
+                        fd: -1,
+                    };
+                    let mut item = vfsi_result::success(0);
+                    let result = unsafe { vfsi_openv(fs, &mut op, 1, &mut item) };
+                    assert_eq!(result.category, VFSI_ERROR_FILESYSTEM);
+                    assert_eq!(result.err_no, expected as u32);
+                    assert_eq!(item.err_no, expected as u32);
+                    assert_eq!(op.fd, -1);
+                } else {
+                    assert_eq!(
+                        unsafe { vfsi_open(fs, path.as_ptr(), flags, 0o600) },
+                        -expected
+                    );
+                }
+                assert_eq!(
+                    std::fs::read(root.path().join("file")).unwrap(),
+                    b"preserved"
+                );
+            }
+        }
+        unsafe { vfsi_free(fs) };
+    }
+
     #[test]
     fn c_boolean_fields_accept_only_zero_and_one() {
         assert_eq!(parse_c_bool(0), Some(false));

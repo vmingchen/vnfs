@@ -35,7 +35,7 @@ use vfsi_nfs::compound::{compound_stats, rpc_stats};
 #[cfg(feature = "nfs")]
 use vfsi_nfs::{NfsAuth, NfsClientBuilder};
 #[cfg(feature = "smb")]
-use vfsi_smb::SmbVecFs;
+use vfsi_smb::{SmbConnectOptions, SmbVecFs};
 use vfsi_sync::{ListDirOptions, ReadAllOptions};
 
 #[cfg(not(feature = "nfs"))]
@@ -163,8 +163,10 @@ fn aggregate_listdirs(
     let mut unique_to_original = Vec::new();
     let mut unique_index_by_dir = HashMap::new();
     for (index, path) in paths.iter().enumerate() {
-        if !unique_index_by_dir.contains_key(path.as_path()) {
-            unique_index_by_dir.insert(path.as_path(), unique_paths.len());
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            unique_index_by_dir.entry(path.as_path())
+        {
+            entry.insert(unique_paths.len());
             unique_paths.push(path.as_path());
             unique_to_original.push(index);
         }
@@ -997,9 +999,15 @@ impl NfsClient {
                     let share = share.filter(|share| !share.is_empty()).ok_or_else(|| {
                         PyValueError::new_err("share is required for backend=\"smb\"")
                     })?;
+                    let mut options =
+                        SmbConnectOptions::default().with_auto_reconnect(auto_reconnect);
+                    options.connect_timeout = connect_timeout;
+                    options.request_timeout = request_timeout;
                     Box::new(
-                        SmbVecFs::connect(host, share, username, password, domain)
-                            .map_err(|e| to_py_err(e, Some(Path::new(host))))?,
+                        SmbVecFs::connect_with_options(
+                            host, share, username, password, domain, options,
+                        )
+                        .map_err(|e| to_py_err(e, Some(Path::new(host))))?,
                     ) as Box<dyn BindingBackend + Send>
                 }
                 #[cfg(feature = "dummy")]
@@ -1619,13 +1627,11 @@ impl NfsClient {
 
             // Resolve lengths; batch-fetch sizes when any end is None.
             let mut lengths: Vec<usize> = vec![0; paths.len()];
-            let mut stat_errors = ErrorMap::new();
             let need_sizes = ends.iter().any(Option::is_none);
             if need_sizes {
                 let (attrs, errs) = attrs_many_impl(fs, &paths, AttrMask::SIZE, true)
                     .map_err(|e| to_py_err(e, None))?;
-                errors.extend(errs.iter().map(|(&k, v)| (k, v.clone())));
-                stat_errors = errs;
+                errors = errs;
                 for (i, a) in attrs.iter().enumerate() {
                     if let Some(a) = a {
                         let end = ends[i].unwrap_or(a.size);
@@ -1646,7 +1652,7 @@ impl NfsClient {
             // Complete bounded ranges after legal short non-EOF reads.
             let mut progress = vec![0usize; paths.len()];
             let mut remaining: Vec<usize> = (0..paths.len())
-                .filter(|&i| !stat_errors.contains_key(&i))
+                .filter(|&i| !errors.contains_key(&i))
                 .collect();
             while !remaining.is_empty() {
                 let ops: Vec<ReadOp> = remaining
@@ -3024,3 +3030,6 @@ mod prr_oct14c_round07;
 
 #[cfg(all(test, feature = "dummy"))]
 mod copy_identity_tests;
+
+#[cfg(all(test, feature = "smb"))]
+mod smb_connection_tests;

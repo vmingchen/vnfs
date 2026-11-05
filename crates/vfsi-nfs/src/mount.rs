@@ -274,12 +274,14 @@ pub fn parse_mount(line: &[u8]) -> Option<MountInfo> {
         _ => return None,
     };
     let source = decode_mount_field(fields[separator + 2])?;
-    let source = source.to_str()?;
-    let (host, export) = source.rsplit_once(':')?;
-    if host.is_empty() || !export.starts_with('/') {
+    let source = source.as_os_str().as_bytes();
+    // The host/export delimiter precedes the absolute path. Later colons
+    // belong to that path, and IPv6 host colons never precede a slash.
+    let split = source.windows(2).position(|pair| pair == b":/")?;
+    if split == 0 {
         return None;
     }
-    let export = PathBuf::from(export);
+    let export = PathBuf::from(std::ffi::OsStr::from_bytes(&source[split + 1..]));
     if export
         .components()
         .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
@@ -471,6 +473,47 @@ mod tests {
         let table = [LINE, b"\n47 46 0:46 / /mnt/nfs/nested rw - tmpfs none rw"].concat();
         assert!(find_mount(&table, 46, Path::new("/mnt/nfs")).is_err());
         assert!(find_mount(&table, 47, Path::new("/mnt/nfs/nested")).is_err());
+    }
+
+    #[test]
+    fn mount_sources_preserve_colons_inside_the_export_path() {
+        let line = std::str::from_utf8(LINE).unwrap();
+        for (source, export) in [
+            ("server:/export:archive", "/export:archive"),
+            ("server:/export:/nested", "/export:/nested"),
+            (
+                "[2001:db8::7]:/export:archive/nested",
+                "/export:archive/nested",
+            ),
+            ("2001:db8::7:/export:/nested", "/export:/nested"),
+        ] {
+            let info = parse_mount(line.replace("server:/export", source).as_bytes())
+                .unwrap_or_else(|| panic!("valid mount source rejected: {source}"));
+            assert_eq!(info.export, Path::new(export), "{source}");
+        }
+    }
+
+    #[test]
+    fn mount_sources_preserve_non_utf8_export_bytes() {
+        let marker = b"server:/export";
+        let offset = LINE
+            .windows(marker.len())
+            .position(|part| part == marker)
+            .unwrap();
+        for source in [
+            b"server:/export-\xff:archive/nested".as_slice(),
+            br"server:/export-\377:archive/nested",
+        ] {
+            let mut line = LINE[..offset].to_vec();
+            line.extend_from_slice(source);
+            line.extend_from_slice(&LINE[offset + marker.len()..]);
+            let info = parse_mount(&line).expect("non-UTF-8 export remains a native path");
+            assert_eq!(
+                info.export.as_os_str().as_bytes(),
+                b"/export-\xff:archive/nested"
+            );
+            assert_eq!(info.server, "192.0.2.7:2049");
+        }
     }
 
     #[test]

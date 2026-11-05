@@ -1310,3 +1310,97 @@ fn live_vector_open_retains_each_mount_alias_route() {
     client.close_files(files).unwrap();
     client.remove_file(&remote).unwrap();
 }
+
+#[test]
+#[ignore = "requires VFSI_AUTO_TEST_MOUNT pointing to a direct NFS mount"]
+fn live_remove_continues_after_errors_across_routes() {
+    let mount = std::env::var("VFSI_AUTO_TEST_MOUNT").expect("NFS mount fixture");
+    let remote = tempfile::tempdir_in(mount).unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let client = Auto::new("/").unwrap();
+    require_live_direct_route(&client, remote.path());
+    let blocked = remote.path().join("blocked");
+    fs::create_dir(&blocked).unwrap();
+    fs::write(blocked.join("child"), b"keep").unwrap();
+    let local_file = local.path().join("local");
+    fs::write(&local_file, b"local").unwrap();
+    assert_eq!(client.route_for(&local_file), AutoRoute::Posix);
+    require_live_direct_route(&client, &blocked);
+    for continue_on_error in [false, true] {
+        let last = remote.path().join("last");
+        fs::write(&last, b"last").unwrap();
+        let error = client
+            .vremove(
+                &[&blocked, &local_file, &last],
+                crate::RemoveMode::Entry,
+                crate::RemoveOptions::new().with_continue_on_error(continue_on_error),
+            )
+            .unwrap_err();
+        assert_eq!(error.index(), Some(0), "retain the first group's error");
+        assert_eq!(error.raw_code(), libc::EISDIR as u32);
+        // The generic local backend rejects non-default removal options.
+        // This second semantic error must not suppress the final NFS group.
+        assert!(local_file.exists());
+        let result = client.attrs(&last);
+        if continue_on_error {
+            assert_eq!(result.unwrap_err().raw_code(), libc::ENOENT as u32);
+        } else {
+            assert_eq!(result.unwrap().len(), Some(4));
+        }
+    }
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+#[ignore = "requires VFSI_AUTO_TEST_MOUNT pointing to a direct NFS mount"]
+fn live_remove_stops_on_transport_error_with_continuation_enabled() {
+    use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+    let mount = std::env::var("VFSI_AUTO_TEST_MOUNT").expect("NFS mount fixture");
+    let remote = tempfile::tempdir_in(&mount).unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let client = Auto::new("/").unwrap();
+    require_live_direct_route(&client, remote.path());
+    let connection = client
+        .connections
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let mut backend = vfsi_nfs::NfsClientBuilder::from_mount(&connection.spec.mount_point)
+        .unwrap()
+        .connect()
+        .unwrap();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeRemoveType { index: 0 },
+        VfError::transport(0, "injected removal transport failure"),
+    ));
+    backend.set_fault_injector(script.clone());
+    client.connections.lock().unwrap().insert(
+        connection.spec.id,
+        Arc::new(routing::NfsConnectionState {
+            client: FsClient::new(backend),
+            ..(*connection).clone()
+        }),
+    );
+    let local_file = local.path().join("local");
+    let remote_file = remote.path().join("remote");
+    fs::write(&local_file, b"keep").unwrap();
+    fs::write(&remote_file, b"keep").unwrap();
+    let error = client
+        .vremove(
+            &[&local_file, &remote_file],
+            crate::RemoveMode::Entry,
+            crate::RemoveOptions::new().with_continue_on_error(true),
+        )
+        .unwrap_err();
+    assert!(
+        error.is_transport(),
+        "transport errors take precedence over earlier semantic errors"
+    );
+    assert_eq!(error.index(), Some(1));
+    assert!(script.is_consumed());
+    assert_eq!(client.read(&remote_file).unwrap(), b"keep");
+    assert_eq!(fs::read(&local_file).unwrap(), b"keep");
+}

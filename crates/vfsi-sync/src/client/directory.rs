@@ -13,10 +13,6 @@ impl<F: VectorBackend> FsClient<F> {
 }
 
 impl<F: VectorBackend> FsClient<F> {
-    /// Lazy between directories, with selective no-follow metadata and pruning.
-    /// Enter runs before any listing; Leave follows even a pruned directory.
-    /// Sorting buffers one bounded directory, not the whole tree. The callback
-    /// runs outside the backend lock. Limits include the starting object.
     /// Maximum safe cohort size for incremental directory paging.
     #[doc(hidden)]
     pub fn directory_page_batch_size(&self) -> VfResult<usize> {

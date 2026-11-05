@@ -914,9 +914,8 @@ impl NfsClient {
     }
 
     fn drain_deferred_path_closes(&mut self) -> RpcResult<()> {
-        let mut remaining = std::mem::take(&mut self.deferred_path_closes);
-        while !remaining.is_empty() {
-            let close = remaining.remove(0);
+        let mut remaining = std::mem::take(&mut self.deferred_path_closes).into_iter();
+        while let Some(close) = remaining.next() {
             match self.close_unregistered(&close.fh, &close.stateid) {
                 Ok(()) => {}
                 Err(error)

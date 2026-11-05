@@ -252,6 +252,9 @@ fn read_nfstime(buf: &[u8], off: &mut usize) -> VfResult<(i64, u32)> {
     let bytes = buf.get(*off..end).ok_or_else(attr_decode_error)?;
     let secs = i64::from_be_bytes(bytes[..8].try_into().expect("eight-byte slice"));
     let nsec = u32::from_be_bytes(bytes[8..].try_into().expect("four-byte slice"));
+    if nsec >= 1_000_000_000 {
+        return Err(attr_decode_error());
+    }
     *off = end;
     Ok((secs, nsec))
 }
@@ -724,6 +727,35 @@ mod tests {
         wire.extend_from_slice(value);
         wire.resize(4 + value.len().div_ceil(4) * 4, 0);
         wire
+    }
+
+    #[test]
+    fn timestamp_decoder_rejects_noncanonical_nanoseconds() {
+        for attribute in [FATTR4_TIME_ACCESS, FATTR4_TIME_METADATA, FATTR4_TIME_MODIFY] {
+            for seconds in [-1i64, 0, 1] {
+                for nanos in [0u32, 999_999_999, 1_000_000_000, u32::MAX] {
+                    let mut wire = seconds.to_be_bytes().to_vec();
+                    wire.extend_from_slice(&nanos.to_be_bytes());
+                    let result = parse_attr_list(&[attribute], &wire);
+                    if nanos < 1_000_000_000 {
+                        let values = result.unwrap();
+                        let actual = match attribute {
+                            FATTR4_TIME_ACCESS => (values.atime_sec, values.atime_nsec),
+                            FATTR4_TIME_METADATA => (values.ctime_sec, values.ctime_nsec),
+                            FATTR4_TIME_MODIFY => (values.mtime_sec, values.mtime_nsec),
+                            _ => unreachable!(),
+                        };
+                        assert_eq!(actual, (seconds, nanos));
+                    } else {
+                        let error = result.unwrap_err();
+                        assert_eq!(
+                            error.transport_kind(),
+                            Some(vfsi_core::TransportKind::InvalidReply)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
