@@ -12,16 +12,16 @@ pub(super) fn open_flags_mutate(flags: i32) -> bool {
 }
 
 trait PathBatchTruncateClient {
-    fn setattr_many(&mut self, ops: &[crate::client::SetattrOp]) -> crate::error::RpcResult<()>;
-    fn close_many_path(&mut self, ops: &[crate::client::CloseOp]) -> crate::error::RpcResult<()>;
+    fn setattr_many(&mut self, ops: &[crate::client::SetattrOp]) -> vfsi_core::RpcResult<()>;
+    fn close_many_path(&mut self, ops: &[crate::client::CloseOp]) -> vfsi_core::RpcResult<()>;
 }
 
 impl PathBatchTruncateClient for crate::client::NfsClient {
-    fn setattr_many(&mut self, ops: &[crate::client::SetattrOp]) -> crate::error::RpcResult<()> {
+    fn setattr_many(&mut self, ops: &[crate::client::SetattrOp]) -> vfsi_core::RpcResult<()> {
         crate::client::NfsClient::setattr_many(self, ops)
     }
 
-    fn close_many_path(&mut self, ops: &[crate::client::CloseOp]) -> crate::error::RpcResult<()> {
+    fn close_many_path(&mut self, ops: &[crate::client::CloseOp]) -> vfsi_core::RpcResult<()> {
         crate::client::NfsClient::close_many_path(self, ops)
     }
 }
@@ -51,7 +51,7 @@ impl NfsVecFs {
     // -- private helpers ----------------------------------------------------
 
     pub(super) fn insert_open_file(&mut self, open: NfsOpenState) -> VfResult<i32> {
-        let fd = crate::vecfs::insert_fd(&mut self.next_fd, &mut self.open_files, open)?;
+        let fd = vfsi_core::insert_fd(&mut self.next_fd, &mut self.open_files, open)?;
         self.open_object_ids.remove(&fd);
         Ok(fd)
     }
@@ -468,13 +468,13 @@ mod tests {
     }
 
     impl PathBatchTruncateClient for FailingTruncateClient {
-        fn setattr_many(&mut self, ops: &[SetattrOp]) -> crate::error::RpcResult<()> {
+        fn setattr_many(&mut self, ops: &[SetattrOp]) -> vfsi_core::RpcResult<()> {
             self.setattr_calls.set(self.setattr_calls.get() + 1);
             assert_eq!(ops.len(), 1);
-            Err(crate::error::RpcError::op(0, nfsstat4_NFS4ERR_ACCESS))
+            Err(vfsi_core::RpcError::op(0, nfsstat4_NFS4ERR_ACCESS))
         }
 
-        fn close_many_path(&mut self, ops: &[CloseOp]) -> crate::error::RpcResult<()> {
+        fn close_many_path(&mut self, ops: &[CloseOp]) -> vfsi_core::RpcResult<()> {
             self.closed.extend(ops.iter().map(|op| {
                 (
                     op.fh.as_bytes().to_vec(),

@@ -830,7 +830,7 @@ fn live_guarded_setattr_handles_symlink_cohorts_on_a_bounded_stack() {
             // that its caller never consumes.
             let operation = crate::client::PathSetattrOp {
                 file: crate::client::FileRef::Path(
-                    crate::path::path_bytes(&backend.server_path(Path::new("/tail"))).to_vec(),
+                    vfsi_core::path::path_bytes(&backend.server_path(Path::new("/tail"))).to_vec(),
                 ),
                 mode: Some(0o640),
                 uid: None,

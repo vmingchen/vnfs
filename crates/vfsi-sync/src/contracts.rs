@@ -1,3 +1,5 @@
+//! Native page/read contracts and validation of backend I/O replies.
+
 use super::*;
 
 /// Backend-owned continuation state for a paged directory visit.

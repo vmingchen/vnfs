@@ -13,14 +13,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use nfsv41_sys::*;
 
 use crate::compound::{Compound, CompoundRes};
-use crate::error::{RpcError, RpcResult};
-use crate::path::split_path_bytes;
 use crate::planner::{
     AdaptiveCompoundLimits, ExecutionMap, FailureCause, RecoveryAction, RequestSafety,
     recovery_action, resource_rejected_before_mutation,
 };
 use crate::session::Session;
-#[path = "client_io_progress.rs"]
+use vfsi_core::path::split_path_bytes;
+use vfsi_core::{RpcError, RpcResult};
 mod io_progress;
 use io_progress::{complete_read_suffix, complete_write_suffix};
 #[cfg(feature = "test-faults")]
@@ -848,12 +847,10 @@ fn first_failed_range(res: &CompoundRes, map: &ExecutionMap) -> RpcResult<Option
         .map(|failure| (failure.caller, failure.status)))
 }
 
-#[path = "client_path_open_cleanup.rs"]
 mod path_open_cleanup;
 pub(crate) use path_open_cleanup::latest_path_open_closes;
 
 #[cfg(all(test, feature = "test-faults"))]
-#[path = "client_session_recovery_tests.rs"]
 mod session_recovery_tests;
 
 impl NfsClient {
@@ -1287,7 +1284,7 @@ impl NfsClient {
                 }
                 let (leaf, nops) = target.cursor.set_parent(&mut *target.compound, path)?;
                 target.map.note_ops(nops);
-                let seqid = target.base_seq + *target.opens_in_chunk as u32;
+                let seqid = target.base_seq.wrapping_add(*target.opens_in_chunk as u32);
                 if open.truncate_create {
                     target.compound.open_claim_null_create_mode(
                         seqid,
@@ -1365,7 +1362,7 @@ impl NfsClient {
             });
         }
         CompoundBudget::new(self.max_ops).ensure(compound)?;
-        self.session.path_owner.seqid = base_seq + opens_in_chunk as u32;
+        self.session.path_owner.seqid = base_seq.wrapping_add(opens_in_chunk as u32);
         let response = self.call_compound_with_safety(compound, safety)?;
         if resource_rejected_before_mutation(&response) {
             self.session.path_owner.seqid = base_seq;
@@ -1994,7 +1991,7 @@ impl NfsClient {
         let stateid = open_result.stateid;
         let fh = NfsFh::from_nfs_fh(res.getfh(3));
         if matches!(slot, OwnerSlot::Path) {
-            self.session.path_owner.seqid += 1;
+            self.session.path_owner.seqid = self.session.path_owner.seqid.wrapping_add(1);
         }
         if create == OpenCreate::Exclusive {
             let attrs = verifier_storage_attrs(&open_result.attrset);
@@ -2363,7 +2360,7 @@ impl NfsClient {
                 let (seqid, owner) = if matches!(slot, OwnerSlot::User) {
                     (0, &public_owner_names[gi])
                 } else {
-                    (base + gi as u32, &owner_name)
+                    (base.wrapping_add(gi as u32), &owner_name)
                 };
                 c.open_claim_null(
                     seqid,
@@ -2410,7 +2407,7 @@ impl NfsClient {
                     let _ = client.setattr_many(&cleanup);
                 }
                 if matches!(slot, OwnerSlot::Path) {
-                    client.session.path_owner.seqid = base + opened.len() as u32;
+                    client.session.path_owner.seqid = base.wrapping_add(opened.len() as u32);
                 }
                 let closes: Vec<CloseOp> = opened
                     .iter()
@@ -2426,7 +2423,7 @@ impl NfsClient {
             },
         )?;
         if matches!(slot, OwnerSlot::Path) {
-            self.session.path_owner.seqid = base + n as u32;
+            self.session.path_owner.seqid = base.wrapping_add(n as u32);
         }
         let timestamp = current_timestamp();
         let cleanup_indices: Vec<usize> = out
@@ -4109,14 +4106,14 @@ impl NfsClient {
                 let seqid = if matches!(slot, OwnerSlot::User) {
                     base
                 } else {
-                    base + gi as u32
+                    base.wrapping_add(gi as u32)
                 };
                 c.close(seqid, &op.stateid);
             },
             |_, _| (),
         )?;
         if matches!(slot, OwnerSlot::Path) {
-            self.session.path_owner.seqid = base + n as u32;
+            self.session.path_owner.seqid = base.wrapping_add(n as u32);
         }
         Ok(())
     }
@@ -4238,7 +4235,7 @@ impl NfsClient {
         let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         if matches!(slot, OwnerSlot::Path) {
-            self.session.path_owner.seqid += 1;
+            self.session.path_owner.seqid = self.session.path_owner.seqid.wrapping_add(1);
         }
         Ok(())
     }
@@ -5255,3 +5252,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod sequence_tests;

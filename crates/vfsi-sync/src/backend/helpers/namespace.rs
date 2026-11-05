@@ -38,14 +38,20 @@ pub fn ensure_dir_impl_default<F: VectorBackend + ?Sized>(
     mode: u32,
 ) -> VfResult<()> {
     use std::path::Component;
-    let mut so_far = PathBuf::new();
-    for comp in backend.abs_path(dir).components() {
+    let target = Path::new("/").join(backend.abs_path(dir));
+    let mut so_far = PathBuf::from("/");
+    for comp in target.components() {
         if let Component::Normal(part) = comp {
             so_far.push(part);
-            let full = Path::new("/").join(&so_far);
-            match backend.mkdir_raw_impl(&full, mode) {
+            match backend.mkdir_raw_impl(&so_far, mode) {
                 Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Later mkdir calls validate ancestors. Only the existing
+                    // final component needs a separate, following type check.
+                    if so_far == target && backend.stat_impl(&so_far)?.ftype != VfType::Directory {
+                        return Err(VfError::errno(0, ERR_NOTDIR));
+                    }
+                }
                 Err(e) => return Err(e),
             }
         }

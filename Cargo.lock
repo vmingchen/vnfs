@@ -1346,7 +1346,6 @@ dependencies = [
  "vfsi-posix",
  "vfsi-smb",
  "vfsi-sync",
- "vnfs",
 ]
 
 [[package]]

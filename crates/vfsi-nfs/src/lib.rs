@@ -1,4 +1,7 @@
 //! NFSv4.1 and NFSv4.2 backend for VFSI.
+//!
+//! Shared requests and errors belong to `vfsi-core`; native backend contracts
+//! and helpers belong to `vfsi-sync`. This crate exposes NFS-specific APIs.
 
 #[cfg(feature = "ffi")]
 pub mod client;
@@ -25,24 +28,6 @@ pub mod telemetry;
 #[cfg(feature = "fuzzing")]
 pub mod fuzzing;
 
-#[doc(hidden)]
-#[cfg(feature = "ffi")]
-pub mod error {
-    pub use vfsi_core::{RpcError, RpcResult, STATUS_TRANSPORT};
-}
-
-#[doc(hidden)]
-#[cfg(feature = "ffi")]
-pub mod path {
-    pub use vfsi_core::path::*;
-}
-
-#[doc(hidden)]
-#[cfg(feature = "ffi")]
-pub mod vecfs {
-    pub use vfsi_sync::*;
-}
-
 #[cfg(all(feature = "ffi", feature = "rpcsec-gss"))]
 pub use nfs::RpcsecGssProtection;
 #[cfg(feature = "ffi")]
@@ -50,3 +35,25 @@ pub use nfs::{
     NfsAuth, NfsClientBuilder, NfsConnectOptions, NfsEvent, NfsObserver, NfsReadPool,
     NfsReadPoolOptions, NfsRecoveryPolicy, NfsServerCopyStats, NfsVecFs,
 };
+
+#[cfg(feature = "ffi")]
+#[doc(hidden)]
+mod shared_contract_boundary {
+    //! Shared types and helpers have one owner instead of protocol aliases.
+    //!
+    //! ```compile_fail,E0432
+    //! use vfsi_nfs::vecfs;
+    //! ```
+    //!
+    //! ```compile_fail,E0432
+    //! use vfsi_nfs::path;
+    //! ```
+    //!
+    //! ```compile_fail,E0432
+    //! use vfsi_nfs::error;
+    //! ```
+    //!
+    //! ```compile_fail,E0603
+    //! use vfsi_nfs::nfs::FsClient;
+    //! ```
+}

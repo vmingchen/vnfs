@@ -76,6 +76,10 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     w = w.with_creation();
     let wr = &fs.vwrite_impl(&borrow_writes(&[w])).expect("writev")[0];
     assert_eq!(wr.bytes_written, payload.len());
+    let error = fs
+        .ensure_dir_impl(Path::new(&f), directory_mode)
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
 
     let r = &fs
         .vread_impl(&[ReadOp::from_path(&f, VfOffset::At(0), payload.len())])

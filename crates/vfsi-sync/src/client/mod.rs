@@ -12,7 +12,7 @@ use vfsi_core::api::{
 };
 
 use crate::backend::{HandleBackend, VectorBackend};
-use crate::traits::{validate_read_into_results, validate_read_results, validate_write_results};
+use crate::contracts::{validate_read_into_results, validate_read_results, validate_write_results};
 use crate::{
     AttrMask, Attrs, Capabilities, DirEntry, FileOperand, OpenFlags, OpenOp, ReadAllOptions,
     ReadOp, ReadResult, RemoveOptions, StreamOptions, VfDir, VfError, VfOffset, VfResult, WriteOp,

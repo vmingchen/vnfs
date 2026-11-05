@@ -27,19 +27,17 @@ use vfsi_core::internal::ManyResults;
 use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 
 use crate::client::{NfsClient, NfsFh, OpenCreate};
-use crate::path::{
+use crate::session::make_verifier;
+use vfsi_core::path::{
     components_bytes, join_path_bytes, normalize_bytes, path_bytes, path_from_bytes,
     split_path_bytes,
 };
-use crate::session::make_verifier;
-#[path = "read_pool.rs"]
 mod read_pool;
-pub use read_pool::{NfsReadPool, NfsReadPoolOptions};
-// Re-export the shared types/trait so `use vnfs::legacy::nfs::*` works.
 pub use crate::rpc::NfsAuth;
 #[cfg(feature = "rpcsec-gss")]
 pub use crate::rpc::RpcsecGssProtection;
-pub use crate::vecfs::*;
+pub use read_pool::{NfsReadPool, NfsReadPoolOptions};
+use vfsi_sync::*;
 
 /// Client state for one NFS open instance: opaque object filehandle, OPEN
 /// stateid, cursor, append policy, and optional reopen recipe. Backend File

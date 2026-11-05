@@ -2,7 +2,7 @@
 //!
 //! The C-facing symbols are intentionally thin: C code works with an opaque
 //! `vfsi_fs` handle and byte-oriented `const char *` paths, while all
-//! filesystem logic stays in the Rust `vnfs` implementation.
+//! filesystem logic stays in the native backend crates.
 //!
 //! # C pointer contract
 //! Non-null handles must originate from this API and stay live for the whole
@@ -205,6 +205,8 @@ pub struct vfsi_stat_op {
 #[derive(Clone, Copy)]
 pub struct vfsi_setattr_op {
     pub path: *const c_char,
+    /// Only MODE, SIZE, ATIME and MTIME have value fields in this ABI.
+    /// Other mask bits are rejected before any operation is submitted.
     pub mask: u32,
     pub mode: u32,
     pub size: u64,
@@ -1284,9 +1286,9 @@ pub unsafe extern "C" fn vfsi_walk(
             return libc::ENOTSUP;
         }
         let depth = if options.max_depth == usize::MAX {
-            vnfs::directory::DepthLimit::unlimited()
+            vfsi_sync::DepthLimit::unlimited()
         } else {
-            let Some(depth) = vnfs::directory::DepthLimit::new(options.max_depth) else {
+            let Some(depth) = vfsi_sync::DepthLimit::new(options.max_depth) else {
                 return libc::EINVAL;
             };
             depth
@@ -1303,13 +1305,13 @@ pub unsafe extern "C" fn vfsi_walk(
                 return Err(VfError::errno(0, libc::ENOTSUP as u32));
             }
             let metadata = vfsi_sync::metadata_from_attrs(root_attrs);
-            let walk_options = vnfs::directory::ListDirOptions::new()
+            let walk_options = vfsi_sync::ListDirOptions::new()
                 .with_recursive(true)
                 .with_max_entries(options.max_entries)
                 .with_max_path_bytes(options.max_path_bytes)
                 .with_max_depth(depth);
             vfsi_sync::walk_events(
-                vnfs::directory::DirEntry::new(path, metadata),
+                vfsi_sync::DirEntry::new(path, metadata),
                 walk_options,
                 sort_by_name,
                 |path, limits| {
@@ -1332,7 +1334,7 @@ pub unsafe extern "C" fn vfsi_walk(
                                 .path()
                                 .ok_or_else(|| VfError::errno(0, libc::EIO as u32))?
                                 .to_path_buf();
-                            Ok(vnfs::directory::DirEntry::new(
+                            Ok(vfsi_sync::DirEntry::new(
                                 path,
                                 vfsi_sync::metadata_from_attrs(attrs),
                             ))
@@ -1349,16 +1351,16 @@ pub unsafe extern "C" fn vfsi_walk(
                         .map_err(|_| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
                     let attrs = attrs_from_metadata(event.entry.attrs());
                     let kind = match event.kind {
-                        vnfs::directory::WalkEventKind::Enter => 0,
-                        vnfs::directory::WalkEventKind::Entry => 1,
-                        vnfs::directory::WalkEventKind::Leave => 2,
+                        vfsi_sync::WalkEventKind::Enter => 0,
+                        vfsi_sync::WalkEventKind::Entry => 1,
+                        vfsi_sync::WalkEventKind::Leave => 2,
                     };
                     // SAFETY: the caller provides this callback; borrowed strings,
                     // attributes and bytes remain live until it returns.
                     match unsafe { cb(path.as_ptr(), kind, event.depth, &attrs, userdata) } {
-                        0 => Ok(vnfs::directory::WalkControl::Continue),
-                        1 => Ok(vnfs::directory::WalkControl::SkipSubtree),
-                        2 => Ok(vnfs::directory::WalkControl::Stop),
+                        0 => Ok(vfsi_sync::WalkControl::Continue),
+                        1 => Ok(vfsi_sync::WalkControl::SkipSubtree),
+                        2 => Ok(vfsi_sync::WalkControl::Stop),
                         _ => Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
                     }
                 },
@@ -1369,7 +1371,7 @@ pub unsafe extern "C" fn vfsi_walk(
     })
 }
 
-fn attrs_from_metadata(metadata: &vnfs::directory::Attrs) -> vfsi_attrs {
+fn attrs_from_metadata(metadata: &vfsi_sync::Attrs) -> vfsi_attrs {
     fn time(value: Option<std::time::SystemTime>) -> (i64, u32) {
         value
             .and_then(|v| match v.duration_since(std::time::UNIX_EPOCH) {
@@ -2365,10 +2367,17 @@ pub unsafe extern "C" fn vfsi_setattrv(
                     false
                 ),
             };
-            let Some(masks) = AttrMask::from_bits(op.mask) else {
+            let Some(masks) = AttrMask::from_bits(op.mask).filter(|masks| {
+                masks
+                    .difference(AttrMask::MODE | AttrMask::SIZE | AttrMask::ATIME | AttrMask::MTIME)
+                    .is_empty()
+            }) else {
                 fail_batch!(
                     results,
-                    vfsi_result::invalid(index, "unknown attribute mask bit"),
+                    vfsi_result::invalid(
+                        index,
+                        "attribute mask has no value field in vfsi_setattr_op"
+                    ),
                     false
                 );
             };
@@ -5130,6 +5139,83 @@ mod tests {
         let root = tempfile::TempDir::new().unwrap();
         let path = CString::new(root.path().as_os_str().as_encoded_bytes()).unwrap();
         (root, path)
+    }
+
+    #[test]
+    fn file_review_setattrv_rejects_masks_without_value_fields_before_mutating_any_file() {
+        let (root, root_path) = temp_root();
+        let original = root.path().join("keep");
+        std::fs::write(&original, b"original").unwrap();
+        let path = CString::new("/keep").unwrap();
+        // No ownership change can occur even on the unfixed implementation.
+        let missing = CString::new("/missing").unwrap();
+        let mut fs = std::ptr::null_mut();
+        assert_eq!(unsafe { vfsi_dummy_open(root_path.as_ptr(), &mut fs) }, 0);
+        let allowed = VFSI_ATTR_MODE | VFSI_ATTR_SIZE | VFSI_ATTR_ATIME | VFSI_ATTR_MTIME;
+        for bit in 0..u32::BITS {
+            let unsupported = 1u32 << bit;
+            if unsupported & allowed != 0 {
+                continue;
+            }
+            let valid = vfsi_setattr_op {
+                path: path.as_ptr(),
+                mask: VFSI_ATTR_SIZE,
+                mode: 0,
+                size: 0,
+                atime_sec: 0,
+                atime_nsec: 0,
+                mtime_sec: 0,
+                mtime_nsec: 0,
+            };
+            let ops = [
+                valid,
+                vfsi_setattr_op {
+                    path: missing.as_ptr(),
+                    mask: unsupported | VFSI_ATTR_SIZE,
+                    ..valid
+                },
+            ];
+            let mut items = [vfsi_result::panic(); 2];
+            let result = unsafe { vfsi_setattrv(fs, ops.as_ptr(), ops.len(), items.as_mut_ptr()) };
+            assert_eq!(std::fs::read(&original).unwrap(), b"original", "bit {bit}");
+            assert_eq!(result.category, VFSI_ERROR_INVALID_ARGUMENT, "bit {bit}");
+            assert_eq!(result.err_no, libc::EINVAL as u32);
+            assert_eq!(result.index, 1);
+            assert_eq!(items[0].category, VFSI_ERROR_NOT_ATTEMPTED);
+            assert_eq!(items[1].category, VFSI_ERROR_INVALID_ARGUMENT);
+        }
+        unsafe { vfsi_free(fs) };
+    }
+
+    #[test]
+    fn file_review_setattrv_accepts_all_value_fields_in_abi_v3() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let (root, root_path) = temp_root();
+        let file = root.path().join("file");
+        std::fs::write(&file, b"original").unwrap();
+        let path = CString::new("/file").unwrap();
+        let mut fs = std::ptr::null_mut();
+        assert_eq!(unsafe { vfsi_dummy_open(root_path.as_ptr(), &mut fs) }, 0);
+        let ops = [vfsi_setattr_op {
+            path: path.as_ptr(),
+            mask: VFSI_ATTR_MODE | VFSI_ATTR_SIZE | VFSI_ATTR_ATIME | VFSI_ATTR_MTIME,
+            mode: 0o640,
+            size: 2,
+            atime_sec: 123,
+            atime_nsec: 456,
+            mtime_sec: 789,
+            mtime_nsec: 123,
+        }];
+        let mut items = [vfsi_result::panic()];
+        let result = unsafe { vfsi_setattrv(fs, ops.as_ptr(), ops.len(), items.as_mut_ptr()) };
+        unsafe { vfsi_free(fs) };
+        assert_eq!(result.category, VFSI_ERROR_NONE);
+        assert_eq!(items[0].category, VFSI_ERROR_NONE);
+        let metadata = std::fs::metadata(&file).unwrap();
+        assert_eq!(metadata.len(), 2);
+        assert_eq!(metadata.permissions().mode() & 0o7777, 0o640);
+        assert_eq!((metadata.atime(), metadata.atime_nsec()), (123, 456));
+        assert_eq!((metadata.mtime(), metadata.mtime_nsec()), (789, 123));
     }
 
     #[test]

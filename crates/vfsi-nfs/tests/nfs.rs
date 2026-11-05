@@ -1881,3 +1881,89 @@ fn pruning_pages_retry_only_before_delivery_and_fail_closed_after_delivery() {
         fs.remove_dir_all(&root).unwrap();
     }
 }
+
+fn file_review_mixed_descriptor_end_offsets(for_write: bool) {
+    let Some(mut fs) = connect() else { return };
+    for mode in ["full", "openwrite", "off"] {
+        fs.set_merged_mode(mode);
+        let root = std::path::PathBuf::from(format!(
+            "/vfsi-file-review-end-{}-{for_write}-{mode}",
+            std::process::id()
+        ));
+        fs.ensure_dir_impl(&root, 0o755).unwrap();
+        let path = root.join("file");
+        let moved = root.join("moved");
+        let other_path = root.join("other");
+        let fd = fs
+            .open_raw_impl(&path, libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o600)
+            .unwrap();
+        let other = FileOperand::from_os_path(&other_path);
+        let operation = (|| -> vfsi_core::VfResult<()> {
+            fs.write_raw_impl(&fd, 0, b"abc")?;
+            fs.vwrite_impl(&[
+                vfsi_sync::WriteOp::new(&other, VfOffset::At(0), b"xyz".as_slice()).with_creation(),
+            ])?;
+            // Resolve EOF from the retained object, even after its path changed.
+            fs.vrename_impl(&[(
+                FileOperand::from_os_path(&path),
+                FileOperand::from_os_path(&moved),
+            )])?;
+            if for_write {
+                let single = fs.vwrite_impl(&[vfsi_sync::WriteOp::new(
+                    &fd,
+                    VfOffset::End,
+                    b"d".as_slice(),
+                )])?;
+                assert_eq!(single[0].offset, 3);
+                let mixed = fs.vwrite_impl(&[
+                    vfsi_sync::WriteOp::new(&other, VfOffset::At(0), b"X".as_slice()),
+                    vfsi_sync::WriteOp::new(&fd, VfOffset::End, b"e".as_slice()),
+                ])?;
+                assert_eq!(mixed.len(), 2);
+                assert_eq!(mixed[1].offset, 4);
+                assert_eq!(mixed[1].bytes_written, 1);
+                assert_eq!(fs.read_raw_impl(&fd, 0, 8)?, b"abcde");
+                assert_eq!(fs.read_raw_impl(&other, 0, 8)?, b"Xyz");
+            } else {
+                let single =
+                    fs.vread_impl(&[vfsi_sync::ReadOp::new(fd.clone(), VfOffset::End, 1)])?;
+                assert_eq!(single[0].offset, 3);
+                assert!(single[0].data.is_empty());
+                let reads = [
+                    vfsi_sync::ReadOp::at(other.clone(), 0, 1),
+                    vfsi_sync::ReadOp::new(fd.clone(), VfOffset::End, 1),
+                ];
+                let mixed = fs.vread_impl(&reads)?;
+                assert_eq!(mixed.len(), 2);
+                assert_eq!(mixed[0].data, b"x");
+                assert_eq!(mixed[1].offset, 3);
+                assert!(mixed[1].data.is_empty());
+                assert!(mixed[1].eof);
+                let mut prefix = [0];
+                let mut eof = [7];
+                let into = fs.vread_into_impl(&reads, &mut [&mut prefix, &mut eof])?;
+                assert_eq!(prefix, [b'x']);
+                assert_eq!(eof, [7]);
+                assert_eq!(into[1].offset, 3);
+                assert_eq!(into[1].bytes_read, 0);
+                assert!(into[1].eof);
+            }
+            Ok(())
+        })();
+        let close = fs.close_impl(&fd);
+        let cleanup = fs.remove_paths_impl(&[root.as_path()], true);
+        operation.unwrap();
+        close.unwrap();
+        cleanup.unwrap();
+    }
+}
+
+#[test]
+fn file_review_mixed_descriptor_end_reads_work_like_descriptor_only_reads() {
+    file_review_mixed_descriptor_end_offsets(false);
+}
+
+#[test]
+fn file_review_mixed_descriptor_end_writes_work_like_descriptor_only_writes() {
+    file_review_mixed_descriptor_end_offsets(true);
+}

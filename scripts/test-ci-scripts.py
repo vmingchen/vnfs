@@ -37,6 +37,94 @@ class ArchiveVerificationTests(unittest.TestCase):
                                    "normalized mtimes can reuse stale same-version Rust artifacts")
 
 
+class LatencyHelperTests(unittest.TestCase):
+    def run_helper(self, *, add_status=0, benchmark_status=0, existing=False,
+                   add_signal="", benchmark_signal=""):
+        script = Path(__file__).resolve().parents[1] / "ci/benchmark-large-read-pipeline.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "calls"
+            for name, body in {
+                "tc": (
+                    'printf "%s\\n" "tc $*" >> "$CALL_LOG"\n'
+                    'if [ "$1 $2" = "qdisc show" ]; then\n'
+                    '  if [ "$EXISTING_QDISC" = "1" ]; then echo "qdisc fq_codel 0: root";\n'
+                    '  else echo "qdisc noqueue 0: root"; fi\n'
+                    'elif [ "$1 $2" = "qdisc add" ]; then\n'
+                    '  if [ -n "$ADD_SIGNAL" ]; then kill -s "$ADD_SIGNAL" "$PPID"; fi\n'
+                    '  exit "$ADD_STATUS"\n'
+                    'fi\n'
+                ),
+                "sudo": 'exec "$@"\n',
+                "cargo": (
+                    'printf "benchmark\\n" >> "$CALL_LOG"\n'
+                    'if [ -n "$BENCHMARK_SIGNAL" ]; then kill -s "$BENCHMARK_SIGNAL" "$PPID"; fi\n'
+                    'exit "$BENCHMARK_STATUS"\n'
+                ),
+            }.items():
+                stub = root / name
+                stub.write_text("#!/bin/sh\n" + body)
+                stub.chmod(0o755)
+            result = subprocess.run(
+                ["bash", str(script), "127.0.0.1", "/", "/file"],
+                env=dict(os.environ, PATH=f"{root}:{os.environ['PATH']}",
+                         CALL_LOG=str(log), ADD_STATUS=str(add_status),
+                         BENCHMARK_STATUS=str(benchmark_status),
+                         ADD_SIGNAL=add_signal, BENCHMARK_SIGNAL=benchmark_signal,
+                         EXISTING_QDISC=str(int(existing))),
+                capture_output=True, text=True, timeout=5,
+            )
+            return result, log.read_text().splitlines()
+
+    def test_failed_qdisc_creation_does_not_delete_an_unowned_qdisc(self):
+        result, calls = self.run_helper(add_status=17)
+        self.assertEqual(result.returncode, 17, result.stderr)
+        self.assertFalse(any("qdisc del" in call for call in calls), calls)
+        self.assertNotIn("benchmark", calls)
+
+    def test_owned_qdisc_is_removed_after_benchmark_failure(self):
+        result, calls = self.run_helper(benchmark_status=23)
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertIn("benchmark", calls)
+        self.assertEqual(sum("qdisc del" in call for call in calls), 1)
+
+    def test_existing_qdisc_is_refused_before_mutation(self):
+        result, calls = self.run_helper(existing=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertFalse(any("qdisc add" in call or "qdisc del" in call for call in calls), calls)
+        self.assertNotIn("benchmark", calls)
+
+    def test_owned_qdisc_is_removed_after_benchmark_success(self):
+        result, calls = self.run_helper()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("benchmark", calls)
+        self.assertEqual(sum("qdisc del" in call for call in calls), 1)
+
+    def test_successful_qdisc_creation_is_cleaned_up_when_interrupted(self):
+        for signal, status in [("INT", 130), ("TERM", 143)]:
+            with self.subTest(signal=signal):
+                result, calls = self.run_helper(add_signal=signal)
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertEqual(sum("qdisc del" in call for call in calls), 1, calls)
+                self.assertNotIn("benchmark", calls)
+
+    def test_failed_qdisc_creation_keeps_unowned_qdisc_when_interrupted(self):
+        for signal, status in [("INT", 130), ("TERM", 143)]:
+            with self.subTest(signal=signal):
+                result, calls = self.run_helper(add_status=17, add_signal=signal)
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertFalse(any("qdisc del" in call for call in calls), calls)
+                self.assertNotIn("benchmark", calls)
+
+    def test_owned_qdisc_is_removed_when_benchmark_is_interrupted(self):
+        for signal, status in [("INT", 130), ("TERM", 143)]:
+            with self.subTest(signal=signal):
+                result, calls = self.run_helper(benchmark_signal=signal)
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertIn("benchmark", calls)
+                self.assertEqual(sum("qdisc del" in call for call in calls), 1, calls)
+
+
 class NativeFixtureTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

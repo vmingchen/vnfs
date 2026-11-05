@@ -73,6 +73,109 @@ mod tests {
     }
 
     #[test]
+    fn file_review_ensure_dir_rejects_existing_non_directories() {
+        let (root, mut backend) = fs("ensure-dir-types");
+        std::fs::write(root.0.join("file"), b"preserved").unwrap();
+        std::os::unix::fs::symlink("file", root.0.join("file-link")).unwrap();
+        std::os::unix::fs::symlink("missing", root.0.join("dangling")).unwrap();
+        for path in ["/file", "/file-link"] {
+            let error = backend.ensure_dir_impl(Path::new(path), 0o700).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
+        }
+        assert!(
+            backend
+                .ensure_dir_impl(Path::new("/dangling"), 0o700)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(root.0.join("file")).unwrap(), b"preserved");
+        backend
+            .ensure_dir_impl(Path::new("/dir/child"), 0o750)
+            .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root.0.join("dir"), std::fs::Permissions::from_mode(0o750))
+            .unwrap();
+        std::os::unix::fs::symlink("dir", root.0.join("dir-link")).unwrap();
+        backend.ensure_dir_impl(Path::new("/dir"), 0o700).unwrap();
+        backend
+            .ensure_dir_impl(Path::new("/dir-link"), 0o700)
+            .unwrap();
+        assert!(root.0.join("dir/child").is_dir());
+        assert_eq!(
+            std::fs::metadata(root.0.join("dir"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o750
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn file_review_exchange_self_still_checks_existence_and_stops_the_batch() {
+        let (root, backend) = fs("exchange-self-missing");
+        let client = FsClient::new(backend);
+        std::fs::write(root.0.join("existing"), b"first").unwrap();
+        std::fs::write(root.0.join("left"), b"left").unwrap();
+        std::fs::write(root.0.join("right"), b"right").unwrap();
+        let error = client
+            .vrename(
+                &[
+                    ("/existing", "/existing"),
+                    ("/missing", "/missing"),
+                    ("/left", "/right"),
+                ],
+                vfsi_core::api::RenameMode::Exchange,
+            )
+            .unwrap_err();
+        assert_eq!(error.index(), Some(1));
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(std::fs::read(root.0.join("existing")).unwrap(), b"first");
+        assert_eq!(std::fs::read(root.0.join("left")).unwrap(), b"left");
+        assert_eq!(std::fs::read(root.0.join("right")).unwrap(), b"right");
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[test]
+    fn file_review_path_truncate_never_waits_for_a_fifo_reader() {
+        const CHILD: &str = "VFSI_LOCAL_FIFO_TRUNCATE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            run_filtered_test_child(
+                "contract_tests::tests::file_review_path_truncate_never_waits_for_a_fifo_reader",
+                CHILD,
+            );
+            return;
+        }
+        use std::os::unix::fs::FileTypeExt;
+        let (root, backend) = fs("truncate-fifo");
+        let path = root.0.join("fifo");
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        std::fs::write(root.0.join("later"), b"unchanged").unwrap();
+        let client = FsClient::new(backend);
+        for follow in [true, false] {
+            let error = client
+                .vsetattrs(&[
+                    vfsi_core::SetAttrsOp::new("/fifo")
+                        .len(0)
+                        .with_follow_final_symlink(follow),
+                    vfsi_core::SetAttrsOp::new("/later")
+                        .len(0)
+                        .with_follow_final_symlink(follow),
+                ])
+                .unwrap_err();
+            assert_eq!(error.index(), Some(0));
+            assert!(
+                std::fs::symlink_metadata(&path)
+                    .unwrap()
+                    .file_type()
+                    .is_fifo()
+            );
+            assert_eq!(std::fs::read(root.0.join("later")).unwrap(), b"unchanged");
+        }
+    }
+
+    #[test]
     fn descriptor_identity_cache_stays_with_the_open_object_not_its_path() {
         let (root, mut backend) = fs("descriptor-identity");
         let path = root.0.join("file");

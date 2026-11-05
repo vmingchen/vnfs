@@ -907,8 +907,8 @@ pub fn metadata_from_attrs(attributes: VfAttrs) -> Attrs {
     }
     Attrs {
         file_type: attributes.ftype,
-        len: attributes.size,
-        permissions: Permissions::from_mode(attributes.mode),
+        len: integer!(SIZE, size),
+        permissions: Permissions::from_mode(integer!(MODE, mode)),
         returned,
         mode: integer!(MODE, mode),
         blocks: integer!(BLOCKS, blocks),
@@ -1492,6 +1492,37 @@ mod copy_option_tests {
 #[cfg(test)]
 mod sparse_metadata_tests {
     use super::*;
+
+    #[test]
+    fn file_review_absent_size_and_mode_do_not_affect_metadata_equality() {
+        for returned in [AttrMask::empty(), AttrMask::SIZE, AttrMask::MODE] {
+            let base = metadata_from_attrs(VfAttrs {
+                returned,
+                size: 4,
+                mode: 0o640,
+                ..VfAttrs::default()
+            });
+            let changed = metadata_from_attrs(VfAttrs {
+                returned,
+                size: if returned.contains(AttrMask::SIZE) {
+                    4
+                } else {
+                    u64::MAX
+                },
+                mode: if returned.contains(AttrMask::MODE) {
+                    0o640
+                } else {
+                    u32::MAX
+                },
+                ..VfAttrs::default()
+            });
+            assert_eq!(changed.len(), base.len());
+            assert_eq!(changed.permissions(), base.permissions());
+            assert_eq!(changed, base, "absent fields must not affect equality");
+            assert_eq!(format!("{changed:?}"), format!("{base:?}"));
+        }
+    }
+
     #[test]
     fn compact_attrs_preserve_each_presence_bit_zero_and_maximum_values() {
         assert!(std::mem::size_of::<Attrs>() <= 144);

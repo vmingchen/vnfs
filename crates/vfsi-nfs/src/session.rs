@@ -10,8 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use nfsv41_sys::*;
 
 use crate::compound::{Compound, CompoundRes};
-use crate::error::{RpcError, RpcResult};
 use crate::rpc::{NfsAuth, RpcClient};
+use vfsi_core::{RpcError, RpcResult};
 
 /// An OPEN owner. seqid is incremented by the server after each OPEN.
 pub struct OpenOwner {
@@ -298,7 +298,8 @@ impl Session {
         // A server may reject an oversized compound before executing
         // SEQUENCE, returning a valid compound result with no per-op results.
         if res.nops() > 0 && res.op_status(0) == nfsstat4_NFS4_OK {
-            self.slot_seqid += 1;
+            // RFC 8881 section 2.10.6.1 requires MAX to wrap to zero.
+            self.slot_seqid = self.slot_seqid.wrapping_add(1);
         }
         Ok(res)
     }
@@ -587,5 +588,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "session_identity_tests.rs"]
-mod session_identity_tests;
+mod identity_tests;

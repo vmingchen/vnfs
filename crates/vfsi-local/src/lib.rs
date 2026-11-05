@@ -1200,8 +1200,15 @@ impl LocalBackend {
     ) -> VfResult<()> {
         if a.masks.contains(AttrMask::SIZE) {
             let mut options = OpenOptions::new();
-            options.write(true);
-            Self::protect_create_open(path, &mut options);
+            // Metadata updates must not wait for a FIFO peer. Retain the
+            // no-follow protection when only the parent directory is pinned.
+            let flags = libc::O_NONBLOCK
+                | if path.nofollow_on_open {
+                    libc::O_NOFOLLOW
+                } else {
+                    0
+                };
+            options.write(true).custom_flags(flags);
             let file = options
                 .open(path)
                 .map_err(|error| VfError::from_io(i, error))?;
@@ -2348,11 +2355,6 @@ impl VectorBackend for LocalBackend {
                     .ok_or_else(|| VfError::from_kind(index, std::io::ErrorKind::InvalidInput))?;
                 let destination_name = cstring_from_bytes(path_bytes(&destination))
                     .ok_or_else(|| VfError::from_kind(index, std::io::ErrorKind::InvalidInput))?;
-                if options == vfsi_core::api::RenameMode::Exchange
-                    && source_path == destination_path
-                {
-                    continue;
-                }
                 let flags = match options {
                     vfsi_core::api::RenameMode::NoReplace => libc::RENAME_NOREPLACE,
                     vfsi_core::api::RenameMode::Exchange => libc::RENAME_EXCHANGE,

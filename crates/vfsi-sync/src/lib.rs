@@ -4,20 +4,15 @@
 //! [`backend::HandleBackend`] and [`backend::VectorBackend`]; shared defaults
 //! live in [`backend::helpers`].
 
+#[doc(hidden)]
+pub use vfsi_core::path;
 pub use vfsi_core::*;
 
-#[doc(hidden)]
-pub mod path {
-    pub use vfsi_core::path::*;
-}
-
-mod traits;
-pub use traits::{BackendDirectoryPage, DirPageCursor, DirectoryPage, ReadAllOptions};
+mod contracts;
+pub use contracts::{BackendDirectoryPage, DirPageCursor, DirectoryPage, ReadAllOptions};
 mod application_macros;
 mod client;
-mod traversal;
 pub use client::{FsClient, FsDir, FsRead, FsReadInto, FsWrite, OpenFile};
-pub use traversal::walk_events;
 /// Native execution contracts for backend implementers and language bindings.
 /// Application callers use [`Vfsi`] and [`VfsiExt`].
 pub mod backend;
@@ -33,7 +28,7 @@ pub use vfsi_core::api::{
     DEFAULT_READV_MAX_TOTAL_BYTES, DEFAULT_WALK_MAX_DEPTH, DepthLimit, DirectoryListing,
     ListDirOptions, OpenOptions, ReadIntoResult as FsReadIntoResult, ReadOptions, ResourceLimits,
     StreamCompletion, StreamOptions, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind,
-    WriteResult as FsWriteResult,
+    WriteResult as FsWriteResult, walk_events,
 };
 
 #[doc(hidden)]

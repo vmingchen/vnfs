@@ -15,10 +15,12 @@ use std::io::{Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use vfsi_nfs::NfsVecFs;
-use vfsi_nfs::nfs::*;
+#[cfg(feature = "test-faults")]
+use vfsi_nfs::NfsConnectOptions;
+use vfsi_nfs::{NfsEvent, NfsObserver, NfsVecFs};
 use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::test_support::borrow_writes;
+use vfsi_sync::*;
 use vnfs::files::VfsiExt;
 use vnfs::nfs::{Nfs, NfsReadPoolOptions};
 

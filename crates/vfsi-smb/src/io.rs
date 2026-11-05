@@ -416,7 +416,7 @@ impl SmbVecFs {
     }
 
     pub(super) fn read_one(&mut self, op: &ReadOp) -> VfResult<ReadResult> {
-        if !op.file.is_fd() {
+        let Some(fd) = op.file.fd() else {
             if matches!(op.file, FileOperand::Saved) {
                 return Err(VfError::unsupported(0));
             }
@@ -449,40 +449,21 @@ impl SmbVecFs {
                 data,
                 eof,
             });
-        }
-        let (file_id, temporary, descriptor) = match &op.file {
-            FileOperand::Fd(fd) => {
-                let open = self
-                    .open_files
-                    .get(fd)
-                    .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
-                if !open.readable {
-                    return Err(VfError::errno(0, ERR_EBADF));
-                }
-                (open.file_id, false, Some(*fd))
-            }
-            FileOperand::Saved => return Err(VfError::unsupported(0)),
-            _ => {
-                let path = self.path_string(&self.file_path(&op.file)?)?;
-                let (id, _) = self.raw_open(&path, libc::O_RDONLY)?;
-                (id, true, None)
-            }
         };
-        let size = self.query_size(file_id);
-        let result = size.and_then(|size| {
-            let offset = self.resolve_offset(descriptor, op.offset, size)?;
-            let data = self.raw_read(file_id, offset, op.length)?;
-            let end = checked_offset(offset, data.len() as u64, 0)?;
-            let eof = !data.is_empty() && end >= size || op.length > 0 && data.len() < op.length;
-            Ok((offset, data, eof, end))
-        });
-        let close_result = temporary.then(|| self.close_temporary_handle(file_id));
-        let (offset, data, eof, end) = result?;
-        if let Some(close) = close_result {
-            close?;
+        let open = self
+            .open_files
+            .get(&fd)
+            .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
+        if !open.readable {
+            return Err(VfError::errno(0, ERR_EBADF));
         }
+        let file_id = open.file_id;
+        let size = self.query_size(file_id)?;
+        let offset = self.resolve_offset(Some(fd), op.offset, size)?;
+        let data = self.raw_read(file_id, offset, op.length)?;
+        let end = checked_offset(offset, data.len() as u64, 0)?;
+        let eof = !data.is_empty() && end >= size || op.length > 0 && data.len() < op.length;
         if op.offset == VfOffset::Cur
-            && let Some(fd) = descriptor
             && let Some(open) = self.open_files.get_mut(&fd)
         {
             open.cur_offset = end;
@@ -496,7 +477,7 @@ impl SmbVecFs {
     }
 
     pub(super) fn write_one(&mut self, op: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult> {
-        if !op.file().is_fd() {
+        let Some(fd) = op.file().fd() else {
             if matches!(op.file(), FileOperand::Saved) {
                 return Err(VfError::unsupported(0));
             }
@@ -517,62 +498,36 @@ impl SmbVecFs {
                 bytes_written: written,
                 stable: true,
             });
-        }
-        let (file_id, temporary, descriptor, append) = match op.file() {
-            FileOperand::Fd(fd) => {
-                let open = self
-                    .open_files
-                    .get(fd)
-                    .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
-                if !open.writable {
-                    return Err(VfError::errno(0, ERR_EBADF));
-                }
-                (open.file_id, false, Some(*fd), open.append)
-            }
-            FileOperand::Saved => return Err(VfError::unsupported(0)),
-            _ => {
-                let path = self.path_string(&self.file_path(op.file())?)?;
-                let mut flags = libc::O_WRONLY;
-                if op.creates() {
-                    flags |= libc::O_CREAT;
-                }
-                if op.truncates() {
-                    flags |= libc::O_TRUNC;
-                }
-                let (id, _) = self.raw_open(&path, flags)?;
-                (id, true, None, false)
-            }
         };
-        let result = (|| {
-            let size = if append || op.offset() == VfOffset::End {
-                self.query_size(file_id)?
-            } else {
-                0
-            };
-            let offset = if append {
-                size
-            } else {
-                self.resolve_offset(descriptor, op.offset(), size)?
-            };
-            let mut confirmed = 0usize;
-            let write_result = self.raw_write_progress(file_id, offset, op.data(), |written| {
-                confirmed = written;
-            });
-            if (append || !matches!(op.offset(), VfOffset::At(_)))
-                && let Some(fd) = descriptor
-                && let Some(open) = self.open_files.get_mut(&fd)
-            {
-                open.cur_offset = checked_offset(offset, confirmed as u64, 0)?;
-            }
-            let written = write_result?;
-            self.raw_flush(file_id)?;
-            Ok((offset, written))
-        })();
-        let close_result = temporary.then(|| self.close_temporary_handle(file_id));
-        let (offset, written) = result?;
-        if let Some(close) = close_result {
-            close?;
+        let open = self
+            .open_files
+            .get(&fd)
+            .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
+        if !open.writable {
+            return Err(VfError::errno(0, ERR_EBADF));
         }
+        let (file_id, append) = (open.file_id, open.append);
+        let size = if append || op.offset() == VfOffset::End {
+            self.query_size(file_id)?
+        } else {
+            0
+        };
+        let offset = if append {
+            size
+        } else {
+            self.resolve_offset(Some(fd), op.offset(), size)?
+        };
+        let mut confirmed = 0usize;
+        let write_result = self.raw_write_progress(file_id, offset, op.data(), |written| {
+            confirmed = written;
+        });
+        if (append || !matches!(op.offset(), VfOffset::At(_)))
+            && let Some(open) = self.open_files.get_mut(&fd)
+        {
+            open.cur_offset = checked_offset(offset, confirmed as u64, 0)?;
+        }
+        let written = write_result?;
+        self.raw_flush(file_id)?;
         Ok(WriteResult {
             file: op.file().clone(),
             offset,

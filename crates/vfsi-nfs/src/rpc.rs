@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use libntirpc_sys::*;
 
-use crate::error::{RpcError, RpcResult};
+use vfsi_core::{RpcError, RpcResult};
 
 pub const NFS4_PROGRAM: rpcprog_t = 100003;
 pub const NFS_V4: rpcvers_t = 4;

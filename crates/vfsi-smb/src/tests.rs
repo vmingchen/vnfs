@@ -495,7 +495,7 @@ fn handle_metadata_checks_lengths_and_decodes_only_reported_fields() {
 fn smb_transport_failures_preserve_the_message() {
     let error = smb_error(SmbError::Disconnected, 3);
     assert_eq!(error.index(), Some(3));
-    assert_eq!(error.raw_code(), crate::vecfs::VF_ERR_RPC);
+    assert_eq!(error.raw_code(), vfsi_core::VF_ERR_RPC);
     assert!(error.to_string().contains("Disconnected"));
     let error = smb_error(
         SmbError::SendFailed {
@@ -572,8 +572,5 @@ fn unmapped_server_status_is_not_a_transport_failure() {
     );
     assert!(!error.is_transport());
     assert_eq!(error.index(), Some(2));
-    assert_eq!(
-        error.status(),
-        Some(crate::vecfs::StatusCode::Smb(status.0))
-    );
+    assert_eq!(error.status(), Some(vfsi_core::StatusCode::Smb(status.0)));
 }

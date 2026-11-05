@@ -224,7 +224,7 @@ impl SmbVecFs {
     }
 
     pub(super) fn insert_open_file(&mut self, open: SmbOpen) -> VfResult<Fd> {
-        crate::vecfs::insert_fd(&mut self.next_fd, &mut self.open_files, open)
+        vfsi_core::insert_fd(&mut self.next_fd, &mut self.open_files, open)
     }
 
     pub(super) fn drain_deferred_closes(&mut self) -> VfResult<()> {

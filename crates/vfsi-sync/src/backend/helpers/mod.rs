@@ -6,7 +6,7 @@ use crate::*;
 
 use crate::backend::{bytes_to_path, metadata_mask, translate_open_flags};
 
-use crate::traits::{
+use crate::contracts::{
     take_single_result, validate_read_into_results, validate_read_results, validate_write_results,
 };
 

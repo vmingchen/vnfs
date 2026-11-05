@@ -147,8 +147,8 @@ pub enum TraversalCompletion {
 #[must_use = "configuration and requests have no effect until used"]
 pub struct ResourceLimits {
     /// Maximum collected scalar payload or aggregate vector read buffers.
-    /// Not a process-memory cap; standard `Read::read_to_end` and explicit
-    /// positional file reads remain caller-managed.
+    /// Not a process-memory cap. Collecting reads through `VfsiExt::std_io`
+    /// enforce this budget; explicit caller buffers remain caller-managed.
     max_read_bytes: usize,
     /// Default request size for client `read_stream`, not file `Read` or pools.
     stream_chunk_bytes: std::num::NonZeroUsize,

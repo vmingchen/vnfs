@@ -33,6 +33,12 @@ method inventory. There are no root `FileSystem`/`Backend` aliases or
 `sfsi`/`vfsi` native namespaces. Protocol negotiation inspection belongs on
 protocol backends or binding-specific extension contracts, not `Vfsi`.
 
+Shared types and path helpers come from `vfsi-core`, and native contracts from
+`vfsi-sync`. The NFS crate no longer forwards them through `error`, `path`,
+`vecfs`, or a wildcard export from `nfs`. C bindings compose native backends
+directly and enable protocol features explicitly rather than inheriting
+them through the `vnfs` application facade.
+
 ## Execution seams
 
 Native filesystem hooks use `*_impl`, with `v` prefixes for vector engines.

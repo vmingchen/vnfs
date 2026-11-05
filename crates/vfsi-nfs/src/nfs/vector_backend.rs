@@ -6,7 +6,7 @@ fn open_adb_path(
     index: usize,
     mut open: impl FnMut(
         crate::client::OpenCreate,
-    ) -> crate::error::RpcResult<(NfsFh, nfsv41_sys::stateid4)>,
+    ) -> vfsi_core::RpcResult<(NfsFh, nfsv41_sys::stateid4)>,
 ) -> VfResult<(NfsFh, nfsv41_sys::stateid4)> {
     match open(crate::client::OpenCreate::NoCreate) {
         Ok(opened) => Ok(opened),
@@ -156,8 +156,9 @@ impl VectorBackend for NfsVecFs {
             let off = match r.offset {
                 VfOffset::At(o) => o,
                 VfOffset::End => {
-                    let path = self.server_vf_path(&r.file).map_err(|e| e.with_index(i))?;
-                    let fh = self.resolve_follow(&path).map_err(|e| e.with_index(i))?;
+                    let fh = self
+                        .resolve_tcfile(&r.file, true)
+                        .map_err(|e| e.with_index(i))?;
                     self.file_size(&fh).map_err(|e| e.with_index(i))?
                 }
                 VfOffset::Cur => match r.file.fd() {
@@ -184,7 +185,7 @@ impl VectorBackend for NfsVecFs {
                 crate::client::FileRef::Handle(open.fh.clone())
             } else {
                 crate::client::FileRef::Path(
-                    crate::path::path_bytes(
+                    vfsi_core::path::path_bytes(
                         &self.server_vf_path(&r.file).map_err(|e| e.with_index(i))?,
                     )
                     .to_vec(),
@@ -322,8 +323,9 @@ impl VectorBackend for NfsVecFs {
             let off = match w.offset() {
                 VfOffset::At(o) => o,
                 VfOffset::End => {
-                    let path = self.server_vf_path(w.file()).map_err(|e| e.with_index(i))?;
-                    let fh = self.resolve_follow(&path).map_err(|e| e.with_index(i))?;
+                    let fh = self
+                        .resolve_tcfile(w.file(), true)
+                        .map_err(|e| e.with_index(i))?;
                     self.file_size(&fh).map_err(|e| e.with_index(i))?
                 }
                 VfOffset::Cur => match w.file().fd() {
@@ -350,7 +352,7 @@ impl VectorBackend for NfsVecFs {
                 crate::client::FileRef::Handle(open.fh.clone())
             } else {
                 crate::client::FileRef::Path(
-                    crate::path::path_bytes(
+                    vfsi_core::path::path_bytes(
                         &self.server_vf_path(w.file()).map_err(|e| e.with_index(i))?,
                     )
                     .to_vec(),
@@ -1501,7 +1503,7 @@ impl VectorBackend for NfsVecFs {
             }
             fh
         };
-        let fd = crate::vecfs::insert_fd(&mut self.next_fd, &mut self.open_dirs, fh)?;
+        let fd = vfsi_core::insert_fd(&mut self.next_fd, &mut self.open_dirs, fh)?;
         Ok(VfDir::Descriptor {
             fd,
             owner: self.dir_owner,
@@ -1654,7 +1656,7 @@ mod adb_path_tests {
             calls.push(create);
             match create {
                 crate::client::OpenCreate::NoCreate => {
-                    Err(crate::error::RpcError::op(0, nfsstat4_NFS4ERR_NOENT))
+                    Err(vfsi_core::RpcError::op(0, nfsstat4_NFS4ERR_NOENT))
                 }
                 crate::client::OpenCreate::Guarded => Ok(expected.clone()),
                 _ => unreachable!(),

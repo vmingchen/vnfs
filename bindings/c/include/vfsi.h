@@ -244,6 +244,10 @@ typedef struct vfsi_stat_op {
 
 typedef struct vfsi_setattr_op {
   const char *path;
+  /**
+   * Only MODE, SIZE, ATIME and MTIME have value fields in this ABI.
+   * Other mask bits are rejected before any operation is submitted.
+   */
   uint32_t mask;
   uint32_t mode;
   uint64_t size;

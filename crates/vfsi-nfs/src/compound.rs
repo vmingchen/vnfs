@@ -9,8 +9,8 @@ use std::os::raw::{c_char, c_void};
 
 use nfsv41_sys::*;
 
-use crate::error::{RpcError, RpcResult};
 use crate::rpc::{NFSPROC4_COMPOUND, RpcClient};
+use vfsi_core::{RpcError, RpcResult};
 
 // These opcodes have no union payload on the wire. Initializing an unused
 // integer member is sufficient; the codec reads only the operation tag.

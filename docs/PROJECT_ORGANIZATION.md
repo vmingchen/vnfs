@@ -110,7 +110,9 @@ handles, and read, write, directory, metadata, and namespace dispatch.
 modules own open/close handling, I/O planning, metadata decoding, directory
 cursors/removal, namespace resolution, copying, and connection recovery.
 The two backend trait implementations remain intact in `handle_backend` and
-`vector_backend`, without extra forwarding layers.
+`vector_backend`, without extra forwarding layers. The read pool lives under
+`nfs/`; protocol-client helpers and session tests live under `client/` and
+`session/`, using standard child-module paths.
 
 `vnfs/src/auto` separates routing policy and connection identities from vector
 dispatch and retained handles. Routing tests and application extension tests
@@ -144,7 +146,7 @@ vfsi-core -> vfsi-sync -> vfsi-nfs -> vnfs
                        -> vfsi-local -> vfsi-posix
                                      -> vfsi-uring
 
-vnfs + vfsi-smb -------------------> vfsi-c
+vfsi-nfs + vfsi-posix + vfsi-smb ---> vfsi-c
 vfsi-python ----------------------> nfs4fs / vsmb (native bindings)
 vfsi-fsspec ----------------------> nfs4fs / vsmbfs (fsspec adapters)
 vsmb + vfsi-fsspec ----------------> vsmbfs

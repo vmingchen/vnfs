@@ -32,14 +32,30 @@ if ! tc qdisc show dev "$interface" | grep -Eq '^qdisc noqueue .* root'; then
     exit 1
 fi
 
+qdisc_created=0
 cleanup() {
-    sudo tc qdisc del dev "$interface" root 2>/dev/null || true
+    if ((qdisc_created)); then
+        sudo tc qdisc del dev "$interface" root 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
+# Bash can run a pending signal trap before the next assignment after tc.
+# Record creation ownership before allowing an interrupt to exit.
+signal_status=0
+add_status=0
+trap 'signal_status=130' INT
+trap 'signal_status=143' TERM
+
+if sudo tc qdisc add dev "$interface" root netem delay "$delay"; then
+    qdisc_created=1
+else
+    add_status=$?
+fi
+
 trap 'exit 130' INT
 trap 'exit 143' TERM
-
-sudo tc qdisc add dev "$interface" root netem delay "$delay"
+((signal_status == 0)) || exit "$signal_status"
+((add_status == 0)) || exit "$add_status"
 echo "Applying $delay egress delay on $interface (loopback RTT is approximately twice this)."
 cd "$repo_root"
 benchmark_args=(

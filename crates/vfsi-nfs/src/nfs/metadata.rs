@@ -389,7 +389,7 @@ impl NfsVecFs {
                 crate::client::FileRef::Handle(open.fh.clone())
             } else {
                 crate::client::FileRef::Path(
-                    crate::path::path_bytes(
+                    vfsi_core::path::path_bytes(
                         &self.server_vf_path(&a.file).map_err(|e| e.with_index(i))?,
                     )
                     .to_vec(),
@@ -547,7 +547,7 @@ impl NfsVecFs {
                 crate::client::FileRef::Handle(open.fh.clone())
             } else {
                 crate::client::FileRef::Path(
-                    crate::path::path_bytes(
+                    vfsi_core::path::path_bytes(
                         &self.server_vf_path(&a.file).map_err(|e| e.with_index(i))?,
                     )
                     .to_vec(),

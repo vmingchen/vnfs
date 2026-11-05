@@ -24,16 +24,6 @@
 //! shares, and path referral responses return `Unsupported` without following
 //! them. Connect directly to the destination server/share instead.
 
-#[doc(hidden)]
-mod path {
-    pub use vfsi_core::path::*;
-}
-
-#[doc(hidden)]
-mod vecfs {
-    pub use vfsi_sync::*;
-}
-
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "test-faults")]
@@ -63,12 +53,7 @@ use vfsi_core::internal::ManyResults;
 #[cfg(feature = "test-faults")]
 use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 
-use crate::path::{normalize_bytes, path_bytes, path_from_bytes};
-use crate::vecfs::{
-    Adb, AttrMask, CopyOptions, ERR_EBADF, ERR_NOTDIR, ExtentPair, Fd, FileOperand, ReadOp,
-    ReadResult, SeekFrom, SetAttrsOp, Target, VfAttrs, VfError, VfOffset, VfPathBase, VfRes,
-    VfResult, VfType, WriteOp, WriteResult,
-};
+use vfsi_core::path::{normalize_bytes, path_bytes, path_from_bytes};
 
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
 const FILE_DIRECTORY_FILE: u32 = 0x0000_0001;
