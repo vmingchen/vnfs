@@ -182,3 +182,13 @@ the mount constructor, so port adapters do not need to parse mount tables.
 The native POSIX header contains checked scalar field projection only; callers
 still supply scoped identity separately and must not confuse synthetic device
 values with kernel device IDs.
+
+## Retained directory cohorts
+
+The optional `vfsi_listdirs_from_cursors` and `vfsi_dir_cursor_free` symbols let
+applications carry native child-directory cursors across their own filtered
+frontiers. The C ABI stays at v3; dynamic loading leaves absent symbols null.
+Each cohort is bounded and fully validated before callbacks. Cursor inputs are
+consumed after preflight, and each delivered child is owned by the callback:
+retain admitted children for descent and free excluded children. See the header
+for cancellation, lifetime, and quota rules.

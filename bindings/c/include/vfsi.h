@@ -146,6 +146,22 @@
 #define VFSI_OBJECT_ID_NOFOLLOW 1
 
 /**
+ * Additive directory-cohort/cursor API; the C ABI remains version three.
+ */
+#define VFSI_DIRECTORY_CURSORS_VERSION 1
+
+/**
+ * Maximum number of directory operands in one retained-cursor cohort.
+ */
+#define VFSI_DIRECTORY_COHORT_MAX 32
+
+/**
+ * Opaque, uniquely owned directory seed. Free unused seeds with
+ * vfsi_dir_cursor_free. Seeds preserve native parent identity when supported.
+ */
+typedef struct vfsi_dir_cursor vfsi_dir_cursor;
+
+/**
  * Opaque filesystem handle owned by C.
  */
 typedef struct vfsi_fs vfsi_fs;
@@ -366,6 +382,13 @@ typedef struct vfsi_object_id_op {
   struct vfsi_object_id *out;
   struct vfsi_attrs *attrs;
 } vfsi_object_id_op;
+
+typedef bool (*vfsi_indexed_listdir_cursor_cb)(size_t,
+                                               const char*,
+                                               const char*,
+                                               const struct vfsi_attrs*,
+                                               struct vfsi_dir_cursor*,
+                                               void*);
 
 #ifdef __cplusplus
 extern "C" {
@@ -941,6 +964,50 @@ struct vfsi_result vfsi_get_object_id(struct vfsi_fs *fs,
  * Same output-header, storage and pointer contract as vfsi_get_object_idv.
  */
 struct vfsi_result vfsi_fget_object_id(struct vfsi_fs *fs, int fd, struct vfsi_object_id *out);
+
+/**
+ * Free a child cursor not submitted for descent. Null is accepted. This
+ * performs no directory enumeration and does not need a live filesystem.
+ *
+ * # Safety
+ * A non-null cursor must be uniquely owned and originate from this API.
+ */
+void vfsi_dir_cursor_free(struct vfsi_dir_cursor *cursor);
+
+/**
+ * Complete bounded shallow listings for an application-owned frontier.
+ * Null cursor slots start fresh directory operands. Non-null slots must be
+ * unique child seeds returned by this function for the same filesystem handle
+ * and original path. After input validation, ALL slots are consumed and set to null,
+ * including on listing failure. Invalid inputs leave the slots unchanged.
+ *
+ * Native child seeds survive between calls. Page continuations stay on the
+ * same backend cursor while each cohort is collected, without reopening
+ * ancestor paths.
+ * Path-based child fallbacks require no-follow resolution. Initial roots use
+ * ordinary shallow-listing resolution. All rows/attributes are validated
+ * before any callback, with shared entry/path quotas from options.
+ *
+ * Every non-null child passed to the callback transfers ownership to it,
+ * including when it returns false. Retain admitted directories for later
+ * descent; free excluded/unused children. Undelivered children are freed by
+ * this function. Completion/cancellation match vfsi_listdirs. The callback
+ * runs outside the backend lock and may call other filesystem operations.
+ *
+ * # Safety
+ * The vfsi_listdirs pointer contract applies. cursors and results hold count
+ * exclusive elements, disjoint from each other and all other inputs. count
+ * is at most VFSI_DIRECTORY_COHORT_MAX. Callback strings/attrs are borrowed
+ * only during the call; child cursors are uniquely owned after delivery.
+ */
+int vfsi_listdirs_from_cursors(struct vfsi_fs *fs,
+                               const char *const *dirs,
+                               struct vfsi_dir_cursor **cursors,
+                               size_t count,
+                               const struct vfsi_listing_options *options,
+                               vfsi_indexed_listdir_cursor_cb cb,
+                               void *userdata,
+                               struct vfsi_listing_result *results);
 
 #ifdef __cplusplus
 }  // extern "C"

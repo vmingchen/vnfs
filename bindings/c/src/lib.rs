@@ -113,6 +113,8 @@ macro_rules! fail_batch {
 
 mod identity;
 pub use identity::*;
+mod directory;
+pub use directory::*;
 
 /// Opaque filesystem handle owned by C.
 pub struct vfsi_fs {
@@ -125,6 +127,7 @@ pub struct vfsi_fs {
     backend_root: PathBuf,
     /// Process-local comparison scope, stable across reconnects and mount views.
     namespace_id: u64,
+    cursor_owner: std::sync::Arc<()>,
 }
 
 #[derive(Clone)]
@@ -1120,6 +1123,7 @@ fn make_fs(
         mountpoint,
         backend_root,
         namespace_id,
+        cursor_owner: std::sync::Arc::new(()),
     }))
 }
 
