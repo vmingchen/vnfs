@@ -1,8 +1,8 @@
 //! The dependency's reader hides its handle, so it cannot anchor fallback
 //! reparse probes. Retain one handle for enumeration, identity and name queries;
 //! directory entry codecs and session-scoped close remain in smb2.
-//! Raw requests do not reconnect. SmbVecFs serializes session changes; reject
-//! a cursor whose connection generation or authenticated session has changed.
+//! A fresh read-only open can recover a dead session once. Enumeration never
+//! replays: reject a cursor whose connection generation or session has changed.
 use super::*;
 use futures_util::FutureExt;
 use smb2::msg::directory_info::parse_entries;
@@ -25,14 +25,47 @@ pub(super) struct DirectoryReader {
 
 impl DirectoryReader {
     pub(super) fn open(fs: &mut SmbVecFs, path: &str, index_numbers: bool) -> VfResult<Self> {
-        let connection = fs.client.connection_mut().clone();
-        let session = (connection.generation(), connection.session_id());
         let mut request = fs.open_request(path, libc::O_RDONLY | libc::O_DIRECTORY)?;
         request.create_options = 1; // FILE_DIRECTORY_FILE; preserve ordinary root following.
-        let frame = fs
-            .runtime
-            .block_on(connection.execute(Command::Create, &request, Some(fs.tree.tree_id)))
-            .map_err(|error| smb_error(error, 0))?;
+        let mut retried = false;
+        let (connection, session, frame) = loop {
+            let connection = fs.client.connection_mut().clone();
+            let session = (connection.generation(), connection.session_id());
+            match fs.runtime.block_on(connection.execute(
+                Command::Create,
+                &request,
+                Some(fs.tree.tree_id),
+            )) {
+                Ok(frame) => break (connection, session, frame),
+                Err(error)
+                    if !retried
+                        && fs.client.config().auto_reconnect
+                        && connection.can_reconnect()
+                        && matches!(
+                            error,
+                            SmbError::Disconnected
+                                | SmbError::ServerUnresponsive { .. }
+                                | SmbError::HandleInvalidated { .. }
+                        ) =>
+                {
+                    // Nothing has been enumerated yet, and FILE_OPEN does not
+                    // mutate the namespace. Restore the tree as well as the
+                    // transport; its old id belongs to the dead session.
+                    let tree = fs.runtime.block_on(async {
+                        fs.client.reconnect().await?;
+                        fs.client.connect_share(&fs.tree.share_name).await
+                    });
+                    let tree = tree.map_err(|error| smb_error(error, 0))?;
+                    check_share_routing(
+                        tree.is_dfs || tree.dfs_origin.is_some(),
+                        &tree.share_name,
+                    )?;
+                    fs.tree = tree;
+                    retried = true;
+                }
+                Err(error) => return Err(smb_error(error, 0)),
+            }
+        };
         require_status(&frame, Command::Create, 0)?;
         let opened = CreateResponse::unpack(&mut ReadCursor::new(&frame.body))
             .map_err(|error| smb_error(error, 0))?;
@@ -272,6 +305,77 @@ fn directory_name(bytes: &[u8]) -> VfResult<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Runs in SMB CI with a required live fixture. Tear down only this
+    /// client's real transport; no server restart or timing-based proxy needed.
+    #[test]
+    fn live_directory_open_recovers_without_replaying_retained_cursors() {
+        let (server, share) = match (
+            std::env::var("VFSI_SMB_SERVER"),
+            std::env::var("VFSI_SMB_SHARE"),
+        ) {
+            (Ok(server), Ok(share)) => (server, share),
+            _ => {
+                assert_ne!(
+                    std::env::var("VFSI_SMB_REQUIRED").as_deref(),
+                    Ok("1"),
+                    "live SMB directory recovery requires server and share"
+                );
+                return;
+            }
+        };
+        let username = std::env::var("VFSI_SMB_USERNAME").unwrap_or_default();
+        let password = std::env::var("VFSI_SMB_PASSWORD").unwrap_or_default();
+        let domain = std::env::var("VFSI_SMB_DOMAIN").unwrap_or_default();
+        for auto_reconnect in [true, false] {
+            let mut fs = SmbVecFs::connect_with_options(
+                &server,
+                &share,
+                &username,
+                &password,
+                &domain,
+                SmbConnectOptions::default().with_auto_reconnect(auto_reconnect),
+            )
+            .unwrap();
+            let generation = fs.client.connection().generation();
+            let missing = format!(
+                "vfsi-missing-directory-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+            let error = DirectoryReader::open(&mut fs, &missing, false)
+                .err()
+                .expect("a semantic open failure must not be retried");
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+            assert_eq!(fs.client.connection().generation(), generation);
+
+            let mut retained = DirectoryReader::open(&mut fs, "", false).unwrap();
+            fs.client.connection().mark_dead();
+            assert!(fs.client.is_disconnected());
+            let fresh = DirectoryReader::open(&mut fs, "", false);
+            if auto_reconnect {
+                let mut fresh = fresh.expect("a fresh directory open must reconnect");
+                assert_eq!(fs.client.connection().generation(), generation + 1);
+                fs.runtime.block_on(fresh.next_batch()).unwrap();
+                fs.runtime.block_on(fresh.close()).unwrap();
+            } else {
+                assert!(fresh.err().expect("reconnect is disabled").is_transport());
+                assert_eq!(fs.client.connection().generation(), generation);
+                assert!(fs.client.is_disconnected());
+            }
+            let error = fs.runtime.block_on(retained.next_batch()).unwrap_err();
+            assert!(error.is_transport());
+            if auto_reconnect {
+                assert!(
+                    error.to_string().contains("session was invalidated"),
+                    "{error}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn normalized_names_preserve_mapping_and_reject_malformed_or_escaping_replies() {
         let reply = |text: &str| {

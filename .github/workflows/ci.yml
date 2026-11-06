@@ -1087,6 +1087,7 @@ jobs:
           if [ -n "${{ matrix.rust_features }}" ]; then
             rust_features="$rust_features,${{ matrix.rust_features }}"
           fi
+          cargo test -p vfsi-smb --features "$rust_features" --lib directory::reader::tests::live_ -- --test-threads=1
           cargo test -p vfsi-smb --features "$rust_features" --test smb -- --test-threads=1
       - name: Run C ABI smoke test against Samba
         if: matrix.bindings
