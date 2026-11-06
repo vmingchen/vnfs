@@ -1609,7 +1609,6 @@ fn directory_continuations_classify_original_children_after_rename_and_replaceme
     })();
     drop(cursor);
     cleanup_test_tree(&root);
-    result.unwrap();
     let observed: std::collections::BTreeMap<_, _> = entries
         .into_iter()
         .map(|entry| {
@@ -1626,12 +1625,27 @@ fn directory_continuations_classify_original_children_after_rename_and_replaceme
             )
         })
         .collect();
-    assert_eq!(observed.len(), 5);
-    for name in ["one", "two", "three"] {
-        assert_eq!(observed[std::ffi::OsStr::new(name)], VfType::Directory);
+    let expected: std::collections::BTreeMap<_, _> = [
+        ("one", VfType::Directory),
+        ("two", VfType::Directory),
+        ("three", VfType::Directory),
+        ("alias", VfType::Symlink),
+        ("other-alias", VfType::Symlink),
+    ]
+    .into_iter()
+    .map(|(name, kind)| (std::ffi::OsString::from(name), kind))
+    .collect();
+    // Every delivered entry must describe the original tree, even when a
+    // server cannot resolve the retained handle's current pathname.
+    for (name, kind) in &observed {
+        assert_eq!(Some(kind), expected.get(name), "unexpected child {name:?}");
     }
-    for alias in ["alias", "other-alias"] {
-        assert_eq!(observed[std::ffi::OsStr::new(alias)], VfType::Symlink);
+    match result {
+        Ok(()) => assert_eq!(observed, expected),
+        // A server may reject normalized-name queries or retain the old name
+        // even after an SMB rename. The documented fallback is ESTALE, never
+        // silently probing the replacement directory.
+        Err(error) => assert_eq!(error.raw_code(), libc::ESTALE as u32),
     }
 }
 
