@@ -1483,6 +1483,8 @@ fn directory_pages_remain_bounded_and_retain_the_opened_directory_after_rename()
     let moved = root.join("moved");
     let local = Path::new(&local_root).join(root.strip_prefix("/").unwrap());
     fs::create_dir_all(local.join("source")).unwrap();
+    // Samba's forced user may differ from the local fixture creator.
+    fs::set_permissions(&local, fs::Permissions::from_mode(0o777)).unwrap();
     for index in 0..600 {
         fs::write(
             local.join(format!("source/file-{index:04}-{}", "x".repeat(96))),
@@ -1568,6 +1570,8 @@ fn directory_continuations_classify_original_children_after_rename_and_replaceme
     for alias in ["alias", "other-alias"] {
         std::os::unix::fs::symlink("one", local.join("source").join(alias)).unwrap();
     }
+    // Renaming source requires write permission on its parent for the SMB user.
+    fs::set_permissions(&local, fs::Permissions::from_mode(0o777)).unwrap();
     let source = root.join("source");
     let (first, mut cursor) = backend
         .listdir_page_impl(&source, AttrMask::MODE, None, 1, usize::MAX, true)
