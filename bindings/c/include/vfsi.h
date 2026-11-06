@@ -841,8 +841,9 @@ struct vfsi_result vfsi_copyv(struct vfsi_fs *fs,
 
 /**
  * Stream several paths in bounded vectorized chunks. Returning `false` from
- * `cb` cancels successfully. The callback provides backpressure and must not
- * reenter the same filesystem handle.
+ * `cb` cancels successfully. Callbacks provide backpressure between bounded
+ * read waves and run outside the backend lock; they may query this filesystem.
+ * The handle and input arrays must remain live and unchanged during callbacks.
  * On success, `index` counts files whose EOF was delivered to the callback,
  * including an EOF callback that cancels the stream.
  *

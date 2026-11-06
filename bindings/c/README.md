@@ -192,3 +192,9 @@ Each cohort is bounded and fully validated before callbacks. Cursor inputs are
 consumed after preflight, and each delivered child is owned by the callback:
 retain admitted children for descent and free excluded children. See the header
 for cancellation, lifetime, and quota rules.
+
+Streaming callbacks from `vfsi_read_streamv` also run outside backend locks.
+Each bounded native read wave completes before delivery; callbacks may query
+the same handle and can stop before the next wave. EOF-completion counts and
+input-index association are unchanged. Keep the handle and inputs live for the
+full streaming call.

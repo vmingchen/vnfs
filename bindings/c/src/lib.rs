@@ -3036,8 +3036,9 @@ pub unsafe extern "C" fn vfsi_copyv(
 }
 
 /// Stream several paths in bounded vectorized chunks. Returning `false` from
-/// `cb` cancels successfully. The callback provides backpressure and must not
-/// reenter the same filesystem handle.
+/// `cb` cancels successfully. Callbacks provide backpressure between bounded
+/// read waves and run outside the backend lock; they may query this filesystem.
+/// The handle and input arrays must remain live and unchanged during callbacks.
 /// On success, `index` counts files whose EOF was delivered to the callback,
 /// including an EOF callback that cancels the stream.
 ///
@@ -3093,27 +3094,24 @@ pub unsafe extern "C" fn vfsi_read_streamv(
             cpaths.push(cpath);
             files.push(FileOperand::from_os_path(&vpath));
         }
-        let mut backend = match lock_or_io(&fs.fs) {
-            Ok(backend) => backend,
-            Err(error) => return vfsi_result::from_error(error),
-        };
         let mut completed = 0;
-        let result = backend.vstream_impl(
+        let result = vfsi_sync::backend::helpers::stream_read_chunks(
             &files,
-            chunk_size,
+            |_| chunk_size,
             memory_limit,
-            &mut |index, offset, data, eof| {
-                completed += usize::from(eof);
-                // SAFETY: the caller provides this callback; borrowed strings, attributes
-                // and bytes remain live until it returns.
+            |reads| lock_or_io(&fs.fs)?.vread_impl(reads),
+            |index, result| {
+                completed += usize::from(result.eof);
+                // SAFETY: callback borrows this owned result only during the
+                // invocation; the backend read wave has already released its lock.
                 unsafe {
                     cb(
                         cpaths[index].as_ptr(),
                         index,
-                        offset,
-                        data.as_ptr(),
-                        data.len(),
-                        eof,
+                        result.offset,
+                        result.data.as_ptr(),
+                        result.data.len(),
+                        result.eof,
                         userdata,
                     )
                 }
@@ -4309,6 +4307,93 @@ mod tests {
             }
             unsafe { vfsi_free(fs) };
         }
+    }
+
+    #[test]
+    fn stream_callbacks_can_query_same_filesystem_without_lock() {
+        struct Seen {
+            fs: *mut vfsi_fs,
+            available: bool,
+            calls: usize,
+            data: [Vec<u8>; 2],
+        }
+        unsafe extern "C" fn callback(
+            _: *const c_char,
+            index: usize,
+            _: u64,
+            data: *const u8,
+            len: usize,
+            _: bool,
+            userdata: *mut c_void,
+        ) -> bool {
+            // SAFETY: the fixture owns the state and keeps the filesystem alive.
+            let seen = unsafe { &mut *userdata.cast::<Seen>() };
+            seen.calls += 1;
+            // Fail promptly on the old behavior rather than deadlocking the test.
+            let available = match unsafe { &*seen.fs }.fs.try_lock() {
+                Ok(guard) => {
+                    drop(guard);
+                    true
+                }
+                Err(_) => false,
+            };
+            if !available {
+                seen.available = false;
+                return false;
+            }
+            let mut attrs = std::mem::MaybeUninit::<vfsi_attrs>::uninit();
+            // SAFETY: this nested operation borrows the same live handle and
+            // exclusively owns its output; no outer mutable buffer is aliased.
+            if unsafe { vfsi_stat(seen.fs, c"/other".as_ptr(), attrs.as_mut_ptr()) } != 0 {
+                seen.available = false;
+                return false;
+            }
+            let Some(output) = seen.data.get_mut(index) else {
+                seen.available = false;
+                return false;
+            };
+            // SAFETY: the streaming callback lends len initialized bytes.
+            output.extend_from_slice(unsafe { std::slice::from_raw_parts(data, len) });
+            true
+        }
+        let root = tempfile::tempdir().unwrap();
+        for (name, bytes) in [
+            ("first", b"abcdef".as_slice()),
+            ("second", b"xyzq"),
+            ("other", b"stat"),
+        ] {
+            std::fs::write(root.path().join(name), bytes).unwrap();
+        }
+        let fs = make_fs(
+            Box::new(vfsi_posix::backend(root.path()).unwrap()),
+            PathBuf::from("/"),
+            PathBuf::from("/"),
+        );
+        let mut seen = Seen {
+            fs,
+            available: true,
+            calls: 0,
+            data: Default::default(),
+        };
+        let paths = [c"/first".as_ptr(), c"/second".as_ptr()];
+        // SAFETY: all inputs, outputs and callback state outlive this call.
+        let result = unsafe {
+            vfsi_read_streamv(
+                fs,
+                paths.as_ptr(),
+                paths.len(),
+                3,
+                6,
+                Some(callback),
+                &mut seen as *mut _ as *mut c_void,
+            )
+        };
+        assert!(seen.available, "stream callback ran under the backend lock");
+        assert!(seen.calls > 2);
+        assert_eq!((result.category, result.index), (VFSI_ERROR_NONE, 2));
+        assert_eq!(seen.data, [b"abcdef".to_vec(), b"xyzq".to_vec()]);
+        // SAFETY: the fixture uniquely owns the live handle.
+        unsafe { vfsi_free(fs) };
     }
 
     #[test]

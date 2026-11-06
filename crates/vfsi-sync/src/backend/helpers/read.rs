@@ -39,8 +39,7 @@ pub fn vread_all_owned_impl_default<F: VectorBackend + ?Sized>(
     let budget = options
         .max_total_bytes()
         .clamp(1, DEFAULT_READ_ALLV_MAX_TOTAL_BYTES);
-    visit_read_chunks(
-        backend,
+    stream_read_chunks(
         files,
         |pending| {
             budget
@@ -48,6 +47,7 @@ pub fn vread_all_owned_impl_default<F: VectorBackend + ?Sized>(
                 .min((budget / pending.clamp(1, batch_size.get())).max(4096))
         },
         budget,
+        |reads| backend.vread_impl(reads),
         |index, result| {
             let data = result.data;
             if !collector.charge(index, data.len()) {
@@ -122,16 +122,24 @@ pub fn vstream_impl_default<F: VectorBackend + ?Sized>(
     memory_limit: usize,
     cb: &mut ReadStreamCallback<'_>,
 ) -> VfRes {
-    visit_read_chunks(backend, files, chunk_size, memory_limit, |index, result| {
-        cb(index, result.offset, &result.data, result.eof)
-    })
+    stream_read_chunks(
+        files,
+        chunk_size,
+        memory_limit,
+        |reads| backend.vread_impl(reads),
+        |index, result| cb(index, result.offset, &result.data, result.eof),
+    )
 }
 
-fn visit_read_chunks<F: VectorBackend + ?Sized>(
-    backend: &mut F,
+/// Shared bounded stream state machine. The caller controls each read wave's
+/// lock scope; callback delivery starts only after the read closure returns.
+/// Owned results keep chunk bytes valid independently of that lock.
+#[doc(hidden)]
+pub fn stream_read_chunks(
     files: &[FileOperand],
     chunk_size: impl Fn(usize) -> usize,
     memory_limit: usize,
+    mut read: impl FnMut(&[ReadOp]) -> VfResult<Vec<ReadResult>>,
     mut cb: impl FnMut(usize, ReadResult) -> bool,
 ) -> VfRes {
     use std::collections::VecDeque;
@@ -163,7 +171,7 @@ fn visit_read_chunks<F: VectorBackend + ?Sized>(
         let remap_error = |error: VfError| {
             error.map_index(|index| batch_indices.get(index).copied().unwrap_or(index))
         };
-        let results = backend.vread_impl(&reads).map_err(remap_error)?;
+        let results = read(&reads).map_err(remap_error)?;
         validate_read_results("vstream_impl", &reads, &results).map_err(remap_error)?;
         for (batch_index, result) in results.into_iter().enumerate() {
             let index = batch_indices[batch_index];
