@@ -2175,3 +2175,60 @@ fn client_extent_copy_reuses_current_state_for_safe_aliases() {
         assert_eq!(actual, expected);
     }
 }
+
+#[test]
+fn recursive_copy_allows_ancestor_destinations_with_both_copy_strategies() {
+    let Some(mut backend) = connect() else { return };
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::path::PathBuf::from(format!(
+        "/vfsi-copy-ancestor-{}-{nonce}",
+        std::process::id()
+    ));
+    let source = root.join("parent/source");
+    backend
+        .ensure_dir_impl(&source.join("empty"), 0o755)
+        .unwrap();
+    let result = (|| {
+        let file = backend.open_raw_impl(
+            &source.join("file"),
+            libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY,
+            0o640,
+        )?;
+        let write = backend.write_raw_impl(&file, 0, b"payload");
+        let close = backend.close_impl(&file);
+        write?;
+        close?;
+        for server_side in [false, true] {
+            for destination in [root.join("parent"), root.clone()] {
+                backend.copy_tree_impl(&source, &destination, false, server_side)?;
+                assert_eq!(
+                    backend.read_raw_impl(
+                        &FileOperand::from_os_path(&destination.join("file")),
+                        0,
+                        7
+                    )?,
+                    b"payload",
+                );
+                assert_eq!(
+                    backend.stat_impl(&destination.join("empty"))?.ftype,
+                    VfType::Directory
+                );
+                assert_eq!(
+                    backend.read_raw_impl(
+                        &FileOperand::from_os_path(&source.join("file")),
+                        0,
+                        7
+                    )?,
+                    b"payload",
+                );
+            }
+        }
+        Ok::<_, vfsi_sync::VfError>(())
+    })();
+    let cleanup = backend.remove_paths_impl(&[root.as_path()], true);
+    result.unwrap();
+    cleanup.unwrap();
+}

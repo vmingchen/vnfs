@@ -1109,6 +1109,13 @@ fn listing_walk_and_tree_copy_do_not_follow_directory_reparse_points() {
     fs::write(local_outside.join("secret"), b"outside source tree").unwrap();
     std::os::unix::fs::symlink("../outside", local_source.join("alias")).unwrap();
 
+    std::os::unix::fs::symlink("source", local_root.join("root-alias")).unwrap();
+    let through_alias = fs
+        .listdir_impl(&root.join("root-alias"), AttrMask::MODE, 0, false)
+        .expect("ordinary root symlinks retain their follow semantics");
+    assert_eq!(through_alias.len(), 1);
+    assert_eq!(through_alias[0].ftype, VfType::Symlink);
+
     let shallow = fs
         .listdir_impl(&source, AttrMask::MODE, 0, false)
         .expect("shallow listing should identify the directory reparse point");
@@ -1544,4 +1551,117 @@ fn directory_pages_remain_bounded_and_retain_the_opened_directory_after_rename()
     }
     assert_eq!(names.len(), 600);
     cleanup_test_tree(&root);
+}
+
+#[test]
+fn directory_continuations_classify_original_children_after_rename_and_replacement() {
+    let Some(mut backend) = connect() else { return };
+    let Ok(local_root) = std::env::var("VFSI_SMB_LOCAL_ROOT") else {
+        assert!(!required("VFSI_SMB_REQUIRED"), "local SMB fixture required");
+        return;
+    };
+    let root = PathBuf::from(format!("/vfsi-smb-renamed-children-{}", std::process::id()));
+    let local = Path::new(&local_root).join(root.strip_prefix("/").unwrap());
+    for name in ["one", "two", "three"] {
+        fs::create_dir_all(local.join("source").join(name)).unwrap();
+    }
+    for alias in ["alias", "other-alias"] {
+        std::os::unix::fs::symlink("one", local.join("source").join(alias)).unwrap();
+    }
+    let source = root.join("source");
+    let (first, mut cursor) = backend
+        .listdir_page_impl(&source, AttrMask::MODE, None, 1, usize::MAX, true)
+        .unwrap();
+    assert_eq!(first.len(), 1);
+    assert!(cursor.is_some());
+    // Rename on the server, then replace the old spelling with misleading
+    // children. The original cursor must not inspect the replacement tree.
+    backend
+        .vrename_impl(&[(
+            FileOperand::from_os_path(&source),
+            FileOperand::from_os_path(&root.join("moved")),
+        )])
+        .unwrap();
+    fs::create_dir(local.join("source")).unwrap();
+    for name in ["one", "two", "three", "alias", "other-alias"] {
+        fs::write(local.join("source").join(name), b"replacement").unwrap();
+    }
+    let mut entries = first;
+    let result = (|| {
+        while cursor.is_some() {
+            let (page, next) = backend.listdir_page_impl(
+                &source,
+                AttrMask::MODE,
+                cursor.take(),
+                1,
+                usize::MAX,
+                true,
+            )?;
+            assert!(page.len() <= 1);
+            entries.extend(page);
+            cursor = next;
+        }
+        Ok::<_, vfsi_sync::VfError>(())
+    })();
+    drop(cursor);
+    cleanup_test_tree(&root);
+    result.unwrap();
+    let observed: std::collections::BTreeMap<_, _> = entries
+        .into_iter()
+        .map(|entry| {
+            assert_eq!(entry.file.path().unwrap().parent(), Some(source.as_path()));
+            (
+                entry
+                    .file
+                    .path()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_os_string(),
+                entry.ftype,
+            )
+        })
+        .collect();
+    assert_eq!(observed.len(), 5);
+    for name in ["one", "two", "three"] {
+        assert_eq!(observed[std::ffi::OsStr::new(name)], VfType::Directory);
+    }
+    for alias in ["alias", "other-alias"] {
+        assert_eq!(observed[std::ffi::OsStr::new(alias)], VfType::Symlink);
+    }
+}
+
+#[test]
+fn directory_continuation_rejects_a_stale_probe_path_after_external_rename() {
+    let Some(mut backend) = connect() else { return };
+    let Ok(local_root) = std::env::var("VFSI_SMB_LOCAL_ROOT") else {
+        assert!(!required("VFSI_SMB_REQUIRED"), "local SMB fixture required");
+        return;
+    };
+    let root = PathBuf::from(format!("/vfsi-smb-stale-probes-{}", std::process::id()));
+    let local = Path::new(&local_root).join(root.strip_prefix("/").unwrap());
+    for child in ["one", "two", "three"] {
+        fs::create_dir_all(local.join("source").join(child)).unwrap();
+    }
+    let source = root.join("source");
+    let (_, cursor) = backend
+        .listdir_page_impl(&source, AttrMask::MODE, None, 1, usize::MAX, true)
+        .unwrap();
+    assert!(cursor.is_some());
+    fs::rename(local.join("source"), local.join("moved")).unwrap();
+    fs::create_dir(local.join("source")).unwrap();
+    for child in ["one", "two", "three"] {
+        std::os::unix::fs::symlink("../moved/one", local.join("source").join(child)).unwrap();
+    }
+    let result = backend.listdir_page_impl(&source, AttrMask::MODE, cursor, 8, usize::MAX, true);
+    cleanup_test_tree(&root);
+    match result {
+        // Servers that update handle names after an out-of-band rename can
+        // continue correctly. Samba may retain the stale name instead.
+        Ok((entries, _)) => {
+            assert_eq!(entries.len(), 2);
+            assert!(entries.iter().all(|entry| entry.ftype == VfType::Directory));
+        }
+        Err(error) => assert_eq!(error.raw_code(), libc::ESTALE as u32),
+    }
 }

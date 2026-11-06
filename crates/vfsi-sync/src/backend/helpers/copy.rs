@@ -129,7 +129,9 @@ pub fn copy_tree_batches_with_pages<F: VectorBackend + ?Sized>(
 ) -> VfRes {
     let source_abs = backend.abs_path(source);
     let destination_abs = backend.abs_path(destination);
-    if source_abs.starts_with(&destination_abs) || destination_abs.starts_with(&source_abs) {
+    // Copying into an ancestor merely merges this directory's children there.
+    // Only an equal/descendant destination can recursively consume its own output.
+    if destination_abs.starts_with(&source_abs) {
         return Err(map_error(VfError::from_kind(
             0,
             std::io::ErrorKind::InvalidInput,

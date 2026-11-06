@@ -1,5 +1,11 @@
+//! Enumeration retains an open directory. Supplementary Unix-symlink probes
+//! still require path opens: validate the server-reported path against that
+//! handle's identity before and after probing. An unresolvable renamed path
+//! returns ESTALE; it must never redirect probes into a replacement directory.
 use super::*;
-use smb2::client::{DirectoryEntry, DirectoryReader, ListOptions};
+use smb2::client::DirectoryEntry;
+mod reader;
+use reader::DirectoryReader;
 use std::collections::VecDeque;
 
 fn validate_entry_name(name: &str) -> VfRes {
@@ -85,6 +91,39 @@ impl SmbVecFs {
         Ok(())
     }
 
+    fn verify_probe_directory(&mut self, path: &Path, identity: u64) -> VfRes {
+        let mut request = self.open_request(&self.path_string(path)?, libc::O_RDONLY)?;
+        // This is an identity check, so a root operand reached through an
+        // ordinary directory symlink must retain its normal follow semantics.
+        request.create_options = 1; // FILE_DIRECTORY_FILE.
+        request.desired_access =
+            FileAccessMask::new(FileAccessMask::FILE_READ_ATTRIBUTES | FileAccessMask::SYNCHRONIZE);
+        let connection = self.client.connection_mut().clone();
+        let outcome = self.runtime.block_on(concurrent_file_identity(
+            connection,
+            self.tree.tree_id,
+            request,
+        ));
+        if let Some(file_id) = outcome.deferred_close {
+            self.deferred_closes.push(file_id);
+        }
+        match outcome.result {
+            Ok(actual) if actual == identity => Ok(()),
+            Ok(_) => Err(VfError::errno(0, libc::ESTALE as u32)
+                .with_message("SMB directory probe path no longer names the retained directory")),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Err(VfError::errno(0, libc::ESTALE as u32)
+                    .with_message(format!("SMB directory probe path is unavailable: {error}")))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub(super) fn read_directory_page(
         &mut self,
         dir: &Path,
@@ -117,15 +156,7 @@ impl SmbVecFs {
             }
             None => {
                 let path = self.path_string(&directory)?;
-                let options = ListOptions::new().index_numbers(masks.contains(AttrMask::FILEID));
-                let reader = self
-                    .runtime
-                    .block_on(self.client.open_directory_reader_with(
-                        &mut self.tree,
-                        &path,
-                        options,
-                    ))
-                    .map_err(|error| smb_error(error, 0))?;
+                let reader = DirectoryReader::open(self, &path, masks.contains(AttrMask::FILEID))?;
                 SmbDirectoryCursor {
                     reader,
                     buffered: VecDeque::new(),
@@ -144,11 +175,7 @@ impl SmbVecFs {
                 validate_entry_name(&entry.name)?;
                 page.push(entry);
             } else {
-                match self
-                    .runtime
-                    .block_on(state.reader.next_batch())
-                    .map_err(|error| smb_error(error, 0))?
-                {
+                match self.runtime.block_on(state.reader.next_batch())? {
                     Some(batch) => state.buffered = batch.into(),
                     None => {
                         complete = true;
@@ -157,6 +184,21 @@ impl SmbVecFs {
                 }
             }
         }
+        // Only fallback probes need a pathname. Query it from the retained
+        // handle, never from the caller's possibly renamed/replaced spelling.
+        // File-only pages retain their ordinary QUERY_DIRECTORY fast path.
+        let needs_probe = page.iter().any(|entry| {
+            !entry.attributes.is_reparse_point() && (entry.is_directory || probe_files)
+        });
+        let probe_directory = if needs_probe {
+            let (path, identity) = self
+                .runtime
+                .block_on(state.reader.current_path(&state.directory))?;
+            self.verify_probe_directory(&path, identity)?;
+            Some((path, identity))
+        } else {
+            None
+        };
         let mut reparse = vec![false; page.len()];
         let mut probes = Vec::with_capacity(32);
         for (index, entry) in page.iter().enumerate() {
@@ -167,7 +209,11 @@ impl SmbVecFs {
             if !entry.is_directory && !probe_files {
                 continue;
             }
-            let child = state.directory.join(&entry.name);
+            let child = probe_directory
+                .as_ref()
+                .expect("probe directory queried")
+                .0
+                .join(&entry.name);
             let path = self.path_string(&child)?;
             let mut create = self.open_request(&path, libc::O_RDONLY)?;
             create.create_options = FILE_OPEN_REPARSE_POINT;
@@ -181,6 +227,9 @@ impl SmbVecFs {
             }
         }
         self.probe_reparse_point_batch(&probes, &mut reparse)?;
+        if let Some((path, identity)) = probe_directory {
+            self.verify_probe_directory(&path, identity)?;
+        }
         let entries = page
             .into_iter()
             .zip(reparse)
@@ -191,6 +240,9 @@ impl SmbVecFs {
                 directory_attrs(&state.directory, entry, masks)
             })
             .collect::<VfResult<Vec<_>>>()?;
+        if complete {
+            self.runtime.block_on(state.reader.close())?;
+        }
         let next = (!complete).then(|| DirPageCursor::new(state));
         Ok((entries, next))
     }

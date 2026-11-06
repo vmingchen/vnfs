@@ -2242,6 +2242,30 @@ mod tests {
     }
 
     #[test]
+    fn recursive_copy_allows_existing_ancestor_destinations() {
+        for destination in ["/parent", "/"] {
+            let (root, mut backend) = fs("copy-ancestor");
+            std::fs::create_dir_all(root.0.join("parent/source/empty")).unwrap();
+            std::fs::write(root.0.join("parent/source/file"), b"payload").unwrap();
+            backend
+                .copy_tree_impl(
+                    Path::new("/parent/source"),
+                    Path::new(destination),
+                    false,
+                    false,
+                )
+                .unwrap();
+            let output = root.0.join(destination.trim_start_matches('/'));
+            assert_eq!(std::fs::read(output.join("file")).unwrap(), b"payload");
+            assert!(output.join("empty").is_dir());
+            assert_eq!(
+                std::fs::read(root.0.join("parent/source/file")).unwrap(),
+                b"payload"
+            );
+        }
+    }
+
+    #[test]
     fn recursive_copy_uses_bounded_directory_pages_and_native_file_batches() {
         let (root, mut backend) = fs("copy-paged-batches");
         std::fs::create_dir_all(root.0.join("source/empty")).unwrap();
