@@ -2369,7 +2369,7 @@ impl NfsClient {
         })
     }
 
-    /// Recursively copy a directory tree (the backend batches per level).
+    /// Recursively copy with bounded directory pages and native file-copy batches.
     #[pyo3(signature = (src, dst, symlinks=false))]
     fn cp_recursive(
         &self,

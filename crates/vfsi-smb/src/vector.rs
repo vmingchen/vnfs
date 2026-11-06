@@ -547,7 +547,23 @@ impl VectorBackend for SmbVecFs {
         max_count: usize,
         recursive: bool,
     ) -> VfResult<Vec<VfAttrs>> {
-        self.listdir_with_reparse_policy(dir, masks, max_count, recursive, false)
+        self.listdir_collect(dir, masks, max_count, recursive)
+    }
+
+    fn listdir_page_impl(
+        &mut self,
+        dir: &Path,
+        masks: AttrMask,
+        cursor: Option<DirPageCursor>,
+        page_size: usize,
+        _max_entries: usize,
+        follow_symlinks: bool,
+    ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
+        if !follow_symlinks && cursor.is_none() {
+            // Ordinary SMB path opens do not guarantee no-follow for every component.
+            return Err(VfError::unsupported(0));
+        }
+        self.read_directory_page(dir, masks, cursor, page_size)
     }
 
     fn vrename_impl(&mut self, pairs: &[(FileOperand, FileOperand)]) -> VfRes {
@@ -768,17 +784,19 @@ impl VectorBackend for SmbVecFs {
         symlinks: bool,
         use_server_side_copy: bool,
     ) -> VfRes {
-        vfsi_sync::backend::helpers::copy_tree_with_listdir(
+        vfsi_sync::backend::helpers::copy_tree_batches_with_pages(
             self,
             source,
             destination,
             symlinks,
             AttrMask::MODE | AttrMask::SIZE,
-            |backend, path, masks| {
-                backend.listdir_with_reparse_policy(path, masks, 0, false, symlinks)
+            |backend, path, masks, cursor| {
+                let (entries, next) =
+                    backend.read_directory_page_with_policy(path, masks, cursor, 256, symlinks)?;
+                let children = (0..entries.len()).map(|_| None).collect();
+                Ok((entries, next, children))
             },
-            |backend, pair| {
-                let pairs = std::slice::from_ref(pair);
+            |backend, pairs| {
                 if use_server_side_copy {
                     backend.vcopy_impl(pairs, vfsi_core::CopyOptions::new())
                 } else {

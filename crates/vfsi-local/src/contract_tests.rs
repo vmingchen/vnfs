@@ -2214,6 +2214,92 @@ mod tests {
     }
 
     #[test]
+    fn recursive_copy_preflights_root_type_and_source_overlap() {
+        let (root, mut backend) = fs("copy-root-preflight");
+        std::fs::create_dir(root.0.join("source")).unwrap();
+        std::fs::write(root.0.join("file"), b"keep").unwrap();
+        assert!(
+            backend
+                .copy_tree_impl(Path::new("/source"), Path::new("/file"), false, false)
+                .is_err(),
+            "an empty directory must not be reported copied over a regular file"
+        );
+        assert_eq!(std::fs::read(root.0.join("file")).unwrap(), b"keep");
+        for target in ["/source", "/source/inside"] {
+            assert!(
+                backend
+                    .copy_tree_impl(Path::new("/source"), Path::new(target), false, false)
+                    .is_err(),
+                "overlapping roots must fail before creating recursive output"
+            );
+        }
+        assert!(
+            std::fs::read_dir(root.0.join("source"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn recursive_copy_uses_bounded_directory_pages_and_native_file_batches() {
+        let (root, mut backend) = fs("copy-paged-batches");
+        std::fs::create_dir_all(root.0.join("source/empty")).unwrap();
+        for index in 0..700 {
+            std::fs::write(
+                root.0.join(format!("source/f-{index:04}")),
+                index.to_string(),
+            )
+            .unwrap();
+        }
+        let mut sizes = Vec::new();
+        vfsi_sync::backend::helpers::copy_tree_batches_with(
+            &mut backend,
+            Path::new("/source"),
+            Path::new("/copy"),
+            false,
+            AttrMask::MODE | AttrMask::SIZE,
+            |backend, pairs| {
+                sizes.push(pairs.len());
+                backend.vcopy_data_impl(pairs)
+            },
+            std::convert::identity,
+        )
+        .unwrap();
+        assert_eq!(sizes.iter().sum::<usize>(), 700);
+        assert!(
+            sizes.contains(&32),
+            "ordinary siblings must reach native vectors"
+        );
+        assert!(sizes.iter().all(|&size| size <= 32));
+        assert!(
+            backend.directory_page_sizes.len() >= 4,
+            "must not collect the entire directory first"
+        );
+        assert!(backend.directory_page_sizes.iter().all(|&size| size <= 256));
+        assert!(root.0.join("copy/empty").is_dir());
+        assert_eq!(std::fs::read(root.0.join("copy/f-0699")).unwrap(), b"699");
+
+        let mut calls = 0;
+        let error = vfsi_sync::backend::helpers::copy_tree_batches_with(
+            &mut backend,
+            Path::new("/source"),
+            Path::new("/failed-copy"),
+            false,
+            AttrMask::MODE,
+            |_, pairs| {
+                calls += 1;
+                assert!(pairs.len() > 1);
+                Err(VfError::transport(None, "lost copy reply"))
+            },
+            std::convert::identity,
+        )
+        .unwrap_err();
+        assert!(error.is_transport());
+        assert_eq!(calls, 1, "a failed vector must never be replayed");
+    }
+
+    #[test]
     fn shared_tree_copy_preserves_symlinks_and_uses_the_copy_strategy() {
         use std::os::unix::fs::PermissionsExt;
 

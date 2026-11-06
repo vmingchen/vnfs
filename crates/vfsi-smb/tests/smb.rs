@@ -1464,3 +1464,84 @@ fn ordinary_descriptor_writes_skip_size_queries_but_end_and_append_require_them(
     operation.unwrap();
     close.unwrap();
 }
+
+#[test]
+fn directory_pages_remain_bounded_and_retain_the_opened_directory_after_rename() {
+    let Some(mut backend) = connect() else { return };
+    let Ok(local_root) = std::env::var("VFSI_SMB_LOCAL_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(format!("/vfsi-smb-directory-pages-{}", std::process::id()));
+    let source = root.join("source");
+    let moved = root.join("moved");
+    let local = Path::new(&local_root).join(root.strip_prefix("/").unwrap());
+    fs::create_dir_all(local.join("source")).unwrap();
+    for index in 0..600 {
+        fs::write(
+            local.join(format!("source/file-{index:04}-{}", "x".repeat(96))),
+            b"x",
+        )
+        .unwrap();
+    }
+    let (first, mut cursor) = backend
+        .listdir_page_impl(
+            &source,
+            AttrMask::MODE | AttrMask::SIZE,
+            None,
+            7,
+            usize::MAX,
+            true,
+        )
+        .unwrap();
+    assert_eq!(first.len(), 7);
+    assert!(cursor.is_some());
+    backend
+        .vrename_impl(&[(
+            FileOperand::from_os_path(&source),
+            FileOperand::from_os_path(&moved),
+        )])
+        .unwrap();
+    let mut names = std::collections::HashSet::new();
+    for entry in first {
+        names.insert(
+            entry
+                .file
+                .path()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_os_string(),
+        );
+    }
+    while cursor.is_some() {
+        let (page, next) = backend
+            .listdir_page_impl(
+                &source,
+                AttrMask::MODE | AttrMask::SIZE,
+                cursor,
+                7,
+                usize::MAX,
+                true,
+            )
+            .unwrap();
+        assert!(page.len() <= 7);
+        for entry in page {
+            assert_eq!(entry.file.path().unwrap().parent(), Some(source.as_path()));
+            assert!(
+                names.insert(
+                    entry
+                        .file
+                        .path()
+                        .unwrap()
+                        .file_name()
+                        .unwrap()
+                        .to_os_string()
+                ),
+                "continuation repeated a name"
+            );
+        }
+        cursor = next;
+    }
+    assert_eq!(names.len(), 600);
+    cleanup_test_tree(&root);
+}

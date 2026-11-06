@@ -178,6 +178,8 @@ pub struct LocalBackend {
     cwd: PathBuf,
     next_fd: i32,
     open_files: HashMap<i32, LocalOpen>,
+    #[cfg(test)]
+    directory_page_sizes: Vec<usize>,
     #[cfg(feature = "test-faults")]
     fault_injector: Option<Arc<dyn FaultInjector>>,
 }
@@ -314,6 +316,8 @@ impl LocalBackend {
             cwd: PathBuf::new(),
             next_fd: 0,
             open_files: HashMap::new(),
+            #[cfg(test)]
+            directory_page_sizes: Vec::new(),
             #[cfg(feature = "test-faults")]
             fault_injector: None,
         })
@@ -2249,6 +2253,8 @@ impl VectorBackend for LocalBackend {
         _max_entries: usize,
         follow_symlinks: bool,
     ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
+        #[cfg(test)]
+        self.directory_page_sizes.push(page_size);
         if page_size == 0 {
             return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
@@ -2520,13 +2526,13 @@ impl VectorBackend for LocalBackend {
         symlinks: bool,
         _use_server_side_copy: bool,
     ) -> VfRes {
-        vfsi_sync::backend::helpers::copy_tree_with(
+        vfsi_sync::backend::helpers::copy_tree_batches_with(
             self,
             src_dir,
             dst,
             symlinks,
             AttrMask::MODE | AttrMask::SIZE | AttrMask::FILEID,
-            |backend, pair| backend.vcopy_data_impl(std::slice::from_ref(pair)),
+            |backend, pairs| backend.vcopy_data_impl(pairs),
             |error| error.with_index(0),
         )
     }

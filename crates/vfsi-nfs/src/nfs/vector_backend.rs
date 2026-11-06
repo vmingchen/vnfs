@@ -1374,20 +1374,21 @@ impl VectorBackend for NfsVecFs {
         src_dir: &Path,
         dst: &Path,
         symlinks: bool,
-        _use_server_side_copy: bool,
+        use_server_side_copy: bool,
     ) -> VfRes {
         self.ensure_writable(1)?;
-        vfsi_sync::backend::helpers::copy_tree_with(
+        vfsi_sync::backend::helpers::copy_tree_batches_with(
             self,
             src_dir,
             dst,
             symlinks,
             AttrMask::MODE | AttrMask::SIZE | AttrMask::FILEID,
-            |backend, pair| {
-                let source = backend.follow_target_path(&backend.server_path(&pair.src_path))?;
-                let destination =
-                    backend.follow_target_path(&backend.server_path(&pair.dst_path))?;
-                backend.copy_extent(&source, &destination, pair)
+            |backend, pairs| {
+                if use_server_side_copy {
+                    backend.vcopy_data_nfs(pairs)
+                } else {
+                    backend.vcopy_data_impl(pairs)
+                }
             },
             |error| error.with_index(0),
         )

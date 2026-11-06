@@ -64,7 +64,6 @@ const FILE_DISPOSITION_INFORMATION: u8 = 13;
 const FILE_END_OF_FILE_INFORMATION: u8 = 20;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-const SMB_REPARSE_PROBE_CONCURRENCY: usize = 32;
 
 #[bitfields::bitfield(u8)]
 #[derive(PartialEq, Eq)]
