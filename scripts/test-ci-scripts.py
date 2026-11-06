@@ -898,14 +898,11 @@ class CSDKTests(unittest.TestCase):
     def test_packaged_sdk_recipe(self):
         subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / "bindings/c/tests/test_build_sdk.py")], check=True)
 
-    @unittest.skipUnless(sys.platform.startswith("linux"), "native POSIX header test requires Linux")
+    @unittest.skipUnless(sys.platform.startswith("linux") or sys.platform == "darwin",
+                         "native C headers require Linux or macOS")
     def test_native_stat_projection(self):
-        with tempfile.TemporaryDirectory() as directory:
-            executable = str(Path(directory) / "posix-fields")
-            subprocess.run(["cc", "-Wall", "-Wextra", "-Werror",
-                "-I" + str(Path(__file__).resolve().parents[1] / "bindings/c/include"),
-                str(Path(__file__).resolve().parents[1] / "bindings/c/tests/posix-fields.c"), "-o", executable], check=True)
-            subprocess.run([executable], check=True)
+        subprocess.run([str(Path(__file__).resolve().parents[1] / "ci/ports/check-c-headers.sh")],
+                       check=True)
 
 if __name__ == "__main__":
     unittest.main()

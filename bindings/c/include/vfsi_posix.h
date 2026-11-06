@@ -55,7 +55,11 @@ static inline int vfsi_attrs_stat_fields(const vfsi_attrs *attrs, struct stat *o
         (intmax_t)out->st_mtime != attrs->mtime_sec ||
         (intmax_t)out->st_ctime != attrs->ctime_sec)
         return EOVERFLOW;
-#ifdef __APPLE__
+#if defined(__APPLE__) && defined(_POSIX_C_SOURCE) && !defined(_DARWIN_C_SOURCE)
+    out->st_atimensec = attrs->atime_nsec;
+    out->st_mtimensec = attrs->mtime_nsec;
+    out->st_ctimensec = attrs->ctime_nsec;
+#elif defined(__APPLE__)
     out->st_atimespec.tv_nsec = attrs->atime_nsec;
     out->st_mtimespec.tv_nsec = attrs->mtime_nsec;
     out->st_ctimespec.tv_nsec = attrs->ctime_nsec;

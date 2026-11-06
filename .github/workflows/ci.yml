@@ -12,6 +12,14 @@ env:
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
 jobs:
+  c-headers-macos:
+    runs-on: macos-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check native C/C++ headers and POSIX projection
+        run: ci/ports/check-c-headers.sh
+
   uring:
     runs-on: ubuntu-26.04
     timeout-minutes: 15

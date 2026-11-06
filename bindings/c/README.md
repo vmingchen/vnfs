@@ -13,6 +13,10 @@ with:
 cargo build -p vfsi-c
 ```
 
+Run `ci/ports/check-c-headers.sh` for native C99, C11, and C++ header checks,
+optional-symbol loader checks, and POSIX field projection on Linux or macOS.
+This check uses the checked-in headers and does not build a backend library.
+
 Applications that keep VFSI optional at runtime can include
 `include/vfsi_dynamic.h` after the library is installed. Its
 `vfsi_dynamic_load()` resolves the common optional port-facing symbols and
