@@ -1,4 +1,5 @@
 //! Optional retained child cursors for application-owned directory frontiers.
+use super::listing::{deliver_listing, plan_directories, prepare_listing_entry, ListingBudget};
 use super::*;
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;

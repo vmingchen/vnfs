@@ -167,14 +167,44 @@ typedef struct vfsi_dir_cursor vfsi_dir_cursor;
 typedef struct vfsi_fs vfsi_fs;
 
 /**
- * Aggregate limits for complete shallow vector listings. Zero is a zero
- * budget; SIZE_MAX explicitly opts out. MODE is always requested.
+ * Uniform ABI-v3 result for scalar and vector operations.
+ *
+ * `index` is the completed count on success, the failing operation index on
+ * an attributable error, or `VFSI_INDEX_UNKNOWN`. Vector calls also populate
+ * a caller-owned result per element;
+ * after a submitted concurrent batch fails, every non-failing element is
+ * marked indeterminate because it may already have completed. `err_no`
+ * retains the backend status while `category` is portable across protocols.
  */
-typedef struct vfsi_listing_options {
-  size_t max_entries;
-  size_t max_path_bytes;
-  uint32_t attributes;
-} vfsi_listing_options;
+typedef struct vfsi_result {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  size_t index;
+  uint32_t category;
+  uint32_t err_no;
+  char message[VFSI_RESULT_MESSAGE_SIZE];
+} vfsi_result;
+
+/**
+ * Complete object identity, not an open-instance ID or a durable global ID.
+ * Initialize struct_size=sizeof(vfsi_object_id), version=VFSI_OBJECT_ID_VERSION.
+ * Compare namespace_id, both fs_id words and fileid; zero values in fs_id or
+ * fileid are valid. namespace_id is an opaque nonzero token scoped to this
+ * process and loaded library instance; never persist it across reloads.
+ * Local mount views share one namespace; NFS views share a configured endpoint
+ * regardless of export root/minor version. Different endpoint spellings are
+ * conservatively distinct. IDs may be reused after deletion/server changes.
+ */
+typedef struct vfsi_object_id {
+  uint32_t struct_size;
+  uint32_t version;
+  uint64_t namespace_id;
+  /**
+   * Full 128-bit backend filesystem ID, high word first. Never truncate it.
+   */
+  uint64_t fs_id[2];
+  uint64_t fileid;
+} vfsi_object_id;
 
 /**
  * Attributes returned by [`vfsi_stat`] and passed to listdir callbacks.
@@ -204,11 +234,37 @@ typedef struct vfsi_attrs {
   uint32_t ctime_nsec;
 } vfsi_attrs;
 
-typedef bool (*vfsi_indexed_listdir_cb)(size_t,
-                                        const char*,
-                                        const char*,
-                                        const struct vfsi_attrs*,
-                                        void*);
+/**
+ * Exactly one target: path != NULL and fd == -1, or path == NULL and fd >= 0.
+ * flags is zero or VFSI_OBJECT_ID_NOFOLLOW (paths only). out points to an
+ * initialized version/size header. attrs is optional output-only ABI-v3 storage;
+ * when non-NULL, attributes and identity come from the same GETATTR response.
+ * Output pointers must be distinct, exclusive and disjoint from all inputs.
+ */
+typedef struct vfsi_object_id_op {
+  const char *path;
+  int fd;
+  uint32_t flags;
+  struct vfsi_object_id *out;
+  struct vfsi_attrs *attrs;
+} vfsi_object_id_op;
+
+/**
+ * Aggregate limits for complete shallow vector listings. Zero is a zero
+ * budget; SIZE_MAX explicitly opts out. MODE is always requested.
+ */
+typedef struct vfsi_listing_options {
+  size_t max_entries;
+  size_t max_path_bytes;
+  uint32_t attributes;
+} vfsi_listing_options;
+
+typedef bool (*vfsi_indexed_listdir_cursor_cb)(size_t,
+                                               const char*,
+                                               const char*,
+                                               const struct vfsi_attrs*,
+                                               struct vfsi_dir_cursor*,
+                                               void*);
 
 /**
  * Complete=1, stopped=2, not completed=0. Empty directories are explicitly
@@ -220,25 +276,15 @@ typedef struct vfsi_listing_result {
 } vfsi_listing_result;
 
 /**
- * Complete object identity, not an open-instance ID or a durable global ID.
- * Initialize struct_size=sizeof(vfsi_object_id), version=VFSI_OBJECT_ID_VERSION.
- * Compare namespace_id, both fs_id words and fileid; zero values in fs_id or
- * fileid are valid. namespace_id is an opaque nonzero token scoped to this
- * process and loaded library instance; never persist it across reloads.
- * Local mount views share one namespace; NFS views share a configured endpoint
- * regardless of export root/minor version. Different endpoint spellings are
- * conservatively distinct. IDs may be reused after deletion/server changes.
+ * Borrowed server endpoint, export root and local mount point, respectively.
  */
-typedef struct vfsi_object_id {
-  uint32_t struct_size;
-  uint32_t version;
-  uint64_t namespace_id;
-  /**
-   * Full 128-bit backend filesystem ID, high word first. Never truncate it.
-   */
-  uint64_t fs_id[2];
-  uint64_t fileid;
-} vfsi_object_id;
+typedef void (*vfsi_nfs_mount_cb)(const char*, const char*, const char*, void*);
+
+typedef bool (*vfsi_indexed_listdir_cb)(size_t,
+                                        const char*,
+                                        const char*,
+                                        const struct vfsi_attrs*,
+                                        void*);
 
 typedef bool (*vfsi_indexed_listdir_ids_cb)(size_t,
                                             const char*,
@@ -246,11 +292,6 @@ typedef bool (*vfsi_indexed_listdir_ids_cb)(size_t,
                                             const struct vfsi_attrs*,
                                             const struct vfsi_object_id*,
                                             void*);
-
-/**
- * Borrowed server endpoint, export root and local mount point, respectively.
- */
-typedef void (*vfsi_nfs_mount_cb)(const char*, const char*, const char*, void*);
 
 /**
  * Resource policy for an incremental tree traversal. Zero is a zero limit,
@@ -270,24 +311,12 @@ typedef struct vfsi_walk_options {
  */
 typedef uint32_t (*vfsi_walk_cb)(const char*, uint32_t, size_t, const struct vfsi_attrs*, void*);
 
-/**
- * Uniform ABI-v3 result for scalar and vector operations.
- *
- * `index` is the completed count on success, the failing operation index on
- * an attributable error, or `VFSI_INDEX_UNKNOWN`. Vector calls also populate
- * a caller-owned result per element;
- * after a submitted concurrent batch fails, every non-failing element is
- * marked indeterminate because it may already have completed. `err_no`
- * retains the backend status while `category` is portable across protocols.
- */
-typedef struct vfsi_result {
-  uint32_t struct_size;
-  uint32_t abi_version;
-  size_t index;
-  uint32_t category;
-  uint32_t err_no;
-  char message[VFSI_RESULT_MESSAGE_SIZE];
-} vfsi_result;
+typedef bool (*vfsi_listdir_cb)(const char *name, const struct vfsi_attrs *attrs, void *userdata);
+
+typedef bool (*vfsi_listdirv_cb)(const char *dir,
+                                 const char *name,
+                                 const struct vfsi_attrs *attrs,
+                                 void *userdata);
 
 typedef struct vfsi_open_op {
   const char *path;
@@ -332,6 +361,16 @@ typedef struct vfsi_pwrite_op {
   size_t wrote;
 } vfsi_pwrite_op;
 
+typedef bool (*vfsi_read_stream_cb)(const char *path,
+                                    size_t index,
+                                    uint64_t offset,
+                                    const uint8_t *data,
+                                    size_t len,
+                                    bool eof,
+                                    void *userdata);
+
+typedef bool (*vfsi_read_paths_cb)(const char *path, const uint8_t *data, size_t len, void *userdata);
+
 typedef struct vfsi_mkdir_op {
   const char *path;
   uint32_t mode;
@@ -351,94 +390,90 @@ typedef struct vfsi_copy_op {
   uint8_t to_eof;
 } vfsi_copy_op;
 
-typedef bool (*vfsi_read_stream_cb)(const char *path,
-                                    size_t index,
-                                    uint64_t offset,
-                                    const uint8_t *data,
-                                    size_t len,
-                                    bool eof,
-                                    void *userdata);
-
-typedef bool (*vfsi_listdir_cb)(const char *name, const struct vfsi_attrs *attrs, void *userdata);
-
-typedef bool (*vfsi_listdirv_cb)(const char *dir,
-                                 const char *name,
-                                 const struct vfsi_attrs *attrs,
-                                 void *userdata);
-
-typedef bool (*vfsi_read_paths_cb)(const char *path, const uint8_t *data, size_t len, void *userdata);
-
-/**
- * Exactly one target: path != NULL and fd == -1, or path == NULL and fd >= 0.
- * flags is zero or VFSI_OBJECT_ID_NOFOLLOW (paths only). out points to an
- * initialized version/size header. attrs is optional output-only ABI-v3 storage;
- * when non-NULL, attributes and identity come from the same GETATTR response.
- * Output pointers must be distinct, exclusive and disjoint from all inputs.
- */
-typedef struct vfsi_object_id_op {
-  const char *path;
-  int fd;
-  uint32_t flags;
-  struct vfsi_object_id *out;
-  struct vfsi_attrs *attrs;
-} vfsi_object_id_op;
-
-typedef bool (*vfsi_indexed_listdir_cursor_cb)(size_t,
-                                               const char*,
-                                               const char*,
-                                               const struct vfsi_attrs*,
-                                               struct vfsi_dir_cursor*,
-                                               void*);
-
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
 
 /**
- * Complete bounded vector listings, with callbacks outside backend locks.
- * Collect the bounded cohort before delivery, so callers may safely fall back
- * on a listing error without mixing a partial snapshot into ordinary scanning.
- * Budgets include duplicate operands. Results are associated with input indices.
- * A false callback stops delivery successfully and is distinguishable from EOF.
- * A callback stop marks the entire cohort stopped, even if an earlier empty
- * directory had no entries to deliver. Requested but absent attributes fail
- * with ENOTSUP before delivery; applications must not fabricate stat values.
- * Operand planning is additionally capped by the default directory entry/path
- * limits, independently of the configured response quotas.
- * Backend first-page fetches use bounded directory cohorts; aggregate quotas
- * and deferred callback delivery span all cohorts, including duplicate inputs.
+ * Query path or retained-descriptor identities in backend vector batches.
+ * Returns ABI-v3 results; output IDs are usable only for successful items.
+ * Preflight validates every target/header before any backend request. Valid
+ * output payloads are cleared before dispatch, including on backend failure.
+ * Missing identity components report Unsupported, never fabricated zeros.
+ * Follow/no-follow policy changes partition the batch into contiguous runs.
+ * Planning is bounded by the default directory entry/path-byte limits.
  *
  * # Safety
- * `fs` must be a live handle. `dirs` and `results` must hold `count` elements,
- * and each directory must be NUL-terminated. `options` must be readable for the
- * call. Callback strings/attributes are borrowed only during the invocation.
- * The callback must not free `fs` or mutate the input/result arrays.
+ * Follow the module C pointer contract. Each out supplies a readable 8-byte
+ * header and exclusive storage for its declared size, at least the v1 layout.
+ * Older/smaller headers are rejected without reading/writing past the header.
+ * No pointers/outputs may alias. count zero permits null arrays.
  */
-int vfsi_listdirs(struct vfsi_fs *fs,
-                  const char *const *dirs,
-                  size_t count,
-                  const struct vfsi_listing_options *options,
-                  vfsi_indexed_listdir_cb cb,
-                  void *userdata,
-                  struct vfsi_listing_result *results);
+struct vfsi_result vfsi_get_object_idv(struct vfsi_fs *fs,
+                                       const struct vfsi_object_id_op *ops,
+                                       size_t count,
+                                       struct vfsi_result *item_results);
 
 /**
- * Bounded listings with attributes and scoped identity from the same READDIR
- * observation. ABI-v3 vfsi_attrs is unchanged. Unsupported identity fails
- * before any delivery; budgets, cancellation and lock behavior match listdirs.
- * No additional per-entry GETATTR pass is performed.
+ * Query a path identity, with optional VFSI_OBJECT_ID_NOFOLLOW.
+ * # Safety
+ * Same output-header, storage and pointer contract as vfsi_get_object_idv.
+ */
+struct vfsi_result vfsi_get_object_id(struct vfsi_fs *fs,
+                                      const char *path,
+                                      uint32_t flags,
+                                      struct vfsi_object_id *out);
+
+/**
+ * Query the object pinned by a retained C descriptor, independent of its name.
+ * # Safety
+ * Same output-header, storage and pointer contract as vfsi_get_object_idv.
+ */
+struct vfsi_result vfsi_fget_object_id(struct vfsi_fs *fs, int fd, struct vfsi_object_id *out);
+
+/**
+ * Free a child cursor not submitted for descent. Null is accepted. This
+ * performs no directory enumeration and does not need a live filesystem.
  *
  * # Safety
- * Same pointer and lifetime contract as vfsi_listdirs. The identity pointer
- * is borrowed only for the callback invocation; copy it before returning.
+ * A non-null cursor must be uniquely owned and originate from this API.
  */
-int vfsi_listdirs_with_ids(struct vfsi_fs *fs,
-                           const char *const *dirs,
-                           size_t count,
-                           const struct vfsi_listing_options *options,
-                           vfsi_indexed_listdir_ids_cb cb,
-                           void *userdata,
-                           struct vfsi_listing_result *results);
+void vfsi_dir_cursor_free(struct vfsi_dir_cursor *cursor);
+
+/**
+ * Complete bounded shallow listings for an application-owned frontier.
+ * Null cursor slots start fresh directory operands. Non-null slots must be
+ * unique child seeds returned by this function for the same filesystem handle
+ * and original path. After input validation, ALL slots are consumed and set to null,
+ * including on listing failure. Invalid inputs leave the slots unchanged.
+ *
+ * Native child seeds survive between calls. Page continuations stay on the
+ * same backend cursor while each cohort is collected, without reopening
+ * ancestor paths.
+ * Path-based child fallbacks require no-follow resolution. Initial roots use
+ * ordinary shallow-listing resolution. All rows/attributes are validated
+ * before any callback, with shared entry/path quotas from options.
+ *
+ * Every non-null child passed to the callback transfers ownership to it,
+ * including when it returns false. Retain admitted directories for later
+ * descent; free excluded/unused children. Undelivered children are freed by
+ * this function. Completion/cancellation match vfsi_listdirs. The callback
+ * runs outside the backend lock and may call other filesystem operations.
+ *
+ * # Safety
+ * The vfsi_listdirs pointer contract applies. cursors and results hold count
+ * exclusive elements, disjoint from each other and all other inputs. count
+ * is at most VFSI_DIRECTORY_COHORT_MAX. Callback strings/attrs are borrowed
+ * only during the call; child cursors are uniquely owned after delivery.
+ */
+int vfsi_listdirs_from_cursors(struct vfsi_fs *fs,
+                               const char *const *dirs,
+                               struct vfsi_dir_cursor **cursors,
+                               size_t count,
+                               const struct vfsi_listing_options *options,
+                               vfsi_indexed_listdir_cursor_cb cb,
+                               void *userdata,
+                               struct vfsi_listing_result *results);
 
 /**
  * Return the ABI version implemented by the loaded library.
@@ -549,21 +584,6 @@ int vfsi_nfs_from_mount(const char *path, struct vfsi_fs **out);
 int vfsi_nfs_mount_info(const char *path, vfsi_nfs_mount_cb cb, void *userdata);
 
 /**
- * Incremental no-follow traversal. Callbacks run outside the filesystem lock.
- * Pruned directories are never listed. Errors can follow delivered events;
- * callers must not replay side-effectful callbacks through another backend.
- *
- * # Safety
- * All pointers, buffers and callbacks must satisfy the module-level C
- * pointer contract for their documented lengths and the full call duration.
- */
-int vfsi_walk(struct vfsi_fs *fs,
-              const char *root,
-              const struct vfsi_walk_options *options,
-              vfsi_walk_cb cb,
-              void *userdata);
-
-/**
  * Connect to an NFSv4.1/4.2 server, mapping a local kernel `mountpoint` to the
  * server-side `export_root` beneath the NFSv4 pseudo-root.
  *
@@ -620,13 +640,106 @@ int vfsi_smb_open_mount(const char *server,
 void vfsi_free(struct vfsi_fs *fs);
 
 /**
- * Stat `path`, following a final symlink.
+ * Complete bounded vector listings, with callbacks outside backend locks.
+ * Collect the bounded cohort before delivery, so callers may safely fall back
+ * on a listing error without mixing a partial snapshot into ordinary scanning.
+ * Budgets include duplicate operands. Results are associated with input indices.
+ * A false callback stops delivery successfully and is distinguishable from EOF.
+ * A callback stop marks the entire cohort stopped, even if an earlier empty
+ * directory had no entries to deliver. Requested but absent attributes fail
+ * with ENOTSUP before delivery; applications must not fabricate stat values.
+ * Operand planning is additionally capped by the default directory entry/path
+ * limits, independently of the configured response quotas.
+ * Backend first-page fetches use bounded directory cohorts; aggregate quotas
+ * and deferred callback delivery span all cohorts, including duplicate inputs.
+ *
+ * # Safety
+ * `fs` must be a live handle. `dirs` and `results` must hold `count` elements,
+ * and each directory must be NUL-terminated. `options` must be readable for the
+ * call. Callback strings/attributes are borrowed only during the invocation.
+ * The callback must not free `fs` or mutate the input/result arrays.
+ */
+int vfsi_listdirs(struct vfsi_fs *fs,
+                  const char *const *dirs,
+                  size_t count,
+                  const struct vfsi_listing_options *options,
+                  vfsi_indexed_listdir_cb cb,
+                  void *userdata,
+                  struct vfsi_listing_result *results);
+
+/**
+ * Bounded listings with attributes and scoped identity from the same READDIR
+ * observation. ABI-v3 vfsi_attrs is unchanged. Unsupported identity fails
+ * before any delivery; budgets, cancellation and lock behavior match listdirs.
+ * No additional per-entry GETATTR pass is performed.
+ *
+ * # Safety
+ * Same pointer and lifetime contract as vfsi_listdirs. The identity pointer
+ * is borrowed only for the callback invocation; copy it before returning.
+ */
+int vfsi_listdirs_with_ids(struct vfsi_fs *fs,
+                           const char *const *dirs,
+                           size_t count,
+                           const struct vfsi_listing_options *options,
+                           vfsi_indexed_listdir_ids_cb cb,
+                           void *userdata,
+                           struct vfsi_listing_result *results);
+
+/**
+ * Incremental no-follow traversal. Callbacks run outside the filesystem lock.
+ * Pruned directories are never listed. Errors can follow delivered events;
+ * callers must not replay side-effectful callbacks through another backend.
  *
  * # Safety
  * All pointers, buffers and callbacks must satisfy the module-level C
  * pointer contract for their documented lengths and the full call duration.
  */
-int vfsi_stat(struct vfsi_fs *fs, const char *path, struct vfsi_attrs *out);
+int vfsi_walk(struct vfsi_fs *fs,
+              const char *root,
+              const struct vfsi_walk_options *options,
+              vfsi_walk_cb cb,
+              void *userdata);
+
+/**
+ * List `dir` and call `cb` for each entry. Returning `false` from `cb`
+ * stops the listing.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
+ */
+int vfsi_listdir(struct vfsi_fs *fs, const char *dir, vfsi_listdir_cb cb, void *userdata);
+
+/**
+ * One bounded directory listing. Zero permits only an empty directory.
+ * Callbacks run outside the filesystem lock.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
+ */
+int vfsi_listdir_with_limits(struct vfsi_fs *fs,
+                             const char *dir,
+                             size_t max_entries,
+                             size_t max_path_bytes,
+                             vfsi_listdir_cb cb,
+                             void *userdata);
+
+/**
+ * List several directories in one vectorized batch, calling `cb` for each
+ * entry with the directory the entry came from.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
+ */
+int vfsi_listdirv(struct vfsi_fs *fs,
+                  const char *const *dirs,
+                  size_t count,
+                  size_t max_entries,
+                  bool recursive,
+                  vfsi_listdirv_cb cb,
+                  void *userdata);
 
 /**
  * Open a file and return a vfsi descriptor (`>= 0`), or a negative errno.
@@ -645,6 +758,65 @@ int vfsi_open(struct vfsi_fs *fs, const char *path, int flags, uint32_t mode);
  * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_close(struct vfsi_fs *fs, int fd);
+
+/**
+ * Open `count` files in one backend vector call. ABI-v2 functions remain
+ * available; this and the other `*v` entry points use the uniform ABI-v3
+ * overall and per-element result contract.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
+ */
+struct vfsi_result vfsi_openv(struct vfsi_fs *fs,
+                              struct vfsi_open_op *ops,
+                              size_t count,
+                              struct vfsi_result *item_results);
+
+/**
+ * Close a descriptor array in one backend vector call.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
+ */
+struct vfsi_result vfsi_closev(struct vfsi_fs *fs,
+                               const int *fds,
+                               size_t count,
+                               struct vfsi_result *item_results);
+
+/**
+ * Stat `path`, following a final symlink.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
+ */
+int vfsi_stat(struct vfsi_fs *fs, const char *path, struct vfsi_attrs *out);
+
+/**
+ * Stat a path array in one backend vector call.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
+ */
+struct vfsi_result vfsi_statv(struct vfsi_fs *fs,
+                              struct vfsi_stat_op *ops,
+                              size_t count,
+                              struct vfsi_result *item_results);
+
+/**
+ * Set selected attributes for a path array in one backend vector call.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
+ */
+struct vfsi_result vfsi_setattrv(struct vfsi_fs *fs,
+                                 const struct vfsi_setattr_op *ops,
+                                 size_t count,
+                                 struct vfsi_result *item_results);
 
 /**
  * Read up to `len` bytes at `offset` into `buf`; writes the actual count to
@@ -672,6 +844,79 @@ int vfsi_pwrite(struct vfsi_fs *fs,
                 size_t len,
                 uint64_t offset,
                 size_t *wrote);
+
+/**
+ * Positioned vector read using caller-owned buffers.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
+ */
+struct vfsi_result vfsi_preadv(struct vfsi_fs *fs,
+                               struct vfsi_pread_op *ops,
+                               size_t count,
+                               struct vfsi_result *item_results);
+
+/**
+ * Positioned vector write using caller-owned buffers.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
+ */
+struct vfsi_result vfsi_pwritev(struct vfsi_fs *fs,
+                                struct vfsi_pwrite_op *ops,
+                                size_t count,
+                                struct vfsi_result *item_results);
+
+/**
+ * Stream several paths in bounded vectorized chunks. Returning `false` from
+ * `cb` cancels successfully. Callbacks provide backpressure between bounded
+ * read waves and run outside the backend lock; they may query this filesystem.
+ * The handle and input arrays must remain live and unchanged during callbacks.
+ * On success, `index` counts files whose EOF was delivered to the callback,
+ * including an EOF callback that cancels the stream.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
+ */
+struct vfsi_result vfsi_read_streamv(struct vfsi_fs *fs,
+                                     const char *const *paths,
+                                     size_t count,
+                                     size_t chunk_size,
+                                     size_t memory_limit,
+                                     vfsi_read_stream_cb cb,
+                                     void *userdata);
+
+/**
+ * Read the full contents of several files in one vectorized batch, calling
+ * `cb` for each file after its data has been fetched.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
+ */
+int vfsi_read_paths(struct vfsi_fs *fs,
+                    const char *const *paths,
+                    size_t count,
+                    vfsi_read_paths_cb cb,
+                    void *userdata);
+
+/**
+ * Whole-file vector with an explicit aggregate payload budget. Oversized
+ * results are an error, never successful truncation. Zero is a zero budget.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
+ */
+int vfsi_read_paths_with_limit(struct vfsi_fs *fs,
+                               const char *const *paths,
+                               size_t count,
+                               size_t max_bytes,
+                               vfsi_read_paths_cb cb,
+                               void *userdata);
 
 /**
  * Create a directory (`create_parents != 0` behaves like `mkdir -p`).
@@ -716,80 +961,6 @@ int vfsi_copy(struct vfsi_fs *fs,
               uint64_t dst_offset,
               uint64_t length,
               bool to_eof);
-
-/**
- * Open `count` files in one backend vector call. ABI-v2 functions remain
- * available; this and the other `*v` entry points use the uniform ABI-v3
- * overall and per-element result contract.
- *
- * # Safety
- * All pointers, buffers and callbacks must satisfy the module-level C
- * pointer contract for their documented lengths and the full call duration.
- */
-struct vfsi_result vfsi_openv(struct vfsi_fs *fs,
-                              struct vfsi_open_op *ops,
-                              size_t count,
-                              struct vfsi_result *item_results);
-
-/**
- * Close a descriptor array in one backend vector call.
- *
- * # Safety
- * All pointers, buffers and callbacks must satisfy the module-level C
- * pointer contract for their documented lengths and the full call duration.
- */
-struct vfsi_result vfsi_closev(struct vfsi_fs *fs,
-                               const int *fds,
-                               size_t count,
-                               struct vfsi_result *item_results);
-
-/**
- * Stat a path array in one backend vector call.
- *
- * # Safety
- * All pointers, buffers and callbacks must satisfy the module-level C
- * pointer contract for their documented lengths and the full call duration.
- */
-struct vfsi_result vfsi_statv(struct vfsi_fs *fs,
-                              struct vfsi_stat_op *ops,
-                              size_t count,
-                              struct vfsi_result *item_results);
-
-/**
- * Set selected attributes for a path array in one backend vector call.
- *
- * # Safety
- * All pointers, buffers and callbacks must satisfy the module-level C
- * pointer contract for their documented lengths and the full call duration.
- */
-struct vfsi_result vfsi_setattrv(struct vfsi_fs *fs,
-                                 const struct vfsi_setattr_op *ops,
-                                 size_t count,
-                                 struct vfsi_result *item_results);
-
-/**
- * Positioned vector read using caller-owned buffers.
- *
- * # Safety
- * All pointers, buffers and callbacks must satisfy the module-level C
- * pointer contract for their documented lengths and the full call duration.
- */
-struct vfsi_result vfsi_preadv(struct vfsi_fs *fs,
-                               struct vfsi_pread_op *ops,
-                               size_t count,
-                               struct vfsi_result *item_results);
-
-/**
- * Positioned vector write using caller-owned buffers.
- *
- * # Safety
- * All pointers, buffers and callbacks must satisfy the module-level C
- * pointer contract for their documented lengths and the full call duration.
- */
-struct vfsi_result vfsi_pwritev(struct vfsi_fs *fs,
-                                struct vfsi_pwrite_op *ops,
-                                size_t count,
-                                struct vfsi_result *item_results);
 
 /**
  * Create a directory array in one backend vector call.
@@ -838,177 +1009,6 @@ struct vfsi_result vfsi_copyv(struct vfsi_fs *fs,
                               const struct vfsi_copy_op *ops,
                               size_t count,
                               struct vfsi_result *item_results);
-
-/**
- * Stream several paths in bounded vectorized chunks. Returning `false` from
- * `cb` cancels successfully. Callbacks provide backpressure between bounded
- * read waves and run outside the backend lock; they may query this filesystem.
- * The handle and input arrays must remain live and unchanged during callbacks.
- * On success, `index` counts files whose EOF was delivered to the callback,
- * including an EOF callback that cancels the stream.
- *
- * # Safety
- * All pointers, buffers and callbacks must satisfy the module-level C
- * pointer contract for their documented lengths and the full call duration.
- */
-struct vfsi_result vfsi_read_streamv(struct vfsi_fs *fs,
-                                     const char *const *paths,
-                                     size_t count,
-                                     size_t chunk_size,
-                                     size_t memory_limit,
-                                     vfsi_read_stream_cb cb,
-                                     void *userdata);
-
-/**
- * List `dir` and call `cb` for each entry. Returning `false` from `cb`
- * stops the listing.
- *
- * # Safety
- * All pointers, buffers and callbacks must satisfy the module-level C
- * pointer contract for their documented lengths and the full call duration.
- */
-int vfsi_listdir(struct vfsi_fs *fs, const char *dir, vfsi_listdir_cb cb, void *userdata);
-
-/**
- * One bounded directory listing. Zero permits only an empty directory.
- * Callbacks run outside the filesystem lock.
- *
- * # Safety
- * All pointers, buffers and callbacks must satisfy the module-level C
- * pointer contract for their documented lengths and the full call duration.
- */
-int vfsi_listdir_with_limits(struct vfsi_fs *fs,
-                             const char *dir,
-                             size_t max_entries,
-                             size_t max_path_bytes,
-                             vfsi_listdir_cb cb,
-                             void *userdata);
-
-/**
- * List several directories in one vectorized batch, calling `cb` for each
- * entry with the directory the entry came from.
- *
- * # Safety
- * All pointers, buffers and callbacks must satisfy the module-level C
- * pointer contract for their documented lengths and the full call duration.
- */
-int vfsi_listdirv(struct vfsi_fs *fs,
-                  const char *const *dirs,
-                  size_t count,
-                  size_t max_entries,
-                  bool recursive,
-                  vfsi_listdirv_cb cb,
-                  void *userdata);
-
-/**
- * Read the full contents of several files in one vectorized batch, calling
- * `cb` for each file after its data has been fetched.
- *
- * # Safety
- * All pointers, buffers and callbacks must satisfy the module-level C
- * pointer contract for their documented lengths and the full call duration.
- */
-int vfsi_read_paths(struct vfsi_fs *fs,
-                    const char *const *paths,
-                    size_t count,
-                    vfsi_read_paths_cb cb,
-                    void *userdata);
-
-/**
- * Whole-file vector with an explicit aggregate payload budget. Oversized
- * results are an error, never successful truncation. Zero is a zero budget.
- *
- * # Safety
- * All pointers, buffers and callbacks must satisfy the module-level C
- * pointer contract for their documented lengths and the full call duration.
- */
-int vfsi_read_paths_with_limit(struct vfsi_fs *fs,
-                               const char *const *paths,
-                               size_t count,
-                               size_t max_bytes,
-                               vfsi_read_paths_cb cb,
-                               void *userdata);
-
-/**
- * Query path or retained-descriptor identities in backend vector batches.
- * Returns ABI-v3 results; output IDs are usable only for successful items.
- * Preflight validates every target/header before any backend request. Valid
- * output payloads are cleared before dispatch, including on backend failure.
- * Missing identity components report Unsupported, never fabricated zeros.
- * Follow/no-follow policy changes partition the batch into contiguous runs.
- * Planning is bounded by the default directory entry/path-byte limits.
- *
- * # Safety
- * Follow the module C pointer contract. Each out supplies a readable 8-byte
- * header and exclusive storage for its declared size, at least the v1 layout.
- * Older/smaller headers are rejected without reading/writing past the header.
- * No pointers/outputs may alias. count zero permits null arrays.
- */
-struct vfsi_result vfsi_get_object_idv(struct vfsi_fs *fs,
-                                       const struct vfsi_object_id_op *ops,
-                                       size_t count,
-                                       struct vfsi_result *item_results);
-
-/**
- * Query a path identity, with optional VFSI_OBJECT_ID_NOFOLLOW.
- * # Safety
- * Same output-header, storage and pointer contract as vfsi_get_object_idv.
- */
-struct vfsi_result vfsi_get_object_id(struct vfsi_fs *fs,
-                                      const char *path,
-                                      uint32_t flags,
-                                      struct vfsi_object_id *out);
-
-/**
- * Query the object pinned by a retained C descriptor, independent of its name.
- * # Safety
- * Same output-header, storage and pointer contract as vfsi_get_object_idv.
- */
-struct vfsi_result vfsi_fget_object_id(struct vfsi_fs *fs, int fd, struct vfsi_object_id *out);
-
-/**
- * Free a child cursor not submitted for descent. Null is accepted. This
- * performs no directory enumeration and does not need a live filesystem.
- *
- * # Safety
- * A non-null cursor must be uniquely owned and originate from this API.
- */
-void vfsi_dir_cursor_free(struct vfsi_dir_cursor *cursor);
-
-/**
- * Complete bounded shallow listings for an application-owned frontier.
- * Null cursor slots start fresh directory operands. Non-null slots must be
- * unique child seeds returned by this function for the same filesystem handle
- * and original path. After input validation, ALL slots are consumed and set to null,
- * including on listing failure. Invalid inputs leave the slots unchanged.
- *
- * Native child seeds survive between calls. Page continuations stay on the
- * same backend cursor while each cohort is collected, without reopening
- * ancestor paths.
- * Path-based child fallbacks require no-follow resolution. Initial roots use
- * ordinary shallow-listing resolution. All rows/attributes are validated
- * before any callback, with shared entry/path quotas from options.
- *
- * Every non-null child passed to the callback transfers ownership to it,
- * including when it returns false. Retain admitted directories for later
- * descent; free excluded/unused children. Undelivered children are freed by
- * this function. Completion/cancellation match vfsi_listdirs. The callback
- * runs outside the backend lock and may call other filesystem operations.
- *
- * # Safety
- * The vfsi_listdirs pointer contract applies. cursors and results hold count
- * exclusive elements, disjoint from each other and all other inputs. count
- * is at most VFSI_DIRECTORY_COHORT_MAX. Callback strings/attrs are borrowed
- * only during the call; child cursors are uniquely owned after delivery.
- */
-int vfsi_listdirs_from_cursors(struct vfsi_fs *fs,
-                               const char *const *dirs,
-                               struct vfsi_dir_cursor **cursors,
-                               size_t count,
-                               const struct vfsi_listing_options *options,
-                               vfsi_indexed_listdir_cursor_cb cb,
-                               void *userdata,
-                               struct vfsi_listing_result *results);
 
 #ifdef __cplusplus
 }  // extern "C"
