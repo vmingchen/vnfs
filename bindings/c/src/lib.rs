@@ -115,6 +115,8 @@ mod identity;
 pub use identity::*;
 mod directory;
 pub use directory::*;
+mod listing;
+use listing::{deliver_listing, plan_directories, prepare_listing_entry, ListingBudget};
 
 /// Opaque filesystem handle owned by C.
 pub struct vfsi_fs {
@@ -757,57 +759,18 @@ unsafe fn listdirs_snapshot(
             } else {
                 AttrMask::empty()
             };
-        // Bound planning storage as well as returned entries; empty inputs can
-        // otherwise bypass every payload quota.
-        if count > vfsi_sync::DEFAULT_DIRECTORY_MAX_ENTRIES {
-            return libc::EFBIG;
+        // SAFETY: the exported pointer contract keeps all inputs live for the call.
+        let plan = match unsafe { plan_directories(fs, dirs, count) } {
+            Ok(plan) => plan,
+            Err(code) => return code,
+        };
+        let mut index = std::collections::HashMap::<&Path, Vec<usize>>::new();
+        for (i, path) in plan.paths.iter().enumerate() {
+            index.entry(path.as_path()).or_default().push(i);
         }
-        let mut planning_bytes = 0usize;
-        // Check borrowed input spellings before allocating their owned copies.
-        for i in 0..count {
-            // SAFETY: i is inside count and the caller supplies count live input pointers
-            // for this call.
-            let pointer = unsafe { *dirs.add(i) };
-            if pointer.is_null() {
-                return libc::EINVAL;
-            }
-            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
-            // call, as required by the exported ABI.
-            let length = unsafe { CStr::from_ptr(pointer) }.to_bytes().len();
-            let Some(total) = planning_bytes.checked_add(length) else {
-                return libc::EFBIG;
-            };
-            if total > vfsi_sync::DEFAULT_DIRECTORY_MAX_PATH_BYTES {
-                return libc::EFBIG;
-            }
-            planning_bytes = total;
-        }
-        let mut paths = Vec::with_capacity(count);
-        let mut index = std::collections::HashMap::<PathBuf, Vec<usize>>::new();
-        for i in 0..count {
-            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
-            // call, as required by the exported ABI.
-            let Some(path) = (unsafe { cstr_path(*dirs.add(i)) }) else {
-                return libc::EINVAL;
-            };
-            let vpath = match vpath_for(fs, &path) {
-                Ok(path) => path,
-                Err(error) => return vf_code(&error),
-            };
-            let Some(total) = planning_bytes.checked_add(vpath.as_os_str().len()) else {
-                return libc::EFBIG;
-            };
-            if total > vfsi_sync::DEFAULT_DIRECTORY_MAX_PATH_BYTES {
-                return libc::EFBIG;
-            }
-            planning_bytes = total;
-            index.entry(vpath).or_default().push(i);
-            paths.push(path);
-        }
-        let refs: Vec<&Path> = index.keys().map(PathBuf::as_path).collect();
+        let refs: Vec<&Path> = index.keys().copied().collect();
         let mut rows = Vec::new();
-        let mut entries = 0usize;
-        let mut bytes = 0usize;
+        let mut budget = ListingBudget::new(options);
         let mut overflow = false;
         let result = match lock_or_io(&fs.fs) {
             Ok(mut backend) => {
@@ -817,10 +780,7 @@ unsafe fn listdirs_snapshot(
                 let mut result = Ok(());
                 for cohort in refs.chunks(DIRECTORY_COHORT) {
                     // Never pass zero: native zero means unlimited enumeration.
-                    let probe = options
-                        .max_entries
-                        .saturating_sub(entries)
-                        .saturating_add(1);
+                    let probe = budget.probe();
                     result = backend.vlistdirs_impl(
                         cohort,
                         fields | AttrMask::MODE,
@@ -831,20 +791,13 @@ unsafe fn listdirs_snapshot(
                                 overflow = true;
                                 return false;
                             };
-                            let next_entries = entries.checked_add(indices.len());
-                            let next_bytes = attrs
-                                .file
-                                .path()
-                                .and_then(|path| path.as_os_str().len().checked_mul(indices.len()))
-                                .and_then(|n| bytes.checked_add(n));
-                            if next_entries.is_none_or(|n| n > options.max_entries)
-                                || next_bytes.is_none_or(|n| n > options.max_path_bytes)
+                            if budget
+                                .charge(attrs.file.path(), indices.len(), None)
+                                .is_err()
                             {
                                 overflow = true;
                                 return false;
                             }
-                            entries = next_entries.unwrap_or_default();
-                            bytes = next_bytes.unwrap_or_default();
                             rows.push((attrs.clone(), dir.to_path_buf()));
                             true
                         },
@@ -869,16 +822,9 @@ unsafe fn listdirs_snapshot(
         // Keep ABI-v3 callers' per-entry storage unchanged.
         let mut identities = include_identity.then(|| Vec::with_capacity(rows.len()));
         for (attrs, dir) in rows {
-            if !attrs.returned.contains(fields | AttrMask::MODE) {
-                return libc::ENOTSUP;
-            }
-            let Some(name) = attrs
-                .file
-                .path()
-                .and_then(|p| p.file_name())
-                .and_then(|name| cstr_from_os(name.as_bytes()))
-            else {
-                return libc::EIO;
+            let (projected, name) = match prepare_listing_entry(&attrs, fields, None) {
+                Ok(entry) => entry,
+                Err(error) => return vf_code(&error),
             };
             if let Some(identities) = &mut identities {
                 match vfsi_object_id::from_attrs(fs.namespace_id, &attrs) {
@@ -886,38 +832,25 @@ unsafe fn listdirs_snapshot(
                     Err(error) => return vf_code(&error),
                 }
             }
-            prepared.push((vfsi_attrs::from_vf(&attrs), dir, name));
+            prepared.push((projected, dir, name));
         }
-        let paths: Vec<_> = paths
+        let deliveries = prepared
             .iter()
-            .map(|path| cstr_from_os(path.as_os_str().as_bytes()))
-            .collect();
-        if paths.iter().any(Option::is_none) {
-            return libc::EINVAL;
-        }
-        for result in results.iter_mut() {
-            result.completion = 1;
-        }
-        for (row, (attrs, dir, name)) in prepared.into_iter().enumerate() {
-            for &i in &index[&dir] {
-                let path = paths[i].as_ref().expect("validated C paths");
-                results[i].delivered += 1;
-                // SAFETY: the caller provides this callback; borrowed strings, attributes
-                // and bytes remain live until it returns.
-                if !cb(
-                    i,
-                    path.as_ptr(),
-                    name.as_ptr(),
-                    &attrs,
-                    identities.as_ref().map(|ids| &ids[row]),
-                ) {
-                    for result in results.iter_mut() {
-                        result.completion = 2;
-                    }
-                    return 0;
-                }
-            }
-        }
+            .enumerate()
+            .flat_map(|(row, (attrs, dir, name))| {
+                index[dir.as_path()]
+                    .iter()
+                    .map(move |&i| (i, (row, attrs, name)))
+            });
+        deliver_listing(results, deliveries, |i, (row, attrs, name)| {
+            cb(
+                i,
+                plan.originals[i].as_ptr(),
+                name.as_ptr(),
+                attrs,
+                identities.as_ref().map(|ids| &ids[row]),
+            )
+        });
         0
     })
 }

@@ -112,50 +112,26 @@ pub unsafe extern "C" fn vfsi_listdirs_from_cursors(
         if !mask().contains(fields) {
             return libc::ENOTSUP;
         }
-        let mut paths = Vec::with_capacity(count);
-        let mut originals = Vec::with_capacity(count);
+        // SAFETY: inputs are readable and immutable for the full exported call.
+        let plan = match unsafe { plan_directories(fs, dirs, count) } {
+            Ok(plan) => plan,
+            Err(code) => return code,
+        };
+        let paths = &plan.paths;
         let mut seen = HashSet::new();
-        let mut planning_bytes = 0usize;
-        for index in 0..count {
-            // SAFETY: both input arrays contain count live elements.
-            let (path, cursor) = unsafe { (*dirs.add(index), *cursors.add(index)) };
-            if path.is_null() {
-                return libc::EINVAL;
-            }
-            // SAFETY: input strings stay readable and unchanged for the full call.
-            let original = unsafe { CStr::from_ptr(path) };
-            let path = Path::new(std::ffi::OsStr::from_bytes(original.to_bytes()));
-            if original.to_bytes().len()
-                > vfsi_sync::DEFAULT_DIRECTORY_MAX_PATH_BYTES.saturating_sub(planning_bytes)
-            {
-                return libc::EFBIG;
-            }
-            let mapped = match vpath_for(fs, path) {
-                Ok(path) => path,
-                Err(error) => return vf_code(&error),
-            };
-            let Some(total) = planning_bytes
-                .checked_add(path.as_os_str().len())
-                .and_then(|n| n.checked_add(mapped.as_os_str().len()))
-            else {
-                return libc::EFBIG;
-            };
-            if total > vfsi_sync::DEFAULT_DIRECTORY_MAX_PATH_BYTES {
-                return libc::EFBIG;
-            }
-            planning_bytes = total;
+        for (index, mapped) in paths.iter().enumerate() {
+            // SAFETY: the caller provides count live cursor slots.
+            let cursor = unsafe { *cursors.add(index) };
             if !cursor.is_null() {
                 if !seen.insert(cursor as usize) {
                     return libc::EINVAL;
                 }
                 // SAFETY: non-null cursor pointers must originate from this API.
                 let cursor = unsafe { &*cursor };
-                if !Arc::ptr_eq(&cursor.owner, &fs.cursor_owner) || cursor.path != mapped {
+                if !Arc::ptr_eq(&cursor.owner, &fs.cursor_owner) || cursor.path != *mapped {
                     return libc::EINVAL;
                 }
             }
-            originals.push(original);
-            paths.push(mapped);
         }
         let mut pending = VecDeque::new();
         for index in 0..count {
@@ -176,7 +152,7 @@ pub unsafe extern "C" fn vfsi_listdirs_from_cursors(
                 .directory_page_batch_size()
                 .clamp(1, VFSI_DIRECTORY_COHORT_MAX as usize);
             let mut rows = Vec::new();
-            let mut bytes = 0usize;
+            let mut budget = ListingBudget::new(options);
             while let Some(&(_, _, follow)) = pending.front() {
                 let mut wave = Vec::new();
                 while wave.len() < width && pending.front().is_some_and(|(_, _, p)| *p == follow) {
@@ -187,10 +163,7 @@ pub unsafe extern "C" fn vfsi_listdirs_from_cursors(
                     .iter()
                     .map(|&index| paths[index].as_path())
                     .collect();
-                let probe = options
-                    .max_entries
-                    .saturating_sub(rows.len())
-                    .saturating_add(1);
+                let probe = budget.probe();
                 let page_size = probe.clamp(1, 256);
                 let states = wave.into_iter().map(|(_, state, _)| state).collect();
                 let pages =
@@ -223,21 +196,8 @@ pub unsafe extern "C" fn vfsi_listdirs_from_cursors(
                                 "invalid cohort child path or cursor",
                             ));
                         }
-                        bytes = bytes
-                            .checked_add(path.as_os_str().len())
-                            .ok_or_else(|| VfError::errno(index, libc::EFBIG as u32))?;
-                        if rows.len() >= options.max_entries || bytes > options.max_path_bytes {
-                            return Err(VfError::errno(index, libc::EFBIG as u32));
-                        }
-                        if !attrs.returned.contains(fields) {
-                            return Err(VfError::unsupported(index));
-                        }
-                        let name = path
-                            .file_name()
-                            .and_then(|name| cstr_from_os(name.as_bytes()))
-                            .ok_or_else(|| {
-                                VfError::invalid_reply(Some(index), "invalid cohort entry name")
-                            })?;
+                        budget.charge(Some(path), 1, Some(index))?;
+                        let (projected, name) = prepare_listing_entry(&attrs, fields, Some(index))?;
                         let child = (attrs.ftype == vfsi_sync::VfType::Directory).then(|| {
                             Box::new(vfsi_dir_cursor {
                                 owner: Arc::clone(&fs.cursor_owner),
@@ -248,7 +208,7 @@ pub unsafe extern "C" fn vfsi_listdirs_from_cursors(
                         rows.push(Row {
                             index,
                             name,
-                            attrs: vfsi_attrs::from_vf(&attrs),
+                            attrs: projected,
                             child,
                         });
                     }
@@ -263,30 +223,25 @@ pub unsafe extern "C" fn vfsi_listdirs_from_cursors(
             Ok(rows) => rows,
             Err(error) => return vf_code(&error),
         };
-        for result in results.iter_mut() {
-            result.completion = 1;
-        }
-        for row in rows {
-            results[row.index].delivered += 1;
-            let child = row.child.map_or(std::ptr::null_mut(), Box::into_raw);
-            // SAFETY: callback inputs live for the invocation. A non-null
-            // child transfers unique ownership unconditionally to the callback.
-            if !unsafe {
-                cb(
-                    row.index,
-                    originals[row.index].as_ptr(),
-                    row.name.as_ptr(),
-                    &row.attrs,
-                    child,
-                    userdata,
-                )
-            } {
-                for result in results.iter_mut() {
-                    result.completion = 2;
+        deliver_listing(
+            results,
+            rows.into_iter().map(|row| (row.index, row)),
+            |index, row| {
+                let child = row.child.map_or(std::ptr::null_mut(), Box::into_raw);
+                // SAFETY: callback inputs live for this invocation; child ownership
+                // transfers unconditionally, including when the callback stops.
+                unsafe {
+                    cb(
+                        index,
+                        plan.originals[index].as_ptr(),
+                        row.name.as_ptr(),
+                        &row.attrs,
+                        child,
+                        userdata,
+                    )
                 }
-                break;
-            }
-        }
+            },
+        );
         0
     })
 }
@@ -439,6 +394,85 @@ mod tests {
         assert_eq!(results[0].delivered, 1);
         assert_eq!(children.names, [(0, b"leaf".to_vec())]);
         // SAFETY: the fixture owns these live handles and frees each exactly once.
+        unsafe { vfsi_free(fs) };
+    }
+
+    #[test]
+    fn path_and_cursor_listings_share_duplicate_quota_and_completion_rules() {
+        unsafe extern "C" fn legacy(
+            index: usize,
+            dir: *const c_char,
+            name: *const c_char,
+            attrs: *const vfsi_attrs,
+            data: *mut c_void,
+        ) -> bool {
+            // SAFETY: the common fixture owns callback data and all borrowed inputs.
+            unsafe { collect(index, dir, name, attrs, std::ptr::null_mut(), data) }
+        }
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("root")).unwrap();
+        for name in ["a", "b"] {
+            std::fs::write(root.path().join("root").join(name), b"x").unwrap();
+        }
+        let fs = local(root.path());
+        let paths = [
+            CString::new("/mount/root").unwrap(),
+            CString::new("/mount/root").unwrap(),
+        ];
+        let pointers: Vec<_> = paths.iter().map(|path| path.as_ptr()).collect();
+        for (entries, bytes, expected) in [
+            (4, 28, 0),
+            (3, usize::MAX, libc::EFBIG),
+            (usize::MAX, 27, libc::EFBIG),
+            (0, usize::MAX, libc::EFBIG),
+            (usize::MAX, usize::MAX, 0),
+        ] {
+            let limits = options(entries, bytes);
+            let mut old_rows = Rows::default();
+            old_rows.fs = fs;
+            let mut old_results = [vfsi_listing_result::default(); 2];
+            // SAFETY: the fixture owns the handle, inputs, callback data and two output slots.
+            let old_status = unsafe {
+                vfsi_listdirs(
+                    fs,
+                    pointers.as_ptr(),
+                    2,
+                    &limits,
+                    Some(legacy),
+                    &mut old_rows as *mut _ as *mut c_void,
+                    old_results.as_mut_ptr(),
+                )
+            };
+            let mut new_rows = Rows::default();
+            let (new_status, new_results) = run(
+                fs,
+                &paths,
+                &mut [std::ptr::null_mut(); 2],
+                limits,
+                &mut new_rows,
+            );
+            assert_eq!((old_status, new_status), (expected, expected));
+            old_rows.names.sort();
+            new_rows.names.sort();
+            assert_eq!(old_rows.names, new_rows.names);
+            assert_eq!(
+                old_results
+                    .iter()
+                    .map(|r| (r.completion, r.delivered))
+                    .collect::<Vec<_>>(),
+                new_results
+                    .iter()
+                    .map(|r| (r.completion, r.delivered))
+                    .collect::<Vec<_>>(),
+            );
+            if expected != 0 {
+                assert!(
+                    old_rows.names.is_empty(),
+                    "quota failures must deliver no prefix"
+                );
+            }
+        }
+        // SAFETY: the fixture frees its uniquely owned live filesystem once.
         unsafe { vfsi_free(fs) };
     }
 
