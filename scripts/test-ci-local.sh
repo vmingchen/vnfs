@@ -300,7 +300,7 @@ run_nfs() {
     export VNFS_TEST_MINOR=$minor VFSI_NFS_MINOR=$minor
     cargo test -p vnfs --features "test-faults rpcsec-gss" --test nfs
     cargo test -p vfsi-nfs --features "server-copy test-faults" --test nfs -- --test-threads=1
-    cargo test -p vfsi-c --lib identity::tests::live_nfs_retained_identity_survives_rename_replacement_and_reconnect -- --ignored --exact
+    ci/test-c-nfs.sh
     VFSI_NFS_EXPORT=${VFSI_NFS_EXPORT:-/} cargo test -p vnfs --test canonical_examples canonical_workflows_on_nfsv41_and_nfsv42 -- --ignored --test-threads=1
     "$python_bin" -m pytest \
       adapters/nfs4fs/tests/test_nfs_integration.py \

@@ -194,6 +194,9 @@ class RustQuickTests(unittest.TestCase):
         scripts.mkdir()
         for name in ("test-rust.sh", "test-ci-local.sh", "test-ci-scripts.py"):
             shutil.copy(Path(__file__).with_name(name), scripts)
+        (self.root / "ci").mkdir()
+        shutil.copy(Path(__file__).resolve().parents[1] / "ci/test-c-nfs.sh",
+                    self.root / "ci/test-c-nfs.sh")
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.log = self.root / "calls"
@@ -272,6 +275,42 @@ class RustQuickTests(unittest.TestCase):
                     self.assertEqual(calls[0], f"native-build {venv}")
                     shutil.rmtree(venv)
                 self.log.unlink()
+
+    def test_nfs_dispatch_requires_both_retained_contracts_for_both_minor_versions(self):
+        for name, body in {
+            "uname": "printf 'Linux\n'\n",
+            "rpcinfo": "printf '100003 4 tcp 2049 nfs\n'\n",
+            "cargo": (
+                'printf "%s %s\n" "${VFSI_NFS_MINOR:-none}" "$*" >> "$CALL_LOG"\n'
+                'printf "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"\n'
+            ),
+        }.items():
+            stub = self.bin / name
+            stub.write_text("#!/bin/sh\n" + body)
+            stub.chmod(0o755)
+        venv = self.root / "venv/bin"
+        venv.mkdir(parents=True)
+        for name in ("python", "maturin"):
+            stub = venv / name
+            stub.write_text("#!/bin/sh\nexit 0\n")
+            stub.chmod(0o755)
+        result = self.run_script("test-ci-local.sh", "nfs",
+                                 VFSI_LOCAL_CI_VENV=str(venv.parent))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.log.read_text().splitlines()
+        for minor in (1, 2):
+            for test in (
+                "identity::tests::live_nfs_retained_identity_survives_rename_replacement_and_reconnect",
+                "directory::tests::retained_cohort_children_survive_parent_rename_with_bounded_compounds",
+            ):
+                self.assertEqual(calls.count(f"{minor} test -p vfsi-c --lib {test} -- --ignored --exact"), 1)
+
+    def test_live_c_gate_rejects_empty_test_selection(self):
+        result = subprocess.run(["bash", str(self.root / "ci/test-c-nfs.sh")],
+                                env=dict(self.env, TEST_OUTPUT="test result: ok. 0 passed; 0 failed; 0 ignored; 1 filtered out"),
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("Required C SDK NFS test did not execute", result.stderr)
 
     def test_uring_dispatch_includes_benchmark_and_nfs_free_guide(self):
         uname = self.bin / "uname"
