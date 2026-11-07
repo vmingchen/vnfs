@@ -5,6 +5,20 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+## vnfs 0.0.29 (2026-11-07)
+
+Supporting Rust releases: `vfsi-core 0.1.18`, `vfsi-sync 0.1.19`,
+`vfsi-local 0.1.16`, and `vfsi-nfs 0.1.17`.
+
+- Ship the current NFS session recovery, mount-policy validation, sparse
+  attribute projection, and safe recursive-copy fixes with updated dependency
+  minimums.
+- Reduce repeated path mapping and NFS removal allocations, and preserve
+  bounded directory paging and streaming callbacks outside backend locks.
+- Add validated attribute requirements and reusable path helpers for application
+  ports, plus reproducible directory-cohort, copy, allocation, and rsync
+  benchmark evidence in the repository.
+
 ## SMB patch release (2026-11-03)
 
 Rust: `vfsi-core 0.1.17`, `vfsi-sync 0.1.18`, and `vfsi-smb 0.1.15`.

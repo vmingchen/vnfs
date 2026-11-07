@@ -1350,7 +1350,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-core"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "bitfields",
  "bitflags",
@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-local"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "libc",
  "proptest",
@@ -1370,7 +1370,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-nfs"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "bitfields",
  "libc",
@@ -1407,7 +1407,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-sync"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "libc",
  "vfsi-core",
@@ -1429,7 +1429,7 @@ dependencies = [
 
 [[package]]
 name = "vnfs"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "bitfields",
  "libc",
