@@ -4653,7 +4653,7 @@ fn recursive_directory_pages_reject_a_child_replaced_by_a_symlink() {
 }
 
 #[test]
-fn buffered_directory_walk_rejects_an_ancestor_replaced_by_a_symlink() {
+fn buffered_directory_walk_does_not_follow_an_ancestor_replaced_by_a_symlink() {
     let options = vnfs::directory::ListDirOptions::new().with_recursive(true);
     for options in [
         vfsi_core::api::WalkOptions::new(options).with_sort_by_name(true),
@@ -4667,6 +4667,11 @@ fn buffered_directory_walk_rejects_an_ancestor_replaced_by_a_symlink() {
             ReplacedDirectory::Ancestor,
         );
     }
+}
+
+#[test]
+fn directory_pages_do_not_follow_an_ancestor_replaced_by_a_symlink() {
+    directory_replacement_is_not_followed(DirectoryVisit::Pages, ReplacedDirectory::Ancestor);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -4705,6 +4710,8 @@ fn directory_replacement_is_not_followed(mode: DirectoryVisit, replacement: Repl
     .unwrap();
     fs.vmkdir(&[vnfs::directory::MkDirOp::new(&child, 0o777)])
         .unwrap();
+    let retained_path = format!("{child}/retained");
+    fs.write(&retained_path, b"original directory").unwrap();
     let target = if matches!(replacement, ReplacedDirectory::Ancestor) {
         let target_child = format!("{target}/child");
         fs.vmkdir(&[vnfs::directory::MkDirOp::new(&target_child, 0o777)])
@@ -4717,6 +4724,7 @@ fn directory_replacement_is_not_followed(mode: DirectoryVisit, replacement: Repl
         .unwrap();
     let mut changed = false;
     let mut escaped = false;
+    let mut retained = false;
     let (victim, link_target) = match replacement {
         ReplacedDirectory::Child => (&child, "../outside"),
         ReplacedDirectory::Ancestor => (&tree, "outside"),
@@ -4728,6 +4736,7 @@ fn directory_replacement_is_not_followed(mode: DirectoryVisit, replacement: Repl
             changed = true;
         }
         escaped |= entry.path().ends_with("secret");
+        retained |= entry.path() == Path::new(&retained_path);
         Ok(())
     };
     let result = match mode {
@@ -4769,6 +4778,19 @@ fn directory_replacement_is_not_followed(mode: DirectoryVisit, replacement: Repl
     assert!(
         !escaped,
         "replacement symlink followed: {mode:?}, {replacement:?}"
+    );
+    if matches!(replacement, ReplacedDirectory::Ancestor) {
+        // Native directory traversal retains the observed parent.
+        // The replaced ancestor's spelling is diagnostic, not a new lookup.
+        // Success must still enumerate the original directory, never merely
+        // skip it or follow the replacement symlink.
+        result.unwrap();
+        assert!(retained, "lost retained original directory: {mode:?}");
+        return;
+    }
+    assert!(
+        !retained,
+        "unexpected traversal after no-follow failure: {mode:?}"
     );
     let error = result.unwrap_err();
     assert_eq!(error.index(), Some(0));
@@ -5232,7 +5254,7 @@ fn portable_auto_directory_vectors_preflight_and_retain_identity() {
 }
 
 #[test]
-fn ordered_directory_walk_rejects_replaced_children_and_ancestors() {
+fn ordered_directory_walk_does_not_follow_replaced_children_or_ancestors() {
     for replacement in [ReplacedDirectory::Child, ReplacedDirectory::Ancestor] {
         directory_replacement_is_not_followed(DirectoryVisit::Ordered, replacement);
     }
