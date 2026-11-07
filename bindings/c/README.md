@@ -168,6 +168,16 @@ overrides; deploy that directory only if your override requires it.
 Static-library consumers must link the remaining platform dependencies.
 Use `cargo rustc -p vfsi-c --lib -- --print native-static-libs` to inspect them.
 
+### SDK 0.3.13
+
+This release packages retained directory cursors, inline listing identities,
+validated mount discovery, the optional-symbol loader, native POSIX field
+projection, and the SDK installer together. The C ABI remains version 3;
+existing ABI-v3 clients remain compatible. Applications using the new headers
+must continue checking optional function pointers when loading older libraries.
+The SDK depends directly on the VFSI backend crates; changing a port's separate
+vnfs dependency does not change the C wrapper's exported symbols.
+
 ### Building an SDK
 
 Run `python3 build-sdk.py --registry-only --prefix /path/to/sdk` from a

@@ -34,7 +34,7 @@ vsmb = { version = "0.1.6", revision = "b6b1ef0ed14109762a46d130af1f8a7e7223e9c5
 vsmbfs = { version = "0.1.6", revision = "b6b1ef0ed14109762a46d130af1f8a7e7223e9c5" }
 
 [ports]
-coreutils = "375255bc1dbdf2a867e99a66942afff0f0eac405"
-findutils = "c211440a76e83155a872206026732869ba353ac3"
-git = "68f9ca46918ae608854a8cc54f31e63f7625ec77"
-rsync = "6d08d3b8f9fe25fae0292f31ec07c2d939b0a077"
+coreutils = "7641f7e945bcd7c4e4916021d8a306164bb4506a"
+findutils = "2b21625eb0554da47c874d25c2eb1a7b67a48a0b"
+git = "041cb566a41d8050c335aa3bb16d769c1c32e04f"
+rsync = "0d91435b023c748b6a384507eac50a09c50d6be7"
