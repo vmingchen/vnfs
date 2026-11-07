@@ -354,3 +354,64 @@ fn range_batches_reuse_backend_result_storage() {
         assert!(reply.eof);
     }
 }
+
+#[test]
+fn singleton_reads_reject_progress_beyond_request_even_with_spare_budget() {
+    for length in [0, 3] {
+        for returned in [length, length + 1] {
+            let mut buffer = vec![0; length];
+            let buffered = consume_ops(
+                [ReadOp::into(&File, 7, &mut buffer)],
+                32,
+                |_, _, _| (),
+                |_, _, _| (),
+                |_, _| panic!("no owned request"),
+                |_, _| {
+                    Ok(vec![ReadIntoResult {
+                        offset: 7,
+                        bytes_read: returned,
+                        eof: false,
+                    }])
+                },
+            );
+            let owned = consume_ops::<File, (), ()>(
+                [ReadOp::range(&File, 7, length)],
+                32,
+                |_, _, _| (),
+                |_, _, _| (),
+                |_, _| {
+                    Ok(vec![OwnedReadResult {
+                        offset: 7,
+                        data: vec![0; returned],
+                        eof: false,
+                    }])
+                },
+                |_, _| panic!("no buffered request"),
+            );
+            for result in [buffered, owned] {
+                if returned > length {
+                    let error = result.expect_err("oversized progress must be rejected");
+                    assert!(error.is_transport());
+                } else {
+                    assert_eq!(result.unwrap()[0].bytes_read(), length);
+                }
+            }
+        }
+    }
+    let whole = consume_ops::<File, (), ()>(
+        [ReadOp::whole("/file")],
+        32,
+        |_, _, _| (),
+        |_, _, _| (),
+        |_, _| {
+            Ok(vec![OwnedReadResult {
+                offset: 0,
+                data: vec![0; 4],
+                eof: true,
+            }])
+        },
+        |_, _| panic!("no buffered request"),
+    )
+    .unwrap();
+    assert_eq!(whole[0].bytes_read(), 4);
+}

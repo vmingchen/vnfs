@@ -242,6 +242,7 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
             Some(0) | None => error,
             Some(_) => Error::invalid_reply(None, "invalid vread_native backend error index"),
         };
+        let ranged = matches!(&first.source, OpSource::Range(..));
         let request = match first.source {
             OpSource::Whole(path) => ReadRequest::whole_file(path),
             OpSource::Range(file, offset, length) => {
@@ -255,10 +256,10 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
                         "invalid vread_native buffer result count",
                     ));
                 }
-                if values[0].bytes_read > budget {
+                if values[0].bytes_read > length {
                     return Err(Error::invalid_reply(
                         None,
-                        "vread_native backend exceeded byte budget",
+                        "vread_native backend exceeded destination length",
                     ));
                 }
                 return Ok(values
@@ -274,6 +275,12 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
             return Err(Error::invalid_reply(
                 None,
                 "invalid vread_native owned result count",
+            ));
+        }
+        if ranged && values[0].data.len() > length {
+            return Err(Error::invalid_reply(
+                None,
+                "vread_native backend exceeded requested range",
             ));
         }
         if values[0].data.len() > budget {
