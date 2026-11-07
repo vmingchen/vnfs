@@ -168,7 +168,7 @@ overrides; deploy that directory only if your override requires it.
 Static-library consumers must link the remaining platform dependencies.
 Use `cargo rustc -p vfsi-c --lib -- --print native-static-libs` to inspect them.
 
-### SDK 0.3.13
+### SDK 0.3.14
 
 This release packages retained directory cursors, inline listing identities,
 validated mount discovery, the optional-symbol loader, native POSIX field
