@@ -8,6 +8,9 @@ use crate::backend::VectorBackend;
 use crate::*;
 use std::path::{Path, PathBuf};
 
+mod copy_experiment;
+pub use copy_experiment::copy_new_files_batched;
+
 /// Borrow fixture storage for one vector dispatch without copying payloads.
 /// Only available with `test-support`; this adds no production backend hook.
 pub fn borrow_writes(writes: &[WriteOp]) -> Vec<WriteOp<&FileOperand, &[u8]>> {

@@ -1,0 +1,34 @@
+{
+  "elapsed_ns": 1145054419,
+  "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+  "stdout_lines": 13995,
+  "traced_entries": 0,
+  "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+  "command": [
+    "/tmp/vnfs02-rsync-cursor-rerun-zb4zib0f/run/port-source/rsync",
+    "-ani",
+    "--out-format=%i %n%L",
+    "tree/",
+    "/tmp/vfsi-rsync-u08f_rcw/destination/"
+  ],
+  "wire": {
+    "rpc_calls": 4668,
+    "unique_rpc_calls": 4668,
+    "repeated_xids": 0,
+    "retransmitted_rpc_frames": 0,
+    "procedures": {
+      "1": 4668
+    },
+    "request_opcodes": {
+      "53": 4668,
+      "22": 4668,
+      "3": 1556,
+      "9": 3113,
+      "15": 1,
+      "10": 1,
+      "46": 1,
+      "26": 1555
+    },
+    "pcap_sha256": "66d735cbee67c6c6d7a7b1b6cd33bb07b5ffbc07200c1fe305712a9d462d4c17"
+  }
+}

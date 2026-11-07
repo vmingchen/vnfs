@@ -1,0 +1,116 @@
+{
+  "positive_retained_cursor_trials": [
+    {
+      "trial": "native-warmup-00-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "native-timing-00-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "native-timing-01-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "native-timing-02-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "native-timing-03-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "native-timing-04-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "native-timing-05-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "native-timing-06-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "native-capture-00-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "native-capture-01-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "native-capture-02-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "added-1ms-rtt-warmup-00-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "added-1ms-rtt-timing-00-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "added-1ms-rtt-timing-01-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "added-1ms-rtt-timing-02-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "added-1ms-rtt-timing-03-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "added-1ms-rtt-timing-04-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "added-1ms-rtt-timing-05-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "added-1ms-rtt-timing-06-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "added-1ms-rtt-capture-00-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "added-1ms-rtt-capture-01-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    },
+    {
+      "trial": "added-1ms-rtt-capture-02-vfsi",
+      "directories": 1555,
+      "retained_cursors": 1554
+    }
+  ],
+  "capture_hashes_verified": 12,
+  "published_baseline_unchanged": true
+}

@@ -1,0 +1,40 @@
+{
+  "elapsed_ns": 267160288,
+  "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+  "stdout_lines": 13995,
+  "traced_entries": 13994,
+  "mount_options": "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,nosharecache,fatal_neterrors=ENETDOWN:ENETUNREACH,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=169.254.241.2,local_lock=none,addr=169.254.241.1",
+  "command": [
+    "/tmp/vnfs02-rsync-development.oH0G8OMm/run/port-source/rsync",
+    "-ani",
+    "--out-format=%i %n%L",
+    "tree/",
+    "/tmp/vfsi-rsync-dcjngw_c/destination/"
+  ],
+  "wire": {
+    "rpc_calls": 273,
+    "unique_rpc_calls": 273,
+    "repeated_xids": 0,
+    "retransmitted_rpc_frames": 0,
+    "procedures": {
+      "1": 273
+    },
+    "request_opcodes": {
+      "53": 269,
+      "22": 1560,
+      "3": 2,
+      "9": 6,
+      "15": 1561,
+      "10": 1557,
+      "42": 1,
+      "43": 1,
+      "58": 1,
+      "24": 3,
+      "32": 2,
+      "26": 1555,
+      "44": 1,
+      "57": 1
+    },
+    "pcap_sha256": "cd3cb9f1f65ee4de0e8d303ad9ab158e438f94de3e60b95268829e2d0450d8c2"
+  }
+}

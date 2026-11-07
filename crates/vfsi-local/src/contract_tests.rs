@@ -2214,6 +2214,60 @@ mod tests {
     }
 
     #[test]
+    fn exclusive_copy_prototype_preserves_extents_empty_files_and_closes_handles() {
+        let (root, mut backend) = fs("new-copy-waves");
+        std::fs::create_dir(root.0.join("source")).unwrap();
+        std::fs::create_dir(root.0.join("destination")).unwrap();
+        let pairs: Vec<_> = (0..19)
+            .map(|index| {
+                std::fs::write(
+                    root.0.join(format!("source/file-{index}")),
+                    b"0123456789abcdef",
+                )
+                .unwrap();
+                ExtentPair::from_os_paths(
+                    Path::new(&format!("/source/file-{index}")),
+                    2,
+                    Path::new(&format!("/destination/file-{index}")),
+                    3,
+                    Some(if index == 0 { 0 } else { 7 }),
+                )
+            })
+            .collect();
+        vfsi_sync::test_support::copy_new_files_batched(&mut backend, &pairs, 0o644, None).unwrap();
+        assert_eq!(
+            std::fs::read(root.0.join("destination/file-0")).unwrap(),
+            b"\0\0\0"
+        );
+        assert_eq!(
+            std::fs::read(root.0.join("destination/file-18")).unwrap(),
+            b"\0\0\x002345678"
+        );
+        assert!(backend.open_files.is_empty());
+
+        std::fs::write(root.0.join("destination/existing"), b"keep").unwrap();
+        let conflict = ExtentPair::from_os_paths(
+            Path::new("/source/file-1"),
+            0,
+            Path::new("/destination/existing"),
+            0,
+            None,
+        );
+        let error =
+            vfsi_sync::test_support::copy_new_files_batched(&mut backend, &[conflict], 0o644, None)
+                .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(root.0.join("destination/existing")).unwrap(),
+            b"keep"
+        );
+        assert!(
+            backend.open_files.is_empty(),
+            "source open must close after destination conflict"
+        );
+    }
+
+    #[test]
     fn recursive_copy_preflights_root_type_and_source_overlap() {
         let (root, mut backend) = fs("copy-root-preflight");
         std::fs::create_dir(root.0.join("source")).unwrap();

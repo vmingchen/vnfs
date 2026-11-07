@@ -12,6 +12,7 @@ struct Strategy {
     handles: bool,
     width: usize,
     stat: bool,
+    page_bytes: usize,
 }
 impl Strategy {
     fn label(self) -> &'static str {
@@ -111,7 +112,11 @@ impl Scan {
             }
             first = backend
                 .nfs
-                .readdir_pages_bounded(&[(handle.clone(), cookie)], strategy.attrs(), PAGE_BYTES)
+                .readdir_pages_bounded(
+                    &[(handle.clone(), cookie)],
+                    strategy.attrs(),
+                    strategy.page_bytes,
+                )
                 .unwrap()
                 .pop()
                 .unwrap();
@@ -123,7 +128,7 @@ fn scan(backend: &mut NfsVecFs, root: &NfsFh, strategy: Strategy) -> Scan {
     let mut result = Scan::default();
     let first = backend
         .nfs
-        .readdir_pages_bounded(&[(root.clone(), 0)], strategy.attrs(), PAGE_BYTES)
+        .readdir_pages_bounded(&[(root.clone(), 0)], strategy.attrs(), strategy.page_bytes)
         .unwrap()
         .pop()
         .unwrap();
@@ -140,7 +145,7 @@ fn scan(backend: &mut NfsVecFs, root: &NfsFh, strategy: Strategy) -> Scan {
                 .collect();
             let pages = backend
                 .nfs
-                .readdir_pages_bounded(&ops, strategy.attrs(), PAGE_BYTES)
+                .readdir_pages_bounded(&ops, strategy.attrs(), strategy.page_bytes)
                 .unwrap();
             assert_eq!(pages.len(), batch.len());
             for ((work, (handle, _)), page) in batch.into_iter().zip(ops).zip(pages) {
@@ -153,7 +158,7 @@ fn scan(backend: &mut NfsVecFs, root: &NfsFh, strategy: Strategy) -> Scan {
                 .collect();
             let pages = backend
                 .nfs
-                .readdir_children_bounded(&ops, strategy.attrs(), PAGE_BYTES)
+                .readdir_children_bounded(&ops, strategy.attrs(), strategy.page_bytes)
                 .unwrap();
             assert_eq!(pages.len(), batch.len());
             for (work, page) in batch.into_iter().zip(pages) {
@@ -171,6 +176,29 @@ fn scan(backend: &mut NfsVecFs, root: &NfsFh, strategy: Strategy) -> Scan {
 }
 
 struct Fixture(PathBuf);
+impl Fixture {
+    fn create(mount: &Path, directories: usize, files: usize) -> (Self, String) {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let name = format!("vfsi-directory-measurement-{}-{unique}", std::process::id());
+        let path = mount.join(&name);
+        std::fs::create_dir(&path).unwrap();
+        let fixture = Self(path);
+        for index in 0..directories {
+            let child = fixture.0.join(format!("d-{index:04}"));
+            std::fs::create_dir(&child).unwrap();
+            for leaf in 0..8 {
+                std::fs::write(child.join(format!("leaf-{leaf:02}")), b"x").unwrap();
+            }
+        }
+        for index in 0..files {
+            std::fs::write(fixture.0.join(format!("file-{index:04}")), b"x").unwrap();
+        }
+        (fixture, name)
+    }
+}
 impl Drop for Fixture {
     fn drop(&mut self) {
         std::fs::remove_dir_all(&self.0).expect("remove only the benchmark's owned fixture");
@@ -199,37 +227,23 @@ fn compare_returned_filehandles_to_parent_name_seeds() {
             handles: false,
             width: 24,
             stat: false,
+            page_bytes: PAGE_BYTES,
         },
         Strategy {
             handles: true,
             width: 24,
             stat: false,
+            page_bytes: PAGE_BYTES,
         },
         Strategy {
             handles: true,
             width: 32,
             stat: false,
+            page_bytes: PAGE_BYTES,
         },
     ];
     for (case, directories, files) in [("directory_dense", 64, 0), ("file_dense", 4, 4096)] {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let name = format!("vfsi-readdir-handles-{}-{unique}", std::process::id());
-        let path = mount.join(&name);
-        std::fs::create_dir(&path).unwrap(); // Exclusive creation before installing cleanup.
-        let fixture = Fixture(path);
-        for index in 0..directories {
-            let child = fixture.0.join(format!("d-{index:04}"));
-            std::fs::create_dir(&child).unwrap();
-            for leaf in 0..8 {
-                std::fs::write(child.join(format!("leaf-{leaf:02}")), b"x").unwrap();
-            }
-        }
-        for index in 0..files {
-            std::fs::write(fixture.0.join(format!("file-{index:04}")), b"x").unwrap();
-        }
+        let (_fixture, name) = Fixture::create(&mount, directories, files);
         // Resolve once outside timing: both variants start with the same root FH.
         let root = backend.nfs.resolve(name.as_bytes()).unwrap();
         let expected = scan(&mut backend, &root, strategies[0]).entries;
@@ -278,6 +292,86 @@ fn compare_returned_filehandles_to_parent_name_seeds() {
                         strategy.label(),
                         strategy.width,
                         after.calls - before.calls,
+                        after.operations - before.operations,
+                        after.request_bytes - before.request_bytes,
+                        result.attr_bytes,
+                        result.entries.len(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+#[ignore = "manual writable-NFS measurement; requires server and matching export-root mount"]
+fn compare_parent_name_cohorts_and_page_budgets() {
+    let host = std::env::var("VFSI_NFS_SERVER").expect("set VFSI_NFS_SERVER");
+    let mount =
+        PathBuf::from(std::env::var_os("VFSI_NFS_TEST_MOUNT").expect("set export-root mount"));
+    let minor = std::env::var("VFSI_NFS_MINOR")
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    assert!(matches!(minor, 1 | 2));
+    for (case, directories, files) in [("directory_dense", 128, 0), ("file_dense", 4, 4096)] {
+        let (_fixture, name) = Fixture::create(&mount, directories, files);
+        let mut strategies: Vec<_> = [8, 16, 24, 31, 32]
+            .into_iter()
+            .flat_map(|width| {
+                [4096, 16384, 32768, 65536]
+                    .into_iter()
+                    .map(move |page_bytes| Strategy {
+                        handles: false,
+                        width,
+                        stat: true,
+                        page_bytes,
+                    })
+            })
+            .collect();
+        // Avoid always visiting the same shape last across protocol/fixture runs.
+        if (minor == 2) != (files != 0) {
+            strategies.reverse();
+        }
+        for operation_limit in [0, 33] {
+            for &strategy in &strategies {
+                // Adaptive budgets are tagged per client. Isolate each setting
+                // so one rejected shape cannot shrink another setting's planner.
+                let telemetry = Telemetry::default();
+                let mut backend = NfsClientBuilder::new(host.clone())
+                    .minor_version(Some(minor))
+                    .telemetry(telemetry.clone())
+                    .connect()
+                    .unwrap();
+                if operation_limit != 0 {
+                    backend.nfs.test_limit_compound_operations(operation_limit);
+                }
+                let root = backend.nfs.resolve(name.as_bytes()).unwrap();
+                let expected = scan(&mut backend, &root, strategy).entries;
+                assert_eq!(expected.len(), directories * 9 + files);
+                for _ in 0..2 {
+                    assert_eq!(scan(&mut backend, &root, strategy).entries, expected);
+                }
+                for sample in 0..3 {
+                    let before = telemetry.snapshot();
+                    let start = Instant::now();
+                    let result = scan(&mut backend, &root, strategy);
+                    let elapsed = start.elapsed().as_micros();
+                    let after = telemetry.snapshot();
+                    assert_eq!(
+                        result.entries, expected,
+                        "complete name/type traversal parity"
+                    );
+                    assert_eq!(after.transport_errors, before.transport_errors);
+                    // Retain any safe RESOURCE/TOO_MANY_OPS repacking attempts
+                    // in the measured result; a successful scan is mandatory.
+                    println!(
+                        "READDIR_COHORTS {{\"minor\":{minor},\"fixture\":\"{case}\",\"operation_limit\":{operation_limit},\"width\":{},\"page_bytes\":{},\"sample\":{sample},\"rpc_attempts\":{},\"nfs_rejections\":{},\"operations\":{},\"request_bytes\":{},\"returned_attr_bytes\":{},\"entries\":{},\"elapsed_us\":{elapsed}}}",
+                        strategy.width,
+                        strategy.page_bytes,
+                        after.calls - before.calls,
+                        after.nfs_errors - before.nfs_errors,
                         after.operations - before.operations,
                         after.request_bytes - before.request_bytes,
                         result.attr_bytes,

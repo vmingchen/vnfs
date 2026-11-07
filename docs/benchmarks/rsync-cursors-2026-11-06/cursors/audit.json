@@ -1,0 +1,12 @@
+{
+  "trials_verified": 46,
+  "capture_hashes_verified": 12,
+  "positive_retained_cursor_trials": 22,
+  "retained_cursors_per_accelerated_trial": [
+    1554
+  ],
+  "output_parity": true,
+  "fallback_verified": true,
+  "fixture_unchanged": true,
+  "server_unchanged": true
+}

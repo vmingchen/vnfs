@@ -272,6 +272,11 @@ unsafe fn listdirs_snapshot(
         }
         let refs: Vec<&Path> = index.keys().copied().collect();
         let mut rows = Vec::new();
+        // Legacy callbacks receive compact projected rows, just like cursor
+        // callbacks. Keep scoped IDs separate so ordinary listings pay no
+        // per-entry identity-storage cost.
+        let mut identities = include_identity.then(Vec::new);
+        let mut projection_error = None;
         let mut budget = ListingBudget::new(options);
         let mut overflow = false;
         let result = match lock_or_io(&fs.fs) {
@@ -300,7 +305,26 @@ unsafe fn listdirs_snapshot(
                                 overflow = true;
                                 return false;
                             }
-                            rows.push((attrs.clone(), dir.to_path_buf()));
+                            if projection_error.is_none() {
+                                let prepared =
+                                    prepare_listing_entry(attrs, fields, None).and_then(|entry| {
+                                        if let Some(identities) = &mut identities {
+                                            identities.push(vfsi_object_id::from_attrs(
+                                                fs.namespace_id,
+                                                attrs,
+                                            )?);
+                                        }
+                                        Ok(entry)
+                                    });
+                                match prepared {
+                                    Ok((attrs, name)) => {
+                                        rows.push((attrs, name, indices.as_slice()));
+                                    }
+                                    Err(error) => projection_error = Some(error),
+                                }
+                            }
+                            // Continue read-only collection after a projection
+                            // error: backend and quota errors retain precedence.
                             true
                         },
                     );
@@ -318,31 +342,16 @@ unsafe fn listdirs_snapshot(
         if overflow {
             return libc::EFBIG;
         }
-        // Validate the entire snapshot before invoking user callbacks. A bad
-        // row must not leave applications with a seemingly complete prefix.
-        let mut prepared = Vec::with_capacity(rows.len());
-        // Keep ABI-v3 callers' per-entry storage unchanged.
-        let mut identities = include_identity.then(|| Vec::with_capacity(rows.len()));
-        for (attrs, dir) in rows {
-            let (projected, name) = match prepare_listing_entry(&attrs, fields, None) {
-                Ok(entry) => entry,
-                Err(error) => return vf_code(&error),
-            };
-            if let Some(identities) = &mut identities {
-                match vfsi_object_id::from_attrs(fs.namespace_id, &attrs) {
-                    Ok(id) => identities.push(id),
-                    Err(error) => return vf_code(&error),
-                }
-            }
-            prepared.push((projected, dir, name));
+        if let Some(error) = projection_error {
+            return vf_code(&error);
         }
-        let deliveries = prepared
+        // All collection and validation precede callbacks; rows borrow only
+        // stable operand-index groups, never backend paths or attributes.
+        let deliveries = rows
             .iter()
             .enumerate()
-            .flat_map(|(row, (attrs, dir, name))| {
-                index[dir.as_path()]
-                    .iter()
-                    .map(move |&i| (i, (row, attrs, name)))
+            .flat_map(|(row, (attrs, name, indices))| {
+                indices.iter().map(move |&i| (i, (row, attrs, name)))
             });
         deliver_listing(results, deliveries, |i, (row, attrs, name)| {
             cb(
