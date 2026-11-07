@@ -105,6 +105,7 @@ impl SmbVecFs {
 #[cfg(test)]
 mod benchmarks {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use std::time::Instant;
 
     struct Fixture(PathBuf);
@@ -134,14 +135,20 @@ mod benchmarks {
         let path = backing.join(&name);
         std::fs::create_dir(&path).unwrap();
         let fixture = Fixture(path);
+        // The local creator and Samba's forced user can be different accounts.
+        // Set fixture permissions explicitly so a restrictive umask is harmless.
+        std::fs::set_permissions(&fixture.0, std::fs::Permissions::from_mode(0o755)).unwrap();
         for (case, files, bytes) in [("small", 32, 4096), ("large", 8, 2 * 1024 * 1024)] {
             let source = fixture.0.join(case);
             std::fs::create_dir(&source).unwrap();
+            std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
             for index in 0..files {
                 let payload: Vec<_> = (0..bytes)
                     .map(|offset| ((offset + index) % 251) as u8)
                     .collect();
-                std::fs::write(source.join(format!("source-{index:02}")), payload).unwrap();
+                let path = source.join(format!("source-{index:02}"));
+                std::fs::write(&path, payload).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
             }
             for sample in 0..3 {
                 let order = if sample % 2 == 0 {
@@ -153,6 +160,11 @@ mod benchmarks {
                     let destination = format!("{case}/out-{sample}-{prototype}");
                     let local_destination = fixture.0.join(&destination);
                     std::fs::create_dir(&local_destination).unwrap();
+                    std::fs::set_permissions(
+                        &local_destination,
+                        std::fs::Permissions::from_mode(0o777),
+                    )
+                    .unwrap();
                     let pairs: Vec<_> = (0..files)
                         .map(|index| {
                             ExtentPair::from_os_paths(
