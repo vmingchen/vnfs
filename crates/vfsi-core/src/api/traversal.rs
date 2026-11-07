@@ -33,8 +33,26 @@ pub fn walk_events(
     root: DirEntry,
     options: ListDirOptions,
     sort_by_name: bool,
+    read_dir: impl FnMut(&Path, ListDirOptions) -> VfResult<Vec<DirEntry>>,
+    callback: impl FnMut(&WalkEvent) -> VfResult<WalkControl>,
+) -> VfResult<TraversalCompletion> {
+    walk_events_with_errors(
+        root,
+        options,
+        sort_by_name,
+        read_dir,
+        callback,
+        |_, _, error| Err(error),
+    )
+}
+
+pub(super) fn walk_events_with_errors(
+    root: DirEntry,
+    options: ListDirOptions,
+    sort_by_name: bool,
     mut read_dir: impl FnMut(&Path, ListDirOptions) -> VfResult<Vec<DirEntry>>,
     mut callback: impl FnMut(&WalkEvent) -> VfResult<WalkControl>,
+    mut on_error: impl FnMut(&Path, usize, VfError) -> VfResult<std::ops::ControlFlow<()>>,
 ) -> VfResult<TraversalCompletion> {
     let mut budget = TraversalBudget::new(
         options.max_entries_or(crate::api::DEFAULT_DIRECTORY_MAX_ENTRIES),
@@ -69,7 +87,29 @@ pub fn walk_events(
                         .with_context("walk_events", event.entry.path()));
                 }
                 let remaining = budget.remaining_options(ListDirOptions::new());
-                let mut entries = read_dir(event.entry.path(), remaining)?;
+                let mut entries = match read_dir(event.entry.path(), remaining) {
+                    Ok(entries) => entries,
+                    Err(error)
+                        if !error.is_transport()
+                            && matches!(
+                                error.kind(),
+                                std::io::ErrorKind::PermissionDenied
+                                    | std::io::ErrorKind::NotFound
+                                    | std::io::ErrorKind::NotADirectory
+                            ) =>
+                    {
+                        match on_error(event.entry.path(), event.depth, error)? {
+                            std::ops::ControlFlow::Continue(()) => {
+                                pending.push(event);
+                                continue;
+                            }
+                            std::ops::ControlFlow::Break(()) => {
+                                return Ok(TraversalCompletion::Stopped);
+                            }
+                        }
+                    }
+                    Err(error) => return Err(error),
+                };
                 for entry in &entries {
                     budget
                         .charge(entry.path())
@@ -120,6 +160,105 @@ mod tests {
             }),
         )
     }
+    #[test]
+    fn directory_error_continues_siblings_without_replaying_events() {
+        let mut events = Vec::new();
+        let mut errors = Vec::new();
+        let result = walk_events_with_errors(
+            entry("/", true),
+            ListDirOptions::new().with_recursive(true),
+            true,
+            |path, _| match path.to_str().unwrap() {
+                "/" => Ok(vec![entry("/a-denied", true), entry("/z-readable", true)]),
+                "/a-denied" => Err(VfError::errno(0, libc::EACCES as u32)),
+                "/z-readable" => Ok(vec![entry("/z-readable/keep", false)]),
+                _ => panic!("unexpected directory"),
+            },
+            |event| {
+                events.push((event.kind, event.entry.path().to_path_buf()));
+                Ok(WalkControl::Continue)
+            },
+            |path, depth, error| {
+                errors.push((path.to_path_buf(), depth, error.kind()));
+                Ok(std::ops::ControlFlow::Continue(()))
+            },
+        )
+        .unwrap();
+        assert_eq!(result, TraversalCompletion::Complete);
+        assert_eq!(
+            errors,
+            vec![(
+                std::path::PathBuf::from("/a-denied"),
+                1,
+                std::io::ErrorKind::PermissionDenied
+            )]
+        );
+        assert_eq!(
+            events,
+            vec![
+                (WalkEventKind::Enter, "/".into()),
+                (WalkEventKind::Enter, "/a-denied".into()),
+                (WalkEventKind::Leave, "/a-denied".into()),
+                (WalkEventKind::Enter, "/z-readable".into()),
+                (WalkEventKind::Entry, "/z-readable/keep".into()),
+                (WalkEventKind::Leave, "/z-readable".into()),
+                (WalkEventKind::Leave, "/".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn directory_error_handler_can_stop_or_fail_without_later_events() {
+        for fail in [false, true] {
+            let mut events = 0;
+            let result = walk_events_with_errors(
+                entry("/", true),
+                ListDirOptions::new(),
+                false,
+                |_, _| Err(VfError::errno(0, libc::ENOENT as u32)),
+                |_| {
+                    events += 1;
+                    Ok(WalkControl::Continue)
+                },
+                |_, _, _| {
+                    if fail {
+                        Err(VfError::errno(0, libc::EPIPE as u32))
+                    } else {
+                        Ok(std::ops::ControlFlow::Break(()))
+                    }
+                },
+            );
+            assert_eq!(events, 1);
+            if fail {
+                assert_eq!(result.unwrap_err().raw_code(), libc::EPIPE as u32);
+            } else {
+                assert_eq!(result.unwrap(), TraversalCompletion::Stopped);
+            }
+        }
+    }
+
+    #[test]
+    fn directory_error_recovery_never_swallows_transport_or_budget_failures() {
+        for error in [
+            VfError::invalid_reply(None, "bad page"),
+            VfError::errno(0, libc::EFBIG as u32),
+            VfError::errno(0, libc::EIO as u32),
+        ] {
+            let expected = error.clone();
+            let actual = walk_events_with_errors(
+                entry("/", true),
+                ListDirOptions::new(),
+                false,
+                |_, _| Err(error.clone()),
+                |_| Ok(WalkControl::Continue),
+                |_, _, _| panic!("terminal errors must bypass recovery"),
+            )
+            .unwrap_err();
+            assert_eq!(actual.kind(), expected.kind());
+            assert_eq!(actual.raw_code(), expected.raw_code());
+        }
+    }
+
     #[test]
     fn prune_prevents_io_and_events_have_depth_first_order() {
         let mut events = Vec::new();

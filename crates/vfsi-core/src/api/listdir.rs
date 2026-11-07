@@ -13,7 +13,7 @@ pub(super) fn listdir<F: Vfsi + ?Sized>(
 ) -> Result<TraversalCompletion> {
     let options = presentation.listing_options();
     if presentation.enter_leave() || presentation.sort_by_name() {
-        return buffered(fs, root, presentation, visitor);
+        return buffered(fs, root, presentation, visitor, |_, _, error| Err(error));
     }
 
     // Keep the native paging engine, including anchored child cursors, linear
@@ -94,11 +94,22 @@ fn limit_error(path: &Path) -> Error {
     Error::errno(0, libc::EFBIG as u32).with_context("listdir", path)
 }
 
+pub(super) fn listdir_with_errors<F: Vfsi + ?Sized>(
+    fs: &F,
+    root: &Path,
+    presentation: super::WalkOptions,
+    visitor: impl FnMut(&WalkEvent) -> Result<WalkControl>,
+    on_error: impl FnMut(&Path, usize, Error) -> Result<ControlFlow<()>>,
+) -> Result<TraversalCompletion> {
+    buffered(fs, root, presentation, visitor, on_error)
+}
+
 fn buffered<F: Vfsi + ?Sized>(
     fs: &F,
     root: &Path,
     presentation: super::WalkOptions,
     mut visitor: impl FnMut(&WalkEvent) -> Result<WalkControl>,
+    on_error: impl FnMut(&Path, usize, Error) -> Result<ControlFlow<()>>,
 ) -> Result<TraversalCompletion> {
     let options = presentation.listing_options();
     let fields = options.fields();
@@ -145,7 +156,7 @@ fn buffered<F: Vfsi + ?Sized>(
         .with_max_depth(crate::api::DepthLimit::unlimited())
         .with_truncate_at_max_depth(false);
     let mut retained_bytes = 0usize;
-    super::traversal::walk_events(
+    super::traversal::walk_events_with_errors(
         DirEntry::new(root.to_path_buf(), attrs),
         budget,
         presentation.sort_by_name(),
@@ -217,5 +228,6 @@ fn buffered<F: Vfsi + ?Sized>(
             }
             Ok(decision)
         },
+        on_error,
     )
 }

@@ -530,3 +530,65 @@ fn shared_pruning_contract_on_posix_and_auto() {
         }
     }
 }
+
+#[test]
+fn recovering_lifecycle_walk_skips_a_vanished_directory_without_replay() {
+    for recover in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let fs = Posix::new(root.path()).unwrap();
+        fs.create_dir("/a-vanished").unwrap();
+        fs.create_dir("/z-readable").unwrap();
+        fs.write("/z-readable/keep", b"data").unwrap();
+        let options = vnfs::directory::WalkOptions::new(ListDirOptions::new().with_recursive(true))
+            .with_enter_leave(true)
+            .with_sort_by_name(true);
+        let mut observed = Vec::new();
+        let mut visitor = |event: &vnfs::directory::WalkEvent| {
+            observed.push((event.kind, event.entry.path().to_path_buf()));
+            if event.kind == WalkEventKind::Enter && event.entry.path() == Path::new("/a-vanished")
+            {
+                fs.remove_dir("/a-vanished")?;
+            }
+            Ok(WalkControl::Continue)
+        };
+        let mut errors = Vec::new();
+        if recover {
+            assert_eq!(
+                fs.listdir_with_errors("/", options, &mut visitor, |path, depth, error| {
+                    errors.push((path.to_path_buf(), depth, error.kind()));
+                    Ok(ControlFlow::Continue(()))
+                })
+                .unwrap(),
+                TraversalCompletion::Complete
+            );
+            assert_eq!(
+                errors,
+                [(
+                    std::path::PathBuf::from("/a-vanished"),
+                    1,
+                    std::io::ErrorKind::NotFound
+                )]
+            );
+            assert!(observed.contains(&(WalkEventKind::Entry, "/z-readable/keep".into())));
+            assert_eq!(
+                observed
+                    .iter()
+                    .filter(|(kind, path)| *kind == WalkEventKind::Enter
+                        && path == Path::new("/a-vanished"))
+                    .count(),
+                1
+            );
+            assert!(observed.contains(&(WalkEventKind::Leave, "/a-vanished".into())));
+        } else {
+            assert_eq!(
+                fs.listdir("/", options, visitor).unwrap_err().kind(),
+                std::io::ErrorKind::NotFound
+            );
+            assert!(
+                !observed
+                    .iter()
+                    .any(|(_, path)| path == Path::new("/z-readable/keep"))
+            );
+        }
+    }
+}

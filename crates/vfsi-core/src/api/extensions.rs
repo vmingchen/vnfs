@@ -1,4 +1,6 @@
-use crate::api::{Attrs, CopyOptions, DirectoryListing, MkDirOp, OpenOp, Result, SetAttrsOp};
+use crate::api::{
+    Attrs, CopyOptions, DirectoryListing, Error, MkDirOp, OpenOp, Result, SetAttrsOp,
+};
 use std::path::Path;
 
 use super::{FileHandle, Vfsi};
@@ -737,6 +739,27 @@ pub trait VfsiExt: Vfsi {
         visitor: impl FnMut(&crate::api::WalkEvent) -> Result<crate::api::WalkControl>,
     ) -> Result<crate::api::TraversalCompletion> {
         super::listdir::listdir(self, root.as_ref(), options.into(), visitor)
+    }
+
+    /// Traverse with explicit recovery for failed directory listings.
+    ///
+    /// The error callback receives the directory path, root-relative depth, and
+    /// its error. Permission-denied, not-found and not-a-directory listing errors
+    /// may be reported and skipped with Continue, or stop with Break. The caller
+    /// records any desired failure exit status. Continued failures still produce
+    /// the directory's Leave event in lifecycle mode. Events are never replayed.
+    ///
+    /// Root metadata failures, transport/invalid replies, quota failures, and
+    /// visitor errors remain terminal. The default listdir method still fails on
+    /// the first error. This workflow buffers bounded directories for recovery.
+    fn listdir_with_errors(
+        &self,
+        root: impl AsRef<Path>,
+        options: impl Into<crate::api::WalkOptions>,
+        visitor: impl FnMut(&crate::api::WalkEvent) -> Result<crate::api::WalkControl>,
+        on_error: impl FnMut(&Path, usize, Error) -> Result<std::ops::ControlFlow<()>>,
+    ) -> Result<crate::api::TraversalCompletion> {
+        super::listdir::listdir_with_errors(self, root.as_ref(), options.into(), visitor, on_error)
     }
 
     /// Visit individual entries using the directory-page primitive.
