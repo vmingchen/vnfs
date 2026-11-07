@@ -78,6 +78,7 @@ int main(void)
     assert(api.abi_version == library_version && api.free == library_free);
     assert(api.dummy_open_mount == NULL && api.nfs_open_mount_export == NULL);
     assert(api.nfs_from_mount == NULL && api.listdir == NULL && api.listdirs == NULL);
+    assert(api.listdirs_from_cursors_with_ids == NULL && api.dir_cursor_free == NULL);
     assert(api.read_paths == NULL && api.read_paths_with_limit == NULL);
     assert(api.get_object_id == NULL && api.fget_object_id == NULL && api.get_object_idv == NULL);
 

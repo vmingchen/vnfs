@@ -207,6 +207,14 @@ consumed after preflight, and each delivered child is owned by the callback:
 retain admitted children for descent and free excluded children. See the header
 for cancellation, lifetime, and quota rules.
 
+Applications that also need scoped identities can resolve the optional
+`vfsi_listdirs_from_cursors_with_ids` symbol with `vfsi_dir_cursor_free`.
+It returns attributes, identity, and retained children from the same READDIR
+observation. Copy each borrowed identity before returning; child ownership and
+quotas match the cursor-only API. Ordinary cursor listings allocate no identity
+storage. If the symbol pair is absent, retain the application's existing
+path-based or POSIX fallback.
+
 Streaming callbacks from `vfsi_read_streamv` also run outside backend locks.
 Each bounded native read wave completes before delivery; callbacks may query
 the same handle and can stop before the next wave. EOF-completion counts and

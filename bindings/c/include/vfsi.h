@@ -151,6 +151,11 @@
 #define VFSI_DIRECTORY_CURSORS_VERSION 1
 
 /**
+ * Retained cursor listings with scoped identities from the same observation.
+ */
+#define VFSI_DIRECTORY_CURSOR_IDS_VERSION 1
+
+/**
  * Maximum number of directory operands in one retained-cursor cohort.
  */
 #define VFSI_DIRECTORY_COHORT_MAX 32
@@ -274,6 +279,14 @@ typedef struct vfsi_listing_result {
   uint32_t completion;
   size_t delivered;
 } vfsi_listing_result;
+
+typedef bool (*vfsi_indexed_listdir_cursor_ids_cb)(size_t,
+                                                   const char*,
+                                                   const char*,
+                                                   const struct vfsi_attrs*,
+                                                   const struct vfsi_object_id*,
+                                                   struct vfsi_dir_cursor*,
+                                                   void*);
 
 /**
  * Borrowed server endpoint, export root and local mount point, respectively.
@@ -474,6 +487,26 @@ int vfsi_listdirs_from_cursors(struct vfsi_fs *fs,
                                vfsi_indexed_listdir_cursor_cb cb,
                                void *userdata,
                                struct vfsi_listing_result *results);
+
+/**
+ * Retained cursor listings with attributes and scoped identity from the same
+ * READDIR observation. No extra GETATTR pass is performed. Unsupported
+ * identities fail before callbacks. ABI-v3 attributes and existing symbols
+ * remain unchanged; dynamically resolve this optional symbol before use.
+ *
+ * # Safety
+ * The vfsi_listdirs_from_cursors contract applies, including unconditional
+ * ownership transfer of delivered children. Identity pointers are borrowed
+ * only during their callback; copy the value before returning.
+ */
+int vfsi_listdirs_from_cursors_with_ids(struct vfsi_fs *fs,
+                                        const char *const *dirs,
+                                        struct vfsi_dir_cursor **cursors,
+                                        size_t count,
+                                        const struct vfsi_listing_options *options,
+                                        vfsi_indexed_listdir_cursor_ids_cb cb,
+                                        void *userdata,
+                                        struct vfsi_listing_result *results);
 
 /**
  * Return the ABI version implemented by the loaded library.

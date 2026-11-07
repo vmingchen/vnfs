@@ -7,6 +7,8 @@ use vfsi_sync::DirPageCursor;
 
 /// Additive directory-cohort/cursor API; the C ABI remains version three.
 pub const VFSI_DIRECTORY_CURSORS_VERSION: u32 = 1;
+/// Retained cursor listings with scoped identities from the same observation.
+pub const VFSI_DIRECTORY_CURSOR_IDS_VERSION: u32 = 1;
 /// Maximum number of directory operands in one retained-cursor cohort.
 pub const VFSI_DIRECTORY_COHORT_MAX: u32 = 32;
 
@@ -24,6 +26,18 @@ pub type vfsi_indexed_listdir_cursor_cb = Option<
         *const c_char,
         *const c_char,
         *const vfsi_attrs,
+        *mut vfsi_dir_cursor,
+        *mut c_void,
+    ) -> bool,
+>;
+
+pub type vfsi_indexed_listdir_cursor_ids_cb = Option<
+    unsafe extern "C" fn(
+        usize,
+        *const c_char,
+        *const c_char,
+        *const vfsi_attrs,
+        *const vfsi_object_id,
         *mut vfsi_dir_cursor,
         *mut c_void,
     ) -> bool,
@@ -86,10 +100,85 @@ pub unsafe extern "C" fn vfsi_listdirs_from_cursors(
     userdata: *mut c_void,
     results: *mut vfsi_listing_result,
 ) -> c_int {
+    let Some(cb) = cb else { return libc::EINVAL };
+    // SAFETY: forwards the caller-owned pointer and ownership contract.
+    unsafe {
+        cursor_snapshot::<false>(
+            fs,
+            dirs,
+            cursors,
+            count,
+            options,
+            |index, dir, name, attrs, _, child| cb(index, dir, name, attrs, child, userdata),
+            results,
+        )
+    }
+}
+
+/// Retained cursor listings with attributes and scoped identity from the same
+/// READDIR observation. No extra GETATTR pass is performed. Unsupported
+/// identities fail before callbacks. ABI-v3 attributes and existing symbols
+/// remain unchanged; dynamically resolve this optional symbol before use.
+///
+/// # Safety
+/// The vfsi_listdirs_from_cursors contract applies, including unconditional
+/// ownership transfer of delivered children. Identity pointers are borrowed
+/// only during their callback; copy the value before returning.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_listdirs_from_cursors_with_ids(
+    fs: *mut vfsi_fs,
+    dirs: *const *const c_char,
+    cursors: *mut *mut vfsi_dir_cursor,
+    count: usize,
+    options: *const vfsi_listing_options,
+    cb: vfsi_indexed_listdir_cursor_ids_cb,
+    userdata: *mut c_void,
+    results: *mut vfsi_listing_result,
+) -> c_int {
+    let Some(cb) = cb else { return libc::EINVAL };
+    // SAFETY: forwards the caller-owned pointer and ownership contract.
+    unsafe {
+        cursor_snapshot::<true>(
+            fs,
+            dirs,
+            cursors,
+            count,
+            options,
+            |index, dir, name, attrs, id, child| {
+                cb(
+                    index,
+                    dir,
+                    name,
+                    attrs,
+                    id.map_or(std::ptr::null(), |id| id),
+                    child,
+                    userdata,
+                )
+            },
+            results,
+        )
+    }
+}
+
+unsafe fn cursor_snapshot<const IDS: bool>(
+    fs: *mut vfsi_fs,
+    dirs: *const *const c_char,
+    cursors: *mut *mut vfsi_dir_cursor,
+    count: usize,
+    options: *const vfsi_listing_options,
+    mut cb: impl FnMut(
+        usize,
+        *const c_char,
+        *const c_char,
+        &vfsi_attrs,
+        Option<&vfsi_object_id>,
+        *mut vfsi_dir_cursor,
+    ) -> bool,
+    results: *mut vfsi_listing_result,
+) -> c_int {
     ffi_guard!(libc::EIO, {
         // SAFETY: non-null pointers satisfy the documented C pointer contract.
-        let (Some(fs), Some(options), Some(cb)) =
-            (unsafe { fs.as_ref() }, unsafe { options.as_ref() }, cb)
+        let (Some(fs), Some(options)) = (unsafe { fs.as_ref() }, unsafe { options.as_ref() })
         else {
             return libc::EINVAL;
         };
@@ -109,10 +198,16 @@ pub unsafe extern "C" fn vfsi_listdirs_from_cursors(
         let Some(fields) = AttrMask::from_bits(options.attributes) else {
             return libc::EINVAL;
         };
-        let fields = fields | AttrMask::MODE;
-        if !mask().contains(fields) {
+        if !mask().contains(fields | AttrMask::MODE) {
             return libc::ENOTSUP;
         }
+        let fields = fields
+            | AttrMask::MODE
+            | if IDS {
+                AttrMask::identity()
+            } else {
+                AttrMask::empty()
+            };
         // SAFETY: inputs are readable and immutable for the full exported call.
         let plan = match unsafe { plan_directories(fs, dirs, count) } {
             Ok(plan) => plan,
@@ -147,6 +242,9 @@ pub unsafe extern "C" fn vfsi_listdirs_from_cursors(
             };
             pending.push_back((index, state, raw.is_null()));
         }
+        // Ordinary cursor users retain the compact Row layout; allocate IDs
+        // separately only when the caller requested scoped identities.
+        let mut identities = IDS.then(Vec::new);
         let snapshot = (|| -> Result<Vec<Row>, VfError> {
             let mut backend = lock_or_io(&fs.fs)?;
             let width = backend
@@ -199,6 +297,9 @@ pub unsafe extern "C" fn vfsi_listdirs_from_cursors(
                         }
                         budget.charge(Some(path), 1, Some(index))?;
                         let (projected, name) = prepare_listing_entry(&attrs, fields, Some(index))?;
+                        if let Some(ids) = &mut identities {
+                            ids.push(vfsi_object_id::from_attrs(fs.namespace_id, &attrs)?);
+                        }
                         let child = (attrs.ftype == vfsi_sync::VfType::Directory).then(|| {
                             Box::new(vfsi_dir_cursor {
                                 owner: Arc::clone(&fs.cursor_owner),
@@ -226,21 +327,21 @@ pub unsafe extern "C" fn vfsi_listdirs_from_cursors(
         };
         deliver_listing(
             results,
-            rows.into_iter().map(|row| (row.index, row)),
-            |index, row| {
+            rows.into_iter()
+                .enumerate()
+                .map(|(offset, row)| (row.index, (offset, row))),
+            |index, (offset, row)| {
                 let child = row.child.map_or(std::ptr::null_mut(), Box::into_raw);
-                // SAFETY: callback inputs live for this invocation; child ownership
+                // Callback inputs live for this invocation; child ownership
                 // transfers unconditionally, including when the callback stops.
-                unsafe {
-                    cb(
-                        index,
-                        plan.originals[index].as_ptr(),
-                        row.name.as_ptr(),
-                        &row.attrs,
-                        child,
-                        userdata,
-                    )
-                }
+                cb(
+                    index,
+                    plan.originals[index].as_ptr(),
+                    row.name.as_ptr(),
+                    &row.attrs,
+                    identities.as_ref().map(|ids| &ids[offset]),
+                    child,
+                )
             },
         );
         0
@@ -255,6 +356,7 @@ mod tests {
     #[derive(Default)]
     struct Rows {
         names: Vec<(usize, Vec<u8>)>,
+        ids: Vec<vfsi_object_id>,
         children: Vec<(CString, *mut vfsi_dir_cursor)>,
         fs: *mut vfsi_fs,
         stop_after: Option<usize>,
@@ -294,6 +396,25 @@ mod tests {
         }
         rows.stop_after.is_none_or(|stop| rows.names.len() < stop)
     }
+    unsafe extern "C" fn collect_ids(
+        index: usize,
+        dir: *const c_char,
+        name: *const c_char,
+        attrs: *const vfsi_attrs,
+        id: *const vfsi_object_id,
+        child: *mut vfsi_dir_cursor,
+        data: *mut c_void,
+    ) -> bool {
+        // SAFETY: the API borrows initialized identity/attribute outputs for this call.
+        let (id, attrs) = unsafe { (&*id, &*attrs) };
+        assert_eq!(id.version, VFSI_OBJECT_ID_VERSION);
+        assert_ne!(id.namespace_id, 0);
+        assert_eq!(id.fileid, attrs.fileid);
+        // SAFETY: run_kind owns the exclusive callback data.
+        unsafe { &mut *data.cast::<Rows>() }.ids.push(*id);
+        // SAFETY: forwarding the API's borrowed inputs and uniquely owned child.
+        unsafe { collect(index, dir, name, attrs, child, data) }
+    }
     fn options(max_entries: usize, max_path_bytes: usize) -> vfsi_listing_options {
         vfsi_listing_options {
             max_entries,
@@ -315,6 +436,16 @@ mod tests {
         options: vfsi_listing_options,
         rows: &mut Rows,
     ) -> (c_int, Vec<vfsi_listing_result>) {
+        run_kind(fs, paths, cursors, options, rows, false)
+    }
+    fn run_kind(
+        fs: *mut vfsi_fs,
+        paths: &[CString],
+        cursors: &mut [*mut vfsi_dir_cursor],
+        options: vfsi_listing_options,
+        rows: &mut Rows,
+        identities: bool,
+    ) -> (c_int, Vec<vfsi_listing_result>) {
         let pointers: Vec<_> = paths.iter().map(|path| path.as_ptr()).collect();
         let mut results = vec![
             vfsi_listing_result {
@@ -326,16 +457,29 @@ mod tests {
         rows.fs = fs;
         // SAFETY: the fixture owns the live handle, paths, cursor slots, and result storage.
         let status = unsafe {
-            vfsi_listdirs_from_cursors(
-                fs,
-                pointers.as_ptr(),
-                cursors.as_mut_ptr(),
-                paths.len(),
-                &options,
-                Some(collect),
-                rows as *mut _ as *mut c_void,
-                results.as_mut_ptr(),
-            )
+            if identities {
+                vfsi_listdirs_from_cursors_with_ids(
+                    fs,
+                    pointers.as_ptr(),
+                    cursors.as_mut_ptr(),
+                    paths.len(),
+                    &options,
+                    Some(collect_ids),
+                    rows as *mut _ as *mut c_void,
+                    results.as_mut_ptr(),
+                )
+            } else {
+                vfsi_listdirs_from_cursors(
+                    fs,
+                    pointers.as_ptr(),
+                    cursors.as_mut_ptr(),
+                    paths.len(),
+                    &options,
+                    Some(collect),
+                    rows as *mut _ as *mut c_void,
+                    results.as_mut_ptr(),
+                )
+            }
         };
         (status, results)
     }
@@ -474,6 +618,49 @@ mod tests {
             }
         }
         // SAFETY: the fixture frees its uniquely owned live filesystem once.
+        unsafe { vfsi_free(fs) };
+    }
+
+    #[test]
+    fn identity_cursor_listings_preserve_ownership_quotas_and_cancellation() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("a/child")).unwrap();
+        std::fs::create_dir_all(root.path().join("b/child")).unwrap();
+        let fs = local(root.path());
+        let paths = [
+            CString::new("/mount/a").unwrap(),
+            CString::new("/mount/b").unwrap(),
+        ];
+        for (quota, stop) in [(1, None), (20, Some(1)), (20, None)] {
+            let mut cursors = [seed(fs, "/a"), seed(fs, "/b")];
+            let mut rows = Rows::default();
+            rows.stop_after = stop;
+            let (status, results) = run_kind(
+                fs,
+                &paths,
+                &mut cursors,
+                options(quota, 4096),
+                &mut rows,
+                true,
+            );
+            assert!(cursors.iter().all(|cursor| cursor.is_null()));
+            if quota == 1 {
+                assert_eq!(status, libc::EFBIG);
+                assert!(rows.names.is_empty());
+                assert!(results.iter().all(|r| r.completion == 0));
+            } else {
+                assert_eq!(status, 0);
+                assert_eq!(rows.ids.len(), rows.names.len());
+                assert_eq!(rows.ids.len(), if stop.is_some() { 1 } else { 2 });
+                assert!(results
+                    .iter()
+                    .all(|r| r.completion == if stop.is_some() { 2 } else { 1 }));
+            }
+            drop(rows);
+            // SAFETY: the fixture keeps the filesystem live and checks all owned seeds were released.
+            assert_eq!(Arc::strong_count(&unsafe { &*fs }.cursor_owner), 1);
+        }
+        // SAFETY: the fixture owns and frees this live handle once.
         unsafe { vfsi_free(fs) };
     }
 
@@ -650,6 +837,16 @@ mod tests {
     #[test]
     #[ignore = "requires a live NFS fixture"]
     fn retained_cohort_children_survive_parent_rename_with_bounded_compounds() {
+        retained_parent_rename(false);
+    }
+
+    #[test]
+    #[ignore = "requires a live NFS fixture"]
+    fn retained_identity_cohort_survives_parent_rename_without_getattr() {
+        retained_parent_rename(true);
+    }
+
+    fn retained_parent_rename(identities: bool) {
         let host = std::env::var("VFSI_NFS_SERVER").expect("required live NFS server");
         let minor = std::env::var("VFSI_NFS_MINOR")
             .unwrap_or_else(|_| "2".into())
@@ -674,12 +871,13 @@ mod tests {
         }
         let fs = make_fs(Box::new(backend), PathBuf::from("/"), PathBuf::from("/"));
         let mut roots = Rows::default();
-        let (status, _) = run(
+        let (status, _) = run_kind(
             fs,
             &[CString::new(root.clone()).unwrap()],
             &mut [std::ptr::null_mut()],
             options(100, 1 << 20),
             &mut roots,
+            identities,
         );
         assert_eq!(status, 0);
         assert_eq!(roots.children.len(), 12);
@@ -694,7 +892,17 @@ mod tests {
         let (paths, mut cursors): (Vec<_>, Vec<_>) = roots.children.drain(..).unzip();
         let _ = vfsi_nfs::compound::thread_compound_stats();
         let mut rows = Rows::default();
-        let (status, results) = run(fs, &paths, &mut cursors, options(100, 1 << 20), &mut rows);
+        let (status, results) = run_kind(
+            fs,
+            &paths,
+            &mut cursors,
+            options(100, 1 << 20),
+            &mut rows,
+            identities,
+        );
+        if identities {
+            assert_eq!(rows.ids.len(), 12);
+        }
         let compounds = vfsi_nfs::compound::thread_compound_stats().0;
         // SAFETY: the fixture keeps this filesystem handle live for this borrow.
         let cleanup = lock_or_io(&unsafe { &*fs }.fs)

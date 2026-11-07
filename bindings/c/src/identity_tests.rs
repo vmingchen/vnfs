@@ -129,6 +129,20 @@ impl VectorBackend for IdentityBackend {
         }
         Ok(())
     }
+    fn listdir_impl(
+        &mut self,
+        dir: &Path,
+        fields: AttrMask,
+        max: usize,
+        recursive: bool,
+    ) -> Result<Vec<VfAttrs>, VfError> {
+        let mut rows = Vec::new();
+        self.vlistdirs_impl(&[dir], fields, max, recursive, &mut |attrs, _| {
+            rows.push(attrs.clone());
+            true
+        })?;
+        Ok(rows)
+    }
     fn vlistdirs_impl(
         &mut self,
         dirs: &[&Path],
@@ -650,5 +664,65 @@ fn live_inline_listing_identity_matches_queries_on_both_nfs_versions() {
         assert_eq!((result.completion, result.delivered), (1, 2));
         unsafe { vfsi_free(fs) };
         eprintln!("inline identity parity passed on NFSv4.{minor}");
+    }
+}
+
+#[test]
+fn cursor_identity_uses_inline_attrs_without_getattr_and_rejects_missing_ids() {
+    unsafe extern "C" fn collect(
+        _: usize,
+        _: *const c_char,
+        _: *const c_char,
+        attrs: *const vfsi_attrs,
+        id: *const vfsi_object_id,
+        child: *mut vfsi_dir_cursor,
+        data: *mut c_void,
+    ) -> bool {
+        let ids = &mut *data.cast::<Vec<vfsi_object_id>>();
+        assert_eq!((*id).fs_id, [1 << 36, 9]);
+        assert_eq!((*id).fileid, 0);
+        assert_eq!((*id).fileid, (*attrs).fileid);
+        ids.push(*id);
+        vfsi_dir_cursor_free(child);
+        true
+    }
+    for missing in [AttrMask::empty(), AttrMask::FS_ID, AttrMask::FILEID] {
+        let (fs, calls) = fake(missing, false, false);
+        let dirs = [c"/root".as_ptr()];
+        let mut cursors = [std::ptr::null_mut()];
+        let mut results = [vfsi_listing_result::default()];
+        let mut ids = Vec::<vfsi_object_id>::new();
+        let options = vfsi_listing_options {
+            max_entries: 20,
+            max_path_bytes: 4096,
+            attributes: VFSI_ATTR_MODE | VFSI_ATTR_FILEID,
+        };
+        let status = unsafe {
+            vfsi_listdirs_from_cursors_with_ids(
+                fs,
+                dirs.as_ptr(),
+                cursors.as_mut_ptr(),
+                1,
+                &options,
+                Some(collect),
+                &mut ids as *mut _ as *mut c_void,
+                results.as_mut_ptr(),
+            )
+        };
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "must not run a second GETATTR pass"
+        );
+        if missing.is_empty() {
+            assert_eq!(status, 0);
+            assert_eq!(ids.len(), 1);
+            assert_eq!(results[0].completion, 1);
+        } else {
+            assert_eq!(status, libc::ENOTSUP);
+            assert!(ids.is_empty());
+            assert_eq!(results[0].completion, 0);
+        }
+        unsafe { vfsi_free(fs) };
     }
 }

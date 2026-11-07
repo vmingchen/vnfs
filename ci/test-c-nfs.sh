@@ -7,7 +7,8 @@ log=$(mktemp)
 trap 'rm -f "$log"' EXIT
 for test_name in \
   identity::tests::live_nfs_retained_identity_survives_rename_replacement_and_reconnect \
-  directory::tests::retained_cohort_children_survive_parent_rename_with_bounded_compounds
+  directory::tests::retained_cohort_children_survive_parent_rename_with_bounded_compounds \
+  directory::tests::retained_identity_cohort_survives_parent_rename_without_getattr
 do
   cargo test -p vfsi-c --lib "$test_name" -- --ignored --exact 2>&1 | tee "$log"
   if ! grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$log"; then
