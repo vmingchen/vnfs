@@ -456,3 +456,89 @@ fn cohort_mapping_matches_scalar_mapping_and_rejects_links_escapes_and_dot_opera
             .is_err()
     );
 }
+
+#[test]
+fn multiple_writers_stream_heterogeneous_files_through_one_vector() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Posix::new(root.path()).unwrap();
+    let payloads = [vec![], vec![3; 7], vec![5; 31]];
+    for (index, payload) in payloads.iter().enumerate() {
+        fs.write(format!("/f{index}"), payload).unwrap();
+    }
+    let mut writers = [Vec::new(), Vec::new(), Vec::new()];
+    let sizes = copy_to_writers(
+        &fs,
+        &["/f0", "/f1", "/f2"],
+        &mut writers,
+        StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(3).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(sizes, [0, 7, 31]);
+    assert_eq!(writers, payloads);
+
+    let error =
+        copy_to_writers(&fs, &["/missing"], &mut writers, StreamOptions::new()).unwrap_err();
+    assert_eq!(
+        error.raw_code(),
+        libc::EINVAL as u32,
+        "shape validation must precede opening sources"
+    );
+    assert!(
+        copy_to_writers(
+            &fs,
+            &[] as &[&str],
+            &mut [] as &mut [Vec<u8>],
+            StreamOptions::new()
+        )
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[test]
+fn multiple_writers_preserve_write_error_and_never_replay_partial_output() {
+    struct Limited {
+        bytes: Vec<u8>,
+        remaining: usize,
+    }
+    impl Write for Limited {
+        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(io::Error::from_raw_os_error(libc::ENOSPC));
+            }
+            let count = data.len().min(self.remaining);
+            self.bytes.extend_from_slice(&data[..count]);
+            self.remaining -= count;
+            Ok(count)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            panic!("helper must not flush");
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let fs = Posix::new(root.path()).unwrap();
+    fs.write("/a", b"first").unwrap();
+    fs.write("/b", b"second").unwrap();
+    let mut writers = [
+        Limited {
+            bytes: Vec::new(),
+            remaining: 20,
+        },
+        Limited {
+            bytes: Vec::new(),
+            remaining: 2,
+        },
+    ];
+    let error = copy_to_writers(
+        &fs,
+        &["/a", "/b"],
+        &mut writers,
+        StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(3).unwrap()),
+    )
+    .unwrap_err();
+    assert_eq!(error.raw_code(), libc::ENOSPC as u32);
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(error.operation(), Some("copy_to_writers"));
+    assert_eq!(writers[0].bytes, b"first");
+    assert_eq!(writers[1].bytes, b"se");
+}

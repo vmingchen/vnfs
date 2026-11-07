@@ -17,7 +17,7 @@ pub use transfer::{
 mod stats;
 pub use stats::{TreeStats, tree_stats};
 mod data;
-pub use data::copy_to_writer;
+pub use data::{copy_to_writer, copy_to_writers};
 
 mod path;
 pub use path::{PathMapper, ResolvePath};
