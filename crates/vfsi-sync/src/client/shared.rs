@@ -17,6 +17,7 @@ struct PendingClose<F> {
 /// for an RPC or for the backend mutex. Final-owner teardown remains synchronous.
 pub(super) struct SharedBackend<F: HandleBackend> {
     pub(super) backend: Mutex<Option<F>>,
+    pub(super) cursor_owner: Arc<()>,
     pending: Mutex<Vec<PendingClose<F>>>,
     has_pending: AtomicBool,
 }
@@ -24,6 +25,7 @@ impl<F: HandleBackend> SharedBackend<F> {
     pub(super) fn new(backend: F) -> Self {
         Self {
             backend: Mutex::new(Some(backend)),
+            cursor_owner: Arc::new(()),
             pending: Mutex::new(Vec::new()),
             has_pending: AtomicBool::new(false),
         }

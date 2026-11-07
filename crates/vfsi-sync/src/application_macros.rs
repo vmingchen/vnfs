@@ -46,6 +46,15 @@ macro_rules! __vfsi_client_methods {
         ) -> Result<()> {
             <$client>::$rename($receiver(self), pairs, options)
         }
+        fn vlistdir_pages<P: AsRef<Path>>(
+            &self,
+            paths: &[P],
+            cursors: Vec<Option<vfsi_core::api::DirectoryCursor>>,
+            options: vfsi_core::api::ListDirOptions,
+            page_size: std::num::NonZeroUsize,
+        ) -> Result<Vec<vfsi_core::api::DirectoryPage>> {
+            <$client>::vlistdir_pages_impl($receiver(self), paths, cursors, options, page_size)
+        }
         fn vlistdirs<P: AsRef<Path>, C: Into<vfsi_core::api::ListDirControl>>(
             &self,
             paths: &[P],

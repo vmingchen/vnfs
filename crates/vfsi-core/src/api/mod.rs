@@ -64,6 +64,8 @@ pub use support::{
     ResourceLimits, StreamCompletion, StreamOptions, TraversalCompletion,
 };
 pub use support::{ReadIntoResult, WriteResult};
+mod paging;
+pub use paging::{DirectoryCursor, DirectoryPage};
 mod listdir;
 mod traversal;
 #[doc(hidden)]
@@ -85,6 +87,7 @@ pub enum RemoveMode {
 /// Unstable dispatch projections for workspace backend implementations.
 #[doc(hidden)]
 pub mod internal {
+    pub use super::paging::{NativeDirectoryCursor, NativeDirectoryPage, native_directory_pages};
     pub use super::read::{ReadRequest, consume_ops, read_batch};
     pub use super::support::FsReadResult as OwnedReadResult;
 }

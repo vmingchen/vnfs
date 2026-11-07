@@ -733,3 +733,41 @@ fn directory_budget_overrides_remain_distinct_from_client_defaults() {
     assert_eq!(walk.listing_options(), resolved);
     assert!(walk.enter_leave() && walk.sort_by_name());
 }
+
+#[test]
+fn default_portable_paging_collects_complete_roots_without_backend_types() {
+    let fs = tree_fs();
+    let pages = fs
+        .vlistdir_pages(
+            &["/tree", "/empty"],
+            vec![None, None],
+            ListDirOptions::new(),
+            std::num::NonZeroUsize::new(1).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(pages.len(), 2);
+    assert_eq!(pages[0].listing.entries.len(), 6);
+    assert!(pages[1].listing.entries.is_empty());
+    assert!(
+        pages
+            .iter()
+            .all(|p| p.continuation.is_none() && p.children.is_empty())
+    );
+    let fs = tree_fs();
+    assert_eq!(
+        fs.vlistdir_pages(
+            &["/tree"],
+            vec![None],
+            ListDirOptions::new().with_max_entries(1),
+            std::num::NonZeroUsize::new(1).unwrap()
+        )
+        .unwrap_err()
+        .raw_code(),
+        libc::EFBIG as u32
+    );
+    assert_eq!(
+        fs.page_calls.get(),
+        1,
+        "stop collecting before a second over-budget page"
+    );
+}

@@ -592,3 +592,118 @@ fn recovering_lifecycle_walk_skips_a_vanished_directory_without_replay() {
         }
     }
 }
+
+#[test]
+fn portable_page_continuations_pin_identity_and_preflight_the_entire_vector() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Posix::new(root.path()).unwrap();
+    fs.create_dir("/original").unwrap();
+    for name in ["a", "b", "c"] {
+        fs.write(format!("/original/{name}"), b"data").unwrap();
+    }
+    let options = ListDirOptions::new().with_allow_symlink_components(false);
+    let size = std::num::NonZeroUsize::new(1).unwrap();
+    let mut page = fs
+        .vlistdir_pages(&["/original"], vec![None], options, size)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let mut names: Vec<_> = page
+        .listing
+        .entries
+        .into_iter()
+        .map(|e| e.file_name().unwrap().to_os_string())
+        .collect();
+    let next = page
+        .continuation
+        .take()
+        .expect("fixture spans multiple pages");
+    let other = Posix::new(root.path()).unwrap();
+    let error = other
+        .vlistdir_pages(
+            &["/does-not-exist", "/original"],
+            vec![None, Some(next)],
+            options,
+            size,
+        )
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(error.raw_code(), libc::EBADF as u32);
+
+    let page = fs
+        .vlistdir_pages(&["/original"], vec![None], options, size)
+        .unwrap()
+        .pop()
+        .unwrap();
+    names.clear();
+    names.extend(
+        page.listing
+            .entries
+            .into_iter()
+            .map(|e| e.file_name().unwrap().to_os_string()),
+    );
+    let mut next = page.continuation;
+    fs.rename("/original", "/saved").unwrap();
+    fs.create_dir("/original").unwrap();
+    fs.write("/original/secret", b"replacement").unwrap();
+    while next.is_some() {
+        let page = fs
+            .vlistdir_pages(&["/original"], vec![next], options, size)
+            .unwrap()
+            .pop()
+            .unwrap();
+        names.extend(
+            page.listing
+                .entries
+                .into_iter()
+                .map(|e| e.file_name().unwrap().to_os_string()),
+        );
+        next = page.continuation;
+    }
+    names.sort();
+    assert_eq!(names, ["a", "b", "c"].map(std::ffi::OsString::from));
+}
+
+#[test]
+fn portable_page_quota_and_preflight_errors_do_not_start_a_path_lookup() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Posix::new(root.path()).unwrap();
+    let size = std::num::NonZeroUsize::new(1).unwrap();
+    assert!(
+        fs.vlistdir_pages::<&str>(&[], vec![], ListDirOptions::new(), size)
+            .unwrap()
+            .is_empty()
+    );
+    for options in [
+        ListDirOptions::new().with_recursive(true),
+        ListDirOptions::new(),
+    ] {
+        let cursors = if options.recursive() {
+            vec![None]
+        } else {
+            vec![]
+        };
+        let error = fs
+            .vlistdir_pages(&["/does-not-exist"], cursors, options, size)
+            .unwrap_err();
+        assert_eq!(error.raw_code(), libc::EINVAL as u32);
+    }
+    fs.create_dir("/empty").unwrap();
+    let options = ListDirOptions::new()
+        .with_max_entries(0)
+        .with_max_path_bytes(0);
+    assert!(
+        fs.vlistdir_pages(&["/empty"], vec![None], options, size)
+            .unwrap()[0]
+            .listing
+            .entries
+            .is_empty()
+    );
+    fs.write("/empty/file", b"").unwrap();
+    assert_eq!(
+        fs.vlistdir_pages(&["/empty"], vec![None], options, size)
+            .unwrap_err()
+            .raw_code(),
+        libc::EFBIG as u32
+    );
+}

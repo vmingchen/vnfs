@@ -105,6 +105,16 @@ macro_rules! owned_client {
             pub(crate) fn vmkdir_impl<P: AsRef<Path>>(&self, paths: &[MkDirOp<P>]) -> Result<()> {
                 self.inner.vmkdir(paths)
             }
+            pub(crate) fn vlistdir_pages_impl<P: AsRef<Path>>(
+                &self,
+                paths: &[P],
+                cursors: Vec<Option<vfsi_core::api::DirectoryCursor>>,
+                options: vfsi_core::api::ListDirOptions,
+                page_size: std::num::NonZeroUsize,
+            ) -> Result<Vec<vfsi_core::api::DirectoryPage>> {
+                self.inner
+                    .vlistdir_pages_impl(paths, cursors, options, page_size)
+            }
             pub(crate) fn directory_page_batch_size(&self, _paths: &[&Path]) -> Result<usize> {
                 self.inner.directory_page_batch_size()
             }

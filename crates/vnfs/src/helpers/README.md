@@ -23,7 +23,13 @@ coherent with concurrent kernel-mounted access.
 `VfsiExt::visit_dirs_ordered` provides lazy, application-ordered directory
 listings with entry/path/depth budgets and admission before child-directory I/O.
 Its comparator borrows immutable entries, so sorting cannot rewrite validated
-paths or metadata. It lets tools such as `ls` retain their sort and display policy without owning a
+paths or metadata. Native lifecycle and ordered visitors retain page
+continuations and parent-relative child seeds across unlocked callbacks. Child
+reads start after admission; path-only backends keep strict no-follow descent.
+For an application-owned frontier, `Vfsi::vlistdir_pages` returns owned pages
+and optional unique cursors in cohorts of at most 32 operands, split by backend
+capacity. Continuations pin the opened directory; a child seed resolves its
+name relative to the observed parent and does not pin that child's identity. It lets tools such as `ls` retain their sort and display policy without owning a
 second traversal engine. Use `listdir` with `WalkOptions::new(listing_options).with_enter_leave(true)` for pre/post-order entry
 events and `vlistdirs` to batch independent, already-approved directories.
 

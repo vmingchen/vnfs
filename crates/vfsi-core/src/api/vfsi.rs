@@ -457,6 +457,31 @@ pub trait Vfsi {
         callback: impl FnMut(usize, DirectoryListing) -> Result<C>,
     ) -> Result<Vec<crate::api::TraversalCompletion>>;
 
+    /// Read owned, shallow pages for an application-controlled directory frontier.
+    ///
+    /// A cohort has at most 32 paths and is split by native negotiated capacity.
+    /// Pass one optional continuation/child cursor per path. Every cursor must
+    /// originate from this client and name that same original path. Inputs move
+    /// into the call and are released on failure. All ownership is checked before
+    /// I/O. Returned pages preserve input order; zero-entry pages have no continuation.
+    /// Options set aggregate entry/path budgets and metadata fields; recursive
+    /// options are rejected. Page size is a hint, capped at 128 for native clients.
+    ///
+    /// Native implementations retain anchored identity across pages and child
+    /// descent. The default supports path-only implementations by collecting a
+    /// complete bounded listing with no cursors; it may exceed the page-size hint.
+    /// Descendant path-only opens should disable symlink components. These pages
+    /// do not provide snapshots or kernel/direct-client cache coherence.
+    fn vlistdir_pages<P: AsRef<Path>>(
+        &self,
+        paths: &[P],
+        cursors: Vec<Option<crate::api::DirectoryCursor>>,
+        options: crate::api::ListDirOptions,
+        _page_size: std::num::NonZeroUsize,
+    ) -> Result<Vec<crate::api::DirectoryPage>> {
+        super::paging::fallback_pages(self, paths, cursors, options)
+    }
+
     /// Stream files through bounded chunks without collecting whole contents.
     /// The callback receives the input index, byte offset, and borrowed chunk.
     /// `ControlFlow::Break(())` stops the whole vector; results contain its completed/stopped prefix.

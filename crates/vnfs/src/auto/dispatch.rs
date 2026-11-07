@@ -1289,3 +1289,33 @@ fn cohort_end(resolved: &[Resolved], start: usize) -> usize {
     }
     end
 }
+
+impl super::Auto {
+    pub(crate) fn vlistdir_pages_impl<P: AsRef<Path>>(
+        &self,
+        paths: &[P],
+        cursors: Vec<Option<vfsi_core::api::DirectoryCursor>>,
+        options: vfsi_core::api::ListDirOptions,
+        page_size: std::num::NonZeroUsize,
+    ) -> VfResult<Vec<vfsi_core::api::DirectoryPage>> {
+        let options = options.resolve(self.limits);
+        vfsi_core::api::internal::native_directory_pages(
+            &self.owner,
+            paths,
+            cursors,
+            options,
+            page_size,
+            |paths| self.directory_page_batch_size(paths),
+            |paths, states, size, probe| {
+                self.read_dir_pages_with_fields(
+                    paths,
+                    options.fields(),
+                    states,
+                    size,
+                    probe,
+                    options.allow_symlink_components(),
+                )
+            },
+        )
+    }
+}

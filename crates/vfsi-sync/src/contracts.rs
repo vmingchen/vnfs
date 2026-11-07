@@ -2,29 +2,9 @@
 
 use super::*;
 
-/// Backend-owned continuation state for a paged directory visit.
-///
-/// The state is dropped automatically when the caller stops or an error
-/// occurs, so backends do not need an explicit cursor-close operation.
+/// Backend-owned continuation state, shared with the portable paging adapter.
 #[doc(hidden)]
-pub struct DirPageCursor(Box<dyn std::any::Any + Send>);
-
-impl DirPageCursor {
-    pub fn new<T: std::any::Any + Send>(state: T) -> Self {
-        Self(Box::new(state))
-    }
-
-    pub fn is<T: std::any::Any + Send>(&self) -> bool {
-        self.0.is::<T>()
-    }
-
-    pub fn into_state<T: std::any::Any + Send>(self) -> VfResult<T> {
-        self.0
-            .downcast::<T>()
-            .map(|state| *state)
-            .map_err(|_| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))
-    }
-}
+pub type DirPageCursor = vfsi_core::api::internal::NativeDirectoryCursor;
 
 /// Backend page plus optional child seeds aligned with its entries.
 /// A seed starts a child's first page relative to its observed parent.

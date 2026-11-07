@@ -301,6 +301,7 @@ run_nfs() {
     cargo test -p vnfs --features "test-faults rpcsec-gss" --test nfs
     cargo test -p vfsi-nfs --features "server-copy test-faults" --test nfs -- --test-threads=1
     ci/test-c-nfs.sh
+    VFSI_NFS_EXPORT=${VFSI_NFS_EXPORT:-/} VFSI_NFS_REQUIRED=1 cargo test -p vnfs --test ordered_directory_nfs -- --nocapture --test-threads=1
     VFSI_NFS_EXPORT=${VFSI_NFS_EXPORT:-/} cargo test -p vnfs --test canonical_examples canonical_workflows_on_nfsv41_and_nfsv42 -- --ignored --test-threads=1
     "$python_bin" -m pytest \
       adapters/nfs4fs/tests/test_nfs_integration.py \

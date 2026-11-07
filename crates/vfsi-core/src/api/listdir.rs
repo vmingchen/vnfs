@@ -156,6 +156,10 @@ fn buffered<F: Vfsi + ?Sized>(
         .with_max_depth(crate::api::DepthLimit::unlimited())
         .with_truncate_at_max_depth(false);
     let mut retained_bytes = 0usize;
+    let seeds = std::cell::RefCell::new(std::collections::HashMap::<
+        std::path::PathBuf,
+        super::DirectoryCursor,
+    >::new());
     super::traversal::walk_events_with_errors(
         DirEntry::new(root.to_path_buf(), attrs),
         budget,
@@ -172,18 +176,28 @@ fn buffered<F: Vfsi + ?Sized>(
                 .max_path_bytes_or(crate::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES)
                 .checked_sub(retained_bytes)
                 .ok_or_else(|| limit_error(path))?;
-            fs.read_dir_with_options(
+            let cursor = seeds.borrow_mut().remove(path);
+            let (entries, children) = super::paging::collect_directory(
+                fs,
                 path,
+                cursor,
                 remaining
                     .with_recursive(false)
                     .with_max_path_bytes(bytes)
                     .with_fields(fields)
-                    // Reopening a path is not anchored to the original page.
-                    // Require atomic no-follow resolution, including ancestors.
+                    // Native seeds preserve observed parent identity. Path-only
+                    // fallback must reject swapped symlinks, including ancestors.
                     .with_allow_symlink_components(
                         options.allow_symlink_components() && !options.recursive() && !lifecycle,
                     ),
-            )
+            )?;
+            let mut retained = seeds.borrow_mut();
+            for child in children {
+                if retained.insert(child.path().to_path_buf(), child).is_some() {
+                    return Err(Error::invalid_reply(None, "duplicate child directory seed"));
+                }
+            }
+            Ok(entries)
         },
         |event| {
             if event.kind == WalkEventKind::Leave {
@@ -217,12 +231,14 @@ fn buffered<F: Vfsi + ?Sized>(
                     return Err(pruning_error(event.entry.path()));
                 }
                 if !options.recursive() || decision == WalkControl::SkipSubtree {
+                    seeds.borrow_mut().remove(event.entry.path());
                     return Ok(WalkControl::SkipSubtree);
                 }
                 if event.depth > walk.max_depth_or(Default::default()).get() {
                     if !walk.truncate_at_max_depth() {
                         return Err(limit_error(event.entry.path()));
                     }
+                    seeds.borrow_mut().remove(event.entry.path());
                     return Ok(WalkControl::SkipSubtree);
                 }
             }

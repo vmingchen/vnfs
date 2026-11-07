@@ -680,12 +680,12 @@ pub trait VfsiExt: Vfsi {
     /// `Leave` events for traversed directories, including pruned directories.
     /// In shallow lifecycle mode, children are `Entry` events. Symlinks are
     /// always `Entry` events. A non-directory lifecycle root produces one Entry.
-    /// Lifecycle traversal currently retains bounded directory buffers because
-    /// the vector page primitive does not expose resumable cursors.
+    /// Lifecycle traversal retains bounded directory buffers and native cursors,
+    /// preserving observed parent identity without reopening ancestor paths.
     /// `sort_by_name(true)` also buffers a bounded directory before sorting.
     /// Unsorted entry-only visiting remains paged. This is not a snapshot.
-    /// Buffered recursive/lifecycle visiting rejects symlinks in reopened
-    /// directory paths, including ancestors. Backends unable to guarantee that
+    /// Native recursive/lifecycle visiting retains anchored directory identity.
+    /// Reopened paths reject symlinks, including ancestors. Backends unable to guarantee that
     /// return Unsupported instead of checking and then following the path.
     /// Ordinary shallow listing retains the backend's path resolution; use
     /// `allow_symlink_components(false)` to require no-follow directory opens explicitly.
@@ -786,7 +786,8 @@ pub trait VfsiExt: Vfsi {
     /// The shared workflow sorts them; callbacks cannot replace validated entries.
     /// `descend` selects directories before their contents are read; it does not
     /// filter entries delivered in their parent's listing. Symlinks are never
-    /// traversed. Descendant opens reject symlinks in every component; backends
+    /// traversed. Native child cursors retain their observed parent identity;
+    /// path-only descendant opens reject symlinks in every component. Backends
     /// unable to guarantee that return Unsupported. The root uses the supplied
     /// path-resolution policy. `visitor` runs outside backend locks and may stop immediately
     /// or skip all children of the current directory. Errors after delivered
@@ -827,15 +828,17 @@ pub trait VfsiExt: Vfsi {
             options.max_path_bytes_or(crate::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES),
         );
         budget.charge(root)?;
-        let mut pending = vec![(root.to_path_buf(), 0usize)];
-        while let Some((path, depth)) = pending.pop() {
-            let mut entries = self.read_dir_with_options(
+        let mut pending = vec![(root.to_path_buf(), 0usize, None)];
+        while let Some((path, depth, cursor)) = pending.pop() {
+            let (mut entries, seeds) = super::paging::collect_directory(
+                self,
                 &path,
+                cursor,
                 budget.remaining_options(
                     crate::api::ListDirOptions::new()
                         .with_fields(options.fields())
-                        // Descendants were observed as real directories in a prior
-                        // listing. Reopening must not follow swapped ancestors.
+                        // Native child seeds resolve relative to the observed
+                        // parent; path-only fallback must reject swapped symlinks.
                         .with_allow_symlink_components(
                             depth == 0 && options.allow_symlink_components(),
                         ),
@@ -848,11 +851,15 @@ pub trait VfsiExt: Vfsi {
             }
             entries.sort_by(&mut order);
             let listing = DirectoryListing { path, entries };
+            let mut seeds: std::collections::HashMap<_, _> = seeds
+                .into_iter()
+                .map(|cursor| (cursor.path().to_path_buf(), cursor))
+                .collect();
             let children: Vec<_> = listing
                 .entries
                 .iter()
                 .filter(|entry| entry.attrs().is_dir() && descend(entry))
-                .map(|entry| entry.path().to_path_buf())
+                .map(|entry| (entry.path().to_path_buf(), seeds.remove(entry.path())))
                 .collect();
             match visitor(listing, depth)? {
                 crate::api::WalkControl::Stop => {
@@ -864,10 +871,15 @@ pub trait VfsiExt: Vfsi {
             if depth >= options.max_depth_or(Default::default()).get() && !children.is_empty() {
                 if !options.truncate_at_max_depth() {
                     return Err(crate::api::Error::errno(0, libc::EFBIG as u32)
-                        .with_context("visit_dirs_ordered", &children[0]));
+                        .with_context("visit_dirs_ordered", &children[0].0));
                 }
             } else {
-                pending.extend(children.into_iter().rev().map(|child| (child, depth + 1)));
+                pending.extend(
+                    children
+                        .into_iter()
+                        .rev()
+                        .map(|(child, cursor)| (child, depth + 1, cursor)),
+                );
             }
         }
         Ok(crate::api::TraversalCompletion::Complete)

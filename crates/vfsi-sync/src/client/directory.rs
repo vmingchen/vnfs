@@ -213,3 +213,35 @@ impl<F: VectorBackend> FsClient<F> {
             })
     }
 }
+
+impl<F: VectorBackend + 'static> FsClient<F> {
+    /// Portable owned paging with complete client/path ownership preflight.
+    #[doc(hidden)]
+    pub fn vlistdir_pages_impl<P: AsRef<Path>>(
+        &self,
+        paths: &[P],
+        cursors: Vec<Option<vfsi_core::api::DirectoryCursor>>,
+        options: vfsi_core::api::ListDirOptions,
+        page_size: std::num::NonZeroUsize,
+    ) -> VfResult<Vec<vfsi_core::api::DirectoryPage>> {
+        let options = options.resolve(self.limits());
+        vfsi_core::api::internal::native_directory_pages(
+            &self.inner.cursor_owner,
+            paths,
+            cursors,
+            options,
+            page_size,
+            |_| self.directory_page_batch_size(),
+            |paths, states, size, probe| {
+                self.read_dir_pages_with_fields(
+                    paths,
+                    options.fields(),
+                    states,
+                    size,
+                    probe,
+                    options.allow_symlink_components(),
+                )
+            },
+        )
+    }
+}
