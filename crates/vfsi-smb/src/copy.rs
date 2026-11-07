@@ -101,3 +101,104 @@ impl SmbVecFs {
         result.and(dst_close).and(src_close)
     }
 }
+
+#[cfg(test)]
+mod benchmarks {
+    use super::*;
+    use std::time::Instant;
+
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "manual managed-SMB new-destination copy experiment"]
+    fn compare_bounded_new_file_copy_waves() {
+        let server = std::env::var("VFSI_SMB_SERVER").expect("set VFSI_SMB_SERVER");
+        let share = std::env::var("VFSI_SMB_SHARE").expect("set VFSI_SMB_SHARE");
+        let backing =
+            PathBuf::from(std::env::var_os("VFSI_SMB_LOCAL_ROOT").expect("set local backing root"));
+        let username = std::env::var("VFSI_SMB_USERNAME").unwrap_or_default();
+        let password = std::env::var("VFSI_SMB_PASSWORD").unwrap_or_default();
+        let domain = std::env::var("VFSI_SMB_DOMAIN").unwrap_or_default();
+        let mut backend =
+            SmbVecFs::connect(&server, &share, &username, &password, &domain).unwrap();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let name = format!("vfsi-copy-waves-{}-{unique}", std::process::id());
+        let path = backing.join(&name);
+        std::fs::create_dir(&path).unwrap();
+        let fixture = Fixture(path);
+        for (case, files, bytes) in [("small", 32, 4096), ("large", 8, 2 * 1024 * 1024)] {
+            let source = fixture.0.join(case);
+            std::fs::create_dir(&source).unwrap();
+            for index in 0..files {
+                let payload: Vec<_> = (0..bytes)
+                    .map(|offset| ((offset + index) % 251) as u8)
+                    .collect();
+                std::fs::write(source.join(format!("source-{index:02}")), payload).unwrap();
+            }
+            for sample in 0..3 {
+                let order = if sample % 2 == 0 {
+                    [false, true]
+                } else {
+                    [true, false]
+                };
+                for prototype in order {
+                    let destination = format!("{case}/out-{sample}-{prototype}");
+                    let local_destination = fixture.0.join(&destination);
+                    std::fs::create_dir(&local_destination).unwrap();
+                    let pairs: Vec<_> = (0..files)
+                        .map(|index| {
+                            ExtentPair::from_os_paths(
+                                &PathBuf::from(format!("/{name}/{case}/source-{index:02}")),
+                                0,
+                                &PathBuf::from(format!("/{name}/{destination}/file-{index:02}")),
+                                0,
+                                Some(bytes as u64),
+                            )
+                        })
+                        .collect();
+                    let before = backend.client.diagnostics().primary.metrics;
+                    let start = Instant::now();
+                    let operation = if prototype {
+                        vfsi_sync::test_support::copy_new_files_batched(
+                            &mut backend,
+                            &pairs,
+                            0o666,
+                            Some(vfsi_core::api::SyncMode::Data),
+                        )
+                    } else {
+                        backend.vcopy_data_impl(&pairs)
+                    };
+                    let elapsed = start.elapsed().as_micros();
+                    let after = backend.client.diagnostics().primary.metrics;
+                    operation.unwrap();
+                    assert!(
+                        backend.open_files.is_empty(),
+                        "every owned copy descriptor must close"
+                    );
+                    for index in 0..files {
+                        assert_eq!(
+                            std::fs::read(source.join(format!("source-{index:02}"))).unwrap(),
+                            std::fs::read(local_destination.join(format!("file-{index:02}")))
+                                .unwrap(),
+                        );
+                    }
+                    println!(
+                        "SMB_COPY_WAVES {{\"case\":\"{case}\",\"prototype\":{prototype},\"files\":{files},\"bytes_per_file\":{bytes},\"sample\":{sample},\"smb_requests\":{},\"compound_requests\":{},\"wire_bytes_sent\":{},\"elapsed_us\":{elapsed}}}",
+                        after.requests_sent - before.requests_sent,
+                        after.compound_requests_sent - before.compound_requests_sent,
+                        after.wire_bytes_sent - before.wire_bytes_sent,
+                    );
+                    std::fs::remove_dir_all(local_destination).unwrap();
+                }
+            }
+        }
+    }
+}

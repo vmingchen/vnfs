@@ -624,6 +624,9 @@ mod filesystem_stats_tests;
 #[cfg(test)]
 mod directory_benchmark;
 
+#[cfg(test)]
+mod copy_benchmark;
+
 mod handle_backend;
 mod open;
 mod recovery;

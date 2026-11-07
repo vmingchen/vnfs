@@ -1,0 +1,9 @@
+{
+  "base_commit": "93a1e1213dbb27fc5c7f0d77c3458dc46ef2a4c4",
+  "recorded_at": "2026-11-06T03:50:46.528588+00:00",
+  "scope": "successful thread-local Rust allocation/reallocation requests during vfsi_listdirs; not peak live memory; fixture setup excluded",
+  "samples": [
+    {"variant":"before","entries":1024,"allocation_requests":11730,"requested_bytes":1481188},
+    {"variant":"compact","entries":1024,"allocation_requests":9681,"requested_bytes":984772}
+  ]
+}

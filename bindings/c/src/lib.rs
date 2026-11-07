@@ -678,3 +678,6 @@ mod error_tests;
 #[cfg(test)]
 #[allow(clippy::undocumented_unsafe_blocks, unsafe_op_in_unsafe_fn)]
 mod tests;
+
+#[cfg(test)]
+mod allocation_tests;

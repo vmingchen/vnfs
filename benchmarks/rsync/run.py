@@ -48,7 +48,7 @@ def validate_sample(row, method, expected_lines, parity):
     return row['stdout_sha256']
 
 
-def worker(args):
+def worker(args, trace_check=checked_trace):
     account = pwd.getpwnam(args.user)
     stem = args.output.resolve()
     checked(['mount', '--make-rprivate', '/'])
@@ -104,7 +104,7 @@ def worker(args):
                 dropped = re.search(r'(\d+) packets dropped by kernel', log.read_text())
                 if not dropped or int(dropped[1]):
                     raise RuntimeError('missing/nonzero capture drop count')
-            entries = checked_trace(stderr.read_text(), args.method)
+            entries = trace_check(stderr.read_text(), args.method)
             output = stdout.read_bytes()
             result = dict(elapsed_ns=elapsed, stdout_sha256=hashlib.sha256(output).hexdigest(),
                           stdout_lines=len(output.splitlines()), traced_entries=entries, mount_options=options,
@@ -179,13 +179,13 @@ def build(checkout, output):
     return binary, library, provenance
 
 
-def main(args):
+def main(args, prepare=build, trial_script=None):
     if not (3 <= args.pairs <= 101 and 1 <= args.captures <= 9 and 0 < args.timeout <= 600):
         raise ValueError('need >=3 timing pairs, >=1 capture, and a bounded timeout')
     args.output.mkdir(parents=True, exist_ok=False)
     raw = args.output/'raw'
     raw.mkdir()
-    binary, library, provenance = build(args.checkout.resolve(), args.output)
+    binary, library, provenance = prepare(args.checkout.resolve(), args.output)
     fixture = json.loads((args.fixture/'fixture.json').read_text())
     expected = fingerprint(args.fixture/'tree')
     if expected['identity_sha256'] != fixture['identity_sha256']:
@@ -207,7 +207,7 @@ def main(args):
                         if fingerprint(args.fixture/'tree') != expected:
                             raise ValueError('fixture mutated')
                         stem = raw/f'{regime}-{phase}-{pair:02d}-{method}'
-                        command = ['unshare','--mount','--fork',sys.executable,str(Path(__file__).resolve()),'_trial',
+                        command = ['unshare','--mount','--fork',sys.executable,str(trial_script or Path(__file__).resolve()),'_trial',
                             '--binary',str(binary),'--library',str(library),'--export',args.export,'--method',method,
                             '--user',pwd.getpwuid(os.getuid()).pw_name,'--output',str(stem),'--interface',link.peer,'--timeout',str(args.timeout)]
                         if phase == 'capture':

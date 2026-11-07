@@ -1722,6 +1722,36 @@ fn indexed_listings_discard_earlier_cohorts_on_late_backend_or_metadata_failure(
 }
 
 #[test]
+fn indexed_listing_projection_errors_preserve_backend_and_budget_error_precedence() {
+    let dirs: Vec<_> = (0..65)
+        .map(|n| CString::new(format!("/dir-{n}")).unwrap())
+        .collect();
+    for (max_entries, fail_call, expected, calls) in [
+        (65, Some(3), libc::EIO, 3),
+        (32, None, libc::EFBIG, 2),
+        (65, None, libc::ENOTSUP, 3),
+    ] {
+        // The first row lacks requested metadata. Collection must still honor
+        // the original backend/quota failure precedence and deliver no prefix.
+        let fixture = ListingFixture::with_failure(1, AttrMask::UID, 0, fail_call, None);
+        let (status, indices, results) = fixture.run(
+            &dirs,
+            &vfsi_listing_options {
+                max_entries,
+                max_path_bytes: usize::MAX,
+                attributes: VFSI_ATTR_MODE | VFSI_ATTR_UID,
+            },
+        );
+        assert_eq!(status, expected);
+        assert_eq!(fixture.calls.lock().unwrap().len(), calls);
+        assert!(indices.is_empty());
+        assert!(results
+            .iter()
+            .all(|r| r.completion == 0 && r.delivered == 0));
+    }
+}
+
+#[test]
 fn directory_byte_overflow_stops_before_retaining_or_visiting_more_entries() {
     for max_entries in [100, usize::MAX] {
         let mut visited = 0;
