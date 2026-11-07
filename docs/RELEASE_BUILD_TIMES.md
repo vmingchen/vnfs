@@ -1,5 +1,29 @@
 # Release build-time baseline
 
+## 2026-11-07 C SDK 0.3.13
+
+Published from clean main commit `db077747fee3e25388b22e72f9503e78eb35a5f3`
+after its [CI run](https://github.com/vmingchen/vnfs/actions/runs/42391616197)
+and [four-port/ABI gate](https://github.com/vmingchen/vnfs/actions/runs/42391616259)
+both passed. No additional Rust crate releases were needed.
+
+`cargo publish -p vfsi-c --locked` took **6.450 seconds**, including package
+verification, upload, and registry availability, using existing caches. It ran
+from 16:38:56 to 16:39:02 UTC. This is not a cold-build measurement.
+
+The downloaded registry archive's checksum is
+`ef73a1845b2c5cfe40e7d738569b2c83c8f4789278364a1acef61ccb98973bea`.
+Its clean source revision, all three public headers, SDK installer, and lockfile
+were verified. ABI v3 and optional-symbol compatibility are preserved.
+
+Local validation passed standalone registry-only packaging, the full
+server-independent Rust suite, smoke tests, old ABI-v3 clients, live NFS
+retained-identity/cursor tests, both C port parity scripts, all 11 rsync cursor
+compatibility tests, and four-port live parity on NFSv4.1 and v4.2.
+Evidence is retained at
+`/home/ubuntu/vfsi-c-release-0.3.13-20261107/`.
+
+
 These are observed release timings, retained for a separate release-speed
 investigation. GitHub Actions durations are wall-clock job or step times from
 the API; local measurements identify the command and environment. Neither is
