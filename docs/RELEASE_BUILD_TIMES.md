@@ -1,5 +1,41 @@
 # Release build-time baseline
 
+## 2026-11-07 traversal and C SDK releases
+
+Published from clean main commit `0877de61705b1a24d171be602d17241eb7cd0c75`
+after its [CI run](https://github.com/vmingchen/vnfs/actions/runs/42399392652)
+and [four-port/ABI gate](https://github.com/vmingchen/vnfs/actions/runs/42399392743)
+both passed at that exact revision.
+
+All four packages used `cargo publish -p PACKAGE --locked` with verification
+enabled and existing caches. These are complete publish-command wall times,
+including packaging, verification, upload, and index availability.
+
+| Package | Complete publish command |
+|---|---:|
+| vfsi-core 0.1.19 | 3.144s |
+| vfsi-sync 0.1.20 | 3.805s |
+| vnfs 0.0.30 | 11.996s |
+| vfsi-c 0.3.14 | 11.073s |
+| Sequential command total | 30.017s |
+
+Publication ran from 18:10:58 to 18:11:30 UTC. Every downloaded registry archive's
+checksum and clean source revision were verified. The C SDK includes the matching
+headers and installer, preserves ABI v3, and adds an optional combined
+cursor/identity listing export.
+
+Local checks passed the full server-independent Rust suite, smoke tests, C/C++
+headers, old ABI-v3 clients, retained-identity tests on NFSv4.1/v4.2, and all 11
+rsync cursor regressions. Complete local NFS suites passed 137 tests per minor
+version; two mount-specific cases remained ignored in those local invocations.
+Hosted CI separately exercised its configured Auto mount tests. The corrected tests require
+retained ancestors to enumerate original contents without following replacement
+symlinks; child replacements still require the original no-follow errors.
+
+Evidence, including per-package hashes/timings and exact CI job results, is kept
+at `/home/ubuntu/vfsi-traversal-release-20261107/`.
+
+
 ## 2026-11-07 C SDK 0.3.13
 
 Published from clean main commit `db077747fee3e25388b22e72f9503e78eb35a5f3`
