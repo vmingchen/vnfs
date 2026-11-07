@@ -11,6 +11,43 @@ step, or complete publish command. Record cache/verification conditions when
 known. Do not compare warm, cold, emulated, and verification-skipping runs as
 though they measured the same work. Preserve older records unchanged.
 
+## 2026-11-07 vnfs 0.0.29 release
+
+Source: `84cff948b6bd438d4423bdd7be61135bbdbb0cfc`. The exact release commit's
+[19-job CI run](https://github.com/vmingchen/vnfs/actions/runs/42383099856)
+and [six-job compatibility gate](https://github.com/vmingchen/vnfs/actions/runs/42383099628)
+passed before publication, including all four registered ports and ABI v3.
+
+All five crates were published sequentially from the clean canonical VM
+checkout using `cargo publish -p PACKAGE --locked` with Cargo verification
+enabled, one build job, and the existing build/download caches. These are
+complete command wall times, including packaging, verification, upload, and
+index wait; they are not compilation-only or cold-build measurements.
+Publication ran from `2026-11-07T14:54:49.902875+00:00` to
+`2026-11-07T14:55:43.243715+00:00` (UTC).
+
+| Crate | Complete publish command wall time |
+|---|---:|
+| vfsi-core 0.1.18 | 5.724s |
+| vfsi-sync 0.1.19 | 3.293s |
+| vfsi-local 0.1.16 | 4.499s |
+| vfsi-nfs 0.1.17 | 25.245s |
+| vnfs 0.0.29 | 12.187s |
+| Sequential command total | 50.948s |
+
+Every registry archive's checksum and clean source revision were verified.
+The published vnfs README also matched the release checkout. A separate
+registry-only consumer passed with default and all public features, resolving
+the five new packages together with the unchanged POSIX and io_uring releases.
+Local smoke and
+the full server-independent Rust suite passed, followed by live NFSv4.1,
+NFSv4.2, and Samba checks. The initial full-suite attempt exhausted disk space;
+the successful serial retry ran after space became available without clearing
+build caches.
+
+Per-crate logs, timestamps, archives, checksum metadata, source provenance,
+and CI evidence are retained at `/home/ubuntu/vnfs-release-0.0.29.4zrsk2yw/`.
+
 ## 2026-11-01 coordinated Rust traversal release
 
 Source: `dc477f5a3609a4becb5904d2d08dd4bcdafdcce3`. The exact release commit's
