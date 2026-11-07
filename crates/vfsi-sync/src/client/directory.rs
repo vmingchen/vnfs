@@ -32,7 +32,7 @@ impl<F: VectorBackend> FsClient<F> {
     ) -> VfResult<Vec<crate::DirectoryPage>> {
         let pages = self.lock()?.vlistdir_pages_impl(
             paths,
-            fields | AttrMask::MODE | AttrMask::SIZE,
+            fields | AttrMask::MODE,
             cursors,
             page_size,
             max_entries,

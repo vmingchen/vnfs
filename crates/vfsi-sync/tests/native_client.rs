@@ -3816,3 +3816,50 @@ fn mapped_io_projects_each_operand_once_on_success_and_invalid_replies() {
         b.close().unwrap();
     }
 }
+
+#[test]
+fn directory_projection_does_not_add_or_fabricate_unrequested_size() {
+    let fields = Arc::new(Mutex::new(Vec::new()));
+    let client = FsClient::new(ScalarOnly {
+        directory_entries: 3,
+        directory_fields: fields.clone(),
+        ..Default::default()
+    });
+    let options = vfsi_sync::ListDirOptions::new().with_fields(vfsi_sync::AttrMask::MODE);
+    let page = client
+        .vlistdir_pages(
+            &["/tree"],
+            vec![None],
+            options,
+            std::num::NonZeroUsize::new(1).unwrap(),
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(
+        page.listing
+            .entries
+            .iter()
+            .all(|entry| entry.attrs().len().is_none())
+    );
+    assert_eq!(*fields.lock().unwrap(), [vfsi_sync::AttrMask::MODE]);
+    drop(page);
+    fields.lock().unwrap().clear();
+    client
+        .vlistdirs(&["/tree"], options, |_, page| {
+            assert!(
+                page.entries
+                    .iter()
+                    .all(|entry| entry.attrs().len().is_none())
+            );
+            Ok(std::ops::ControlFlow::Continue(()))
+        })
+        .unwrap();
+    assert!(
+        fields
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|fields| *fields == vfsi_sync::AttrMask::MODE)
+    );
+}
