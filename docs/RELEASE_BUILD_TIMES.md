@@ -1,5 +1,49 @@
 # Release build-time baseline
 
+## 2026-11-08 writer helpers and matching C SDK
+
+Rust source: `a907e2863e54695d7b9438ae3ebe4e30d65b4c0a`, after its
+[19-job CI](https://github.com/vmingchen/vnfs/actions/runs/42495435105) and
+[six-job port/ABI gate](https://github.com/vmingchen/vnfs/actions/runs/42495435130)
+passed. C SDK source: `7a507dd6c5916fee528e68eeffa45ec71bd4938a`, after its
+[19-job CI](https://github.com/vmingchen/vnfs/actions/runs/42496769413) and
+[port/ABI gate](https://github.com/vmingchen/vnfs/actions/runs/42496769492)
+passed. C ABI remains v3.
+
+Each package used `cargo publish -p PACKAGE --locked` from a clean canonical
+checkout, with Cargo verification enabled, one build job, and existing caches.
+Times include packaging, verification, upload, and index wait; they are complete
+command wall times, not compilation-only or cold-build estimates.
+
+| Package | Complete publish command wall time |
+|---|---:|
+| vfsi-core 0.1.20 | 4.941s |
+| vnfs 0.0.31 | 29.074s |
+| vfsi-c 0.3.15 | 38.426s |
+| Sum of publish command wall times | 72.441s |
+
+Rust publication ran from `2026-11-08T15:45:18.447519+00:00` through
+`2026-11-08T15:45:53.278974+00:00` (UTC). The SDK publication ran from
+`2026-11-08T15:56:12.331961+00:00` through `2026-11-08T15:56:50.758365+00:00` (UTC).
+The phases include a separate SDK CI gate; the table does not measure that
+elapsed interval.
+
+Every registry archive's checksum and clean source revision were verified.
+A standalone registry-only consumer executed ordered and round-robin writer
+copies with default and all public Rust features. Local smoke and the complete
+server-independent Rust suite passed; live writer-copy tests preserved every
+byte on NFSv4.1 and v4.2 while reducing compounds from 67 to 38.
+
+The published SDK's locked graph includes `vfsi-core 0.1.20` and
+`libntirpc-sys 0.3.6`. It was also installed independently with `--registry-only
+--profile dev` for local Git/rsync parity checks. Rust ports pin `vnfs =0.0.31`;
+C ports pin the matching `vfsi-c 0.3.15` SDK, which depends on backend crates
+rather than the Rust facade. Current port revisions are recorded in
+`ecosystem/ports.toml` and `ecosystem/versions.toml`.
+
+Logs, timings, archives, provenance, and CI evidence are retained at
+`/home/ubuntu/vnfs-release-0.0.31.tulxrkin/`; port build/parity evidence is at `/home/ubuntu/vfsi-ports-vnfs-0.0.31-20261108/`.
+
 ## 2026-11-07 traversal and C SDK releases
 
 Published from clean main commit `0877de61705b1a24d171be602d17241eb7cd0c75`

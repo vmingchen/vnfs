@@ -5,24 +5,24 @@ schema_version = 1
 [platform]
 canonical = "https://github.com/vmingchen/vnfs"
 mirror = "https://github.com/vfsi/vfsi"
-code_revision = "0877de61705b1a24d171be602d17241eb7cd0c75"
+code_revision = "7a507dd6c5916fee528e68eeffa45ec71bd4938a"
 
 [rust]
 nfsv41-sys = { version = "0.1.15", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
-vfsi-core = { version = "0.1.19", revision = "0877de61705b1a24d171be602d17241eb7cd0c75" }
+vfsi-core = { version = "0.1.20", revision = "a907e2863e54695d7b9438ae3ebe4e30d65b4c0a" }
 vfsi-local = { version = "0.1.16", revision = "84cff948b6bd438d4423bdd7be61135bbdbb0cfc" }
 vfsi-nfs = { version = "0.1.17", revision = "84cff948b6bd438d4423bdd7be61135bbdbb0cfc" }
 vfsi-posix = { version = "0.1.6", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
 vfsi-smb = { version = "0.1.15", revision = "b6b1ef0ed14109762a46d130af1f8a7e7223e9c5" }
 vfsi-sync = { version = "0.1.20", revision = "0877de61705b1a24d171be602d17241eb7cd0c75" }
 vfsi-uring = { version = "0.1.6", revision = "dc477f5a3609a4becb5904d2d08dd4bcdafdcce3" }
-vnfs = { version = "0.0.30", revision = "0877de61705b1a24d171be602d17241eb7cd0c75" }
+vnfs = { version = "0.0.31", revision = "a907e2863e54695d7b9438ae3ebe4e30d65b4c0a" }
 
 [c]
 package = "vfsi-c"
-version = "0.3.14"
+version = "0.3.15"
 abi = 3
-revision = "0877de61705b1a24d171be602d17241eb7cd0c75"
+revision = "7a507dd6c5916fee528e68eeffa45ec71bd4938a"
 # First implementation commit; shipped in vfsi-c 0.3.11 while preserving ABI v3.
 scoped_identity_revision = "037759665d9857e216702b6a92d53e37ff8f4fb5"
 scoped_identity_published = true
@@ -34,7 +34,7 @@ vsmb = { version = "0.1.6", revision = "b6b1ef0ed14109762a46d130af1f8a7e7223e9c5
 vsmbfs = { version = "0.1.6", revision = "b6b1ef0ed14109762a46d130af1f8a7e7223e9c5" }
 
 [ports]
-coreutils = "7641f7e945bcd7c4e4916021d8a306164bb4506a"
-findutils = "2b21625eb0554da47c874d25c2eb1a7b67a48a0b"
-git = "041cb566a41d8050c335aa3bb16d769c1c32e04f"
-rsync = "0d91435b023c748b6a384507eac50a09c50d6be7"
+coreutils = "544d1ed1f919faad23b5b1e4c860328cc4a31264"
+findutils = "dc2809ebe017251f9e3217fc6f4141a687ebddd8"
+git = "fdc0fe726f182d089a3bc02b7efc357e214797fa"
+rsync = "709240c73c8bf948b1c31221c9163b2395074973"
