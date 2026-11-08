@@ -1350,7 +1350,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-core"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "bitfields",
  "bitflags",
@@ -1429,7 +1429,7 @@ dependencies = [
 
 [[package]]
 name = "vnfs"
-version = "0.0.30"
+version = "0.0.31"
 dependencies = [
  "bitfields",
  "libc",

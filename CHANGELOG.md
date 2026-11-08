@@ -5,6 +5,17 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+## vnfs 0.0.31 (2026-11-08)
+
+Supporting Rust release: `vfsi-core 0.1.20`.
+
+- Add `helpers::copy_to_writers` to stream multiple sources into caller-owned
+  writers, with ordered delivery by default and opt-in round-robin reads.
+- Bound round-robin cohorts by the configured payload budget and at most 32
+  open sources, retaining indexed errors and cleanup after partial failures.
+- Reject singleton read replies that report more bytes than requested, including
+  caller-provided buffers with spare aggregate read budget.
+
 ## vnfs 0.0.29 (2026-11-07)
 
 Supporting Rust releases: `vfsi-core 0.1.18`, `vfsi-sync 0.1.19`,
