@@ -168,6 +168,12 @@ overrides; deploy that directory only if your override requires it.
 Static-library consumers must link the remaining platform dependencies.
 Use `cargo rustc -p vfsi-c --lib -- --print native-static-libs` to inspect them.
 
+### SDK 0.3.15
+
+This patch refreshes the locked backend dependency baseline to include
+`vfsi-core 0.1.20`, matching the vnfs 0.0.31 Rust release. Public C interfaces
+and ABI v3 are unchanged.
+
 ### SDK 0.3.14
 
 This release packages retained directory cursors, inline listing identities,

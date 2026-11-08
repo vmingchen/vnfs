@@ -7,7 +7,8 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## vnfs 0.0.31 (2026-11-08)
 
-Supporting Rust release: `vfsi-core 0.1.20`.
+Supporting Rust release: `vfsi-core 0.1.20`. The matching C SDK is
+`vfsi-c 0.3.15` (ABI v3).
 
 - Add `helpers::copy_to_writers` to stream multiple sources into caller-owned
   writers, with ordered delivery by default and opt-in round-robin reads.
