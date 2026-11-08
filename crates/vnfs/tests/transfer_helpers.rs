@@ -22,6 +22,16 @@ enum Fault {
     PartialCrossDevice,
     LostRename,
     MissingSize,
+    OwnedShortRead,
+    NoReadProgress,
+    OversizedOwnedRead,
+    LostRead,
+    BadReadIndex,
+    ReadAfter(usize, usize),
+    ReadAfterOpen(usize, usize),
+    BadOpenCount,
+    BadOpenIndex,
+    BadCloseIndex,
 }
 #[derive(Default)]
 struct Calls {
@@ -38,6 +48,8 @@ struct Calls {
     removes: usize,
     max_bytes: usize,
     max_files: usize,
+    open_batches: Vec<usize>,
+    read_batches: Vec<Vec<(u64, usize)>>,
 }
 struct Harness {
     fs: Posix,
@@ -111,15 +123,29 @@ impl Vfsi for Harness {
     }
     fn vopen(&self, r: &[OpenOp]) -> Result<Vec<Self::File>> {
         self.calls.borrow_mut().opens += 1;
-        self.fs.vopen(r)
+        self.calls.borrow_mut().open_batches.push(r.len());
+        if self.fault.get() == Fault::BadOpenIndex {
+            return Err(Error::errno(r.len(), libc::EIO as u32));
+        }
+        let mut files = self.fs.vopen(r)?;
+        if self.fault.get() == Fault::BadOpenCount {
+            files.pop();
+        }
+        Ok(files)
     }
     fn vread<'a>(
         &self,
         r: impl IntoIterator<Item = ReadOp<'a, Self::File>>,
         o: ReadOptions,
     ) -> Result<Vec<ReadResult>> {
+        let r: Vec<_> = r.into_iter().collect();
+        let ranges: Vec<_> = r
+            .iter()
+            .filter_map(|op| op.range_parts().map(|(_, offset, length)| (offset, length)))
+            .collect();
         let attempt = {
             let mut calls = self.calls.borrow_mut();
+            calls.read_batches.push(ranges.clone());
             calls.read_attempts += 1;
             calls.read_attempts
         };
@@ -131,6 +157,17 @@ impl Vfsi for Harness {
         }
         if self.fault.get() == Fault::IndexedRead {
             return Err(Error::errno(1, libc::EIO as u32));
+        }
+        match self.fault.get() {
+            Fault::ReadAfter(at, index) if at == attempt => {
+                return Err(Error::errno(index, libc::EIO as u32));
+            }
+            Fault::ReadAfterOpen(at, index) if at == self.calls.borrow().opens => {
+                return Err(Error::errno(index, libc::EIO as u32));
+            }
+            Fault::LostRead => return Err(Error::transport(None, "lost read reply")),
+            Fault::BadReadIndex => return Err(Error::errno(r.len(), libc::EIO as u32)),
+            _ => {}
         }
         let mut out = self.fs.vread(r, o)?;
         let mut c = self.calls.borrow_mut();
@@ -145,6 +182,19 @@ impl Vfsi for Harness {
                     *result = ReadResult::buffered(result.offset(), 3, false);
                 }
             }
+        }
+        if self.fault.get() == Fault::OwnedShortRead {
+            for result in &mut out {
+                if let Some(data) = result.data().filter(|data| data.len() > 3) {
+                    *result = ReadResult::owned(result.offset(), data[..3].to_vec(), false);
+                }
+            }
+        }
+        if self.fault.get() == Fault::NoReadProgress {
+            out[0] = ReadResult::owned(out[0].offset(), Vec::new(), false);
+        }
+        if self.fault.get() == Fault::OversizedOwnedRead {
+            out[0] = ReadResult::owned(out[0].offset(), vec![0; ranges[0].1 + 1], true);
         }
         if self.fault.get() == Fault::BadRead {
             out.pop();
@@ -176,6 +226,9 @@ impl Vfsi for Harness {
     fn vclose(&self, f: &mut [Self::File]) -> Result<()> {
         self.calls.borrow_mut().closes += f.len();
         self.fs.vclose(f)?;
+        if self.fault.get() == Fault::BadCloseIndex {
+            return Err(Error::errno(f.len(), libc::EIO as u32));
+        }
         if self.fault.get() == Fault::Close {
             return Err(Error::errno(0, libc::EIO as u32));
         }
@@ -1131,3 +1184,6 @@ fn shared_open_builder_dispatches_scalar_and_batch_opens_through_vfsi() {
     first.close().unwrap();
     fs.close_files(rest).unwrap();
 }
+
+#[path = "support/writer_copies.rs"]
+mod writer_copies;

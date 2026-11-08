@@ -1006,6 +1006,64 @@ fn public_stream_cohorts_reduce_compounds_without_regressing_single_file_streams
 }
 
 #[test]
+fn public_writer_round_robin_batches_continuation_reads() {
+    use std::num::NonZeroUsize;
+    use vnfs::files::StreamOptions;
+    use vnfs::helpers::{WriterCopyOptions, copy_to_writers};
+
+    let dir = setup_dir("writer-round-robin");
+    let telemetry = vnfs::nfs::Telemetry::default();
+    let version = vnfs::nfs::NfsVersion::try_from(
+        std::env::var("VNFS_TEST_MINOR")
+            .ok()
+            .map(|value| value.parse().unwrap()),
+    )
+    .unwrap();
+    let fs = Nfs::builder(test_host())
+        .version(version)
+        .telemetry(telemetry.clone())
+        .connect()
+        .unwrap();
+    let paths: Vec<_> = (0..4).map(|index| format!("{dir}/{index}")).collect();
+    let payloads: Vec<_> = (0..4)
+        .map(|index| vec![index as u8 + 1; 1024 * 1024 + 17])
+        .collect();
+    for (path, data) in paths.iter().zip(&payloads) {
+        fs.write(path, data).unwrap();
+    }
+    let stream = StreamOptions::new().with_chunk_size(NonZeroUsize::new(64 * 1024).unwrap());
+    let mut counts = Vec::new();
+    for round_robin in [false, true] {
+        let mut writers = vec![Vec::new(); paths.len()];
+        let before = telemetry.snapshot().calls;
+        let sizes = if round_robin {
+            copy_to_writers(
+                &fs,
+                &paths,
+                &mut writers,
+                WriterCopyOptions::from(stream)
+                    .with_round_robin(NonZeroUsize::new(128 * 1024).unwrap()),
+            )
+        } else {
+            copy_to_writers(&fs, &paths, &mut writers, stream)
+        }
+        .unwrap();
+        counts.push(telemetry.snapshot().calls - before);
+        assert_eq!(sizes, vec![(1024 * 1024 + 17) as u64; paths.len()]);
+        assert_eq!(writers, payloads);
+    }
+    assert!(
+        counts[1] < counts[0],
+        "round-robin must batch continuation reads: {counts:?}"
+    );
+    eprintln!(
+        "writer copies: ordered={} compounds, round-robin={}",
+        counts[0], counts[1]
+    );
+    fs.remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn public_stream_cohorts_follow_file_and_parent_symlinks() {
     use vnfs::files::{ResourceLimits, StreamCompletion, StreamOptions, Vfsi};
     let dir = setup_dir("stream-cohort-symlinks");

@@ -53,6 +53,17 @@ copy_to_writer(session.fs(), source, &mut output,
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+For multiple admitted destinations, `helpers::copy_to_writers` keeps ordered
+streaming by default and continues to accept `StreamOptions`. Opt into
+interleaved continuation reads with
+`WriterCopyOptions::from(stream_options).with_round_robin(read_budget)`, where
+`read_budget` is a nonzero aggregate payload limit. Cohorts open at most 32
+sources, and both the requested budget and the client's read limit are honored.
+The budget excludes client/RPC overhead and destination storage. Files may
+advance together, so an error can leave several writers partial; input indices
+are not completion boundaries. Destination admission, metadata, flushing and
+publication remain caller responsibilities.
+
 When the application also needs mount information, use the bundled session
 instead of separately discovering the mount and constructing a path mapper:
 
