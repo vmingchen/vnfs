@@ -12,6 +12,12 @@ fn timeout_connection_auth_and_invalid_data_keep_typed_provenance() {
             vfsi_core::TransportKind::Auth,
         ),
         (
+            SmbError::NegotiateValidationFailed {
+                reason: "server changed the negotiated security mode".into(),
+            },
+            vfsi_core::TransportKind::Auth,
+        ),
+        (
             SmbError::InvalidData {
                 message: "bad frame".into(),
             },

@@ -868,7 +868,8 @@ pub(super) fn smb_error(error: SmbError, index: impl Into<Option<usize>>) -> VfE
         SmbErrorKind::ConnectionLost | SmbErrorKind::SessionExpired => T::Connection,
         SmbErrorKind::AuthRequired
         | SmbErrorKind::SigningRequired
-        | SmbErrorKind::SignatureInvalid => T::Auth,
+        | SmbErrorKind::SignatureInvalid
+        | SmbErrorKind::NegotiateValidationFailed => T::Auth,
         SmbErrorKind::InvalidData => T::InvalidReply,
         SmbErrorKind::Unsupported => {
             return VfError::unsupported(index).with_message(error.to_string());
