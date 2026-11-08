@@ -52,6 +52,7 @@ impl SmbVecFs {
             domain: domain.to_owned(),
             auto_reconnect: options.auto_reconnect(),
             compression: options.compression(),
+            require_encryption: false,
             // Custom compounds are bound to the primary connection. Never let
             // the dependency redirect a tree to an untracked DFS connection.
             dfs_enabled: false,
