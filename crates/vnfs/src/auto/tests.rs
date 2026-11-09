@@ -961,7 +961,7 @@ fn live_changed_auto_limits_apply_to_cached_connections_and_open_handles() {
 
 #[test]
 #[ignore = "requires configured NFS mount fixtures"]
-fn live_write_allv_preflights_invalid_later_requests_across_routes() {
+fn live_write_allv_isolates_invalid_later_requests_across_routes() {
     let mount = std::env::var("VFSI_AUTO_TEST_MOUNT")
         .expect("VFSI_AUTO_TEST_MOUNT is required for this ignored integration test");
     let unique = format!(
@@ -1039,8 +1039,8 @@ fn live_write_allv_preflights_invalid_later_requests_across_routes() {
     }
     for (remote_first, invalid, error, first, second, failed_path) in observations {
         assert_eq!(
-            &first, b"original",
-            "earlier cohort changed: remote_first={remote_first}, invalid={invalid}"
+            &first, b"changedl",
+            "healthy cohort must execute: remote_first={remote_first}, invalid={invalid}"
         );
         assert_eq!(second, b"original");
         assert_eq!(error.index(), Some(1));
@@ -1404,37 +1404,50 @@ fn live_remove_continues_after_errors_across_routes() {
     fs::create_dir(&blocked).unwrap();
     fs::write(blocked.join("child"), b"keep").unwrap();
     let local_file = local.path().join("local");
-    fs::write(&local_file, b"local").unwrap();
     assert_eq!(client.route_for(&local_file), AutoRoute::Posix);
     require_live_direct_route(&client, &blocked);
     for continue_on_error in [false, true] {
+        fs::write(&local_file, b"local").unwrap();
         let last = remote.path().join("last");
         fs::write(&last, b"last").unwrap();
-        let error = client
-            .removes_all(
+        let outcomes = client
+            .vremove(
                 &[&blocked, &local_file, &last],
                 crate::RemoveMode::Entry,
                 crate::RemoveOptions::new().with_continue_on_error(continue_on_error),
             )
-            .unwrap_err();
-        assert_eq!(error.index(), Some(0), "retain the first group's error");
-        assert_eq!(error.raw_code(), libc::EISDIR as u32);
-        // The generic local backend rejects non-default removal options.
-        // This second semantic error must not suppress the final NFS group.
-        assert!(local_file.exists());
-        let result = client.attrs(&last);
+            .unwrap();
+        assert_eq!(outcomes.len(), 3);
+        let error = outcomes[0].as_ref().unwrap_err();
+        assert_eq!(error.cause().index(), None);
+        assert_eq!(error.cause().kind(), std::io::ErrorKind::DirectoryNotEmpty);
+        assert_eq!(error.state(), vfsi_core::FailureState::Failed);
         if continue_on_error {
-            assert_eq!(result.unwrap_err().raw_code(), libc::ENOENT as u32);
+            // Generic local removal genuinely rejects nondefault options.
+            let error = outcomes[1].as_ref().unwrap_err();
+            assert_eq!(error.state(), vfsi_core::FailureState::NotAttempted);
+            assert_eq!(error.cause().kind(), std::io::ErrorKind::Unsupported);
+            assert!(local_file.exists());
         } else {
-            assert_eq!(result.unwrap().len(), Some(4));
+            assert!(outcomes[1].is_ok());
+            assert!(!local_file.exists());
         }
+        assert!(
+            outcomes[2].is_ok(),
+            "neither failed root may suppress a later NFS route"
+        );
+        assert_eq!(fs::read(blocked.join("child")).unwrap(), b"keep");
+        assert_eq!(
+            client.attrs(&last).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 }
 
 #[cfg(feature = "test-faults")]
 #[test]
 #[ignore = "requires VFSI_AUTO_TEST_MOUNT pointing to a direct NFS mount"]
-fn live_remove_stops_on_transport_error_with_continuation_enabled() {
+fn live_remove_keeps_each_route_error_without_replay() {
     use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
     let mount = std::env::var("VFSI_AUTO_TEST_MOUNT").expect("NFS mount fixture");
     let remote = tempfile::tempdir_in(&mount).unwrap();
@@ -1469,18 +1482,21 @@ fn live_remove_stops_on_transport_error_with_continuation_enabled() {
     let remote_file = remote.path().join("remote");
     fs::write(&local_file, b"keep").unwrap();
     fs::write(&remote_file, b"keep").unwrap();
-    let error = client
-        .removes_all(
+    let outcomes = client
+        .vremove(
             &[&local_file, &remote_file],
             crate::RemoveMode::Entry,
             crate::RemoveOptions::new().with_continue_on_error(true),
         )
-        .unwrap_err();
-    assert!(
-        error.is_transport(),
-        "transport errors take precedence over earlier semantic errors"
-    );
-    assert_eq!(error.index(), Some(1));
+        .unwrap();
+    assert_eq!(outcomes.len(), 2);
+    let local_error = outcomes[0].as_ref().unwrap_err();
+    assert_eq!(local_error.state(), vfsi_core::FailureState::NotAttempted);
+    assert_eq!(local_error.cause().kind(), std::io::ErrorKind::Unsupported);
+    let remote_error = outcomes[1].as_ref().unwrap_err();
+    assert!(remote_error.cause().is_transport());
+    assert_eq!(remote_error.state(), vfsi_core::FailureState::NotAttempted);
+    assert_eq!(remote_error.cause().index(), None);
     assert!(script.is_consumed());
     assert_eq!(client.read(&remote_file).unwrap(), b"keep");
     assert_eq!(fs::read(&local_file).unwrap(), b"keep");

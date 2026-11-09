@@ -193,7 +193,7 @@ mod unaddressed_open_tests {
         known.getfh();
         let invalid = stateid4 {
             seqid: 0,
-            other: [255; 12],
+            other: [0xffu8 as std::ffi::c_char; 12],
         };
         known.read(&invalid, 0, 1);
         let reply = client.call_compound(&mut known).unwrap();

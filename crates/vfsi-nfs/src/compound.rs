@@ -199,7 +199,7 @@ impl Compound {
     /// OPEN with GETFH, so successful compounds need no extra reply scan.
     pub(crate) fn has_unaddressed_open(&self, reply: &CompoundRes) -> bool {
         let mut pending = false;
-        for index in 0..reply.nops() {
+        for (index, request) in self.ops.iter().take(reply.nops()).enumerate() {
             if reply.op_status(index) != nfsstat4_NFS4_OK {
                 break;
             }
@@ -210,7 +210,6 @@ impl Compound {
                     }
                     // Session prepends SEQUENCE to this builder before sending;
                     // the validated request and reply indices therefore match.
-                    let request = &self.ops[index];
                     // SAFETY: the request opcode is OPEN, as validated against
                     // the reply; the builder initialized its matching union arm.
                     let claim = unsafe { request.nfs_argop4_u.opopen.claim.claim };
