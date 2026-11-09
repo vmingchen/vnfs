@@ -98,16 +98,16 @@ fn singleton_buffer_reads_allocate_only_backend_results_and_output() {
             |_, _| panic!("no owned request"),
             |requests, _| {
                 requests[0].1[0] = 42;
-                Ok(vec![ReadIntoResult {
+                Ok(vec![Ok(ReadIntoResult {
                     offset: 7,
                     bytes_read: 1,
                     eof: false,
-                }])
+                })])
             },
         )
         .unwrap()
     });
-    assert_eq!(result[0].bytes_read(), 1);
+    assert_eq!(result[0].as_ref().unwrap().bytes_read(), 1);
     assert_eq!(buffer, [42]);
     assert!(
         allocations <= 2,
@@ -129,10 +129,12 @@ fn homogeneous_owned_reads_do_not_allocate_a_reordering_buffer() {
             |requests, _| {
                 Ok(requests
                     .iter()
-                    .map(|_| OwnedReadResult {
-                        offset: 0,
-                        data: Vec::new(),
-                        eof: true,
+                    .map(|_| {
+                        Ok(OwnedReadResult {
+                            offset: 0,
+                            data: Vec::new(),
+                            eof: true,
+                        })
                     })
                     .collect())
             },
@@ -161,7 +163,7 @@ fn homogeneous_dispatch_staging_stays_constant_across_batch_sizes() {
                         requests,
                         budget,
                         |_, _| panic!("no ranges"),
-                        |paths, _| Ok(paths.iter().map(|_| Vec::new()).collect()),
+                        |paths, _| Ok(paths.iter().map(|_| Ok(Vec::new())).collect()),
                     )
                 },
                 |_, _| panic!("no buffers"),
@@ -189,11 +191,11 @@ fn homogeneous_dispatch_staging_stays_constant_across_batch_sizes() {
                         .iter_mut()
                         .map(|(offset, buffer)| {
                             buffer[0] = 42;
-                            ReadIntoResult {
+                            Ok(ReadIntoResult {
                                 offset: *offset,
                                 bytes_read: 1,
                                 eof: false,
-                            }
+                            })
                         })
                         .collect())
                 },
@@ -226,9 +228,12 @@ fn mixed_dispatch_keeps_order_and_error_indices_with_unknown_iterator_lengths() 
                         }
                     })
                     .filter(|_| true); // intentionally no exact lower size hint
-                let complete = |offset| -> vfsi_core::VfResult<_> {
+                let complete = |offset| -> vfsi_core::OpResult<_> {
                     if fail && offset as usize == count - 1 {
-                        Err(vfsi_core::VfError::errno(0, libc::ENOENT as u32))
+                        Err(vfsi_core::OpError::failed(
+                            vfsi_core::VfError::errno(0, libc::ENOENT as u32),
+                            None,
+                        ))
                     } else {
                         Ok(offset)
                     }
@@ -239,43 +244,47 @@ fn mixed_dispatch_keeps_order_and_error_indices_with_unknown_iterator_lengths() 
                     |_, offset, _| offset,
                     |_, offset, _| offset,
                     |requests, _| {
-                        requests
+                        Ok(requests
                             .iter()
-                            .enumerate()
-                            .map(|(index, request)| {
-                                let offset = complete(*request.range_ref().unwrap())
-                                    .map_err(|e| e.with_index(index))?;
+                            .map(|request| {
+                                let offset = complete(*request.range_ref().unwrap())?;
                                 Ok(OwnedReadResult {
                                     offset,
                                     data: Vec::new(),
                                     eof: true,
                                 })
                             })
-                            .collect()
+                            .collect())
                     },
                     |requests, _| {
-                        requests
+                        Ok(requests
                             .iter()
-                            .enumerate()
-                            .map(|(index, offset)| {
-                                let offset = complete(*offset).map_err(|e| e.with_index(index))?;
+                            .map(|offset| {
+                                let offset = complete(*offset)?;
                                 Ok(ReadIntoResult {
                                     offset,
                                     bytes_read: 0,
                                     eof: true,
                                 })
                             })
-                            .collect()
+                            .collect())
                     },
                 );
                 if fail {
-                    assert_eq!(results.unwrap_err().index(), Some(count - 1));
+                    let outcomes = results.unwrap();
+                    assert!(outcomes[..count - 1].iter().all(|result| result.is_ok()));
+                    let error = outcomes[count - 1].as_ref().unwrap_err();
+                    assert_eq!(error.state(), vfsi_core::FailureState::Failed);
+                    assert_eq!(error.cause().index(), None);
+                    let error =
+                        vfsi_core::internal::collect_vec_result(Ok(outcomes), count).unwrap_err();
+                    assert_eq!(error.index(), Some(count - 1));
                 } else {
                     assert_eq!(
                         results
                             .unwrap()
                             .iter()
-                            .map(ReadResult::offset)
+                            .map(|result| result.as_ref().unwrap().offset())
                             .collect::<Vec<_>>(),
                         (0..count as u64).collect::<Vec<_>>()
                     );
@@ -307,9 +316,12 @@ fn singleton_preflight_and_backend_indices_do_not_replay_or_mutate() {
         |_, _| Err(Error::errno(1, 5)),
         |_, _| panic!("no buffered request"),
     )
+    .unwrap()
+    .remove(0)
     .unwrap_err();
-    assert!(error.is_transport());
-    assert_eq!(error.index(), None);
+    assert!(error.cause().is_transport());
+    assert_eq!(error.state(), vfsi_core::FailureState::NotAttempted);
+    assert_eq!(error.cause().index(), None);
 }
 
 #[test]
@@ -317,14 +329,19 @@ fn range_batches_reuse_backend_result_storage() {
     let requests = [ReadRequest::range(7), ReadRequest::range(11)];
     let replies: Vec<_> = [7, 11]
         .into_iter()
-        .map(|offset| OwnedReadResult {
-            offset,
-            data: vec![offset as u8],
-            eof: true,
+        .map(|offset| {
+            Ok(OwnedReadResult {
+                offset,
+                data: vec![offset as u8],
+                eof: true,
+            })
         })
         .collect();
     let storage = replies.as_ptr();
-    let payloads: Vec<_> = replies.iter().map(|reply| reply.data.as_ptr()).collect();
+    let payloads: Vec<_> = replies
+        .iter()
+        .map(|reply| reply.as_ref().unwrap().data.as_ptr())
+        .collect();
     let (result, allocations) = measured(|| {
         read_batch(
             &requests,
@@ -348,6 +365,7 @@ fn range_batches_reuse_backend_result_storage() {
         "range dispatcher allocated {allocations} times"
     );
     for ((reply, payload), offset) in result.iter().zip(payloads).zip([7, 11]) {
+        let reply = reply.as_ref().unwrap();
         assert_eq!(reply.offset, offset);
         assert_eq!(reply.data, [offset as u8]);
         assert_eq!(reply.data.as_ptr(), payload);
@@ -367,11 +385,11 @@ fn singleton_reads_reject_progress_beyond_request_even_with_spare_budget() {
                 |_, _, _| (),
                 |_, _| panic!("no owned request"),
                 |_, _| {
-                    Ok(vec![ReadIntoResult {
+                    Ok(vec![Ok(ReadIntoResult {
                         offset: 7,
                         bytes_read: returned,
                         eof: false,
-                    }])
+                    })])
                 },
             );
             let owned = consume_ops::<File, (), ()>(
@@ -380,20 +398,24 @@ fn singleton_reads_reject_progress_beyond_request_even_with_spare_budget() {
                 |_, _, _| (),
                 |_, _, _| (),
                 |_, _| {
-                    Ok(vec![OwnedReadResult {
+                    Ok(vec![Ok(OwnedReadResult {
                         offset: 7,
                         data: vec![0; returned],
                         eof: false,
-                    }])
+                    })])
                 },
                 |_, _| panic!("no buffered request"),
             );
             for result in [buffered, owned] {
                 if returned > length {
-                    let error = result.expect_err("oversized progress must be rejected");
-                    assert!(error.is_transport());
+                    let error = result
+                        .unwrap()
+                        .remove(0)
+                        .expect_err("oversized progress must be rejected");
+                    assert!(error.cause().is_transport());
+                    assert_eq!(error.state(), vfsi_core::FailureState::Unknown);
                 } else {
-                    assert_eq!(result.unwrap()[0].bytes_read(), length);
+                    assert_eq!(result.unwrap()[0].as_ref().unwrap().bytes_read(), length);
                 }
             }
         }
@@ -404,14 +426,14 @@ fn singleton_reads_reject_progress_beyond_request_even_with_spare_budget() {
         |_, _, _| (),
         |_, _, _| (),
         |_, _| {
-            Ok(vec![OwnedReadResult {
+            Ok(vec![Ok(OwnedReadResult {
                 offset: 0,
                 data: vec![0; 4],
                 eof: true,
-            }])
+            })])
         },
         |_, _| panic!("no buffered request"),
     )
     .unwrap();
-    assert_eq!(whole[0].bytes_read(), 4);
+    assert_eq!(whole[0].as_ref().unwrap().bytes_read(), 4);
 }

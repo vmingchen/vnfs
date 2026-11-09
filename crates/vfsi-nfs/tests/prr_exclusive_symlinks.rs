@@ -42,6 +42,10 @@ fn reject_final_symlink(target_exists: bool, looping: bool) {
         &[Path::new(if looping { "link" } else { "target" })],
         &[Path::new(&link)],
     )
+    .and_then(|outcomes| {
+        let count = outcomes.len();
+        vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+    })
     .unwrap();
     #[cfg(feature = "test-faults")]
     let _ = vfsi_nfs::compound::thread_compound_stats();
@@ -65,7 +69,15 @@ fn reject_final_symlink(target_exists: bool, looping: bool) {
     } else {
         None
     };
-    fs.remove_paths_impl(&[Path::new(&root)], true).unwrap();
+    {
+        let remove_roots: &[&std::path::Path] = &[Path::new(&root)];
+        vfsi_core::internal::collect_vec_result(
+            fs.remove_paths_impl(remove_roots, true),
+            remove_roots.len(),
+        )
+        .map(|_| ())
+    }
+    .unwrap();
 
     assert_eq!(result.unwrap_err().raw_code(), libc::EEXIST as u32);
     assert_eq!(link_type, VfType::Symlink);
@@ -105,6 +117,10 @@ fn ordinary_create_still_follows_dangling_final_symlink() {
     let target = format!("{root}/target");
     fs.ensure_dir_impl(Path::new(&root), 0o755).unwrap();
     fs.vsymlink_impl(&[Path::new("target")], &[Path::new(&link)])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+        })
         .unwrap();
     let file = fs
         .open_raw_impl(Path::new(&link), libc::O_CREAT | libc::O_WRONLY, 0o640)
@@ -120,7 +136,15 @@ fn ordinary_create_still_follows_dangling_final_symlink() {
         fs.lstat_impl(Path::new(&link)).unwrap().ftype,
         VfType::Symlink
     );
-    fs.remove_paths_impl(&[Path::new(&root)], true).unwrap();
+    {
+        let remove_roots: &[&std::path::Path] = &[Path::new(&root)];
+        vfsi_core::internal::collect_vec_result(
+            fs.remove_paths_impl(remove_roots, true),
+            remove_roots.len(),
+        )
+        .map(|_| ())
+    }
+    .unwrap();
 }
 
 #[test]
@@ -133,6 +157,10 @@ fn exclusive_create_still_follows_intermediate_symlink() {
     let target = format!("{dir}/new");
     fs.ensure_dir_impl(Path::new(&dir), 0o755).unwrap();
     fs.vsymlink_impl(&[Path::new("dir")], &[Path::new(&link)])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+        })
         .unwrap();
     let file = fs
         .open_raw_impl(
@@ -152,7 +180,15 @@ fn exclusive_create_still_follows_intermediate_symlink() {
         fs.lstat_impl(Path::new(&link)).unwrap().ftype,
         VfType::Symlink
     );
-    fs.remove_paths_impl(&[Path::new(&root)], true).unwrap();
+    {
+        let remove_roots: &[&std::path::Path] = &[Path::new(&root)];
+        vfsi_core::internal::collect_vec_result(
+            fs.remove_paths_impl(remove_roots, true),
+            remove_roots.len(),
+        )
+        .map(|_| ())
+    }
+    .unwrap();
 }
 
 #[test]
@@ -165,6 +201,10 @@ fn ordinary_create_still_follows_intermediate_symlink() {
     let target = format!("{dir}/new");
     fs.ensure_dir_impl(Path::new(&dir), 0o755).unwrap();
     fs.vsymlink_impl(&[Path::new("dir")], &[Path::new(&link)])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+        })
         .unwrap();
     let result = fs.open_raw_impl(Path::new(&leaf), libc::O_CREAT | libc::O_WRONLY, 0o640);
     if let Ok(file) = &result {
@@ -184,7 +224,15 @@ fn ordinary_create_still_follows_intermediate_symlink() {
     let mode = fs
         .stat_impl(Path::new(&target))
         .map(|attrs| attrs.mode & 0o777);
-    fs.remove_paths_impl(&[Path::new(&root)], true).unwrap();
+    {
+        let remove_roots: &[&std::path::Path] = &[Path::new(&root)];
+        vfsi_core::internal::collect_vec_result(
+            fs.remove_paths_impl(remove_roots, true),
+            remove_roots.len(),
+        )
+        .map(|_| ())
+    }
+    .unwrap();
     result.expect("ordinary create through a directory symlink");
     reopened
         .unwrap()
@@ -204,6 +252,10 @@ fn grouped_remove_error(prefix: bool, earlier_in_group: bool, missing_parent: bo
     let adir = format!("{root}/adir");
     fs.ensure_dir_impl(Path::new(&zdir), 0o755).unwrap();
     fs.vsymlink_impl(&[Path::new("zdir")], &[Path::new(&zlink)])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+        })
         .unwrap();
     let create = |fs: &mut NfsVecFs, path: &str| {
         let file = fs
@@ -229,8 +281,20 @@ fn grouped_remove_error(prefix: bool, earlier_in_group: bool, missing_parent: bo
     }
     files.push(FileOperand::from_path(&format!("{adir}/missing")));
     let expected = files.len() - 1;
-    let result = fs.vremove_impl(&files);
-    fs.remove_paths_impl(&[Path::new(&root)], true).unwrap();
+    let result = {
+        let remove_files = &files;
+        vfsi_core::internal::collect_vec_result(fs.vremove_impl(remove_files), remove_files.len())
+            .map(|_| ())
+    };
+    {
+        let remove_roots: &[&std::path::Path] = &[Path::new(&root)];
+        vfsi_core::internal::collect_vec_result(
+            fs.remove_paths_impl(remove_roots, true),
+            remove_roots.len(),
+        )
+        .map(|_| ())
+    }
+    .unwrap();
     let error = result.unwrap_err();
     assert_eq!(error.raw_code(), libc::ENOENT as u32);
     assert_eq!(
@@ -271,6 +335,10 @@ fn grouped_remove_keeps_same_parent_names_batched() {
     let link = format!("{root}/link");
     fs.ensure_dir_impl(Path::new(&dir), 0o755).unwrap();
     fs.vsymlink_impl(&[Path::new("dir")], &[Path::new(&link)])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+        })
         .unwrap();
     let files: Vec<_> = (0..16)
         .map(|index| {
@@ -288,14 +356,26 @@ fn grouped_remove_keeps_same_parent_names_batched() {
     let script = Arc::new(FaultScript::new([]));
     fs.set_fault_injector(script.clone());
     let _ = vfsi_nfs::compound::thread_compound_stats();
-    let result = fs.vremove_impl(&files);
+    let result = {
+        let remove_files = &files;
+        vfsi_core::internal::collect_vec_result(fs.vremove_impl(remove_files), remove_files.len())
+            .map(|_| ())
+    };
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
     let remove_chunks = script
         .visited()
         .iter()
         .filter(|point| matches!(point, OpenFaultPoint::BeforeRemoveChunk { .. }))
         .count();
-    fs.remove_paths_impl(&[Path::new(&root)], true).unwrap();
+    {
+        let remove_roots: &[&std::path::Path] = &[Path::new(&root)];
+        vfsi_core::internal::collect_vec_result(
+            fs.remove_paths_impl(remove_roots, true),
+            remove_roots.len(),
+        )
+        .map(|_| ())
+    }
+    .unwrap();
     result.unwrap();
     assert_eq!(
         remove_chunks, 1,

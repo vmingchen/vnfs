@@ -43,23 +43,35 @@ pub fn vlistdir_pages_impl_default<F: VectorBackend + ?Sized>(
     page_size: usize,
     max_entries: usize,
     follow_symlinks: bool,
-) -> VfResult<Vec<BackendDirectoryPage>> {
+) -> vfsi_core::VecResult<BackendDirectoryPage> {
     if dirs.len() != cursors.len() || page_size == 0 {
         return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
     }
-    dirs.iter()
+    let mut fatal: Option<VfError> = None;
+    Ok(dirs
+        .iter()
         .zip(cursors)
-        .enumerate()
-        .map(|(index, (dir, cursor))| {
+        .map(|(dir, cursor)| {
+            use vfsi_core::OpError;
+            if let Some(cause) = &fatal {
+                return Err(OpError::not_attempted(cause.clone()));
+            }
             backend
                 .listdir_page_impl(dir, masks, cursor, page_size, max_entries, follow_symlinks)
                 .map(|(entries, next)| {
                     let children = (0..entries.len()).map(|_| None).collect();
                     (entries, next, children)
                 })
-                .map_err(|error| error.with_index(index))
+                .map_err(|cause| {
+                    if cause.is_transport() {
+                        fatal = Some(cause.clone());
+                        OpError::unknown(cause, None)
+                    } else {
+                        OpError::failed(cause, None)
+                    }
+                })
         })
-        .collect()
+        .collect())
 }
 
 pub fn walk_impl_default<F: VectorBackend + ?Sized>(

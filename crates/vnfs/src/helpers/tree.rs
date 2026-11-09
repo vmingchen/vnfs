@@ -249,7 +249,7 @@ impl TreeBuilder {
                     .iter()
                     .map(|(path, _)| crate::MkDirOp::new(path, 0o777))
                     .collect();
-                fs.vmkdir(&paths)
+                fs.mkdirs_all(&paths)
                     .map_err(|e| entry_error(e, batch, &self.entries))?;
             }
         }
@@ -259,7 +259,7 @@ impl TreeBuilder {
                 .map(|(path, _)| OpenOp::new(path, OpenFlags::WRITE | OpenFlags::CREATE_NEW))
                 .collect();
             let handles = fs
-                .vopen(&requests)
+                .open_batch(&requests)
                 .map_err(|e| entry_error(e, batch, &self.entries))?;
             if handles.len() != batch.len() {
                 let _ = fs.close_files(handles);
@@ -276,7 +276,7 @@ impl TreeBuilder {
                 })
                 .collect();
             let write = fs
-                .vwrite(&writes, crate::WriteOptions::new().with_write_all(true))
+                .write_batch(&writes, crate::WriteOptions::new().with_write_all(true))
                 .map(|_| ())
                 .map_err(|e| entry_error(e, batch, &self.entries));
             drop(writes);

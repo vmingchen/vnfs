@@ -136,11 +136,11 @@ fn application_traversal_and_mutation_do_not_require_backend_imports() {
                     .with_recursive(true),
             )
             .map(|mut trees| trees.remove(0))?;
-        client.vcopy(
+        client.copies_all(
             &[("/a/source", "/a/copy")],
             vnfs::files::CopyOptions::default(),
         )?;
-        client.vremove(
+        client.removes_all(
             &["/a/copy"],
             vnfs::directory::RemoveMode::Entry,
             Default::default(),
@@ -174,7 +174,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         .unwrap();
     assert_eq!(
         client
-            .vread(
+            .read_batch(
                 [
                     vnfs::files::ReadOp::whole("/sub/a"),
                     vnfs::files::ReadOp::whole("/sub/b")
@@ -189,7 +189,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     );
     assert!(
         client
-            .vread(
+            .read_batch(
                 [
                     vnfs::files::ReadOp::whole("/sub/a"),
                     vnfs::files::ReadOp::whole("/sub/b")
@@ -209,7 +209,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     let mut a = [0; 4];
     let mut b = [0; 2];
     let result = client
-        .vread(
+        .read_batch(
             [
                 vnfs::files::ReadOp::into(&files[0], 0, &mut a),
                 vnfs::files::ReadOp::into(&files[1], 1, &mut b),
@@ -224,7 +224,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     );
     assert_eq!(a, [b'a', b'b', b'c', 0]);
     let eof = client
-        .vread(
+        .read_batch(
             [vnfs::files::ReadOp::range(&files[0], 3, 1)],
             Default::default(),
         )
@@ -233,7 +233,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     assert!(eof[0].eof());
     assert_eq!(&b, b"ef");
     client
-        .vwrite(
+        .write_batch(
             &[
                 vnfs::files::WriteOp::at(&files[0], 1, b"XY"),
                 vnfs::files::WriteOp::at(&files[1], 0, b"UV"),
@@ -243,7 +243,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         .unwrap();
     assert_eq!(
         client
-            .vread(
+            .read_batch(
                 [vnfs::files::ReadOp::whole("/sub/a")],
                 vnfs::files::ReadOptions::default()
             )
@@ -282,15 +282,15 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
             .len(),
         2
     );
-    client.vclose(&mut files).unwrap();
+    client.close_batch(&mut files).unwrap();
     assert!(files.iter().all(|file| file.is_closed()));
-    client.vclose(&mut files).unwrap();
+    client.close_batch(&mut files).unwrap();
     assert!(client.std_io(&files[0]).read(&mut a).is_err());
     let foreign = vnfs::mounted::Auto::new(&root).unwrap();
     let file = client.open("/sub/a").unwrap();
     assert!(
         foreign
-            .vwrite(
+            .write_batch(
                 &[vnfs::files::WriteOp::at(&file, 0, b"wrong")],
                 vnfs::files::WriteOptions::new().with_write_all(true)
             )
@@ -298,14 +298,14 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     );
     file.close().unwrap();
     client
-        .vsetattrs(&[vnfs::directory::SetAttrsOp::new("/sub/a")
+        .setattrs_all(&[vnfs::directory::SetAttrsOp::new("/sub/a")
             .len(2)
             .permissions(vnfs::directory::Permissions::from_mode(0o600))])
         .unwrap();
     assert_eq!(client.attrs("/sub/a").unwrap().len().unwrap(), 2);
     client.create_dir_with_mode("/copies", 0o700).unwrap();
     client
-        .vcopy(
+        .copies_all(
             &[("/sub/a", "/copies/a"), ("/sub/b", "/copies/b")],
             vnfs::files::CopyOptions::default(),
         )
@@ -318,7 +318,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     );
     assert!(client.symlink_attrs("/sub/link").unwrap().is_symlink());
     let metadata = client
-        .vgetattrs(
+        .getattrs_all(
             &[
                 std::path::Path::new("/sub/a"),
                 std::path::Path::new("/sub/link"),
@@ -347,11 +347,11 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
             .is_err()
     );
     assert_eq!(
-        client.vopen_dirs(&["/sub"]).unwrap_err().kind(),
+        client.open_dirs(&["/sub"]).unwrap_err().kind(),
         vnfs::error::ErrorKind::Unsupported
     );
     client
-        .vremove(
+        .removes_all(
             &["/copies/a", "/copies/b", "/copies/hard"],
             vnfs::directory::RemoveMode::Entry,
             Default::default(),
@@ -394,14 +394,14 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
                 )
             })
             .collect();
-        let mut files = client.vopen(&requests)?;
+        let mut files = client.open_batch(&requests)?;
         let writes: Vec<_> = files
             .iter()
             .map(|file| vnfs::files::WriteOp::at(file, 0, b"abc"))
             .collect();
         assert!(
             client
-                .vwrite(
+                .write_batch(
                     &writes,
                     vnfs::files::WriteOptions::new().with_write_all(true)
                 )?
@@ -415,14 +415,14 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
             .collect();
         assert!(
             client
-                .vread(reads, Default::default())?
+                .read_batch(reads, Default::default())?
                 .iter()
                 .all(|result| result.data() == Some(b"abc".as_slice()))
         );
 
         let mut first = [0; 4];
         let mut second = [0; 4];
-        let result = client.vread(
+        let result = client.read_batch(
             [
                 vnfs::files::ReadOp::into(&files[0], 0, &mut first),
                 vnfs::files::ReadOp::into(&files[1], 0, &mut second),
@@ -435,7 +435,7 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
         // Protocol backends may know EOF alongside positive progress, while
         // POSIX read counts alone do not. A subsequent nonempty read at EOF
         // must establish it on either backend.
-        let eof = client.vread(
+        let eof = client.read_batch(
             files
                 .iter()
                 .map(|file| vnfs::files::ReadOp::range(file, 3, 1)),
@@ -449,12 +449,12 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
         client.std_io(&files[0]).read_to_end(&mut contents).unwrap();
         assert_eq!(contents, b"abc");
         files[0].try_close()?;
-        client.vclose(&mut files)?;
-        client.vclose(&mut files)?;
+        client.close_batch(&mut files)?;
+        client.close_batch(&mut files)?;
         assert!(files.iter().all(|file| file.is_closed()));
         assert_eq!(
             client
-                .vread(
+                .read_batch(
                     paths
                         .iter()
                         .map(vnfs::files::ReadOp::whole)
@@ -649,7 +649,7 @@ fn vsetattrs_many_local_and_routed_files() {
     let updates = [vnfs::directory::SetAttrsOp::new("/link").len(11)];
     assert!(
         mounted
-            .vsetattrs(&[updates[0].with_follow_final_symlink(false)])
+            .setattrs_all(&[updates[0].with_follow_final_symlink(false)])
             .is_err()
     );
     assert_eq!(
@@ -658,7 +658,7 @@ fn vsetattrs_many_local_and_routed_files() {
             .len(),
         7
     );
-    mounted.vsetattrs(&updates).unwrap();
+    mounted.setattrs_all(&updates).unwrap();
     assert_eq!(
         std::fs::metadata(root.path().join("mounted/file-0"))
             .unwrap()
@@ -750,7 +750,7 @@ fn explicit_io_adapter_bounds_collecting_reads_and_preserves_retained_identity()
         fs.rename("/original", "/moved").unwrap();
         fs.write("/original", b"replacement").unwrap();
         let metadata = fs
-            .vgetattrs(
+            .getattrs_all(
                 &[
                     vnfs::files::Target::file(&file),
                     vnfs::files::Target::Path(std::path::Path::new("/original")),
@@ -808,13 +808,13 @@ fn explicit_io_adapter_bounds_collecting_reads_and_preserves_retained_identity()
         let mut closed = fs.open("/exact").unwrap();
         closed.try_close().unwrap();
         assert_eq!(
-            fs.vfsync(&[&file, &closed], vnfs::files::SyncMode::All)
+            fs.sync_batch(&[&file, &closed], vnfs::files::SyncMode::All)
                 .unwrap_err()
                 .index(),
             Some(1)
         );
         assert_eq!(
-            fs.vgetattrs(
+            fs.getattrs_all(
                 &[
                     vnfs::files::Target::file(&file),
                     vnfs::files::Target::file(&closed)
@@ -827,7 +827,7 @@ fn explicit_io_adapter_bounds_collecting_reads_and_preserves_retained_identity()
         );
         let mut buffer = [0; 1];
         assert!(fs.std_io(&closed).read(&mut buffer).is_err());
-        fs.vfsync(&[&file, &exact, &writable], vnfs::files::SyncMode::Data)
+        fs.sync_batch(&[&file, &exact, &writable], vnfs::files::SyncMode::Data)
             .unwrap();
         // Both concrete and routed clients keep append behavior behind vectors.
         fs.write("/append", b"abc").unwrap();
@@ -941,7 +941,7 @@ fn invalid_open_batch_cannot_create_or_truncate_earlier_files() {
         ] {
             std::fs::write(root.join("existing"), b"preserved").unwrap();
             let error = fs
-                .vopen(&[
+                .open_batch(&[
                     OpenOp::new("/new", OpenFlags::WRITE | OpenFlags::CREATE),
                     OpenOp::new("/existing", OpenFlags::WRITE | OpenFlags::TRUNCATE),
                     OpenOp::new("/invalid", flags),
@@ -1017,7 +1017,7 @@ fn object_identity_and_open_instances_are_distinct_concepts() {
         // usable, even though both refer to the same filesystem object.
         first.close().unwrap();
         let bytes = fs
-            .vread([ReadOp::range(&second, 0, 7)], ReadOptions::default())
+            .read_batch([ReadOp::range(&second, 0, 7)], ReadOptions::default())
             .unwrap();
         assert_eq!(bytes[0].data().unwrap(), b"payload");
     }
@@ -1078,20 +1078,29 @@ fn complete_writes_order_hardlinks_and_renamed_open_instances() {
         fn ordered(&self) -> bool {
             true
         }
-        fn read(&mut self, requests: &mut [Read<'_>]) -> Vec<std::io::Result<usize>> {
+        fn read(&mut self, requests: &mut [Read<'_>]) -> Vec<vfsi_core::OpResult<usize>> {
             vfsi_local::io::read_ordered(requests)
         }
-        fn write(&mut self, requests: &[Write<'_>]) -> Vec<std::io::Result<usize>> {
+        fn write(&mut self, requests: &[Write<'_>]) -> Vec<vfsi_core::OpResult<usize>> {
             requests
                 .iter()
-                .map(|r| r.file.write_at(&r.data[..r.data.len().min(2)], r.offset))
+                .map(|r| {
+                    r.file
+                        .write_at(&r.data[..r.data.len().min(2)], r.offset)
+                        .map_err(|error| {
+                            vfsi_core::OpError::failed(
+                                vfsi_core::VfError::from_io(None, error),
+                                None,
+                            )
+                        })
+                })
                 .collect()
         }
         fn sync(
             &mut self,
             files: &[&std::sync::Arc<std::fs::File>],
             data: bool,
-        ) -> Vec<std::io::Result<usize>> {
+        ) -> Vec<vfsi_core::OpResult<()>> {
             vfsi_local::io::sync_ordered(files, data)
         }
     }
@@ -1122,6 +1131,10 @@ fn complete_writes_order_hardlinks_and_renamed_open_instances() {
             first.write_request_at(0, b"AAAA"),
             second.write_request_at(2, b"BBBB"),
         ])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
         assert_eq!(fs.read("/alias").unwrap(), b"AABBBB");
     }
@@ -1194,6 +1207,75 @@ fn local_constructors_preserve_missing_and_non_directory_root_errors() {
         assert!(!root.join("missing").exists());
         let error = vnfs::mounted::Auto::new(&regular).err().unwrap();
         assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[path = "support/write_results.rs"]
+mod write_results_support;
+
+#[cfg(all(feature = "posix", unix))]
+#[test]
+fn public_posix_write_outcomes_preserve_siblings() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = vnfs::posix::Posix::new(root.path()).unwrap();
+    let other = vnfs::posix::Posix::new(root.path()).unwrap();
+    fs.create_dir("/writes").unwrap();
+    write_results_support::check(&fs, &other, "/writes", vfsi_core::FailureState::Failed);
+}
+
+#[cfg(all(feature = "auto", target_os = "linux"))]
+#[test]
+fn public_mounted_write_outcomes_preserve_siblings() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = vnfs::mounted::Auto::new(root.path()).unwrap();
+    let other = vnfs::mounted::Auto::new(root.path()).unwrap();
+    fs.create_dir("/writes").unwrap();
+    write_results_support::check(&fs, &other, "/writes", vfsi_core::FailureState::Failed);
+}
+
+#[path = "support/removal_results.rs"]
+mod removal_results;
+
+#[test]
+fn public_removal_results_preserve_independent_roots() {
+    let root = tempfile_root();
+    let fs = vnfs::posix::Posix::new(&root).unwrap();
+    fs.create_dir("/local_removal").unwrap();
+    removal_results::check(&fs, "/local_removal");
+    #[cfg(feature = "auto")]
+    {
+        let auto = vnfs::mounted::Auto::new(&root).unwrap();
+        auto.create_dir("/auto_removal").unwrap();
+        removal_results::check(&auto, "/auto_removal");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn public_directory_outcomes_preserve_siblings_and_cursor_identity() {
+    let root = tempfile_root();
+    let fs = vnfs::posix::Posix::new(&root).unwrap();
+    let other = vnfs::posix::Posix::new(&root).unwrap();
+    vfsi_sync::test_support::public_directory_results(&fs, &other, "/local_pages", true);
+    #[cfg(feature = "auto")]
+    {
+        let fs = vnfs::mounted::Auto::new(&root).unwrap();
+        let other = vnfs::mounted::Auto::new(&root).unwrap();
+        vfsi_sync::test_support::public_directory_results(&fs, &other, "/mounted_pages", true);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn public_stream_outcomes_preserve_siblings_and_delivery_progress() {
+    let root = tempfile_root();
+    let fs = vnfs::posix::Posix::new(&root).unwrap();
+    vfsi_sync::test_support::public_stream_results(&fs, "/local_streams");
+    #[cfg(feature = "auto")]
+    {
+        let fs = vnfs::mounted::Auto::new(&root).unwrap();
+        vfsi_sync::test_support::public_stream_results(&fs, "/mounted_streams");
     }
     std::fs::remove_dir_all(root).unwrap();
 }

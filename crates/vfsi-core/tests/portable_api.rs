@@ -26,6 +26,7 @@ impl FileHandle for TestFile {
 #[derive(Default)]
 struct PortableFs {
     reads: Cell<usize>,
+    streams: Cell<usize>,
     listings: Cell<usize>,
     shape: Cell<u8>,
     tree: Cell<bool>,
@@ -39,34 +40,34 @@ impl Vfsi for PortableFs {
     fn capabilities(&self) -> Result<vfsi_core::Capabilities> {
         Ok(vfsi_core::Capabilities::empty())
     }
-    fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, _: &[(P, Q)]) -> Result<()> {
+    fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, _: &[(P, Q)]) -> vfsi_core::VecResult<()> {
         panic!("unexpected symlink")
     }
-    fn vreadlink<P: AsRef<Path>>(&self, _: &[P]) -> Result<Vec<std::path::PathBuf>> {
+    fn vreadlink<P: AsRef<Path>>(&self, _: &[P]) -> vfsi_core::VecResult<std::path::PathBuf> {
         panic!("unexpected readlink")
     }
-    fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, _: &[(P, Q)]) -> Result<()> {
+    fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, _: &[(P, Q)]) -> vfsi_core::VecResult<()> {
         panic!("unexpected hardlink")
     }
 
     fn vstatfs<P: vfsi_core::AsTarget<Self::File>>(
         &self,
         targets: &[P],
-    ) -> vfsi_core::api::Result<Vec<vfsi_core::FilesystemStats>> {
+    ) -> vfsi_core::VecResult<vfsi_core::FilesystemStats> {
         if targets.is_empty() {
             Ok(Vec::new())
         } else {
             Err(vfsi_core::VfError::unsupported(0))
         }
     }
-    fn vfsync(&self, _: &[&Self::File], _: SyncMode) -> Result<()> {
-        Ok(())
+    fn vfsync(&self, files: &[&Self::File], _: SyncMode) -> vfsi_core::VecResult<()> {
+        Ok(files.iter().map(|_| Ok(())).collect())
     }
     fn vsetattrs<P: vfsi_core::AsTarget<Self::File>>(
         &self,
-        _: &[vfsi_core::SetAttrsOp<P>],
-    ) -> vfsi_core::api::Result<()> {
-        Ok(())
+        updates: &[vfsi_core::SetAttrsOp<P>],
+    ) -> vfsi_core::VecResult<()> {
+        Ok(updates.iter().map(|_| Ok(())).collect())
     }
 
     type File = TestFile;
@@ -78,7 +79,7 @@ impl Vfsi for PortableFs {
         &self,
         paths: &[P],
         options: AttrsOptions,
-    ) -> Result<Vec<Attrs>> {
+    ) -> vfsi_core::VecResult<Attrs> {
         assert!(self.tree.get(), "unexpected metadata");
         assert!(!options.follow_final_symlink());
         self.metadata.set(self.metadata.get() + 1);
@@ -95,19 +96,24 @@ impl Vfsi for PortableFs {
                 .attrs()
                 .clone()
             })
+            .map(Ok)
             .collect())
     }
-    fn vopen(&self, requests: &[OpenOp]) -> Result<Vec<TestFile>> {
-        Ok(requests.iter().map(|_| TestFile).collect())
+    fn vopen(&self, requests: &[OpenOp]) -> vfsi_core::VecResult<TestFile> {
+        Ok(requests.iter().map(|_| Ok(TestFile)).collect())
     }
     fn vread<'a>(
         &self,
         ops: impl IntoIterator<Item = ReadOp<'a, TestFile>>,
         _: ReadOptions,
-    ) -> Result<Vec<ReadResult>> {
+    ) -> vfsi_core::VecResult<ReadResult> {
         self.reads.set(self.reads.get() + 1);
+        if self.shape.get() == 6 {
+            return Err(Error::transport(None, "rejected before dispatch"));
+        }
         let mut results: Vec<_> = ops
             .into_iter()
+            .take(if self.shape.get() == 7 { 1 } else { usize::MAX })
             .enumerate()
             .map(|(index, mut op)| {
                 if let Some((_, offset, buffer)) = op.buffer_parts_mut() {
@@ -127,36 +133,47 @@ impl Vfsi for PortableFs {
             3 => results[0] = ReadResult::buffered(0, 1, true),
             4 => results[0] = ReadResult::owned(1, vec![0], true),
             5 => results[0] = ReadResult::owned(0, vec![0], false),
-            6 => return Err(Error::transport(None, "lost reply")),
             _ => {}
         }
-        Ok(results)
+        Ok(results.into_iter().map(Ok).collect())
     }
-    fn vwrite<'a>(&self, _: &[WriteOp<'a, TestFile>], _: WriteOptions) -> Result<Vec<WriteResult>> {
+    fn vwrite<'a>(
+        &self,
+        _: &[WriteOp<'a, TestFile>],
+        _: WriteOptions,
+    ) -> vfsi_core::VecResult<WriteResult> {
         panic!("unexpected write")
     }
-    fn vclose(&self, _: &mut [TestFile]) -> Result<()> {
-        Ok(())
+    fn vclose(&self, files: &mut [TestFile]) -> vfsi_core::VecResult<()> {
+        Ok(files.iter().map(|_| Ok(())).collect())
     }
-    fn vmkdir<P: AsRef<Path>>(&self, _: &[vfsi_core::MkDirOp<P>]) -> Result<()> {
+    fn vmkdir<P: AsRef<Path>>(&self, _: &[vfsi_core::MkDirOp<P>]) -> vfsi_core::VecResult<()> {
         panic!("unexpected mkdir")
     }
     fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
-        _: &[(P, Q)],
+        _pairs: &[(P, Q)],
         _: vfsi_core::api::CopyOptions,
-    ) -> Result<()> {
+    ) -> vfsi_core::VecResult<()> {
         panic!("unexpected copy")
     }
-    fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, _: &[(P, Q)], _: RenameMode) -> Result<()> {
-        panic!("unexpected rename")
+    fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        pairs: &[(P, Q)],
+        _: RenameMode,
+    ) -> vfsi_core::VecResult<()> {
+        if pairs.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(vfsi_core::VfError::unsupported(None))
+        }
     }
     fn vremove<P: AsRef<Path>>(
         &self,
         paths: &[P],
         mode: RemoveMode,
         options: RemoveOptions,
-    ) -> Result<()> {
+    ) -> vfsi_core::VecResult<()> {
         assert_eq!(mode, RemoveMode::Contents);
         self.removals.borrow_mut().push((
             paths.iter().map(|path| path.as_ref().to_owned()).collect(),
@@ -165,23 +182,46 @@ impl Vfsi for PortableFs {
         if self.shape.get() == 6 {
             Err(Error::transport(None, "lost removal reply"))
         } else {
-            Ok(())
+            Ok(paths.iter().map(|_| Ok(())).collect())
         }
     }
     fn vstream<P: AsRef<Path>>(
         &self,
-        _: &[P],
+        paths: &[P],
         _: StreamOptions,
-        _: impl FnMut(usize, u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
-    ) -> Result<Vec<StreamCompletion>> {
-        panic!("unexpected stream")
+        mut callback: impl FnMut(usize, u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
+    ) -> vfsi_core::VecResult<StreamCompletion> {
+        assert!(self.shape.get() == 13, "unexpected stream");
+        self.streams.set(self.streams.get() + 1);
+        Ok(paths
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                if index == 1 {
+                    Err(vfsi_core::OpError::failed(
+                        Error::errno(99, libc::ENOENT as u32),
+                        None,
+                    ))
+                } else {
+                    callback(index, 0, b"payload")
+                        .map(|decision| {
+                            if decision.is_break() {
+                                StreamCompletion::Stopped { next_offset: 7 }
+                            } else {
+                                StreamCompletion::Complete
+                            }
+                        })
+                        .map_err(|cause| vfsi_core::OpError::failed(cause, None))
+                }
+            })
+            .collect())
     }
     fn vlistdirs<P: AsRef<Path>, C: Into<vfsi_core::api::ListDirControl>>(
         &self,
         paths: &[P],
         options: ListDirOptions,
         mut callback: impl FnMut(usize, DirectoryListing) -> Result<C>,
-    ) -> Result<Vec<TraversalCompletion>> {
+    ) -> vfsi_core::VecResult<TraversalCompletion> {
         self.listings.set(self.listings.get() + 1);
         self.directory_options.borrow_mut().push(options);
         if self.tree.get() {
@@ -194,65 +234,79 @@ impl Vfsi for PortableFs {
             return Err(Error::errno(99, libc::EIO as u32));
         }
         for (index, path) in paths.iter().enumerate() {
-            let pages = if self.tree.get() {
-                match path.as_ref().to_str().unwrap() {
-                    "/tree" => vec![
-                        vec![
-                            tree_entry(Path::new("/tree/z"), false),
-                            tree_entry(Path::new("/tree/prune"), true),
+            let outcome = (|| -> vfsi_core::OpResult<TraversalCompletion> {
+                let pages = if self.tree.get() {
+                    match path.as_ref().to_str().unwrap() {
+                        "/tree" => vec![
+                            vec![
+                                tree_entry(Path::new("/tree/z"), false),
+                                tree_entry(Path::new("/tree/prune"), true),
+                            ],
+                            vec![
+                                tree_entry(Path::new("/tree/a"), false),
+                                tree_entry(Path::new("/tree/keep"), true),
+                                tree_entry(Path::new("/tree/other"), true),
+                                tree_symlink(),
+                            ],
                         ],
-                        vec![
-                            tree_entry(Path::new("/tree/a"), false),
-                            tree_entry(Path::new("/tree/keep"), true),
-                            tree_entry(Path::new("/tree/other"), true),
-                            tree_symlink(),
-                        ],
-                    ],
-                    "/empty" => vec![vec![]],
-                    _ => vec![vec![tree_entry(&path.as_ref().join("file"), false)]],
-                }
-            } else {
-                vec![vec![]]
-            };
-            let mut stopped = false;
-            for entries in pages {
-                self.page_calls.set(self.page_calls.get() + 1);
-                stopped = callback(
-                    if self.tree.get() && self.shape.get() == 9 {
-                        99
-                    } else {
-                        index
-                    },
-                    DirectoryListing {
-                        path: if self.tree.get() && self.shape.get() == 10 {
-                            "/wrong-parent".into()
+                        "/empty" => vec![vec![]],
+                        _ => vec![vec![tree_entry(&path.as_ref().join("file"), false)]],
+                    }
+                } else {
+                    vec![vec![]]
+                };
+                let mut stopped = false;
+                for entries in pages {
+                    self.page_calls.set(self.page_calls.get() + 1);
+                    stopped = callback(
+                        if self.tree.get() && self.shape.get() == 9 {
+                            99
                         } else {
-                            path.as_ref().to_owned()
+                            index
                         },
-                        entries,
-                    },
-                )?
-                .into()
-                    == vfsi_core::api::ListDirControl::Stop;
-                if stopped {
-                    break;
+                        DirectoryListing {
+                            path: if self.tree.get() && self.shape.get() == 10 {
+                                "/wrong-parent".into()
+                            } else {
+                                path.as_ref().to_owned()
+                            },
+                            entries,
+                        },
+                    )
+                    .map_err(|cause| vfsi_core::OpError::failed(cause, None))?
+                    .into()
+                        == vfsi_core::api::ListDirControl::Stop;
+                    if stopped {
+                        break;
+                    }
                 }
-            }
-            results.push(if stopped {
-                TraversalCompletion::Stopped
-            } else {
-                TraversalCompletion::Complete
-            });
+                Ok(if stopped {
+                    TraversalCompletion::Stopped
+                } else {
+                    TraversalCompletion::Complete
+                })
+            })();
+            let stopped = outcome
+                .as_ref()
+                .is_ok_and(|completion| *completion == TraversalCompletion::Stopped);
+            results.push(outcome);
             if stopped {
+                results.extend((index + 1..paths.len()).map(|_| Ok(TraversalCompletion::Stopped)));
                 break;
             }
+        }
+        if self.shape.get() == 12 && !results.is_empty() {
+            results[0] = Err(vfsi_core::OpError::failed(
+                Error::errno(None, libc::EIO as u32),
+                Some(vfsi_core::IoProgress::Write { bytes_written: 1 }),
+            ));
         }
         if self.tree.get() {
             match self.shape.get() {
                 7 => {
                     results.pop();
                 }
-                8 => results.push(TraversalCompletion::Complete),
+                8 => results.push(Ok(TraversalCompletion::Complete)),
                 _ => {}
             }
         }
@@ -614,7 +668,7 @@ fn consuming_reads_release_caller_buffers_and_owned_counts_are_derived() {
     let file = TestFile;
     let mut buffer = [99; 3];
     let result = fs
-        .vread([ReadOp::into(&file, 7, &mut buffer)], ReadOptions::new())
+        .read_batch([ReadOp::into(&file, 7, &mut buffer)], ReadOptions::new())
         .unwrap();
     assert_eq!(buffer, [0; 3]);
     assert_eq!((result[0].offset(), result[0].bytes_read()), (7, 3));
@@ -648,7 +702,7 @@ fn directory_defaults_match_with_or_without_explicit_options() {
     fs.read_dirs(&["/c"]).unwrap();
     fs.read_dirs_with_options(&["/d"], ListDirOptions::new())
         .unwrap();
-    fs.vlistdirs(&["/e"], ListDirOptions::new(), |_, _| {
+    fs.listdirs_all(&["/e"], ListDirOptions::new(), |_, _| {
         Ok(ControlFlow::Continue(()))
     })
     .unwrap();
@@ -738,7 +792,7 @@ fn directory_budget_overrides_remain_distinct_from_client_defaults() {
 fn default_portable_paging_collects_complete_roots_without_backend_types() {
     let fs = tree_fs();
     let pages = fs
-        .vlistdir_pages(
+        .dir_pages_all(
             &["/tree", "/empty"],
             vec![None, None],
             ListDirOptions::new(),
@@ -755,7 +809,7 @@ fn default_portable_paging_collects_complete_roots_without_backend_types() {
     );
     let fs = tree_fs();
     assert_eq!(
-        fs.vlistdir_pages(
+        fs.dir_pages_all(
             &["/tree"],
             vec![None],
             ListDirOptions::new().with_max_entries(1),
@@ -770,4 +824,103 @@ fn default_portable_paging_collects_complete_roots_without_backend_types() {
         1,
         "stop collecting before a second over-budget page"
     );
+}
+
+#[test]
+fn read_batch_checks_unconsumed_inputs_without_replaying_the_vector() {
+    let fs = PortableFs::default();
+    fs.shape.set(7);
+    let error = fs
+        .read_batch(
+            [ReadOp::whole("/a"), ReadOp::whole("/b")],
+            Default::default(),
+        )
+        .unwrap_err();
+    assert!(error.is_transport());
+    assert_eq!(fs.reads.get(), 1);
+}
+
+#[test]
+fn fallback_pages_quarantine_byte_progress_without_losing_healthy_roots() {
+    let fs = PortableFs::default();
+    fs.shape.set(12);
+    let mut outcomes = fs
+        .vlistdir_pages(
+            &["/bad", "/healthy"],
+            vec![None, None],
+            ListDirOptions::new(),
+            std::num::NonZeroUsize::new(1).unwrap(),
+        )
+        .unwrap()
+        .into_iter();
+    let error = outcomes.next().unwrap().unwrap_err();
+    assert_eq!(error.state(), vfsi_core::FailureState::Unknown);
+    assert_eq!(error.cause().index(), None);
+    assert!(error.progress().is_none());
+    assert!(outcomes.next().unwrap().is_ok());
+    assert_eq!(fs.listings.get(), 1, "one vector, without replay");
+}
+
+#[test]
+fn fallback_pages_keep_known_roots_when_completion_slots_are_missing() {
+    let fs = tree_fs();
+    fs.shape.set(7);
+    let mut outcomes = fs
+        .vlistdir_pages(
+            &["/tree", "/empty"],
+            vec![None, None],
+            ListDirOptions::new(),
+            std::num::NonZeroUsize::new(1).unwrap(),
+        )
+        .unwrap()
+        .into_iter();
+    let page = outcomes.next().unwrap().unwrap();
+    assert_eq!(page.listing.entries.len(), 6);
+    let error = outcomes.next().unwrap().unwrap_err();
+    assert_eq!(error.state(), vfsi_core::FailureState::Unknown);
+    assert_eq!(error.cause().index(), None);
+    assert_eq!(fs.listings.get(), 1, "missing completion is not replayed");
+}
+
+#[test]
+fn strict_stream_collection_dispatches_once_and_does_not_invent_a_prefix() {
+    let fs = PortableFs::default();
+    fs.shape.set(13);
+    let mut seen = Vec::new();
+    let error = fs
+        .streams_all(
+            &["/a", "/missing", "/b"],
+            StreamOptions::new(),
+            |index, _, bytes| {
+                assert_eq!(bytes, b"payload");
+                seen.push(index);
+                Ok(std::ops::ControlFlow::Continue(()))
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(
+        seen,
+        [0, 2],
+        "strict collection does not suppress a healthy suffix"
+    );
+    assert_eq!(
+        fs.streams.get(),
+        1,
+        "never replay callbacks to collect a prefix"
+    );
+}
+
+#[test]
+fn scalar_stream_preserves_nested_callback_error_after_rich_normalization() {
+    let fs = PortableFs::default();
+    fs.shape.set(13);
+    let expected =
+        Error::transport(7, "nested callback operation").with_context("nested", "/nested");
+    let actual = fs
+        .read_stream_with_options("/a", StreamOptions::new(), |_, _| Err(expected.clone()))
+        .unwrap_err();
+    assert_eq!(actual, expected);
+    assert_eq!(fs.streams.get(), 1);
 }

@@ -314,3 +314,74 @@ def test_copy_rejects_different_paths_to_same_file(fs, alias_kind):
     with pytest.raises(shutil.SameFileError):
         fs.cp_file("nfs4:///copy-source", "nfs4:///copy-alias")
     assert fs.cat_file("nfs4:///copy-source") == b"source contents"
+
+
+def test_vector_move_retains_later_success_and_invalidates_all_affected_cache(fs):
+    """A strict native exception does not imply an untouched suffix."""
+    fs.pipe(
+        {
+            "/rename-first": b"first",
+            "/rename-last": b"last",
+            "/rename-target-first": b"old",
+        }
+    )
+    # Populate metadata caches before the vector changes the namespace.
+    for path in ["/rename-first", "/rename-last", "/rename-target-first"]:
+        fs.info(path)
+    with pytest.raises(FileNotFoundError):
+        fs.mv(
+            ["/rename-first", "/rename-missing", "/rename-last"],
+            ["/rename-target-first", "/rename-target-missing", "/rename-target-last"],
+        )
+    assert fs.cat_file("/rename-target-first") == b"first"
+    assert fs.cat_file("/rename-target-last") == b"last"
+    assert not fs.exists("/rename-first")
+    assert not fs.exists("/rename-last")
+    assert not fs.exists("/rename-target-missing")
+
+
+def test_rm_vector_keeps_nonprefix_successes_and_invalidates_all_cached_paths(fs):
+    first = "nfs4:///remove-vector-first"
+    missing = "nfs4:///remove-vector-missing"
+    last = "nfs4:///remove-vector-last"
+    fs.pipe({first: b"first", last: b"last"})
+    listed = fs.ls("nfs4:///", detail=False)
+    assert any(name.endswith("remove-vector-first") for name in listed)
+    assert any(name.endswith("remove-vector-last") for name in listed)
+    assert fs.info(last)["size"] == 4
+    with pytest.raises(FileNotFoundError) as caught:
+        fs.rm([first, missing, last])
+    assert str(caught.value.filename).endswith("remove-vector-missing")
+    assert not fs.exists(first)
+    assert not fs.exists(last)
+    listed = fs.ls("nfs4:///", detail=False)
+    assert not any(
+        name.endswith(("remove-vector-first", "remove-vector-last")) for name in listed
+    )
+
+
+def test_recursive_rm_batches_only_independent_directory_levels(fs, monkeypatch):
+    for branch in ["left", "right"]:
+        fs.mkdir(f"/remove-levels/{branch}/nested", create_parents=True)
+        fs.pipe_file(f"/remove-levels/{branch}/nested/file", b"payload")
+
+    original = fs._client
+    calls = []
+
+    class UnorderedRemover:
+        def __getattr__(self, name):
+            return getattr(original, name)
+
+        def remove_many(self, paths):
+            paths = list(paths)
+            calls.append(paths)
+            # Running a wave backwards must be safe: vector submission order
+            # cannot establish dependencies between a parent and its child.
+            return original.remove_many(list(reversed(paths)))
+
+    monkeypatch.setattr(fs, "_client", UnorderedRemover())
+    fs.rm("/remove-levels", recursive=True)
+    assert not fs.exists("/remove-levels")
+    assert [len(paths) for paths in calls] == [2, 2, 2, 1]
+    for paths in calls:
+        assert len({path.count("/") for path in paths}) == 1

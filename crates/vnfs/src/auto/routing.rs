@@ -328,7 +328,10 @@ impl Auto {
                     ) {
                         Ok(attrs) if attrs.len() == checked.len() => {
                             for (index, item) in checked.into_iter().zip(attrs) {
-                                if item.file_type() == crate::FileType::Symlink {
+                                if match item {
+                                    Ok(item) => item.file_type() == crate::FileType::Symlink,
+                                    Err(_) => true,
+                                } {
                                     resolved[index] = Resolved {
                                         route: Route::Posix,
                                         path: requests[index].path().to_path_buf(),

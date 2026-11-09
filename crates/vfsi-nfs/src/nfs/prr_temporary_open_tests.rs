@@ -42,7 +42,7 @@ fn multi_compound_path_cleanup_closes_latest_states_in_one_batch() {
             false,
         )
         .unwrap();
-    assert!(outcome.failed.is_none());
+    assert!(outcome.results.iter().all(Result::is_ok));
     assert!(
         outcome.opened.len() > 2,
         "must reopen the large file across compounds"

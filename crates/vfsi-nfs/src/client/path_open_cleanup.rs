@@ -1,6 +1,47 @@
 //! Temporary path I/O uses one owner, so later OPENs replace earlier stateids.
+#![allow(non_upper_case_globals)]
 use super::{CloseOp, NfsFh};
 use nfsv41_sys::stateid4;
+
+/// Retain only owners not retired by a successful inline CLOSE. Healthy
+/// full compounds borrow reply handles and allocate no cleanup-owner entries.
+pub(super) fn record_path_open_owners(
+    response: &crate::compound::CompoundRes,
+    opened: &mut Vec<(NfsFh, stateid4)>,
+) {
+    use nfsv41_sys::{nfs_opnum4_NFS4_OP_CLOSE, nfs_opnum4_NFS4_OP_GETFH, nfs_opnum4_NFS4_OP_OPEN};
+    let mut pending = None;
+    for index in 0..response.nops() {
+        if response.op_status(index) != 0 {
+            break;
+        }
+        match response.op(index).resop {
+            nfs_opnum4_NFS4_OP_OPEN => {
+                if let Some((fh, stateid)) = pending.take() {
+                    opened.push((NfsFh::from_nfs_fh(response.getfh(fh)), stateid));
+                }
+                if index + 1 < response.nops()
+                    && response.op(index + 1).resop == nfs_opnum4_NFS4_OP_GETFH
+                    && response.op_status(index + 1) == 0
+                {
+                    pending = Some((index + 1, response.open(index).stateid));
+                }
+            }
+            nfs_opnum4_NFS4_OP_CLOSE => {
+                if let Some((fh, _)) = pending.take() {
+                    let closed = response.getfh_bytes(fh);
+                    // Reopening with the shared path owner replaces its
+                    // stateid. Closing also retires older observations.
+                    opened.retain(|(fh, _)| fh.as_bytes() != closed);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some((fh, stateid)) = pending {
+        opened.push((NfsFh::from_nfs_fh(response.getfh(fh)), stateid));
+    }
+}
 
 /// Only for OPENs sharing the temporary path owner. Independent public OPEN
 /// instances of the same object must each retain their own CLOSE.

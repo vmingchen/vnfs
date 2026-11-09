@@ -9,7 +9,10 @@ pub fn stat_impl_default<F: VectorBackend + ?Sized>(
         masks: AttrMask::stat(),
         ..VfAttrs::default()
     };
-    backend.vgetattrs_impl(std::slice::from_mut(&mut a))?;
+    vfsi_core::internal::collect_vec_result(
+        backend.vgetattrs_impl(std::slice::from_mut(&mut a)),
+        1,
+    )?;
     Ok(a)
 }
 
@@ -22,7 +25,10 @@ pub fn lstat_impl_default<F: VectorBackend + ?Sized>(
         masks: AttrMask::stat(),
         ..VfAttrs::default()
     };
-    backend.vgetattrs_nofollow_impl(std::slice::from_mut(&mut a))?;
+    vfsi_core::internal::collect_vec_result(
+        backend.vgetattrs_nofollow_impl(std::slice::from_mut(&mut a)),
+        1,
+    )?;
     Ok(a)
 }
 
@@ -35,7 +41,10 @@ pub fn fstat_impl_default<F: VectorBackend + ?Sized>(
         masks: AttrMask::stat(),
         ..VfAttrs::default()
     };
-    backend.vgetattrs_impl(std::slice::from_mut(&mut a))?;
+    vfsi_core::internal::collect_vec_result(
+        backend.vgetattrs_impl(std::slice::from_mut(&mut a)),
+        1,
+    )?;
     Ok(a)
 }
 
@@ -80,7 +89,7 @@ pub fn native_metadata_impl_default<F: VectorBackend + ?Sized>(
     } else {
         backend.vgetattrs_nofollow_impl(std::slice::from_mut(&mut attrs))
     };
-    result.map_err(|error| match path {
+    vfsi_core::internal::collect_vec_result(result, 1).map_err(|error| match path {
         Some(path) => error.with_context("metadata", path),
         None => error,
     })?;
@@ -113,7 +122,7 @@ pub fn native_set_metadata_path_impl_default<F: VectorBackend + ?Sized>(
 }
 
 // Wire/raw masks and timestamp tuples are execution details, not a second
-// public mutation type. Convert and validate every operation before dispatch.
+// public mutation type. Validate each operation independently before dispatch.
 fn setattrs_to_legacy(op: &SetAttrsOp<Target<'_, FileOperand>>) -> VfResult<VfAttrs> {
     let [accessed, modified] = vfsi_core::internal::validate_setattrs(op)?;
     let mut attrs = VfAttrs {
@@ -153,24 +162,9 @@ fn setattrs_to_legacy(op: &SetAttrsOp<Target<'_, FileOperand>>) -> VfResult<VfAt
 pub fn vsetattrs_typed_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     updates: &[SetAttrsOp<Target<'_, FileOperand>>],
-) -> VfResult<()> {
-    let attrs = updates
-        .iter()
-        .enumerate()
-        .map(|(index, op)| {
-            setattrs_to_legacy(op).map_err(|error| {
-                let error = error.with_index(index);
-                let path = match op.target() {
-                    Target::Path(path) => Some(*path),
-                    Target::File(file) => file.path(),
-                };
-                match path {
-                    Some(path) => error.with_context("vsetattrs", path),
-                    None => error,
-                }
-            })
-        })
-        .collect::<VfResult<Vec<_>>>()?;
+) -> vfsi_core::VecResult<()> {
+    use vfsi_core::OpError;
+    let mut slots = (0..updates.len()).map(|_| None).collect::<Vec<_>>();
     let mut start = 0;
     while start < updates.len() {
         let follow = updates[start].follow_final_symlink();
@@ -178,19 +172,74 @@ pub fn vsetattrs_typed_default<F: VectorBackend + ?Sized>(
             .iter()
             .take_while(|op| op.follow_final_symlink() == follow)
             .count();
-        let result = if follow {
-            backend.vsetattrs_raw_impl(&attrs[start..start + count])
-        } else {
-            backend.vsetattrs_raw_nofollow_impl(&attrs[start..start + count])
-        };
-        result.map_err(|error| match error.index() {
-            Some(index) if index < count => error.with_index(start + index),
-            Some(_) => {
-                VfError::invalid_reply(None, "setattrs backend returned an invalid error index")
+        let mut attrs = Vec::with_capacity(count);
+        let mut indices = Vec::with_capacity(count);
+        for (offset, op) in updates[start..start + count].iter().enumerate() {
+            let index = start + offset;
+            match setattrs_to_legacy(op) {
+                Ok(attr) => {
+                    attrs.push(attr);
+                    indices.push(index);
+                }
+                Err(error) => slots[index] = Some(Err(OpError::not_attempted(error))),
             }
-            None => error,
-        })?;
+        }
+        if !attrs.is_empty() {
+            let result = if follow {
+                backend.vsetattrs_raw_impl(&attrs)
+            } else {
+                backend.vsetattrs_raw_nofollow_impl(&attrs)
+            };
+            let mut results = match result {
+                Ok(results) if results.len() <= attrs.len() => results,
+                Ok(_) => attrs
+                    .iter()
+                    .map(|_| {
+                        Err(OpError::unknown(
+                            VfError::invalid_reply(None, "too many SETATTR outcomes"),
+                            None,
+                        ))
+                    })
+                    .collect(),
+                Err(cause) => {
+                    let cause = if cause.index().is_some_and(|index| index >= attrs.len()) {
+                        VfError::invalid_reply(None, "invalid SETATTR outer error index")
+                    } else {
+                        cause
+                    };
+                    attrs
+                        .iter()
+                        .map(|_| Err(OpError::not_attempted(cause.clone())))
+                        .collect()
+                }
+            };
+            results.resize_with(attrs.len(), || {
+                Err(OpError::unknown(
+                    VfError::invalid_reply(None, "missing SETATTR outcome"),
+                    None,
+                ))
+            });
+            for (index, result) in indices.into_iter().zip(results) {
+                slots[index] = Some(result);
+            }
+        }
         start += count;
     }
-    Ok(())
+    Ok(slots
+        .into_iter()
+        .zip(updates)
+        .map(|(slot, op)| {
+            slot.expect("all attribute updates assigned")
+                .map_err(|error| {
+                    let path = match op.target() {
+                        Target::Path(path) => Some(*path),
+                        Target::File(file) => file.path(),
+                    };
+                    match path {
+                        Some(path) => error.with_context("vsetattrs", path),
+                        None => error,
+                    }
+                })
+        })
+        .collect())
 }

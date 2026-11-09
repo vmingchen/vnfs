@@ -4,18 +4,22 @@ pub fn unlink_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     pathname: &Path,
 ) -> VfResult<()> {
-    backend.vremove_impl(&[FileOperand::from_os_path(pathname)])
+    vfsi_core::internal::collect_vec_result(
+        backend.vremove_impl(&[FileOperand::from_os_path(pathname)]),
+        1,
+    )
+    .map(|_| ())
 }
 
 pub fn vunlink_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     pathnames: &[&Path],
 ) -> VfRes {
-    let files: Vec<FileOperand> = pathnames
+    let files: Vec<_> = pathnames
         .iter()
-        .map(|p| FileOperand::from_os_path(p))
+        .map(|path| FileOperand::from_os_path(path))
         .collect();
-    backend.vremove_impl(&files)
+    vfsi_core::internal::collect_vec_result(backend.vremove_impl(&files), files.len()).map(|_| ())
 }
 
 pub fn mkdir_raw_impl_default<F: VectorBackend + ?Sized>(
@@ -29,7 +33,8 @@ pub fn mkdir_raw_impl_default<F: VectorBackend + ?Sized>(
         mode,
         ..VfAttrs::default()
     };
-    backend.vmkdir_impl(std::slice::from_ref(&a))
+    vfsi_core::internal::collect_vec_result(backend.vmkdir_impl(std::slice::from_ref(&a)), 1)
+        .map(|_| ())
 }
 
 pub fn ensure_dir_impl_default<F: VectorBackend + ?Sized>(
@@ -74,10 +79,13 @@ pub fn native_rename_impl_default<F: VectorBackend + ?Sized>(
     from: &std::path::Path,
     to: &std::path::Path,
 ) -> VfResult<()> {
-    backend
-        .vrename_impl(&[(
+    vfsi_core::internal::collect_vec_result(
+        backend.vrename_impl(&[(
             FileOperand::from_os_path(from),
             FileOperand::from_os_path(to),
-        )])
-        .map_err(|error| error.with_context("rename", from))
+        )]),
+        1,
+    )
+    .map(|_| ())
+    .map_err(|error| error.with_context("rename", from))
 }

@@ -38,7 +38,7 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
                 .create(&fs, format!("{src}/nested/files"))?;
             let destination = format!("{root}/no-replace");
             let error = fs
-                .vrename(&[(&src, &destination)], RenameMode::NoReplace)
+                .renames_all(&[(&src, &destination)], RenameMode::NoReplace)
                 .unwrap_err();
             assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
             // Default conflict-safe copying uses bounded descriptor vectors.
@@ -55,7 +55,7 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
             let s = tree_stats(&fs, format!("{root}/descriptor"), ListDirOptions::new())?;
             assert_eq!((s.files, s.directories, s.file_bytes), (2, 3, 103));
             let path = format!("{root}/descriptor/nested/files/a");
-            let data = fs.vread([ReadOp::whole(&path)], ReadOptions::new())?;
+            let data = fs.read_batch([ReadOp::whole(&path)], ReadOptions::new())?;
             assert_eq!(data[0].data().unwrap(), vec![19; 97]);
             // Replace selects the server COPY path on v4.2, with v4.1 fallback.
             let s = copy_tree(
@@ -74,7 +74,7 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
                 TransferOptions::new().with_existing(Existing::Replace),
             )?;
             let path = format!("{root}/native/nested/files/b");
-            let data = fs.vread([ReadOp::whole(&path)], ReadOptions::new())?;
+            let data = fs.read_batch([ReadOp::whole(&path)], ReadOptions::new())?;
             assert_eq!(data[0].data().unwrap(), b"second");
             let s = move_items(
                 &fs,

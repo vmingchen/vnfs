@@ -207,9 +207,9 @@ impl<'a, F> SetAttrsOp<super::Target<'a, F>> {
     /// The handle remains owned by the caller and is checked at dispatch.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{SetAttrsOp, Vfsi};
+    /// use vfsi_core::api::{SetAttrsOp, Vfsi, VfsiExt};
     /// # fn example<F: Vfsi>(fs: &F, file: &F::File) -> vfsi_core::api::Result<()> {
-    /// fs.vsetattrs(&[SetAttrsOp::file(file).len(1024)])?;
+    /// fs.setattrs_all(&[SetAttrsOp::file(file).len(1024)])?;
     /// # Ok(())
     /// # }
     /// ```

@@ -1,4 +1,4 @@
-use crate::{Attributes, AttrsOptions, FileType, ListDirOptions, Result, Vfsi};
+use crate::{Attributes, AttrsOptions, FileType, ListDirOptions, Result, Vfsi, VfsiExt};
 use std::path::Path;
 
 /// Logical sizes, not allocated disk space. Symlink targets are never followed.
@@ -43,7 +43,7 @@ pub fn tree_stats(
 ) -> Result<TreeStats> {
     let root = root.as_ref();
     let fields = Attributes::MODE | Attributes::SIZE;
-    let mut metadata = fs.vgetattrs(
+    let mut metadata = fs.getattrs_all(
         &[root],
         AttrsOptions::new()
             .with_fields(fields)
@@ -60,7 +60,7 @@ pub fn tree_stats(
     let mut stats = TreeStats::default();
     stats.add(&metadata)?;
     if metadata.is_dir() {
-        let completion = fs.vlistdirs(
+        let completion = fs.listdirs_all(
             &[root],
             options.with_recursive(true).with_fields(fields),
             |index, page| {

@@ -12,7 +12,7 @@ use vfsi_sync::backend::VectorBackend;
 
 use vfsi_nfs::NfsVecFs;
 use vfsi_sync::{ReadOp, VfOffset, WriteOp};
-use vnfs::files::{Vfsi, VfsiExt};
+use vnfs::files::VfsiExt;
 use vnfs::nfs::{Nfs, NfsClient, NfsVersion};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -61,7 +61,10 @@ impl BenchmarkFs {
                             .with_truncate()
                     })
                     .collect();
-                let results = fs.vwrite_impl(&operations)?;
+                let results = fs.vwrite_impl(&operations).and_then(|outcomes| {
+                    let count = outcomes.len();
+                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                })?;
                 if results.len() != paths.len()
                     || results.iter().any(|r| r.bytes_written != payload.len())
                 {
@@ -76,7 +79,7 @@ impl BenchmarkFs {
     fn read(&mut self, paths: &[String], length: usize) -> Result<Vec<Vec<u8>>> {
         Ok(match self {
             Self::Public(fs) => fs
-                .vread(
+                .read_batch(
                     paths.iter().map(vnfs::files::ReadOp::whole),
                     Default::default(),
                 )?
@@ -92,7 +95,11 @@ impl BenchmarkFs {
                     .iter()
                     .map(|path| ReadOp::from_path(path, VfOffset::At(0), length))
                     .collect();
-                fs.vread_impl(&operations)?
+                fs.vread_impl(&operations)
+                    .and_then(|outcomes| {
+                        let count = outcomes.len();
+                        vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    })?
                     .into_iter()
                     .map(|result| result.data)
                     .collect()

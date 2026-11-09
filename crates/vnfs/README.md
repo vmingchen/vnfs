@@ -17,7 +17,7 @@ Connect directly to a server—no kernel mount required.
 
 ```toml
 [dependencies]
-vnfs = "0.0.31"
+vnfs = "0.0.32"
 ```
 
 On Ubuntu 24.04 or newer, install the Linux native build prerequisites:
@@ -47,8 +47,8 @@ fn main() -> vnfs::Result<()> {
         ReadOp::whole("/file-1"),
         ReadOp::whole("/file-2"),
     ], Default::default())?;
-    assert_eq!(results[0].data(), Some(b"hello".as_slice()));
-    assert_eq!(results[1].data(), Some(b"world".as_slice()));
+    assert_eq!(results[0].as_ref().unwrap().data(), Some(b"hello".as_slice()));
+    assert_eq!(results[1].as_ref().unwrap().data(), Some(b"world".as_slice()));
     Ok(())
 }
 ```
@@ -130,3 +130,7 @@ MIT OR Apache-2.0, at your option.
 [operations]: https://docs.rs/vnfs/latest/vnfs/nfs/#streaming-resource-limits-and-mount-routing
 [benchmark]: https://github.com/vmingchen/vnfs/blob/main/crates/vnfs/examples/small_files_benchmark.rs
 [fast]: https://www.usenix.org/conference/fast17/technical-sessions/presentation/chen
+
+The 0.0.32 API is the unreleased per-operation result migration.
+Its source and backend trait changes require the coordinated vfsi-* 0.2.0
+series; see the workspace migration guide before upgrading an implementor.

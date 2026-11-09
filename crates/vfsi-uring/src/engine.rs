@@ -9,6 +9,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
+use vfsi_core::{FailureState, IoProgress, OpError, OpResult, VfError};
 use vfsi_local::io::{DescriptorIo, OwnedRead, Read, Write};
 
 #[derive(Default)]
@@ -83,7 +84,7 @@ pub(crate) struct Engine {
     nowait_supported: bool,
     progress: Vec<usize>,
     done: Vec<bool>,
-    errors: Vec<Option<i32>>,
+    errors: Vec<Option<(i32, FailureState)>>,
     groups: Vec<std::ops::Range<usize>>,
     entries: Vec<io_uring::squeue::Entry>,
     results: Vec<Option<i32>>,
@@ -97,7 +98,7 @@ pub(crate) struct Engine {
     #[cfg(test)]
     short_completion: Option<usize>,
     #[cfg(test)]
-    fail_after_submit: bool,
+    fail_after_submit: Option<u64>,
     #[cfg(test)]
     planning_visits: usize,
 }
@@ -182,7 +183,7 @@ impl Engine {
                 #[cfg(test)]
                 short_completion: None,
                 #[cfg(test)]
-                fail_after_submit: false,
+                fail_after_submit: None,
                 #[cfg(test)]
                 planning_visits: 0,
             },
@@ -343,7 +344,7 @@ impl Engine {
                             .submissions
                             .fetch_add(submitted as u64, Ordering::Relaxed);
                         #[cfg(test)]
-                        if self.fail_after_submit {
+                        if self.fail_after_submit == Some(counters.waves.load(Ordering::Relaxed)) {
                             return Err(io::Error::from_raw_os_error(libc::EIO));
                         }
                     }
@@ -399,7 +400,7 @@ impl Engine {
         Ok(pending)
     }
 
-    fn execute(&mut self, jobs: &mut [Job<'_>]) -> Vec<io::Result<usize>> {
+    fn execute(&mut self, jobs: &mut [Job<'_>]) -> Vec<OpResult<usize>> {
         #[cfg(test)]
         {
             self.planning_visits = 0;
@@ -407,7 +408,12 @@ impl Engine {
         if self.ring.is_none() {
             return jobs
                 .iter()
-                .map(|_| Err(io::Error::from_raw_os_error(libc::EIO)))
+                .map(|_| {
+                    Err(OpError::not_attempted(VfError::errno(
+                        None,
+                        libc::EIO as u32,
+                    )))
+                })
                 .collect();
         }
         let mut progress = std::mem::take(&mut self.progress);
@@ -424,8 +430,6 @@ impl Engine {
         // Completed prefixes never become pending again. Keep a monotonic
         // cursor instead of rescanning all earlier jobs for every bounded wave.
         let mut first_pending = 0;
-        // Aggregate errors as they are recorded, not with another cohort scan.
-        let mut failed = false;
         while first_pending < jobs.len() {
             while first_pending < jobs.len() && done[first_pending] {
                 first_pending += 1;
@@ -463,8 +467,7 @@ impl Engine {
                     .min(budget)
                     .min(u32::MAX as usize);
                 let Some(offset) = job.offset.checked_add(progress[index] as u64) else {
-                    errors[index] = Some(libc::EOVERFLOW);
-                    failed = true;
+                    errors[index] = Some((libc::EOVERFLOW, FailureState::NotAttempted));
                     done[index] = true;
                     continue;
                 };
@@ -507,6 +510,9 @@ impl Engine {
                     .fetch_add(1, Ordering::Relaxed);
             }
             for op in &pending {
+                // Pre-mark the published wave, so a lost/drain-failed reply
+                // cannot make untouched later jobs look submitted.
+                errors[op.job] = Some((libc::EIO, FailureState::Unknown));
                 if let Buffer::Write(data) = &jobs[op.job].buffer {
                     let start = progress[op.job];
                     self.scratch[op.bytes.clone()]
@@ -518,19 +524,18 @@ impl Engine {
                     for op in &mut completed {
                         let result = op.result;
                         let index = op.job;
+                        errors[index] = None;
                         if let Buffer::OwnedRead(buffer) = &mut jobs[index].buffer {
                             *buffer = op.owned.take().unwrap();
                         }
                         if result < 0 {
-                            errors[index] = Some(-result);
-                            failed = true;
+                            errors[index] = Some((-result, FailureState::Failed));
                             done[index] = true;
                             continue;
                         }
                         let count = result as usize;
                         if count > op.bytes.len() {
-                            errors[index] = Some(libc::EIO);
-                            failed = true;
+                            errors[index] = Some((libc::EIO, FailureState::Unknown));
                             done[index] = true;
                             continue;
                         }
@@ -565,29 +570,73 @@ impl Engine {
                     pending = completed;
                 }
                 Err(error) => {
-                    failed = true;
                     let errno = error.raw_os_error().unwrap_or(libc::EIO);
-                    for index in 0..jobs.len() {
-                        if !done[index] {
-                            errors[index] = Some(errno);
-                            done[index] = true;
+                    for error in &mut errors {
+                        if let Some((code, FailureState::Unknown)) = error {
+                            *code = errno;
                         }
                     }
                 }
             }
-            // wave() has drained every published SQE. A known failure must
-            // not dispatch untouched jobs or retry another job's suffix.
-            // Keep their acknowledged progress; the indexed error remains
-            // attached to the request that actually failed.
-            if failed {
+            // Ordinary CQE failures affect only their own logical input.
+            // Preserve independent later waves; poisoned engines stop dispatch.
+            if self.ring.is_none() {
                 break;
             }
         }
-        let results = progress
+        let stopped_cause = errors
             .iter()
-            .zip(&errors)
-            .map(|(&count, &error)| {
-                error.map_or(Ok(count), |errno| Err(io::Error::from_raw_os_error(errno)))
+            .flatten()
+            .next()
+            .map(|&(code, _)| code)
+            .unwrap_or(libc::EIO);
+        let results = jobs
+            .iter_mut()
+            .enumerate()
+            .map(|(index, job)| {
+                let count = progress[index];
+                let failure = errors[index].or_else(|| {
+                    (!done[index]).then_some((
+                        stopped_cause,
+                        if count == 0 {
+                            FailureState::NotAttempted
+                        } else {
+                            FailureState::Failed
+                        },
+                    ))
+                });
+                let Some((code, mut state)) = failure else {
+                    return Ok(count);
+                };
+                if count != 0 && state == FailureState::NotAttempted {
+                    state = FailureState::Failed;
+                }
+                let confirmed = if count == 0 {
+                    None
+                } else {
+                    Some(match &mut job.buffer {
+                        Buffer::Read(_) => IoProgress::Read(vfsi_core::api::ReadResult::buffered(
+                            job.offset, count, false,
+                        )),
+                        Buffer::OwnedRead(buffer) => {
+                            let mut data = std::mem::take(buffer);
+                            data.truncate(count);
+                            IoProgress::Read(vfsi_core::api::ReadResult::owned(
+                                job.offset, data, false,
+                            ))
+                        }
+                        Buffer::Write(_) => IoProgress::Write {
+                            bytes_written: count,
+                        },
+                        Buffer::Sync(_) => unreachable!(),
+                    })
+                };
+                let cause = VfError::errno(None, code as u32);
+                Err(match state {
+                    FailureState::NotAttempted => OpError::not_attempted(cause),
+                    FailureState::Failed => OpError::failed(cause, confirmed),
+                    FailureState::Unknown => OpError::unknown(cause, confirmed),
+                })
             })
             .collect();
         // Do not retain metadata for an arbitrarily large caller cohort for
@@ -615,7 +664,7 @@ impl DescriptorIo for Engine {
         (!(self.options.flags.cached_reads() && self.nowait_supported))
             .then_some(self.options.max_batch_bytes.get())
     }
-    fn read_owned(&mut self, mut operations: Vec<OwnedRead>) -> Vec<io::Result<Vec<u8>>> {
+    fn read_owned(&mut self, mut operations: Vec<OwnedRead>) -> Vec<OpResult<Vec<u8>>> {
         // Direct final destinations win for bounded small cohorts. Large
         // working sets currently copy substantially faster through the reused
         // arena on the measured ARM64 kernel; keep that proven path rather
@@ -651,7 +700,7 @@ impl DescriptorIo for Engine {
     fn ordered(&self) -> bool {
         self.options.flags.syscall_writes()
     }
-    fn read(&mut self, operations: &mut [Read<'_>]) -> Vec<io::Result<usize>> {
+    fn read(&mut self, operations: &mut [Read<'_>]) -> Vec<OpResult<usize>> {
         if self.options.flags.cached_reads()
             && self.nowait_supported
             && self.ring.is_some()
@@ -662,15 +711,10 @@ impl DescriptorIo for Engine {
             let mut results = Vec::with_capacity(operations.len());
             let mut fallback = Vec::new();
             let mut indices = Vec::new();
-            let mut failed = false;
             let mut probe = true;
             let mut warm_left = 0;
             let (mut probes, mut hits, mut misses, mut direct) = (0, 0, 0, 0);
             for (index, op) in operations.iter_mut().enumerate() {
-                if failed {
-                    results.push(Ok(0));
-                    continue;
-                }
                 if op.buffer.is_empty() {
                     results.push(Ok(0));
                     continue;
@@ -726,14 +770,20 @@ impl DescriptorIo for Engine {
                         0
                     }
                     Err(error) => {
-                        results.push(Err(error));
-                        failed = true;
+                        results.push(Err(OpError::failed(VfError::from_io(None, error), None)));
                         continue;
                     }
                 };
                 let Some(offset) = op.offset.checked_add(prefix as u64) else {
-                    results.push(Err(io::Error::from_raw_os_error(libc::EOVERFLOW)));
-                    failed = true;
+                    let progress = (prefix > 0).then(|| {
+                        IoProgress::Read(vfsi_core::api::ReadResult::buffered(
+                            op.offset, prefix, false,
+                        ))
+                    });
+                    results.push(Err(OpError::failed(
+                        VfError::errno(None, libc::EOVERFLOW as u32),
+                        progress,
+                    )));
                     continue;
                 };
                 misses += 1;
@@ -761,7 +811,7 @@ impl DescriptorIo for Engine {
                 .0
                 .cache_misses
                 .fetch_add(misses, Ordering::Relaxed);
-            if !failed && !fallback.is_empty() {
+            if !fallback.is_empty() {
                 // Partial cache hits continue at their actual offsets. Their
                 // uncached suffixes share bounded ring waves with other misses.
                 let mut jobs: Vec<_> = fallback
@@ -772,8 +822,31 @@ impl DescriptorIo for Engine {
                         buffer: Buffer::Read(op.buffer),
                     })
                     .collect();
-                for (index, result) in indices.into_iter().zip(self.execute(&mut jobs)) {
-                    results[index] = result.map(|count| count + results[index].as_ref().unwrap());
+                let completed = self.execute(&mut jobs);
+                for ((index, job), result) in indices.into_iter().zip(&jobs).zip(completed) {
+                    let prefix = *results[index].as_ref().unwrap();
+                    results[index] = match result {
+                        Ok(count) => Ok(prefix + count),
+                        Err(error) if prefix == 0 => Err(error),
+                        Err(error) => {
+                            let (cause, state, progress) = error.into_parts();
+                            let count = progress.as_ref().map_or(0, |progress| match progress {
+                                IoProgress::Read(read) => read.bytes_read(),
+                                _ => 0,
+                            });
+                            let progress =
+                                Some(IoProgress::Read(vfsi_core::api::ReadResult::buffered(
+                                    job.offset - prefix as u64,
+                                    prefix + count,
+                                    false,
+                                )));
+                            Err(if state == FailureState::Unknown {
+                                OpError::unknown(cause, progress)
+                            } else {
+                                OpError::failed(cause, progress)
+                            })
+                        }
+                    };
                 }
             }
             return results;
@@ -788,14 +861,28 @@ impl DescriptorIo for Engine {
             .collect();
         self.execute(&mut jobs)
     }
-    fn write(&mut self, operations: &[Write<'_>]) -> Vec<io::Result<usize>> {
+    fn write(&mut self, operations: &[Write<'_>]) -> Vec<OpResult<usize>> {
+        if self.ring.is_none() {
+            return (0..operations.len())
+                .map(|_| {
+                    Err(OpError::not_attempted(VfError::errno(
+                        None,
+                        libc::EIO as u32,
+                    )))
+                })
+                .collect();
+        }
         if self.options.flags.syscall_writes() && self.ring.is_some() {
             let results = vfsi_local::io::write_ordered(operations);
             self.telemetry.0.syscall_writes.fetch_add(
                 operations
                     .iter()
                     .zip(&results)
-                    .filter(|(op, result)| !op.data.is_empty() && !matches!(result, Ok(0)))
+                    .filter(|(op, result)| {
+                        !op.data.is_empty()
+                            && !matches!(result, Err(error)
+                        if error.state() == FailureState::NotAttempted)
+                    })
                     .count() as u64,
                 Ordering::Relaxed,
             );
@@ -811,7 +898,7 @@ impl DescriptorIo for Engine {
             .collect();
         self.execute(&mut jobs)
     }
-    fn sync(&mut self, files: &[&Arc<File>], data_only: bool) -> Vec<io::Result<usize>> {
+    fn sync(&mut self, files: &[&Arc<File>], data_only: bool) -> Vec<OpResult<()>> {
         let mut jobs: Vec<_> = files
             .iter()
             .map(|file| Job {
@@ -821,6 +908,9 @@ impl DescriptorIo for Engine {
             })
             .collect();
         self.execute(&mut jobs)
+            .into_iter()
+            .map(|result| result.map(|_| ()))
+            .collect()
     }
 }
 
@@ -956,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn owned_read_errors_drain_a_wave_stop_unsent_work_and_allow_reuse() {
+    fn owned_read_errors_drain_a_wave_continue_later_work_and_allow_reuse() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("file");
         std::fs::write(&path, b"abcd").unwrap();
@@ -984,16 +1074,20 @@ mod tests {
         ]);
         assert_eq!(results[0].as_ref().unwrap(), b"abcd");
         assert_eq!(
-            results[1].as_ref().unwrap_err().raw_os_error(),
-            Some(libc::EBADF)
+            results[1].as_ref().unwrap_err().cause().raw_code(),
+            libc::EBADF as u32
         );
-        assert!(results[2].as_ref().unwrap().is_empty());
+        assert_eq!(
+            results[1].as_ref().unwrap_err().state(),
+            FailureState::Failed
+        );
+        assert_eq!(results[2].as_ref().unwrap(), b"abcd");
         assert_eq!(
             (
                 telemetry.snapshot().submissions,
                 telemetry.snapshot().completions
             ),
-            (2, 2)
+            (3, 3)
         );
         assert!(
             engine.progress.is_empty(),
@@ -1009,6 +1103,129 @@ mod tests {
     }
 
     #[test]
+    fn independent_reads_retain_success_after_middle_failure_in_one_wave() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("file");
+        std::fs::write(&path, b"abcd").unwrap();
+        let good = Arc::new(File::open(&path).unwrap());
+        let bad = Arc::new(File::options().write(true).open(path).unwrap());
+        for owned in [false, true] {
+            let (mut engine, telemetry) = Engine::new(
+                Options::default().with_queue_depth(std::num::NonZeroU32::new(3).unwrap()),
+            )
+            .unwrap();
+            let mut first = [99; 4];
+            let mut invalid = [99; 4];
+            let mut last = [99; 4];
+            let results = if owned {
+                engine
+                    .read_owned(vec![
+                        OwnedRead {
+                            file: Arc::clone(&good),
+                            offset: 0,
+                            buffer: vec![99; 4],
+                        },
+                        OwnedRead {
+                            file: Arc::clone(&bad),
+                            offset: 0,
+                            buffer: vec![99; 4],
+                        },
+                        OwnedRead {
+                            file: Arc::clone(&good),
+                            offset: 0,
+                            buffer: vec![99; 4],
+                        },
+                    ])
+                    .into_iter()
+                    .map(|result| {
+                        result.map(|data| {
+                            assert_eq!(data, b"abcd");
+                            data.len()
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                engine.read(&mut [
+                    Read {
+                        file: &good,
+                        offset: 0,
+                        buffer: &mut first,
+                    },
+                    Read {
+                        file: &bad,
+                        offset: 0,
+                        buffer: &mut invalid,
+                    },
+                    Read {
+                        file: &good,
+                        offset: 0,
+                        buffer: &mut last,
+                    },
+                ])
+            };
+            assert_eq!(results[0], Ok(4));
+            assert_eq!(results[2], Ok(4));
+            let error = results[1].as_ref().unwrap_err();
+            assert_eq!(error.state(), FailureState::Failed);
+            assert_eq!(error.cause().raw_code(), libc::EBADF as u32);
+            assert!(error.progress().is_none());
+            if !owned {
+                assert_eq!((first, invalid, last), (*b"abcd", [99; 4], *b"abcd"));
+            }
+            let stats = telemetry.snapshot();
+            assert_eq!(
+                (stats.waves, stats.submissions, stats.completions),
+                (1, 3, 3)
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_read_failure_preserves_confirmed_prefix_and_marks_unsent_sibling() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("file");
+        std::fs::write(&path, b"abcdefgh").unwrap();
+        let file = Arc::new(File::open(path).unwrap());
+        let (mut engine, telemetry) = Engine::new(
+            Options::default()
+                .with_queue_depth(std::num::NonZeroU32::new(2).unwrap())
+                .with_max_batch_bytes(std::num::NonZeroUsize::new(4).unwrap()),
+        )
+        .unwrap();
+        engine.fail_after_submit = Some(2);
+        let mut first = [99; 8];
+        let mut later = [99; 1];
+        let results = engine.read(&mut [
+            Read {
+                file: &file,
+                offset: 0,
+                buffer: &mut first,
+            },
+            Read {
+                file: &file,
+                offset: 0,
+                buffer: &mut later,
+            },
+        ]);
+        let error = results[0].as_ref().unwrap_err();
+        assert_eq!(error.state(), FailureState::Unknown);
+        let Some(IoProgress::Read(progress)) = error.progress() else {
+            panic!("the confirmed first wave must be retained");
+        };
+        assert_eq!((progress.offset(), progress.bytes_read()), (0, 4));
+        assert!(progress.is_buffered());
+        assert_eq!(&first[..4], b"abcd");
+        assert_eq!(&first[4..], &[99; 4]);
+        let later_error = results[1].as_ref().unwrap_err();
+        assert_eq!(later_error.state(), FailureState::NotAttempted);
+        assert!(later_error.progress().is_none());
+        assert_eq!(later, [99]);
+        assert_eq!(telemetry.snapshot().submissions, 2);
+        assert_eq!(telemetry.snapshot().completions, 1);
+        assert!(engine.ring.is_none());
+    }
+
+    #[test]
     fn owned_reads_retain_inflight_allocations_and_descriptors_after_publication_failure() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("file");
@@ -1016,15 +1233,15 @@ mod tests {
         let file = Arc::new(File::open(path).unwrap());
         let weak = Arc::downgrade(&file);
         let (mut engine, telemetry) = Engine::new(Options::default()).unwrap();
-        engine.fail_after_submit = true;
+        engine.fail_after_submit = Some(1);
         let results = engine.read_owned(vec![OwnedRead {
             file,
             offset: 0,
             buffer: vec![99; 4],
         }]);
         assert_eq!(
-            results[0].as_ref().unwrap_err().raw_os_error(),
-            Some(libc::EIO)
+            results[0].as_ref().unwrap_err().cause().raw_code(),
+            libc::EIO as u32
         );
         assert!(engine.ring.is_none());
         assert!(
@@ -1045,7 +1262,7 @@ mod tests {
     }
 
     #[test]
-    fn syscall_writes_stop_after_errors_and_cannot_bypass_poisoning() {
+    fn syscall_writes_continue_after_errors_and_cannot_bypass_poisoning() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("file");
         std::fs::write(&path, b"old").unwrap();
@@ -1074,24 +1291,28 @@ mod tests {
         let results = engine.write(&operations);
         assert_eq!(*results[0].as_ref().unwrap(), 1);
         assert_eq!(
-            results[1].as_ref().unwrap_err().raw_os_error(),
-            Some(libc::EBADF)
+            results[1].as_ref().unwrap_err().cause().status(),
+            Some(vfsi_core::StatusCode::Errno(libc::EBADF as u32))
         );
-        assert_eq!(*results[2].as_ref().unwrap(), 0);
-        assert_eq!(std::fs::read(&path).unwrap(), b"Ald");
+        assert_eq!(*results[2].as_ref().unwrap(), 1);
+        assert_eq!(
+            results[1].as_ref().unwrap_err().state(),
+            FailureState::Failed
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"AlC");
         let stats = telemetry.snapshot();
         assert_eq!(
             (stats.syscall_writes, stats.waves, stats.submissions),
-            (2, 0, 0)
+            (3, 0, 0)
         );
         engine.ring.take();
         assert!(engine.write(&operations).iter().all(Result::is_err));
-        assert_eq!(std::fs::read(path).unwrap(), b"Ald");
-        assert_eq!(telemetry.snapshot().syscall_writes, 2);
+        assert_eq!(std::fs::read(path).unwrap(), b"AlC");
+        assert_eq!(telemetry.snapshot().syscall_writes, 3);
     }
 
     #[test]
-    fn owned_read_preflight_checks_later_descriptors_before_allocating_outputs() {
+    fn owned_read_preflight_rejects_impossible_allocation_before_dispatch() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("file"), b"data").unwrap();
         let (engine, telemetry) = Engine::new(
@@ -1104,15 +1325,20 @@ mod tests {
             .open_raw_impl(std::path::Path::new("/file"), libc::O_RDONLY, 0)
             .unwrap();
         // The first output cannot be allocated (capacity overflow, not an OOM).
-        // Full preflight must return the later EBADF before allocating it.
+        // Allocation capacity is a whole-call resource rejection, before any
+        // valid or invalid sibling can reach the executor.
         let error = fs
             .vread_impl(&[
                 ReadOp::at(file.clone(), 0, usize::MAX - 1),
                 ReadOp::at(vfsi_core::FileOperand::from_fd(i32::MAX), 0, 1),
             ])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap_err();
-        assert_eq!(error.index(), Some(1));
-        assert_eq!(error.raw_code(), libc::EBADF as u32);
+        assert_eq!(error.index(), Some(0));
+        assert_eq!(error.raw_code(), libc::EFBIG as u32);
         assert_eq!(telemetry.snapshot().submissions, 0);
         fs.close_impl(&file).unwrap();
     }
@@ -1264,7 +1490,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_reads_keep_eof_tail_and_stop_after_a_real_error() {
+    fn cached_reads_keep_eof_tail_and_successful_siblings_after_a_real_error() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("file");
         std::fs::write(&path, b"abc").unwrap();
@@ -1337,13 +1563,14 @@ mod tests {
         ]);
         assert_eq!(*results[0].as_ref().unwrap(), 3);
         assert_eq!(
-            results[1].as_ref().unwrap_err().raw_os_error(),
-            Some(libc::EBADF)
+            results[1].as_ref().unwrap_err().cause().raw_code(),
+            libc::EBADF as u32
         );
-        assert_eq!(*results[2].as_ref().unwrap(), 0);
+        assert_eq!(*results[2].as_ref().unwrap(), 3);
         assert_eq!(first, *b"abc");
-        assert_eq!((invalid, untouched), ([99; 3], [99; 3]));
+        assert_eq!((invalid, untouched), ([99; 3], *b"abc"));
         assert_eq!(telemetry.snapshot().submissions, 2);
+        untouched.fill(99);
         engine.ring.take();
         assert!(
             engine.read(&mut [Read {
@@ -1460,20 +1687,18 @@ mod tests {
                     data: b"bad",
                 },
             ]);
-            assert_eq!(*results[0].as_ref().unwrap(), short.min(3));
-            assert_eq!(*results[1].as_ref().unwrap(), short.saturating_sub(3));
+            assert_eq!(*results[0].as_ref().unwrap(), 3);
+            assert_eq!(*results[1].as_ref().unwrap(), 5);
             assert_eq!(
-                results[2].as_ref().unwrap_err().raw_os_error(),
-                Some(libc::EBADF)
+                results[2].as_ref().unwrap_err().cause().status(),
+                Some(vfsi_core::StatusCode::Errno(libc::EBADF as u32))
             );
-            let mut expected = *b"00000000";
-            expected[..short].copy_from_slice(&b"abcdefgh"[..short]);
-            assert_eq!(std::fs::read(&path).unwrap(), expected);
+            assert_eq!(std::fs::read(&path).unwrap(), b"abcdefgh");
             let stats = telemetry.snapshot();
-            assert_eq!(
-                (stats.waves, stats.submissions, stats.completions),
-                (1, 2, 2)
-            );
+            assert_eq!((stats.waves, stats.submissions, stats.completions), {
+                let waves = 8usize.div_ceil(short) as u64;
+                (waves, waves + 1, waves + 1)
+            });
         }
     }
 
@@ -1512,7 +1737,8 @@ mod tests {
             assert!(
                 results
                     .iter()
-                    .all(|result| result.as_ref().unwrap_err().raw_os_error() == Some(errno))
+                    .all(|result| result.as_ref().unwrap_err().cause().status()
+                        == Some(vfsi_core::StatusCode::Errno(errno as u32)))
             );
             assert_eq!(std::fs::read(path).unwrap(), b"000000");
             let stats = telemetry.snapshot();
@@ -1716,6 +1942,10 @@ mod tests {
                         length: 1,
                     },
                 ])
+                .and_then(|outcomes| {
+                    let count = outcomes.len();
+                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                })
                 .unwrap();
             assert_eq!(results[0].data, bytes);
             assert!(
@@ -1752,6 +1982,10 @@ mod tests {
             // Exercise both direct-owned and borrowed/scratch dispatch.
             let result = fs
                 .vread_impl(&[ReadOp::new(file.clone(), VfOffset::Cur, 10)])
+                .and_then(|outcomes| {
+                    let count = outcomes.len();
+                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                })
                 .unwrap()
                 .remove(0);
             assert_eq!(result.data, b"ab");
@@ -1770,6 +2004,10 @@ mod tests {
                     &[ReadOp::new(file.clone(), VfOffset::Cur, 8)],
                     &mut [&mut buffer],
                 )
+                .and_then(|outcomes| {
+                    let count = outcomes.len();
+                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                })
                 .unwrap()
                 .remove(0);
             assert_eq!(
@@ -1781,6 +2019,10 @@ mod tests {
             for length in [0, 1] {
                 let result = fs
                     .vread_impl(&[ReadOp::at(file.clone(), 10, length)])
+                    .and_then(|outcomes| {
+                        let count = outcomes.len();
+                        vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    })
                     .unwrap()
                     .remove(0);
                 assert!(result.data.is_empty());
@@ -1788,6 +2030,10 @@ mod tests {
                 let mut buffer = vec![99; length];
                 let result = fs
                     .vread_into_impl(&[ReadOp::at(file.clone(), 10, length)], &mut [&mut buffer])
+                    .and_then(|outcomes| {
+                        let count = outcomes.len();
+                        vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    })
                     .unwrap()
                     .remove(0);
                 assert_eq!((result.bytes_read, result.eof), (0, length != 0));
@@ -1808,7 +2054,7 @@ mod tests {
     #[test]
     fn streaming_and_whole_reads_continue_after_short_completions() {
         use vfsi_core::{
-            Vfsi,
+            VfsiExt,
             api::{ReadOp as AppReadOp, StreamCompletion, StreamOptions},
         };
         let root = tempfile::tempdir().unwrap();
@@ -1821,7 +2067,7 @@ mod tests {
         let mut bytes = Vec::new();
         let mut offsets = Vec::new();
         let completion = fs
-            .vstream(
+            .streams_all(
                 &["/file"],
                 StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(10).unwrap()),
                 |index, offset, chunk| {
@@ -1839,7 +2085,7 @@ mod tests {
         assert_eq!(offsets, [0, 2, 4, 6, 8]);
         assert_eq!(completion, [StreamCompletion::Complete]);
         let whole = fs
-            .vread([AppReadOp::whole("/file")], Default::default())
+            .read_batch([AppReadOp::whole("/file")], Default::default())
             .unwrap();
         assert_eq!(whole[0].data(), Some(b"abcdefghij".as_slice()));
         assert!(whole[0].eof());
@@ -1901,7 +2147,13 @@ mod tests {
             offset: VfOffset::Cur,
             length: 2,
         };
-        let results = fs.vread_impl(&[read.clone(), read]).unwrap();
+        let results = fs
+            .vread_impl(&[read.clone(), read])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
+            .unwrap();
         assert_eq!(results[0].data, b"ab");
         assert_eq!(results[1].data, b"cd");
         assert_eq!(telemetry.snapshot().submissions, 0);
@@ -1910,7 +2162,12 @@ mod tests {
             offset: VfOffset::At(0),
             length: 2,
         };
-        fs.vread_impl(&[positional]).unwrap();
+        fs.vread_impl(&[positional])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
+            .unwrap();
         assert_eq!(
             fs.seek_raw_impl(&file, 0, vfsi_core::SeekFrom::Cur)
                 .unwrap(),
@@ -1925,6 +2182,10 @@ mod tests {
             .unwrap();
         let results = fs
             .vwrite_impl(&[WriteOp::new(&append, VfOffset::At(0), b"xy".as_slice())])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         assert!(
             !results[0].stable,
@@ -1939,7 +2200,7 @@ mod tests {
     }
 
     #[test]
-    fn failure_does_not_finish_another_jobs_short_write() {
+    fn write_failure_does_not_abandon_another_jobs_short_write() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("file");
         std::fs::write(&path, b"000").unwrap();
@@ -1959,16 +2220,21 @@ mod tests {
                 data: b"xyz",
             },
         ]);
-        assert_eq!(*results[0].as_ref().unwrap(), 2);
+        assert_eq!(*results[0].as_ref().unwrap(), 3);
         assert_eq!(
-            results[1].as_ref().unwrap_err().raw_os_error(),
-            Some(libc::EBADF)
+            results[1].as_ref().unwrap_err().cause().status(),
+            Some(vfsi_core::StatusCode::Errno(libc::EBADF as u32))
         );
-        assert_eq!(std::fs::read(path).unwrap(), b"ab0");
+        assert_eq!(
+            results[1].as_ref().unwrap_err().state(),
+            FailureState::Failed
+        );
+        assert!(results[1].as_ref().unwrap_err().progress().is_none());
+        assert_eq!(std::fs::read(path).unwrap(), b"abc");
         let stats = telemetry.snapshot();
         assert_eq!(
             (stats.waves, stats.submissions, stats.completions),
-            (1, 2, 2)
+            (2, 3, 3)
         );
     }
 
@@ -1980,7 +2246,7 @@ mod tests {
         let file = Arc::new(File::options().write(true).open(&path).unwrap());
         let weak = Arc::downgrade(&file);
         let (mut engine, telemetry) = Engine::new(Options::default()).unwrap();
-        engine.fail_after_submit = true;
+        engine.fail_after_submit = Some(1);
         let results = engine.write(&[
             Write {
                 file: &file,
@@ -2040,5 +2306,230 @@ mod tests {
         );
         assert_eq!(std::fs::read(&path).unwrap(), b"old");
         assert_eq!(telemetry.snapshot().submissions, 0);
+    }
+    #[test]
+    fn native_read_hook_retains_later_successes_across_failed_waves() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("file"), b"abcd").unwrap();
+        for depth in [1, 3] {
+            let (engine, telemetry) = Engine::new(
+                Options::default().with_queue_depth(std::num::NonZeroU32::new(depth).unwrap()),
+            )
+            .unwrap();
+            let mut fs = vfsi_local::LocalBackend::new(root.path().to_path_buf(), engine).unwrap();
+            let good = fs
+                .open_raw_impl(std::path::Path::new("/file"), libc::O_RDONLY, 0)
+                .unwrap();
+            let bad = fs
+                .open_raw_impl(std::path::Path::new("/file"), libc::O_WRONLY, 0)
+                .unwrap();
+            let outcomes = fs
+                .vread_impl(&[
+                    ReadOp::at(good.clone(), 0, 1),
+                    ReadOp::at(bad.clone(), 0, 1),
+                    ReadOp::at(good.clone(), 1, 1),
+                ])
+                .unwrap();
+            assert_eq!(outcomes[0].as_ref().unwrap().data, b"a");
+            assert_eq!(outcomes[2].as_ref().unwrap().data, b"b");
+            assert_eq!(
+                outcomes[1].as_ref().unwrap_err().state(),
+                FailureState::Failed
+            );
+            let stats = telemetry.snapshot();
+            assert_eq!((stats.submissions, stats.completions), (3, 3));
+            assert_eq!(stats.waves, if depth == 1 { 3 } else { 1 });
+            assert_eq!(stats.copied_read_bytes, 0);
+            let (mut first, mut failed, mut last) = ([99; 1], [99; 1], [99; 1]);
+            let outcomes = fs
+                .vread_into_impl(
+                    &[
+                        ReadOp::at(good.clone(), 0, 1),
+                        ReadOp::at(bad.clone(), 0, 1),
+                        ReadOp::at(good.clone(), 1, 1),
+                    ],
+                    &mut [&mut first, &mut failed, &mut last],
+                )
+                .unwrap();
+            assert_eq!(outcomes[0].as_ref().unwrap().bytes_read, 1);
+            assert_eq!(outcomes[2].as_ref().unwrap().bytes_read, 1);
+            assert_eq!(
+                outcomes[1].as_ref().unwrap_err().state(),
+                FailureState::Failed
+            );
+            assert_eq!(first, *b"a");
+            assert_eq!(last, *b"b");
+            assert_eq!(failed, [99]);
+            let stats = telemetry.snapshot();
+            assert_eq!((stats.submissions, stats.completions), (6, 6));
+            assert_eq!(stats.waves, if depth == 1 { 6 } else { 2 });
+            // Borrowed reads retain the engine's existing scratch-copy policy;
+            // only the two successful one-byte inputs are copied.
+            assert_eq!(stats.copied_read_bytes, 2);
+            fs.vclose_impl(&[good, bad]).unwrap();
+        }
+    }
+    #[test]
+    fn sync_failures_keep_successes_and_continue_later_waves() {
+        let root = tempfile::tempdir().unwrap();
+        let good = Arc::new(File::create(root.path().join("file")).unwrap());
+        let bad = Arc::new(File::open("/dev/null").unwrap());
+        for depth in [1, 3] {
+            for data_only in [false, true] {
+                let (mut engine, telemetry) = Engine::new(
+                    Options::default().with_queue_depth(std::num::NonZeroU32::new(depth).unwrap()),
+                )
+                .unwrap();
+                let results = engine.sync(&[&good, &bad, &good], data_only);
+                assert_eq!(results.len(), 3);
+                assert!(results[0].is_ok() && results[2].is_ok());
+                let error = results[1].as_ref().unwrap_err();
+                assert_eq!(error.state(), FailureState::Failed);
+                assert!(error.progress().is_none());
+                let stats = telemetry.snapshot();
+                assert_eq!((stats.submissions, stats.completions), (3, 3));
+                assert_eq!(stats.waves, if depth == 1 { 3 } else { 1 });
+            }
+        }
+    }
+
+    #[test]
+    fn sync_publication_loss_keeps_prior_success_and_unsubmitted_suffix() {
+        let root = tempfile::tempdir().unwrap();
+        let file = Arc::new(File::create(root.path().join("file")).unwrap());
+        let (mut engine, telemetry) =
+            Engine::new(Options::default().with_queue_depth(std::num::NonZeroU32::new(1).unwrap()))
+                .unwrap();
+        engine.fail_after_submit = Some(2);
+        let results = engine.sync(&[&file, &file, &file], false);
+        assert!(results[0].is_ok());
+        assert_eq!(
+            results[1].as_ref().unwrap_err().state(),
+            FailureState::Unknown
+        );
+        assert_eq!(
+            results[2].as_ref().unwrap_err().state(),
+            FailureState::NotAttempted
+        );
+        let before = telemetry.snapshot();
+        assert_eq!((before.submissions, before.completions), (2, 1));
+        assert!(engine.ring.is_none());
+        let results = engine.sync(&[&file], false);
+        assert_eq!(
+            results[0].as_ref().unwrap_err().state(),
+            FailureState::NotAttempted
+        );
+        assert_eq!(telemetry.snapshot().submissions, before.submissions);
+    }
+    #[test]
+    fn independent_write_errors_preserve_later_waves_and_every_cqe() {
+        for depth in [1, 3] {
+            let root = tempfile::tempdir().unwrap();
+            let paths: Vec<_> = ["first", "bad", "last"]
+                .map(|name| root.path().join(name))
+                .into();
+            for path in &paths {
+                std::fs::write(path, b"0").unwrap();
+            }
+            let first = Arc::new(File::options().write(true).open(&paths[0]).unwrap());
+            let bad = Arc::new(File::open(&paths[1]).unwrap());
+            let last = Arc::new(File::options().write(true).open(&paths[2]).unwrap());
+            let (mut engine, telemetry) = Engine::new(
+                Options::default().with_queue_depth(std::num::NonZeroU32::new(depth).unwrap()),
+            )
+            .unwrap();
+            let results = engine.write(&[
+                Write {
+                    file: &first,
+                    offset: 0,
+                    data: b"A",
+                },
+                Write {
+                    file: &bad,
+                    offset: 0,
+                    data: b"B",
+                },
+                Write {
+                    file: &last,
+                    offset: 0,
+                    data: b"C",
+                },
+            ]);
+            assert_eq!(results[0], Ok(1));
+            assert_eq!(results[2], Ok(1));
+            let error = results[1].as_ref().unwrap_err();
+            assert_eq!(error.state(), FailureState::Failed);
+            assert_eq!(
+                error.cause().status(),
+                Some(vfsi_core::StatusCode::Errno(libc::EBADF as u32))
+            );
+            assert!(error.progress().is_none());
+            assert_eq!(std::fs::read(&paths[0]).unwrap(), b"A");
+            assert_eq!(std::fs::read(&paths[1]).unwrap(), b"0");
+            assert_eq!(std::fs::read(&paths[2]).unwrap(), b"C");
+            let stats = telemetry.snapshot();
+            assert_eq!((stats.submissions, stats.completions), (3, 3));
+            assert_eq!(stats.waves, if depth == 1 { 3 } else { 1 });
+        }
+    }
+
+    #[test]
+    fn fatal_write_submission_keeps_confirmed_prefix_and_untouched_suffix_distinct() {
+        let root = tempfile::tempdir().unwrap();
+        let first_path = root.path().join("first");
+        let last_path = root.path().join("last");
+        std::fs::write(&first_path, b"00000000").unwrap();
+        std::fs::write(&last_path, b"untouched").unwrap();
+        let first = Arc::new(File::options().write(true).open(&first_path).unwrap());
+        let last = Arc::new(File::options().write(true).open(&last_path).unwrap());
+        let (mut engine, telemetry) = Engine::new(
+            Options::default()
+                .with_queue_depth(std::num::NonZeroU32::new(1).unwrap())
+                .with_max_batch_bytes(std::num::NonZeroUsize::new(2).unwrap()),
+        )
+        .unwrap();
+        engine.fail_after_submit = Some(2);
+        let operations = [
+            Write {
+                file: &first,
+                offset: 0,
+                data: b"abcdef",
+            },
+            Write {
+                file: &last,
+                offset: 0,
+                data: b"changed",
+            },
+        ];
+        let results = engine.write(&operations);
+        let error = results[0].as_ref().unwrap_err();
+        assert_eq!(error.state(), FailureState::Unknown);
+        assert_eq!(
+            error.progress(),
+            Some(&IoProgress::Write { bytes_written: 2 })
+        );
+        assert_eq!(
+            results[1].as_ref().unwrap_err().state(),
+            FailureState::NotAttempted
+        );
+        assert!(results[1].as_ref().unwrap_err().progress().is_none());
+        assert_eq!(&std::fs::read(&first_path).unwrap()[..2], b"ab");
+        assert_eq!(std::fs::read(&last_path).unwrap(), b"untouched");
+        let stats = telemetry.snapshot();
+        assert_eq!(
+            (stats.waves, stats.submissions, stats.completions),
+            (2, 2, 1)
+        );
+        assert!(
+            engine
+                .write(&operations)
+                .iter()
+                .all(|result| result.as_ref().unwrap_err().state() == FailureState::NotAttempted)
+        );
+        assert_eq!(
+            telemetry.snapshot().submissions,
+            2,
+            "poisoned write engine never replays"
+        );
     }
 }

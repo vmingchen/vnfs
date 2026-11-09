@@ -22,7 +22,6 @@ use std::time::Duration;
 use vfsi_sync::backend::{HandleBackend, VectorBackend};
 
 use nfsv41_sys::*;
-use vfsi_core::internal::ManyResults;
 #[cfg(feature = "test-faults")]
 use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 
@@ -105,7 +104,8 @@ pub struct NfsConnectOptions {
     pub request_timeout: Duration,
     pub authentication: NfsAuth,
     /// Stable NFS client-owner identity. Must be unique among simultaneously
-    /// active clients using the same server and credential.
+    /// active clients using the same server and credential. If an OPEN loses
+    /// its cleanup identity, recovery retires this owner and uses a fresh one.
     pub client_owner: Option<Vec<u8>>,
     pub recovery_policy: NfsRecoveryPolicy,
     flags: ConnectFlags,
@@ -643,3 +643,12 @@ use directory::*;
 mod namespace;
 use namespace::*;
 mod copy;
+
+#[cfg(all(test, feature = "test-faults"))]
+mod removal_results_tests;
+
+#[cfg(all(test, feature = "test-faults"))]
+mod directory_open_results_tests;
+
+#[cfg(all(test, feature = "test-faults"))]
+mod paging_results_tests;

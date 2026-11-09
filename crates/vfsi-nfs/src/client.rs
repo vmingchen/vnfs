@@ -20,7 +20,10 @@ use crate::planner::{
 use crate::session::Session;
 use vfsi_core::path::split_path_bytes;
 use vfsi_core::{RpcError, RpcResult};
+mod completion;
 mod io_progress;
+mod open;
+mod path_mutation;
 use io_progress::{complete_read_suffix, complete_write_suffix};
 #[cfg(feature = "test-faults")]
 use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
@@ -108,6 +111,9 @@ pub struct NfsClient {
     configured_max_request_bytes: Option<std::num::NonZeroUsize>,
     rpc_envelope_reserve: usize,
     deferred_path_closes: Vec<CloseOp>,
+    // An OPEN may exist without an exact filehandle. Never renew its identity
+    // indefinitely or try to recover cleanup through a diagnostic pathname.
+    quarantined_opens: bool,
     next_public_open_owner_id: u64,
     #[cfg(feature = "test-faults")]
     fault_injector: Option<Arc<dyn FaultInjector>>,
@@ -121,6 +127,14 @@ pub struct NfsClient {
     short_merged_write_once: Option<usize>,
     #[cfg(feature = "test-faults")]
     fail_merged_write_once: Option<(usize, usize)>,
+    #[cfg(feature = "test-faults")]
+    pub(crate) fail_trailing_write_close_once: bool,
+    #[cfg(feature = "test-faults")]
+    pub(crate) fail_inline_path_close_once: bool,
+    #[cfg(feature = "test-faults")]
+    pub(crate) fail_merged_read_once: Option<usize>,
+    #[cfg(feature = "test-faults")]
+    pub(crate) fail_merged_truncate_once: bool,
 }
 
 /// Upper bound for the per-compound payload cap for merged path I/O; the
@@ -271,6 +285,8 @@ pub struct CreateOp {
     pub name: Vec<u8>,
     pub ftype: nfs_ftype4,
     pub linkdata: Option<Vec<u8>>,
+    /// Optional permissions supplied atomically with creation.
+    pub mode: Option<u32>,
 }
 
 /// One LINK of a batched compound: `[PUTFH src, SAVEFH, PUTFH dst, LINK]`.
@@ -296,6 +312,7 @@ pub struct CloseOp {
 
 /// Close path-batch OPENs if a later preparation step fails, while preserving
 /// the original failure if best-effort cleanup also fails.
+#[cfg(test)]
 pub(crate) fn prepare_path_opens<C, T, E>(
     opened: &[(NfsFh, stateid4)],
     client: &mut C,
@@ -316,21 +333,6 @@ pub(crate) fn prepare_path_opens<C, T, E>(
     result
 }
 
-fn read_error_with_cleanup<T, C>(
-    opened: &[(NfsFh, stateid4)],
-    close_in_compound: bool,
-    client: &mut C,
-    error: RpcError,
-    close: impl FnOnce(&mut C, &[CloseOp]),
-) -> RpcResult<T> {
-    if !close_in_compound && !opened.is_empty() {
-        // Only these decoder-owned OPENs share the temporary path owner.
-        // Generic/public OPEN cleanup must retain independent instances.
-        close(client, &latest_path_open_closes(opened));
-    }
-    Err(error)
-}
-
 /// One NFSv4.2 COPY: `[PUTFH src, SAVEFH, PUTFH dst, COPY]`.
 pub struct CopyOp {
     pub src_fh: NfsFh,
@@ -343,10 +345,41 @@ pub struct CopyOp {
     pub count: u64,
 }
 
+fn validate_copy_result(op: &CopyOp, reply: &COPY4resok) -> vfsi_core::OpResult<u64> {
+    let count = reply.cr_response.wr_count;
+    if reply.cr_response.wr_ids != 0
+        || reply.cr_synchronous != 1
+        || reply.cr_consecutive != 1
+        || reply.cr_response.wr_committed > stable_how4_FILE_SYNC4
+        || op.count != 0 && count > op.count
+        || op.src_offset.checked_add(count).is_none()
+        || op.dst_offset.checked_add(count).is_none()
+    {
+        return Err(vfsi_core::OpError::unknown(
+            vfsi_core::VfError::invalid_reply(None, "invalid synchronous COPY response"),
+            None,
+        ));
+    }
+    Ok(count)
+}
+
+fn readdir_response_limits(
+    response_bytes: usize,
+    operations: usize,
+    page_bytes: usize,
+) -> (u32, u32) {
+    let maxcount = (response_bytes / operations.max(1))
+        .max(1)
+        .min(u32::MAX as usize)
+        .min(page_bytes.max(4096)) as u32;
+    ((maxcount / 4).max(1), maxcount)
+}
+
 /// The server confirmed `ca_maxoperations` from CREATE_SESSION; keep every
 /// compound (plus the implicit SEQUENCE) under it.
 const MAX_COMPOUND_OPS: usize = 256;
 
+#[cfg(test)]
 fn remove_result_index(op_index: usize, item_count: usize) -> usize {
     // The response starts with SEQUENCE and PUTFH before the first REMOVE.
     op_index.saturating_sub(2).min(item_count.saturating_sub(1))
@@ -509,6 +542,8 @@ struct PathIoChunk<'a> {
     base_seq: u32,
     opens_in_chunk: usize,
     safety: RequestSafety,
+    dispatched: &'a mut bool,
+    submitted: &'a mut Vec<(usize, usize, usize)>,
 }
 
 /// Same-object dependencies for one NFS WRITE wave. The first range
@@ -556,39 +591,71 @@ impl WriteWaveAccess {
     }
 }
 
-/// Per-op results of a merged path compound. `counts`/`committed` are `None`
-/// for ops that never executed (the compound aborted at `failed`).
+/// Independent merged WRITE results and temporary-open cleanup ownership.
 pub struct PathWriteOutcome {
-    pub counts: Vec<Option<u32>>,
-    pub committed: Vec<Option<u32>>,
-    /// Open stateids (with their filehandles) created by the compound; used
-    /// by the separate-close form and for best-effort cleanup on failure.
+    pub results: Vec<vfsi_core::OpResult<(usize, u32)>>,
     pub opened: Vec<(NfsFh, stateid4)>,
-    /// First failing caller-relative op index + NFS status, if any.
-    pub failed: Option<(usize, u32)>,
-    /// The trailing in-compound CLOSE failed (special stateid unsupported).
+    /// The special CLOSE failed or did not fit; subsequent calls can use
+    /// separate closes. This hint never asks a caller to replay WRITEs.
     pub close_failed: Option<u32>,
 }
 
-/// Per-op results of a merged path read compound.
+/// Whether an NFS status indicates the special stateid was rejected
+/// (rather than a per-file failure), so the merged path must be disabled.
+pub(crate) fn is_stateid_error(status: u32) -> bool {
+    matches!(
+        status,
+        nfsstat4_NFS4ERR_BAD_STATEID
+            | nfsstat4_NFS4ERR_OLD_STATEID
+            | nfsstat4_NFS4ERR_STALE_STATEID
+            | nfsstat4_NFS4ERR_BAD_SEQID
+            | nfsstat4_NFS4ERR_NOTSUPP
+    )
+}
+
+/// A protocol-proven path rejection that the native namespace layer can repair
+/// before any later logical mutation. This is private continuation metadata,
+/// never a completed-prefix guarantee in the public vector API.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PathWriteRepair {
+    pub index: usize,
+    pub kind: PathWriteRepairKind,
+    pub prefix_stable: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PathWriteRepairKind {
+    Symlink,
+    WriteStateid,
+    TruncateStateid,
+}
+
+/// Independent merged READ results plus temporary-open cleanup bookkeeping.
 pub struct PathReadOutcome {
-    pub data: Vec<Option<Vec<u8>>>,
-    pub eof: Vec<Option<bool>>,
+    pub results: Vec<vfsi_core::OpResult<(Vec<u8>, bool)>>,
     pub opened: Vec<(NfsFh, stateid4)>,
-    pub failed: Option<(usize, u32)>,
     pub close_failed: Option<u32>,
+}
+
+// A protocol wave stops at the server's first failure; the public raw engine
+// resumes its proven unexecuted suffix. These indices never escape as a
+// completed-prefix promise in Vfsi.
+struct PathReadWave {
+    data: Vec<Option<Vec<u8>>>,
+    eof: Vec<Option<bool>>,
+    opened: Vec<(NfsFh, stateid4)>,
+    failed: Option<(usize, u32)>,
+    close_failed: Option<u32>,
+    errors: Vec<Option<vfsi_core::OpError>>,
+    fatal: Option<RpcError>,
+    submitted: Vec<(usize, usize, usize)>,
+    dispatched: bool,
 }
 
 /// One path-based GETATTR for a merged compound.
 pub struct PathGetattrOp {
     pub file: FileRef,
     pub attrs: Vec<u32>,
-}
-
-pub struct PathGetattrOutcome {
-    /// Raw XDR attribute lists per op (in the requested order).
-    pub lists: Vec<Option<Vec<u8>>>,
-    pub failed: Option<(usize, u32)>,
 }
 
 /// One path-based SETATTR for a merged compound.
@@ -604,10 +671,14 @@ pub struct PathSetattrOp {
     pub check_type: bool,
 }
 
-pub struct PathSetattrOutcome {
-    /// The object's own NFS type per op (when `check_type`), else None.
-    pub types: Vec<Option<u32>>,
-    pub failed: Option<(usize, u32)>,
+// A private protocol continuation, never exposed as Vfsi execution progress.
+type PathMutationRun<T> = (Vec<vfsi_core::OpResult<T>>, Option<PathRepair>);
+
+/// Backend-only continuation at a parent/guard rejection, before later mutations.
+#[derive(Clone, Copy)]
+pub(crate) struct PathRepair {
+    pub(crate) input: usize,
+    pub(crate) failed_op: u32,
 }
 
 /// One path-based OPEN for a merged compound.
@@ -627,20 +698,10 @@ pub struct PathOpenOutcome {
     pub failed: Option<(usize, u32)>,
 }
 
-pub struct PathRemoveOutcome {
-    pub removed: Vec<Option<()>>,
-    pub failed: Option<(usize, u32)>,
-}
-
 /// One path-based RENAME pair for a merged compound.
 pub struct PathRenamePair {
     pub src: Vec<u8>,
     pub dst: Vec<u8>,
-}
-
-pub struct PathRenameOutcome {
-    pub renamed: Vec<Option<()>>,
-    pub failed: Option<(usize, u32)>,
 }
 
 /// Compound-local "current filehandle" tracking, mirroring the txn-compound
@@ -755,8 +816,27 @@ impl CfhCursor {
 }
 
 // Keep compound safety classification shared by mutation and resource retries.
+fn validate_create_mode(mode: Option<u32>, set: &bitmap4) -> vfsi_core::OpResult<()> {
+    if mode.is_some() && (set.bitmap4_len < 2 || set.map[1] & (1 << (FATTR4_MODE % 32)) == 0) {
+        return Err(vfsi_core::OpError::unknown(
+            vfsi_core::VfError::invalid_reply(None, "CREATE did not acknowledge requested mode"),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 fn batch_is_read_only(tag: &[u8]) -> bool {
-    matches!(tag, b"getattrv" | b"vstatfs_impl" | b"readlinkv" | b"readv")
+    matches!(
+        tag,
+        b"getattrv"
+            | b"vstatfs_impl"
+            | b"readlinkv"
+            | b"readv"
+            | b"lookup_typev"
+            | b"readdir_pages"
+            | b"readdir_children"
+    )
 }
 
 fn batch_resource_progress(
@@ -776,6 +856,24 @@ fn batch_resource_progress(
     } else {
         None
     }
+}
+
+pub(crate) fn collect_rpc_results<T>(
+    result: vfsi_core::VecResult<T>,
+    expected: usize,
+) -> RpcResult<Vec<T>> {
+    vfsi_core::internal::collect_vec_result(result, expected).map_err(|cause| {
+        if let Some(vfsi_core::StatusCode::Nfs(status)) = cause.status() {
+            RpcError::op(cause.index().unwrap_or(0), status)
+        } else {
+            RpcError::transport_with_kind(
+                cause
+                    .transport_kind()
+                    .unwrap_or(vfsi_core::TransportKind::Other),
+                cause.to_string(),
+            )
+        }
+    })
 }
 
 fn remap_cleanup_error(error: RpcError, cleanup_indices: &[usize]) -> RpcError {
@@ -849,6 +947,7 @@ fn first_failed_range(res: &CompoundRes, map: &ExecutionMap) -> RpcResult<Option
 
 mod path_open_cleanup;
 pub(crate) use path_open_cleanup::latest_path_open_closes;
+use path_open_cleanup::record_path_open_owners;
 
 #[cfg(all(test, feature = "test-faults"))]
 mod session_recovery_tests;
@@ -904,12 +1003,57 @@ impl NfsClient {
         self.deferred_path_closes.len()
     }
 
-    fn close_path_or_defer(&mut self, closes: Vec<CloseOp>) {
+    pub(crate) fn ensure_usable(&self) -> RpcResult<()> {
+        if self.quarantined_opens {
+            return Err(RpcError::transport(
+                "NFS identity quarantined after an OPEN lost its cleanup handle; reconnect",
+            ));
+        }
+        self.session.ensure_usable()
+    }
+
+    pub(crate) fn needs_fresh_identity(&self) -> bool {
+        self.quarantined_opens
+    }
+
+    pub(crate) fn quarantine_open_identity(&mut self) {
+        self.quarantined_opens = true;
+    }
+
+    pub(crate) fn inherit_open_quarantine(&mut self, attempted: &Self) {
+        if attempted.needs_fresh_identity() && self.session.shares_identity(&attempted.session) {
+            self.quarantine_open_identity();
+        }
+    }
+
+    pub(crate) fn close_path_or_defer(&mut self, closes: Vec<CloseOp>) {
         if closes.is_empty() {
             return;
         }
-        if self.close_unregistered_many(&closes).is_err() {
+        #[cfg(feature = "test-faults")]
+        if let Some(injector) = &self.fault_injector
+            && injector
+                .check(&OpenFaultPoint::BeforePathCloseBatch)
+                .is_err()
+        {
             self.deferred_path_closes.extend(closes);
+            return;
+        }
+        match self.close_descriptors(&closes) {
+            Ok(outcomes) => {
+                for (close, outcome) in closes.into_iter().zip(outcomes) {
+                    match outcome {
+                        Ok(()) => {
+                            #[cfg(feature = "test-faults")]
+                            {
+                                self.confirmed_path_closes += 1;
+                            }
+                        }
+                        Err(_) => self.deferred_path_closes.push(close),
+                    }
+                }
+            }
+            Err(_) => self.deferred_path_closes.extend(closes),
         }
     }
 
@@ -1117,6 +1261,7 @@ impl NfsClient {
             configured_max_request_bytes,
             rpc_envelope_reserve,
             deferred_path_closes: Vec::new(),
+            quarantined_opens: false,
             next_public_open_owner_id: 0,
             #[cfg(feature = "test-faults")]
             fault_injector: None,
@@ -1130,6 +1275,14 @@ impl NfsClient {
             short_merged_write_once: None,
             #[cfg(feature = "test-faults")]
             fail_merged_write_once: None,
+            #[cfg(feature = "test-faults")]
+            fail_trailing_write_close_once: false,
+            #[cfg(feature = "test-faults")]
+            fail_inline_path_close_once: false,
+            #[cfg(feature = "test-faults")]
+            fail_merged_read_once: None,
+            #[cfg(feature = "test-faults")]
+            fail_merged_truncate_once: false,
         })
     }
 
@@ -1192,10 +1345,7 @@ impl NfsClient {
     }
 
     fn readdir_limits(&self, operations: usize) -> (u32, u32) {
-        let per_operation = (self.read_compound_bytes() / operations.max(1)).max(1);
-        let maxcount = per_operation.min(u32::MAX as usize) as u32;
-        let dircount = (maxcount / 4).max(1);
-        (dircount, maxcount.max(1))
+        readdir_response_limits(self.read_compound_bytes(), operations, usize::MAX)
     }
 
     pub fn root(&self) -> &NfsFh {
@@ -1275,9 +1425,20 @@ impl NfsClient {
                 }
                 if target.close_in_compound && target.opened_path.is_some() && *target.fh_at_opened
                 {
-                    target
-                        .compound
-                        .close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
+                    #[cfg(feature = "test-faults")]
+                    let invalid_stateid = stateid4 {
+                        seqid: 0,
+                        other: [!0; 12],
+                    };
+                    #[cfg(feature = "test-faults")]
+                    let stateid = if std::mem::take(&mut self.fail_inline_path_close_once) {
+                        &invalid_stateid
+                    } else {
+                        &SPECIAL_STATEID
+                    };
+                    #[cfg(not(feature = "test-faults"))]
+                    let stateid = &SPECIAL_STATEID;
+                    target.compound.close(stateid.seqid, stateid);
                     target.map.note_ops(1);
                     *target.opened_path = None;
                 }
@@ -1308,16 +1469,27 @@ impl NfsClient {
                 }
                 *target.opens_in_chunk += 1;
                 target.map.note_ops(1);
-                if !target.close_in_compound {
-                    target.compound.getfh();
-                    target.map.note_ops(1);
-                }
+                // Pin the opened object before data or cleanup can fail.
+                // Resolving its path again cannot recover an unlinked owner.
+                target.compound.getfh();
+                target.map.note_ops(1);
                 *target.opened_path = Some(Box::from(path.as_slice()));
                 *target.fh_at_opened = true;
                 if open.truncate_existing {
-                    target
-                        .compound
-                        .setattr_with_stateid(None, Some(0), &SPECIAL_STATEID);
+                    #[cfg(feature = "test-faults")]
+                    let invalid_stateid = stateid4 {
+                        seqid: 0,
+                        other: [!0; 12],
+                    };
+                    #[cfg(feature = "test-faults")]
+                    let stateid = if std::mem::take(&mut self.fail_merged_truncate_once) {
+                        &invalid_stateid
+                    } else {
+                        &SPECIAL_STATEID
+                    };
+                    #[cfg(not(feature = "test-faults"))]
+                    let stateid = &SPECIAL_STATEID;
+                    target.compound.setattr_with_stateid(None, Some(0), stateid);
                     target.map.note_ops(1);
                 }
                 Some(true)
@@ -1325,9 +1497,20 @@ impl NfsClient {
             FileRef::Handle(handle) => {
                 if target.close_in_compound && target.opened_path.is_some() && *target.fh_at_opened
                 {
-                    target
-                        .compound
-                        .close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
+                    #[cfg(feature = "test-faults")]
+                    let invalid_stateid = stateid4 {
+                        seqid: 0,
+                        other: [!0; 12],
+                    };
+                    #[cfg(feature = "test-faults")]
+                    let stateid = if std::mem::take(&mut self.fail_inline_path_close_once) {
+                        &invalid_stateid
+                    } else {
+                        &SPECIAL_STATEID
+                    };
+                    #[cfg(not(feature = "test-faults"))]
+                    let stateid = &SPECIAL_STATEID;
+                    target.compound.close(stateid.seqid, stateid);
                     target.map.note_ops(1);
                     *target.opened_path = None;
                 }
@@ -1352,6 +1535,8 @@ impl NfsClient {
             base_seq,
             opens_in_chunk,
             safety,
+            dispatched,
+            submitted,
         } = chunk;
         if allow_repack
             && self.merged_paths_need_repack(tag, one_item_ops, compound, map.ranges.len())?
@@ -1361,8 +1546,17 @@ impl NfsClient {
             });
         }
         CompoundBudget::new(self.max_ops).ensure(compound)?;
+        if !self.compound_request_fits(compound)? {
+            return Err(RpcError::op(0, nfsstat4_NFS4ERR_REQ_TOO_BIG));
+        }
+        self.ensure_usable()?;
         self.session.path_owner.seqid = base_seq.wrapping_add(opens_in_chunk as u32);
-        let response = self.call_compound_with_safety(compound, safety)?;
+        *dispatched = true;
+        let response = self
+            .call_compound_with_safety(compound, safety)
+            .inspect_err(|_| {
+                submitted.clone_from(&map.ranges);
+            })?;
         if resource_rejected_before_mutation(&response) {
             self.session.path_owner.seqid = base_seq;
             if self.can_retry_merged_resource(tag, &response, old_budget, reserve, per_file) {
@@ -1404,6 +1598,7 @@ impl NfsClient {
     /// Send a compound only when its final size, including SEQUENCE, honors
     /// the server-confirmed `ca_maxoperations` value.
     fn call_compound(&mut self, compound: &mut Compound) -> RpcResult<CompoundRes> {
+        self.ensure_usable()?;
         CompoundBudget::new(self.max_ops).ensure(compound)?;
         if !self.compound_request_fits(compound)? {
             return Err(RpcError::op(0, nfsv41_sys::nfsstat4_NFS4ERR_REQ_TOO_BIG));
@@ -1421,7 +1616,23 @@ impl NfsClient {
             );
             return Ok(reply);
         }
-        let reply = self.session.compound(compound)?;
+        let reply = match self.session.compound(compound) {
+            Ok(reply) => reply,
+            Err(error) => {
+                // A lost reply can hide the acquired stateid even for CLAIM_FH.
+                // Do not keep that OPEN alive by reusing a stable client ID.
+                if compound.has_open() {
+                    self.quarantine_open_identity();
+                }
+                return Err(error);
+            }
+        };
+        if reply.status() != nfsstat4_NFS4_OK
+            && compound.has_named_open()
+            && compound.has_unaddressed_open(&reply)
+        {
+            self.quarantine_open_identity();
+        }
         self.compound_limits
             .observe(compound.tag_bytes(), sent_ops, reply.status(), reply.nops());
         Ok(reply)
@@ -1488,106 +1699,37 @@ impl NfsClient {
         Ok((fh, ftype))
     }
 
-    /// Tolerantly LOOKUP each `(parent, name)` and return the child handle and
-    /// FATTR4_TYPE (`[PUTFH, LOOKUP, GETFH, GETATTR]` per element). Failed
-    /// LOOKUPs are reported per path; only transport / compound-level
-    /// failures abort the whole call.
+    /// Resolve independent children without discarding confirmed siblings.
     pub fn lookup_getattr_many(
         &mut self,
         ops: &[(NfsFh, Vec<u8>)],
-    ) -> RpcResult<Vec<Result<(NfsFh, u32), u32>>> {
-        if ops.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut out: Vec<Option<Result<(NfsFh, u32), u32>>> =
-            (0..ops.len()).map(|_| None).collect();
-        let mut cursor = 0usize;
-        let mut max_items = usize::MAX;
-        while cursor < ops.len() {
-            let batch_capacity = self
-                .op_budget_for(b"lookup_typev", 5)
-                .batch_capacity(4)?
-                .min(max_items);
-            let end = (cursor + batch_capacity).min(ops.len());
-            let mut map = ExecutionMap::new();
-            let mut c = Compound::new();
-            c.tag(b"lookup_typev");
-            for (caller, (dir, name)) in ops[cursor..end].iter().enumerate() {
-                map.begin(cursor + caller);
-                c.putfh(&dir.as_nfs_fh());
-                c.lookup(name);
-                c.getfh();
-                c.getattr(&[FATTR4_TYPE]);
-                map.note_ops(4);
-                map.end();
-            }
-            if !self.compound_request_fits(&c)? && end - cursor > 1 {
-                max_items = (end - cursor) / 2;
-                continue;
-            }
-            max_items = usize::MAX;
-            let res = self.call_compound_with_safety(&mut c, RequestSafety::ReadOnly)?;
-            let report = map.analyze(&res).map_err(|error| {
-                RpcError::transport_with_kind(
-                    vfsi_core::TransportKind::InvalidReply,
-                    format!("malformed lookup_typev COMPOUND reply: {error}"),
-                )
-            })?;
-
-            if let Some(status) = report.compound_failure {
-                if matches!(
-                    status,
-                    nfsstat4_NFS4ERR_TOO_MANY_OPS | nfsstat4_NFS4ERR_RESOURCE
-                ) && end - cursor > 1
-                {
-                    debug_assert_eq!(
-                        recovery_action(RequestSafety::ReadOnly, FailureCause::ResourceLimit, true,),
-                        RecoveryAction::SplitAndRetry
-                    );
-                    continue;
+    ) -> vfsi_core::VecResult<(NfsFh, u32)> {
+        self.fixed_results::<4, _, _>(
+            b"lookup_typev",
+            ops,
+            usize::MAX,
+            |_| 0,
+            |compound, (dir, name), _| {
+                compound.putfh(&dir.as_nfs_fh());
+                compound.lookup(name);
+                compound.getfh();
+                compound.getattr(&[FATTR4_TYPE]);
+            },
+            |reply, local, _| {
+                let start = 1 + 4 * local;
+                let bytes = reply.getattr(start + 3);
+                if bytes.len() != 4 {
+                    return Err(vfsi_core::OpError::unknown(
+                        vfsi_core::VfError::invalid_reply(None, "invalid LOOKUP type attribute"),
+                        None,
+                    ));
                 }
-                return Err(RpcError::op(cursor, status));
-            }
-
-            for &(caller, start, _) in map.completed_ranges(&report) {
-                let fh = NfsFh::from_nfs_fh(res.getfh(start + 2));
-                let bytes = res.getattr_bytes(start + 3);
-                let ftype = if bytes.len() >= 4 {
-                    u32::from_be_bytes(bytes[0..4].try_into().unwrap())
-                } else {
-                    0
-                };
-                out[caller] = Some(Ok((fh, ftype)));
-            }
-            if let Some(failure) = report.failure {
-                if matches!(
-                    failure.status,
-                    nfsstat4_NFS4ERR_TOO_MANY_OPS | nfsstat4_NFS4ERR_RESOURCE
-                ) && end - cursor > 1
-                {
-                    cursor = failure.caller;
-                    continue;
-                }
-                out[failure.caller] = Some(Err(failure.status));
-                debug_assert_eq!(
-                    recovery_action(RequestSafety::ReadOnly, FailureCause::ItemStatus, true,),
-                    RecoveryAction::ContinueSuffix
-                );
-                cursor = failure.caller + 1;
-            } else {
-                cursor = end;
-            }
-        }
-        out.into_iter()
-            .enumerate()
-            .map(|(caller, value)| {
-                value.ok_or_else(|| {
-                    RpcError::transport(format!(
-                        "lookup_typev planner omitted caller item {caller}"
-                    ))
-                })
-            })
-            .collect()
+                Ok((
+                    NfsFh::from_nfs_fh(reply.getfh(start + 2)),
+                    u32::from_be_bytes(bytes.try_into().unwrap()),
+                ))
+            },
+        )
     }
 
     /// Tolerantly LOOKUP each `(parent, name)` in as few compounds as
@@ -1720,20 +1862,13 @@ impl NfsClient {
         Ok(current)
     }
 
-    /// WRITE several `[PUTFH, WRITE]` pairs in as few compounds as possible.
-    /// Returns `(bytes written, committed)` per op.
-    ///
-    /// Note: there is no batched READ counterpart. The kernel nfsd does not
-    /// handle multiple READ ops per compound correctly (its reply-page offset
-    /// computation collides sub-page reads), so reads are issued one per
-    /// compound.
     /// READ several `[PUTFH, READ]` pairs in as few compounds as possible.
     /// Each i-th read in a compound is at resop `2 + 2*i` (SEQUENCE, PUTFH,
     /// READ, PUTFH, READ, ...). The kernel nfsd does not serve multiple READ
     /// ops per compound correctly; use an nfs-ganesha server for this.
     /// Returns the data and the server's EOF flag per request, in request
     /// order.
-    pub fn readv(&mut self, ops: &[ReadOp]) -> RpcResult<Vec<(Vec<u8>, bool)>> {
+    pub fn readv(&mut self, ops: &[ReadOp]) -> vfsi_core::VecResult<(Vec<u8>, bool)> {
         self.readv_decode(ops, |_, data, eof| Ok((data.to_vec(), eof)))
     }
 
@@ -1743,7 +1878,7 @@ impl NfsClient {
         &mut self,
         ops: &[ReadOp],
         mut on_data: impl FnMut(usize, &[u8]) -> RpcResult<()>,
-    ) -> RpcResult<Vec<(usize, bool)>> {
+    ) -> vfsi_core::VecResult<(usize, bool)> {
         self.readv_decode(ops, |index, data, eof| {
             on_data(index, data)?;
             Ok((data.len(), eof))
@@ -1781,133 +1916,150 @@ impl NfsClient {
         &mut self,
         ops: &[ReadOp],
         mut decode: impl FnMut(usize, &[u8], bool) -> RpcResult<R>,
-    ) -> RpcResult<Vec<R>> {
+    ) -> vfsi_core::VecResult<R> {
         let byte_budget = self.read_compound_bytes().saturating_sub(128);
-        let mut results = Vec::with_capacity(ops.len());
-        let mut start = 0usize;
-        while start < ops.len() {
-            let mut end = start;
-            let mut bytes = 0usize;
-            while end < ops.len() {
-                let next = (ops[end].count as usize).saturating_add(128);
-                if bytes.saturating_add(next) > byte_budget {
-                    break;
-                }
-                bytes += next;
-                end += 1;
-            }
-            if end == start {
-                return Err(RpcError::op(start, nfsstat4_NFS4ERR_REP_TOO_BIG));
-            }
-            let mut extracted = 0usize;
-            let chunk = self
-                .batch_ops_fallible(
-                    b"readv",
-                    2,
-                    &ops[start..end],
-                    |c, op, _| {
-                        c.putfh(&op.fh.as_nfs_fh());
-                        c.read(&op.stateid, op.offset, op.count);
-                    },
-                    |res, i| {
-                        let local_index = extracted;
-                        let wire_index = start + local_index;
-                        extracted += 1;
-                        let ok = res.read(2 + 2 * i);
-                        let len = ok.data.data_len as usize;
-                        Self::validate_read_length(len, ops[wire_index].count as usize)
-                            .map_err(|error| error.with_op_index(local_index))?;
-                        let data = res.read_data(2 + 2 * i);
-                        decode(wire_index, data, ok.eof != 0)
-                            .map_err(|error| error.with_op_index(local_index))
-                    },
-                )
-                .map_err(|error| {
-                    let index = start + error.op_index;
-                    error.with_op_index(index)
-                })?;
-            results.extend(chunk);
-            start = end;
+        // Reject an individually unrepresentable request before dispatching
+        // any sibling. Aggregate response limits still pack independent waves.
+        if ops
+            .iter()
+            .any(|op| (op.count as usize).saturating_add(128) > byte_budget)
+        {
+            return Err(vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_REP_TOO_BIG));
         }
-        Ok(results)
-    }
-
-    /// WRITE several `[PUTFH, WRITE]` pairs in as few compounds as possible;
-    /// returns (bytes written, commit mode) per request.
-    pub fn writev(&mut self, ops: &[WriteOp<'_>]) -> RpcResult<Vec<(u32, u32)>> {
-        self.batch_ops(
-            b"writev",
-            2,
+        self.fixed_results::<2, _, _>(
+            b"readv",
             ops,
-            |c, op, _| {
-                c.putfh(&op.fh.as_nfs_fh());
-                c.write(&op.stateid, op.offset, stable_how4_FILE_SYNC4, op.data);
+            byte_budget,
+            |op| (op.count as usize).saturating_add(128),
+            |compound, op, _| {
+                compound.putfh(&op.fh.as_nfs_fh());
+                compound.read(&op.stateid, op.offset, op.count);
             },
-            |res, i| {
-                let ok = res.write(2 + 2 * i);
-                (ok.count, ok.committed)
+            |reply, local, original| {
+                let ok = reply.read(2 + 2 * local);
+                Self::validate_read_length(ok.data.data_len as usize, ops[original].count as usize)
+                    .and_then(|()| decode(original, reply.read_data(2 + 2 * local), ok.eof != 0))
+                    .map_err(|error| {
+                        vfsi_core::OpError::unknown(vfsi_core::error_from_rpc(error, None), None)
+                    })
             },
         )
     }
 
-    /// REMOVE several names from `dir` in one compound. REMOVE leaves the
-    /// current filehandle on `dir`, so consecutive REMOVEs chain.
-    pub fn remove_many(&mut self, dir: &NfsFh, names: &[Vec<u8>]) -> RpcResult<()> {
-        let mut start = 0usize;
-        let mut max_items = usize::MAX;
-        while start < names.len() {
-            // SEQUENCE and PUTFH precede the first REMOVE. Keep each request
-            // within the shape's learned operation budget.
-            let take = self
-                .remove_batch_capacity()
-                .min(max_items)
-                .min(names.len() - start);
-            // Earlier chunks are confirmed; this chunk has not been sent.
-            #[cfg(feature = "test-faults")]
-            if let Some(injector) = &self.fault_injector {
-                injector
-                    .check(&OpenFaultPoint::BeforeRemoveChunk {
-                        first_name: names[start].clone(),
-                    })
-                    .map_err(|error| {
-                        if error.is_transport() {
-                            RpcError::transport(error.to_string())
-                        } else {
-                            RpcError::op(start, error.raw_code())
-                        }
-                    })?;
-            }
-            let mut c = Compound::new();
-            c.tag(b"removev");
-            c.putfh(&dir.as_nfs_fh());
-            for name in &names[start..start + take] {
-                c.remove(name);
-            }
-            if !self.compound_request_fits(&c)? && take > 1 {
-                max_items = take / 2;
-                continue;
-            }
-            max_items = usize::MAX;
-            let map = |op_index: usize| start + remove_result_index(op_index, take);
-            let res = self
-                .call_compound_with_safety(&mut c, RequestSafety::NonIdempotentMutation)
-                .map_err(|error| {
-                    let index = map(error.op_index);
-                    error.with_op_index(index)
-                })?;
-            if take > 1
-                && resource_rejected_before_mutation(&res)
-                && self.remove_batch_capacity() < take
-            {
-                continue;
-            }
-            self.session.expect_all_ok(&res).map_err(|error| {
-                let index = map(error.op_index);
-                error.with_op_index(index)
-            })?;
-            start += take;
+    fn validate_write_completion(
+        count: u32,
+        committed: u32,
+        requested: usize,
+    ) -> vfsi_core::OpResult<(u32, u32)> {
+        if count as usize > requested || committed > stable_how4_FILE_SYNC4 {
+            Err(vfsi_core::OpError::unknown(
+                vfsi_core::VfError::invalid_reply(None, "invalid NFS WRITE completion"),
+                None,
+            ))
+        } else {
+            Ok((count, committed))
         }
-        Ok(())
+    }
+
+    /// WRITE independent `[PUTFH, WRITE]` pairs in bounded compounds.
+    /// Preserve successful replies and resume only the proven unexecuted
+    /// suffix after a status error. Lost submitted replies are never replayed.
+    pub fn writev(&mut self, ops: &[WriteOp<'_>]) -> vfsi_core::VecResult<(u32, u32)> {
+        let byte_budget = self.max_request_arg_bytes().saturating_sub(128);
+        let rejection = |op: &WriteOp<'_>| {
+            if op.offset.checked_add(op.data.len() as u64).is_none() {
+                Some(vfsi_core::VfError::errno(None, libc::EOVERFLOW as u32))
+            } else if op.data.len().saturating_add(256) > byte_budget {
+                Some(vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_REQ_TOO_BIG))
+            } else {
+                None
+            }
+        };
+        if ops.iter().any(|op| rejection(op).is_some()) {
+            // Allocate remapping only for rejected inputs; the common batch
+            // borrows the original operations directly without copying payloads.
+            let mut slots = vec![None; ops.len()];
+            let mut valid = Vec::new();
+            let mut indices = Vec::new();
+            for (index, op) in ops.iter().enumerate() {
+                if let Some(cause) = rejection(op) {
+                    slots[index] = Some(Err(vfsi_core::OpError::not_attempted(cause)));
+                } else {
+                    indices.push(index);
+                    valid.push(WriteOp {
+                        fh: op.fh.clone(),
+                        stateid: op.stateid,
+                        offset: op.offset,
+                        data: op.data,
+                    });
+                }
+            }
+            if !valid.is_empty() {
+                let results = self.writev(&valid).unwrap_or_else(|cause| {
+                    (0..valid.len())
+                        .map(|_| Err(vfsi_core::OpError::not_attempted(cause.clone())))
+                        .collect()
+                });
+                for (index, result) in indices.into_iter().zip(results) {
+                    slots[index] = Some(result);
+                }
+            }
+            return Ok(slots
+                .into_iter()
+                .map(|slot| slot.expect("every WRITE input assigned"))
+                .collect());
+        }
+        self.fixed_results::<2, _, _>(
+            b"writev",
+            ops,
+            byte_budget,
+            |op| op.data.len().saturating_add(256),
+            |compound, op, _| {
+                compound.putfh(&op.fh.as_nfs_fh());
+                compound.write(&op.stateid, op.offset, stable_how4_FILE_SYNC4, op.data);
+            },
+            |reply, local, original| {
+                let ok = reply.write(2 + 2 * local);
+                Self::validate_write_completion(ok.count, ok.committed, ops[original].data.len())
+            },
+        )
+    }
+
+    /// REMOVE sibling names in bounded compounds, preserving every item result.
+    /// Consecutive REMOVEs share one PUTFH. Only a proven untouched suffix resumes
+    /// after a status error; completed or ambiguous removals are never replayed.
+    pub fn remove_many(&mut self, dir: &NfsFh, names: &[Vec<u8>]) -> vfsi_core::VecResult<()> {
+        #[cfg(feature = "test-faults")]
+        let injector = self.fault_injector.clone();
+        self.path_mutation_results(
+            b"removev",
+            1,
+            names.len(),
+            |compound, _, index| {
+                let name = &names[index];
+                if name.is_empty() || name.contains(&0) || name.contains(&b'/') {
+                    return Err(vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_INVAL));
+                }
+                let first = compound.op_count() == 0;
+                if first {
+                    compound.putfh(&dir.as_nfs_fh());
+                }
+                compound.remove(name);
+                Ok(1 + usize::from(first))
+            },
+            |_, _, _| Ok(()),
+            |_, _| false,
+            |_index| {
+                #[cfg(feature = "test-faults")]
+                if let Some(injector) = &injector {
+                    injector.check(&OpenFaultPoint::BeforeRemoveChunk {
+                        first_name: names[_index].clone(),
+                    })?;
+                }
+                Ok(())
+            },
+        )
+        .map(|(results, _)| results)
     }
 
     /// OPEN a file below `dir`. `create` controls creation semantics. Returns
@@ -1997,7 +2149,7 @@ impl NfsClient {
             if post_create_mode.is_some() || attrs.mode || attrs.atime || attrs.mtime {
                 let timestamp = current_timestamp();
                 let update = verifier_cleanup_setattr(&fh, attrs, post_create_mode, timestamp);
-                if let Err(error) = self.setattr_many(&[update]) {
+                if let Err(error) = collect_rpc_results(self.setattr_many(&[update]), 1) {
                     let close = [CloseOp {
                         fh: fh.clone(),
                         stateid,
@@ -2186,55 +2338,29 @@ impl NfsClient {
     pub fn getattr_many_with_bitmap(
         &mut self,
         ops: &[GetattrOp],
-    ) -> RpcResult<Vec<(bitmap4, Vec<u8>)>> {
-        self.batch_ops(
+    ) -> vfsi_core::VecResult<(bitmap4, Vec<u8>)> {
+        self.fixed_results::<2, _, _>(
             b"vstatfs_impl",
-            2,
             ops,
-            |c, op, _| {
-                c.putfh(&op.fh.as_nfs_fh());
-                c.getattr(&op.attrs);
+            usize::MAX,
+            |_| 0,
+            |compound, op, _| {
+                compound.putfh(&op.fh.as_nfs_fh());
+                compound.getattr(&op.attrs);
             },
-            |res, i| res.getattr_with_bitmap(2 + 2 * i),
+            |reply, local, _| Ok(reply.getattr_with_bitmap(2 + 2 * local)),
         )
     }
-    fn cleanup_exclusive_path_opens(
-        &mut self,
-        opened: &[Option<(NfsFh, stateid4)>],
-        verifier_attrs: &[Option<VerifierStorageAttrs>],
-        ops: &[PathOpenOp],
-        indices: &[usize],
-    ) -> RpcResult<()> {
-        let timestamp = current_timestamp();
-        let mut cleanup_indices = Vec::new();
-        let mut cleanup = Vec::new();
-        for &index in indices {
-            if ops[index].create != OpenCreate::Exclusive {
-                continue;
-            }
-            let Some((fh, _)) = opened[index].as_ref() else {
-                continue;
-            };
-            let attrs = verifier_attrs[index].unwrap_or_default();
-            let mode = ops[index].mode.map(|mode| mode & 0o7777);
-            if mode.is_some() || attrs.mode || attrs.atime || attrs.mtime {
-                cleanup_indices.push(index);
-                cleanup.push(verifier_cleanup_setattr(fh, attrs, mode, timestamp));
-            }
-        }
-        self.setattr_many(&cleanup)
-            .map_err(|error| remap_cleanup_error(error, &cleanup_indices))
-    }
-
     /// SETATTR mode and/or size on several files in one compound.
-    pub fn setattr_many(&mut self, ops: &[SetattrOp]) -> RpcResult<()> {
-        let _ = self.batch_ops::<SetattrOp, ()>(
+    pub fn setattr_many(&mut self, ops: &[SetattrOp]) -> vfsi_core::VecResult<()> {
+        self.fixed_results::<2, _, _>(
             b"setattrv",
-            2,
             ops,
-            |c, op, _| {
-                c.putfh(&op.fh.as_nfs_fh());
-                c.setattr_ownership(
+            usize::MAX,
+            |_| 0,
+            |compound, op, _| {
+                compound.putfh(&op.fh.as_nfs_fh());
+                compound.setattr_ownership(
                     op.mode,
                     op.size,
                     (op.uid, op.gid),
@@ -2246,76 +2372,78 @@ impl NfsClient {
                     },
                 );
             },
-            |_, _| (),
-        )?;
-        Ok(())
+            |_, _, _| Ok(()),
+        )
     }
 
     /// READLINK several files in as few compounds as possible.
-    pub fn readlink_many(&mut self, ops: &[ReadlinkOp]) -> RpcResult<Vec<Vec<u8>>> {
-        self.batch_ops(
+    pub fn readlink_many(&mut self, ops: &[ReadlinkOp]) -> vfsi_core::VecResult<Vec<u8>> {
+        self.fixed_results::<2, _, _>(
             b"readlinkv",
-            2,
             ops,
-            |c, op, _| {
-                c.putfh(&op.fh.as_nfs_fh());
-                c.readlink();
+            usize::MAX,
+            |_| 0,
+            |compound, op, _| {
+                compound.putfh(&op.fh.as_nfs_fh());
+                compound.readlink();
             },
-            |res, i| res.readlink(2 + 2 * i).to_vec(),
+            |reply, local, _| Ok(reply.readlink(2 + 2 * local).to_vec()),
         )
     }
 
     /// RENAME several pairs in as few compounds as possible. Each pair is
     /// `[PUTFH src, SAVEFH, PUTFH dst, RENAME]`.
-    pub fn rename_many(&mut self, ops: &[RenameOp]) -> RpcResult<()> {
-        let _ = self.batch_ops::<RenameOp, ()>(
+    pub fn rename_many(&mut self, ops: &[RenameOp]) -> vfsi_core::VecResult<()> {
+        self.fixed_results::<4, _, _>(
             b"renamev",
-            4,
             ops,
-            |c, op, _| {
-                c.putfh(&op.srcdir.as_nfs_fh());
-                c.savefh();
-                c.putfh(&op.dstdir.as_nfs_fh());
-                c.rename(&op.oldname, &op.newname);
+            usize::MAX,
+            |_| 0,
+            |compound, op, _| {
+                compound.putfh(&op.srcdir.as_nfs_fh());
+                compound.savefh();
+                compound.putfh(&op.dstdir.as_nfs_fh());
+                compound.rename(&op.oldname, &op.newname);
             },
-            |_, _| (),
-        )?;
-        Ok(())
+            |_, _, _| Ok(()),
+        )
     }
 
     /// CREATE several objects (mkdir / symlink) in as few compounds as
     /// possible. CREATE changes the current filehandle, so each gets its own
     /// `[PUTFH dir, CREATE]`.
-    pub fn create_many(&mut self, ops: &[CreateOp]) -> RpcResult<()> {
-        let _ = self.batch_ops::<CreateOp, ()>(
+    pub fn create_many(&mut self, ops: &[CreateOp]) -> vfsi_core::VecResult<()> {
+        self.fixed_results::<2, _, _>(
             b"createv",
-            2,
             ops,
-            |c, op, _| {
-                c.putfh(&op.dir.as_nfs_fh());
-                c.create(&op.name, op.ftype, op.linkdata.as_deref());
+            usize::MAX,
+            |_| 0,
+            |compound, op, _| {
+                compound.putfh(&op.dir.as_nfs_fh());
+                compound.create(&op.name, op.ftype, op.linkdata.as_deref(), op.mode);
             },
-            |_, _| (),
-        )?;
-        Ok(())
+            |reply, local, input| {
+                validate_create_mode(ops[input].mode, reply.create_attrs(2 + 2 * local))
+            },
+        )
     }
 
-    /// LINK several sources into their destinations in as few compounds as
-    /// possible. Each is `[PUTFH src, SAVEFH, PUTFH dst, LINK]`.
-    pub fn link_many(&mut self, ops: &[LinkOp]) -> RpcResult<()> {
-        let _ = self.batch_ops::<LinkOp, ()>(
+    /// LINK independent sources without replaying completed mutations.
+    /// Each input is PUTFH, SAVEFH, PUTFH, LINK.
+    pub fn link_many(&mut self, ops: &[LinkOp]) -> vfsi_core::VecResult<()> {
+        self.fixed_results::<4, _, _>(
             b"linkv",
-            4,
             ops,
-            |c, op, _| {
-                c.putfh(&op.src.as_nfs_fh());
-                c.savefh();
-                c.putfh(&op.dstdir.as_nfs_fh());
-                c.link(&op.newname);
+            usize::MAX,
+            |_| 0,
+            |compound, op, _| {
+                compound.putfh(&op.src.as_nfs_fh());
+                compound.savefh();
+                compound.putfh(&op.dstdir.as_nfs_fh());
+                compound.link(&op.newname);
             },
-            |_, _| (),
-        )?;
-        Ok(())
+            |_, _, _| Ok(()),
+        )
     }
 
     /// OPEN several files in as few compounds as possible; each is
@@ -2441,7 +2569,7 @@ impl NfsClient {
                     verifier_cleanup_setattr(&out[index].0, out[index].2, None, timestamp)
                 })
                 .collect();
-            if let Err(error) = self.setattr_many(&cleanup) {
+            if let Err(error) = collect_rpc_results(self.setattr_many(&cleanup), cleanup.len()) {
                 let error = remap_cleanup_error(error, &cleanup_indices);
                 let closes: Vec<CloseOp> = out
                     .iter()
@@ -2463,6 +2591,22 @@ impl NfsClient {
             .collect())
     }
 
+    /// Independent descriptor CLOSE outcomes. Resume only the proven
+    /// unexecuted suffix after a protocol failure; never replay a closed input.
+    pub(crate) fn close_descriptors(&mut self, ops: &[CloseOp]) -> vfsi_core::VecResult<()> {
+        self.fixed_results::<2, _, _>(
+            b"closev",
+            ops,
+            usize::MAX,
+            |_| 0,
+            |compound, op, _| {
+                compound.putfh(&op.fh.as_nfs_fh());
+                compound.close(1, &op.stateid);
+            },
+            |_, _, _| Ok(()),
+        )
+    }
+
     /// CLOSE public descriptors in as few compounds as possible. Each has an
     /// independent OPEN owner, so each CLOSE uses seqid 1.
     pub fn close_many(&mut self, ops: &[CloseOp]) -> RpcResult<()> {
@@ -2472,12 +2616,6 @@ impl NfsClient {
     /// Like [`close_many`](Self::close_many) but using the path-op open owner.
     pub fn close_many_path(&mut self, ops: &[CloseOp]) -> RpcResult<()> {
         self.close_many_cleanup_slot(ops, OwnerSlot::Path)
-    }
-
-    /// Cleanup confirmed public OPENs that were not transferred to descriptors.
-    /// Preserve cleanup fault hooks independently of the chosen OPEN owner.
-    pub(crate) fn close_unregistered_many(&mut self, ops: &[CloseOp]) -> RpcResult<()> {
-        self.close_many_cleanup_slot(ops, OwnerSlot::User)
     }
 
     fn close_many_cleanup_slot(&mut self, ops: &[CloseOp], slot: OwnerSlot) -> RpcResult<()> {
@@ -2498,25 +2636,26 @@ impl NfsClient {
     // Repairs use an independent temporary owner. The original compound may
     // already have closed its special stateid; separate-close callers may
     // still own their path OPENs. Neither ownership may be borrowed here.
-    fn with_path_io_repair_target<T>(
+    fn with_path_io_repair_target<T, E>(
         &mut self,
         file: &FileRef,
         stateid: Option<&stateid4>,
         access: u32,
         caller: usize,
-        repair: impl FnOnce(&mut Self, &NfsFh, &stateid4) -> RpcResult<T>,
-    ) -> RpcResult<T> {
+        mut map_error: impl FnMut(RpcError) -> E,
+        repair: impl FnOnce(&mut Self, &NfsFh, &stateid4) -> Result<T, E>,
+    ) -> Result<T, E> {
         match file {
             FileRef::Handle(fh) => repair(self, fh, stateid.unwrap_or(&SPECIAL_STATEID)),
             FileRef::Path(path) => {
                 let (parent, name) = split_path_bytes(path)
-                    .map_err(|_| RpcError::op(caller, nfsstat4_NFS4ERR_INVAL))?;
+                    .map_err(|_| map_error(RpcError::op(caller, nfsstat4_NFS4ERR_INVAL)))?;
                 let parent = self
                     .resolve(parent)
-                    .map_err(|error| error.with_op_index(caller))?;
+                    .map_err(|error| map_error(error.with_op_index(caller)))?;
                 let (fh, stateid) = self
                     .open(&parent, name, access, OpenCreate::NoCreate)
-                    .map_err(|error| error.with_op_index(caller))?;
+                    .map_err(|error| map_error(error.with_op_index(caller)))?;
                 let result = repair(self, &fh, &stateid);
                 self.close_path_or_defer(vec![CloseOp { fh, stateid }]);
                 result
@@ -2537,6 +2676,7 @@ impl NfsClient {
             op.stateid.as_ref(),
             OPEN4_SHARE_ACCESS_READ,
             caller,
+            std::convert::identity,
             |client, fh, stateid| {
                 complete_read_suffix(
                     client,
@@ -2557,19 +2697,22 @@ impl NfsClient {
         caller: usize,
         part: usize,
         data: &[u8],
-    ) -> RpcResult<u32> {
+    ) -> vfsi_core::OpResult<u32> {
         let op = &ops[caller];
-        let offset = checked_offset(op.offset, part, caller)?;
+        let offset =
+            checked_offset(op.offset, part, caller).map_err(io_progress::write_rpc_error)?;
         self.with_path_io_repair_target(
             &op.file,
             op.stateid.as_ref(),
             OPEN4_SHARE_ACCESS_WRITE,
             caller,
+            io_progress::write_rpc_error,
             |client, fh, stateid| {
                 // Known same-file conflicts are split by WriteWaveAccess.
                 // A hard-link alias can only be discovered on this slow path.
                 // Never repair an earlier gap through a later accepted write.
-                let end = checked_offset(offset, data.len(), caller)?;
+                let end = checked_offset(offset, data.len(), caller)
+                    .map_err(io_progress::write_rpc_error)?;
                 for &(index, _, _) in later {
                     if index <= caller {
                         continue;
@@ -2577,25 +2720,32 @@ impl NfsClient {
                     let next = &ops[index];
                     let overlaps = next.truncate
                         || (next.offset < end
-                            && offset < checked_offset(next.offset, next.data.len(), index)?);
+                            && offset
+                                < checked_offset(next.offset, next.data.len(), index)
+                                    .map_err(io_progress::write_rpc_error)?);
                     if !overlaps {
                         continue;
                     }
                     let alias = match &next.file {
                         FileRef::Handle(handle) => handle == fh,
                         FileRef::Path(path) => {
-                            client
-                                .resolve(path)
-                                .map_err(|error| error.with_op_index(caller))?
-                                == *fh
+                            client.resolve(path).map_err(io_progress::write_rpc_error)? == *fh
                         }
                     };
                     if alias {
-                        return Err(RpcError::op(caller, nfsstat4_NFS4ERR_IO));
+                        return Err(io_progress::write_rpc_error(RpcError::op(
+                            caller,
+                            nfsstat4_NFS4ERR_IO,
+                        )));
                     }
                 }
-                complete_write_suffix(client, caller, offset, data, |client, offset, data| {
-                    client.write(fh, stateid, offset, data)
+                complete_write_suffix(client, offset, data, |client, offset, data| {
+                    client.ensure_usable().map_err(|error| {
+                        vfsi_core::OpError::not_attempted(vfsi_core::error_from_rpc(error, None))
+                    })?;
+                    client
+                        .write(fh, stateid, offset, data)
+                        .map_err(io_progress::write_rpc_error)
                 })
             },
         )
@@ -2610,279 +2760,414 @@ impl NfsClient {
     /// OPENed (UNCHECKED create, so no existence probe), WRITten with the
     /// special stateid, and the compound climbs back with RESTOREFH. When
     /// `close_in_compound` is set the final CLOSE uses the special stateid
-    /// (Ganesha resolves it to the current open); otherwise the open
-    /// stateids/filehandles are returned so the caller can CLOSE in a
+    /// (Ganesha resolves it to the current open). A final GETFH retains the
+    /// pinned owner for close-only recovery if that CLOSE fails. Otherwise the
+    /// separate-close form returns stateids/filehandles for a
     /// follow-up compound (the portable fallback).
     ///
-    /// On a mid-compound failure, ops before the failing op are reported in
-    /// `counts`/`committed` and `failed` carries the caller-relative index
-    /// and NFS status. Path references may be resolved again across compound
+    /// Each input keeps its own result and confirmed WRITE prefix. A known
+    /// unexecuted suffix resumes without replaying completed inputs. Path references may be resolved again across compound
     /// boundaries or short-I/O repair; use Handle references when object identity
     /// must remain pinned across concurrent namespace changes.
     pub fn writev_path_compound(
         &mut self,
         ops: &[PathWriteOp<'_>],
         close_in_compound: bool,
-    ) -> RpcResult<PathWriteOutcome> {
+    ) -> vfsi_core::VfResult<PathWriteOutcome> {
+        self.writev_path_run(ops, close_in_compound, false)
+            .map(|(outcome, _)| outcome)
+    }
+
+    // Native namespace/special-stateid recovery must finish before any later
+    // WRITE can overwrite an alias. Yield only protocol-proven rejections;
+    // the public raw engine still completes every independent input.
+    pub(crate) fn writev_path_run(
+        &mut self,
+        ops: &[PathWriteOp<'_>],
+        mut close_in_compound: bool,
+        recover_path_errors: bool,
+    ) -> vfsi_core::VfResult<(PathWriteOutcome, Option<PathWriteRepair>)> {
+        use vfsi_core::{FailureState, IoProgress, OpError, error_from_rpc};
         let n = ops.len();
-        let mut counts: Vec<Option<u32>> = vec![None; n];
+        let reject = |op: &PathWriteOp<'_>| {
+            if op.offset.checked_add(op.data.len() as u64).is_none() {
+                Some(vfsi_core::VfError::errno(None, libc::EOVERFLOW as u32))
+            } else if matches!(&op.file, FileRef::Path(path) if split_path_bytes(path).is_err()) {
+                Some(vfsi_core::VfError::errno(None, libc::EISDIR as u32))
+            } else {
+                None
+            }
+        };
+        if ops.iter().any(|op| reject(op).is_some()) {
+            let mut slots = vec![None; n];
+            let mut valid = Vec::new();
+            let mut indices = Vec::new();
+            for (index, op) in ops.iter().enumerate() {
+                if let Some(cause) = reject(op) {
+                    slots[index] = Some(Err(OpError::not_attempted(cause)));
+                } else {
+                    indices.push(index);
+                    valid.push(PathWriteOp {
+                        file: match &op.file {
+                            FileRef::Path(path) => FileRef::Path(path.clone()),
+                            FileRef::Handle(fh) => FileRef::Handle(fh.clone()),
+                        },
+                        offset: op.offset,
+                        data: op.data,
+                        create: op.create,
+                        truncate: op.truncate,
+                        stateid: op.stateid,
+                    });
+                }
+            }
+            let mut opened = Vec::new();
+            let mut close_failed = None;
+            let mut repair = None;
+            if !valid.is_empty() {
+                let results =
+                    match self.writev_path_run(&valid, close_in_compound, recover_path_errors) {
+                        Ok((outcome, pending)) => {
+                            repair = pending.map(|mut repair| {
+                                repair.index = indices[repair.index];
+                                repair
+                            });
+                            opened = outcome.opened;
+                            close_failed = outcome.close_failed;
+                            outcome.results
+                        }
+                        Err(cause) => (0..valid.len())
+                            .map(|_| Err(OpError::not_attempted(cause.clone())))
+                            .collect(),
+                    };
+                for (index, result) in indices.into_iter().zip(results) {
+                    slots[index] = Some(result);
+                }
+            }
+            return Ok((
+                PathWriteOutcome {
+                    results: slots
+                        .into_iter()
+                        .map(|slot| slot.expect("every merged WRITE assigned"))
+                        .collect(),
+                    opened,
+                    close_failed,
+                },
+                repair,
+            ));
+        }
+        let mut counts: Vec<Option<usize>> = vec![None; n];
         let mut committed: Vec<Option<u32>> = vec![None; n];
         let mut opened: Vec<(NfsFh, stateid4)> = Vec::new();
-        let mut failed: Option<(usize, u32)> = None;
+        let mut errors: Vec<Option<OpError>> = vec![None; n];
+        let mut submitted = Vec::new();
+        let mut dispatched = false;
+        let mut repair = None;
         let mut close_failed: Option<u32> = None;
-        // Worst case per file: RESTOREFH + CLOSE + OPEN (+GETFH) + WRITE.
-        let per_file = 4;
+        // GETFH follows OPEN even in full compounds, retaining cleanup identity.
         // Headroom for a new directory's path resolution inside a compound.
         let reserve = 8;
         let per_op = self.per_op_bytes();
 
-        let mut global = 0usize;
-        // Bytes of ops[global] already emitted across earlier compounds
-        // (>0 means ops[global] is being continued mid-file).
-        let mut part_off = 0usize;
-        let mut max_items = usize::MAX;
-        while global < n {
-            let tag = if close_in_compound {
-                b"writev1".as_slice()
-            } else {
-                b"writev2".as_slice()
-            };
-            let budget = self
-                .op_budget_for(tag, 1 + per_file)
-                .merged_limit(reserve, per_file);
-            let chunk_start = global;
-            let chunk_part_off = part_off;
-            let mut cursor = CfhCursor::default();
-            let mut map = ExecutionMap::new();
-            let mut c = Compound::new();
-            c.tag(tag);
-            let mut opened_path: Option<Box<[u8]>> = None;
-            let mut fh_at_opened = false;
-            let mut opens_in_chunk = 0usize;
-            let base_seq = self.session.path_owner.seqid;
-            let mut payload = 0usize;
-            let mut expected_writes = [(0usize, 0usize); MAX_COMPOUND_OPS];
-            let mut expected_write_count = 0;
-            #[cfg(feature = "test-faults")]
-            let mut injected_short_write = false;
-            let mut active_files = std::collections::HashMap::new();
+        let operation = (|| -> RpcResult<()> {
+            let mut global = 0usize;
+            // Bytes of ops[global] already emitted across earlier compounds
+            // (>0 means ops[global] is being continued mid-file).
+            let mut part_off = 0usize;
+            let mut max_items = usize::MAX;
+            while global < n {
+                submitted.clear();
+                let mut failed: Option<(usize, u32)> = None;
+                let per_file = if close_in_compound { 5 } else { 4 };
+                let tag = if close_in_compound {
+                    b"writev1".as_slice()
+                } else {
+                    b"writev2".as_slice()
+                };
+                let budget = self
+                    .op_budget_for(tag, 1 + per_file)
+                    .merged_limit(reserve, per_file);
+                let chunk_start = global;
+                let chunk_part_off = part_off;
+                let mut cursor = CfhCursor::default();
+                let mut map = ExecutionMap::new();
+                let mut c = Compound::new();
+                c.tag(tag);
+                let mut opened_path: Option<Box<[u8]>> = None;
+                let mut fh_at_opened = false;
+                let mut opens_in_chunk = 0usize;
+                let base_seq = self.session.path_owner.seqid;
+                let mut payload = 0usize;
+                let mut expected_writes = [(0usize, 0usize); MAX_COMPOUND_OPS];
+                let mut expected_write_count = 0;
+                #[cfg(feature = "test-faults")]
+                let mut injected_short_write = false;
+                let mut active_files = std::collections::HashMap::new();
 
-            while global < n && map.ranges.len() < max_items && map.next + per_file <= budget {
-                let op = &ops[global];
-                let start = part_off;
-                let range = op.offset..checked_offset(op.offset, op.data.len(), global)?;
-                match active_files.entry(&op.file) {
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        entry.insert(WriteWaveAccess::new(range, !op.truncate));
+                while global < n && map.ranges.len() < max_items && map.next + per_file <= budget {
+                    if errors[global].is_some() {
+                        global += 1;
+                        part_off = 0;
+                        continue;
                     }
-                    std::collections::hash_map::Entry::Occupied(mut entry) => {
-                        if !entry.get_mut().admit(range, !op.truncate) {
-                            break;
+                    let op = &ops[global];
+                    let start = part_off;
+                    let range = op.offset..checked_offset(op.offset, op.data.len(), global)?;
+                    match active_files.entry(&op.file) {
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(WriteWaveAccess::new(range, !op.truncate));
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            if !entry.get_mut().admit(range, !op.truncate) {
+                                break;
+                            }
                         }
                     }
-                }
-                // Bound the next write window by both wire-op and request
-                // payload budgets. A first operation may still make progress
-                // when its byte estimate reaches the soft boundary.
-                let room = if self.max_request_arg_bytes() > 0 {
-                    if payload > 0 {
-                        self.max_request_arg_bytes().saturating_sub(payload + 128)
-                    } else {
-                        self.max_request_arg_bytes()
-                    }
-                } else {
-                    usize::MAX
-                };
-                let end = match path_io_chunk_end(
-                    start,
-                    op.data.len(),
-                    per_op,
-                    room,
-                    budget.saturating_sub(map.next + 3),
-                    map.next == 0 && payload == 0,
-                ) {
-                    Some(end) => end,
-                    None => break,
-                };
-                map.begin(global);
-                let newly_opened = match self.prepare_path_io_target(
-                    &mut PathIoTarget {
-                        compound: &mut c,
-                        cursor: &mut cursor,
-                        map: &mut map,
-                        close_in_compound,
-                        opened_path: &mut opened_path,
-                        fh_at_opened: &mut fh_at_opened,
-                        base_seq,
-                        opens_in_chunk: &mut opens_in_chunk,
-                    },
-                    &op.file,
-                    PathIoOpen {
-                        access: OPEN4_SHARE_ACCESS_BOTH,
-                        create: if op.create {
-                            OpenCreate::Unchecked
+                    // Bound the next write window by both wire-op and request
+                    // payload budgets. A first operation may still make progress
+                    // when its byte estimate reaches the soft boundary.
+                    let room = if self.max_request_arg_bytes() > 0 {
+                        if payload > 0 {
+                            self.max_request_arg_bytes().saturating_sub(payload + 128)
                         } else {
-                            OpenCreate::NoCreate
+                            self.max_request_arg_bytes()
+                        }
+                    } else {
+                        usize::MAX
+                    };
+                    let end = match path_io_chunk_end(
+                        start,
+                        op.data.len(),
+                        per_op,
+                        room,
+                        budget.saturating_sub(map.next + 3),
+                        map.next == 0 && payload == 0,
+                    ) {
+                        Some(end) => end,
+                        None => break,
+                    };
+                    map.begin(global);
+                    let newly_opened = match self.prepare_path_io_target(
+                        &mut PathIoTarget {
+                            compound: &mut c,
+                            cursor: &mut cursor,
+                            map: &mut map,
+                            close_in_compound,
+                            opened_path: &mut opened_path,
+                            fh_at_opened: &mut fh_at_opened,
+                            base_seq,
+                            opens_in_chunk: &mut opens_in_chunk,
                         },
-                        truncate_create: op.create && op.truncate && start == 0,
-                        truncate_existing: op.truncate && !op.create && start == 0,
-                    },
-                ) {
-                    Some(opened) => opened,
-                    None => {
-                        failed = Some((global, nfsstat4_NFS4ERR_INVAL));
-                        global = n;
-                        break;
-                    }
-                };
-                let stateid = match &op.file {
-                    FileRef::Path(_) => &SPECIAL_STATEID,
-                    FileRef::Handle(_) => op.stateid.as_ref().unwrap_or(&SPECIAL_STATEID),
-                };
-                if end > start {
-                    let mut off = 0usize;
-                    for chunk in op.data[start..end].chunks(per_op) {
-                        let requested = chunk.len();
+                        &op.file,
+                        PathIoOpen {
+                            access: OPEN4_SHARE_ACCESS_BOTH,
+                            create: if op.create && start == 0 {
+                                OpenCreate::Unchecked
+                            } else {
+                                OpenCreate::NoCreate
+                            },
+                            truncate_create: op.create && op.truncate && start == 0,
+                            truncate_existing: op.truncate && !op.create && start == 0,
+                        },
+                    ) {
+                        Some(opened) => opened,
+                        None => {
+                            failed = Some((global, nfsstat4_NFS4ERR_INVAL));
+                            global = n;
+                            break;
+                        }
+                    };
+                    let stateid = match &op.file {
+                        FileRef::Path(_) => &SPECIAL_STATEID,
+                        FileRef::Handle(_) => op.stateid.as_ref().unwrap_or(&SPECIAL_STATEID),
+                    };
+                    if end > start {
+                        let mut off = 0usize;
+                        for chunk in op.data[start..end].chunks(per_op) {
+                            let requested = chunk.len();
+                            let slot = expected_writes
+                                .get_mut(expected_write_count)
+                                .ok_or_else(|| RpcError::transport("too many merged WRITEs"))?;
+                            *slot = (start + off, requested);
+                            expected_write_count += 1;
+                            #[cfg(feature = "test-faults")]
+                            let chunk = if !injected_short_write {
+                                if let Some(count) = self.short_merged_write_once {
+                                    injected_short_write = true;
+                                    &chunk[..count.min(chunk.len())]
+                                } else {
+                                    chunk
+                                }
+                            } else {
+                                chunk
+                            };
+                            #[cfg(feature = "test-faults")]
+                            let invalid_stateid = stateid4 {
+                                seqid: 0,
+                                other: [!0; 12],
+                            };
+                            #[cfg(feature = "test-faults")]
+                            let stateid = if self.fail_merged_write_once
+                                == Some((global, (start + off) / per_op))
+                            {
+                                self.fail_merged_write_once = None;
+                                &invalid_stateid
+                            } else {
+                                stateid
+                            };
+                            c.write(
+                                stateid,
+                                checked_offset(op.offset, start + off, global)?,
+                                stable_how4_FILE_SYNC4,
+                                chunk,
+                            );
+                            map.note_ops(1);
+                            off += requested;
+                        }
+                    } else {
+                        // A zero-length write still emits a WRITE for this item.
                         let slot = expected_writes
                             .get_mut(expected_write_count)
                             .ok_or_else(|| RpcError::transport("too many merged WRITEs"))?;
-                        *slot = (start + off, requested);
+                        *slot = (start, 0);
                         expected_write_count += 1;
-                        #[cfg(feature = "test-faults")]
-                        let chunk = if !injected_short_write {
-                            if let Some(count) = self.short_merged_write_once {
-                                injected_short_write = true;
-                                &chunk[..count.min(chunk.len())]
-                            } else {
-                                chunk
-                            }
-                        } else {
-                            chunk
-                        };
+                        c.write(
+                            stateid,
+                            checked_offset(op.offset, start, global)?,
+                            stable_how4_FILE_SYNC4,
+                            &[],
+                        );
+                        map.note_ops(1);
+                    }
+                    if newly_opened {
+                        cursor.descend();
+                    }
+                    map.end();
+                    payload += 128 + (end - start);
+                    if end == op.data.len() {
+                        global += 1;
+                        part_off = 0;
+                    } else {
+                        // The compound is full; resume this file next time.
+                        part_off = end;
+                        break;
+                    }
+                    // A new directory's resolution could exceed the reserve.
+                    if map.next + per_file > budget && global < n {
+                        break;
+                    }
+                }
+
+                if map.ranges.is_empty() {
+                    if global == n {
+                        break;
+                    }
+                    errors[chunk_start] = Some(OpError::not_attempted(vfsi_core::VfError::nfs(
+                        None,
+                        nfsstat4_NFS4ERR_TOO_MANY_OPS,
+                    )));
+                    global = chunk_start + 1;
+                    part_off = 0;
+                    continue;
+                }
+                // The OPEN-adjacent GETFH already pinned this owner.
+                let needs_trailing_close = close_in_compound && opened_path.is_some();
+                let trailing_close = if needs_trailing_close {
+                    let index = map.next;
+                    if map.next < self.max_ops {
                         #[cfg(feature = "test-faults")]
                         let invalid_stateid = stateid4 {
                             seqid: 0,
                             other: [!0; 12],
                         };
                         #[cfg(feature = "test-faults")]
-                        let stateid = if self.fail_merged_write_once
-                            == Some((global, (start + off) / per_op))
-                        {
-                            self.fail_merged_write_once = None;
-                            &invalid_stateid
-                        } else {
-                            stateid
-                        };
-                        c.write(
-                            stateid,
-                            checked_offset(op.offset, start + off, global)?,
-                            stable_how4_FILE_SYNC4,
-                            chunk,
-                        );
+                        let close_stateid =
+                            if std::mem::take(&mut self.fail_trailing_write_close_once) {
+                                &invalid_stateid
+                            } else {
+                                &SPECIAL_STATEID
+                            };
+                        #[cfg(not(feature = "test-faults"))]
+                        let close_stateid = &SPECIAL_STATEID;
+                        c.close(close_stateid.seqid, close_stateid);
                         map.note_ops(1);
-                        off += requested;
+                        Some(index)
+                    } else {
+                        None
                     }
                 } else {
-                    // A zero-length write still emits a WRITE for this item.
-                    let slot = expected_writes
-                        .get_mut(expected_write_count)
-                        .ok_or_else(|| RpcError::transport("too many merged WRITEs"))?;
-                    *slot = (start, 0);
-                    expected_write_count += 1;
-                    c.write(
-                        stateid,
-                        checked_offset(op.offset, start, global)?,
-                        stable_how4_FILE_SYNC4,
-                        &[],
-                    );
-                    map.note_ops(1);
-                }
-                if newly_opened {
-                    cursor.descend();
-                }
-                map.end();
-                payload += 128 + (end - start);
-                if end == op.data.len() {
-                    global += 1;
+                    None
+                };
+                let res = match self.send_path_io_chunk(PathIoChunk {
+                    tag,
+                    one_item_ops: 1 + per_file,
+                    reserve,
+                    per_file,
+                    old_budget: budget,
+                    allow_repack: failed.is_none(),
+                    compound: &mut c,
+                    map: &map,
+                    base_seq,
+                    opens_in_chunk,
+                    safety: RequestSafety::NonIdempotentMutation,
+                    dispatched: &mut dispatched,
+                    submitted: &mut submitted,
+                })? {
+                    PathIoChunkResult::Repack { max_items: cap } => {
+                        max_items = cap;
+                        global = chunk_start;
+                        part_off = chunk_part_off;
+                        continue;
+                    }
+                    PathIoChunkResult::Retry => {
+                        max_items = usize::MAX;
+                        global = chunk_start;
+                        part_off = chunk_part_off;
+                        continue;
+                    }
+                    PathIoChunkResult::Response(response) => {
+                        max_items = usize::MAX;
+                        response
+                    }
+                };
+                record_path_open_owners(&res, &mut opened);
+                let report = map.analyze(&res).map_err(|error| {
+                    submitted.clone_from(&map.ranges);
+                    RpcError::transport_with_kind(
+                        vfsi_core::TransportKind::InvalidReply,
+                        format!("malformed writev COMPOUND reply: {error}"),
+                    )
+                })?;
+                // Cleanup of the preceding owner runs before this input.
+                let inline_close_failure = report
+                    .failure
+                    .filter(|failure| res.op(failure.op_index).resop == nfs_opnum4_NFS4_OP_CLOSE);
+                let range_failed = report
+                    .failure
+                    .filter(|_| inline_close_failure.is_none())
+                    .map(|failure| (failure.caller, failure.status));
+                if let Some((caller, _status)) = range_failed {
+                    global = caller + 1;
                     part_off = 0;
-                } else {
-                    // The compound is full; resume this file next time.
-                    part_off = end;
-                    break;
+                    for i in caller + 1..n {
+                        counts[i] = None;
+                        committed[i] = None;
+                    }
                 }
-                // A new directory's resolution could exceed the reserve.
-                if map.next + per_file > budget && global < n {
-                    break;
-                }
-            }
-
-            if map.ranges.is_empty() {
-                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
-                break;
-            }
-            if close_in_compound && opened_path.is_some() {
-                c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
-                map.note_ops(1);
-            }
-            let res = match self.send_path_io_chunk(PathIoChunk {
-                tag,
-                one_item_ops: 1 + per_file,
-                reserve,
-                per_file,
-                old_budget: budget,
-                allow_repack: failed.is_none(),
-                compound: &mut c,
-                map: &map,
-                base_seq,
-                opens_in_chunk,
-                safety: RequestSafety::NonIdempotentMutation,
-            })? {
-                PathIoChunkResult::Repack { max_items: cap } => {
-                    max_items = cap;
-                    global = chunk_start;
-                    part_off = chunk_part_off;
-                    continue;
-                }
-                PathIoChunkResult::Retry => {
-                    max_items = usize::MAX;
-                    global = chunk_start;
-                    part_off = chunk_part_off;
-                    continue;
-                }
-                PathIoChunkResult::Response(response) => {
-                    max_items = usize::MAX;
-                    response
-                }
-            };
-            let report = map.analyze(&res).map_err(|error| {
-                RpcError::transport_with_kind(
-                    vfsi_core::TransportKind::InvalidReply,
-                    format!("malformed writev COMPOUND reply: {error}"),
-                )
-            })?;
-            let range_failed = report
-                .failure
-                .map(|failure| (failure.caller, failure.status));
-            if let Some((caller, st)) = range_failed {
-                failed = Some((caller, st));
-                for i in caller + 1..n {
-                    counts[i] = None;
-                    committed[i] = None;
-                }
-            }
-            if !close_in_compound {
-                res.for_each_open_result(map.executed_ranges(&report), |fh, stateid| {
-                    opened.push((NfsFh::from_nfs_fh(fh), stateid));
-                });
-            }
-            // Complete only missing wire suffixes before later compounds.
-            // A complete reply retains the original batching and adds no RPC.
-            let mut write_index = 0;
-            for (caller, s, e) in map.completed_ranges(&report) {
-                for j in *s..(*e).min(res.nops()) {
-                    let ro = res.op(j);
-                    if ro.resop == nfs_opnum4_NFS4_OP_WRITE {
-                        let ok = res.write(j);
+                // Decode every successful WRITE, including the prefix of the
+                // logical input whose later wire operation failed.
+                let mut write_index = 0;
+                for (caller, start, end) in map
+                    .ranges
+                    .iter()
+                    .filter(|(_, start, _)| *start < res.nops())
+                {
+                    for index in *start..(*end).min(res.nops()) {
+                        if res.op(index).resop != nfs_opnum4_NFS4_OP_WRITE
+                            || res.op_status(index) != 0
+                        {
+                            continue;
+                        }
+                        let ok = res.write(index);
                         #[cfg(feature = "test-faults")]
                         if injected_short_write {
                             self.short_merged_write_once = None;
@@ -2891,448 +3176,682 @@ impl NfsClient {
                             .get(write_index)
                             .ok_or_else(|| RpcError::transport("extra merged WRITE reply"))?;
                         write_index += 1;
+                        if errors[*caller].is_some() {
+                            continue;
+                        }
                         let received = ok.count as usize;
-                        let result = (|| {
-                            if received > requested || (received == 0 && requested != 0) {
-                                return Err(RpcError::op(*caller, nfsstat4_NFS4ERR_IO));
+                        if received > requested || ok.committed > stable_how4_FILE_SYNC4 {
+                            errors[*caller] = Some(OpError::unknown(
+                                vfsi_core::VfError::invalid_reply(
+                                    None,
+                                    "invalid merged WRITE completion",
+                                ),
+                                None,
+                            ));
+                            continue;
+                        }
+                        if counts[*caller].unwrap_or(0) != part {
+                            errors[*caller] = Some(OpError::unknown(
+                                vfsi_core::VfError::invalid_reply(
+                                    None,
+                                    "noncontiguous merged WRITE completion",
+                                ),
+                                None,
+                            ));
+                            continue;
+                        }
+                        *counts[*caller].get_or_insert(0) += received;
+                        committed[*caller] = Some(
+                            committed[*caller]
+                                .unwrap_or(stable_how4_FILE_SYNC4)
+                                .min(ok.committed),
+                        );
+                        if received == 0 && requested != 0 {
+                            errors[*caller] = Some(OpError::failed(
+                                vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_IO),
+                                None,
+                            ));
+                            continue;
+                        }
+                        if received < requested {
+                            #[cfg(feature = "test-faults")]
+                            if let Some(injector) = &self.fault_injector
+                                && let Err(cause) = injector
+                                    .check(&OpenFaultPoint::BeforeWriteRepair { index: *caller })
+                            {
+                                errors[*caller] = Some(OpError::failed(cause, None));
+                                continue;
                             }
-                            let mut stable = ok.committed;
-                            if received < requested {
-                                stable = stable.min(self.repair_path_write(
-                                    ops,
-                                    &map.ranges[..report.completed.len()
-                                        + usize::from(report.failure.is_some())],
-                                    *caller,
-                                    part + received,
-                                    &ops[*caller].data[part + received..part + requested],
-                                )?);
+                            match self.repair_path_write(
+                                ops,
+                                &map.ranges[..report.completed.len()
+                                    + usize::from(report.failure.is_some())],
+                                *caller,
+                                part + received,
+                                &ops[*caller].data[part + received..part + requested],
+                            ) {
+                                Ok(stable) => {
+                                    *counts[*caller]
+                                        .as_mut()
+                                        .expect("acknowledged WRITE prefix") +=
+                                        requested - received;
+                                    committed[*caller] =
+                                        Some(committed[*caller].unwrap().min(stable));
+                                }
+                                Err(error) => {
+                                    let (cause, state, progress) = error.into_parts();
+                                    if let Some(IoProgress::Write { bytes_written }) = progress {
+                                        *counts[*caller].as_mut().unwrap() += bytes_written;
+                                    }
+                                    errors[*caller] = Some(if state == FailureState::Unknown {
+                                        OpError::unknown(cause, None)
+                                    } else {
+                                        OpError::failed(cause, None)
+                                    });
+                                }
                             }
-                            let count = counts[*caller].get_or_insert(0);
-                            *count = count.saturating_add(requested as u32);
-                            committed[*caller] = Some(
-                                committed[*caller]
-                                    .unwrap_or(stable_how4_FILE_SYNC4)
-                                    .min(stable),
-                            );
-                            Ok(())
-                        })();
-                        if let Err(error) = result {
-                            return read_error_with_cleanup(
-                                &opened,
-                                close_in_compound,
-                                self,
-                                error,
-                                |client, closes| {
-                                    client.close_path_or_defer(
-                                        closes
-                                            .iter()
-                                            .map(|op| CloseOp {
-                                                fh: op.fh.clone(),
-                                                stateid: op.stateid,
-                                            })
-                                            .collect(),
-                                    )
-                                },
-                            );
                         }
                     }
                 }
-            }
-            // The trailing CLOSE (close_in_compound form) sits outside any
-            // file range; report a failure there so the caller can fall back
-            // to the separate-close form.
-            if let Some(status) = report.compound_failure {
-                let close_op = map.ranges.last().map(|(_, _, end)| *end);
-                if close_in_compound
-                    && opened_path.is_some()
-                    && report.compound_failure_op == close_op
+                if let Some((caller, status)) = range_failed
+                    && errors[caller].is_none()
                 {
-                    close_failed = Some(status);
+                    errors[caller] =
+                        Some(OpError::failed(vfsi_core::VfError::nfs(None, status), None));
+                }
+                // The trailing CLOSE (close_in_compound form) sits outside any
+                // file range; report it without replaying acknowledged WRITEs.
+                // Subsequent calls may use the separate-close form.
+                let close_status = if let Some(failure) = inline_close_failure {
+                    // Only cleanup ran in this range. Resume this untouched
+                    // input after closing or retaining the prior owner.
+                    global = failure.caller;
+                    part_off = 0;
+                    Some(failure.status)
+                } else if let Some(status) = report.compound_failure {
+                    if trailing_close.is_some() && report.compound_failure_op == trailing_close {
+                        Some(status)
+                    } else {
+                        return Err(RpcError::op(0, status));
+                    }
+                } else if needs_trailing_close && trailing_close.is_none() {
+                    Some(nfsstat4_NFS4ERR_TOO_MANY_OPS)
                 } else {
-                    return Err(RpcError::op(0, status));
+                    None
+                };
+                if let Some(status) = close_status {
+                    close_failed = Some(status);
+                    self.close_path_or_defer(latest_path_open_closes(&opened));
+                    opened.clear();
+                    close_in_compound = false;
+                }
+                if recover_path_errors
+                    && let Some(failure) = report.failure
+                    && matches!(ops[failure.caller].file, FileRef::Path(_))
+                    && errors[failure.caller].as_ref().is_some_and(|error| {
+                        error.state() == FailureState::Failed
+                            && error.cause().status()
+                                == Some(vfsi_core::StatusCode::Nfs(failure.status))
+                    })
+                {
+                    let failed_op = res.op(failure.op_index).resop;
+                    let kind = if failure.status == nfsstat4_NFS4ERR_SYMLINK
+                        && matches!(
+                            failed_op,
+                            nfs_opnum4_NFS4_OP_OPEN
+                                | nfs_opnum4_NFS4_OP_LOOKUP
+                                | nfs_opnum4_NFS4_OP_LOOKUPP
+                        ) {
+                        Some(PathWriteRepairKind::Symlink)
+                    } else if is_stateid_error(failure.status) {
+                        match failed_op {
+                            nfs_opnum4_NFS4_OP_WRITE => Some(PathWriteRepairKind::WriteStateid),
+                            nfs_opnum4_NFS4_OP_SETATTR
+                                if ops[failure.caller].truncate
+                                    && !ops[failure.caller].create
+                                    && counts[failure.caller].unwrap_or(0) == 0 =>
+                            {
+                                Some(PathWriteRepairKind::TruncateStateid)
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(kind) = kind {
+                        repair = Some(PathWriteRepair {
+                            index: failure.caller,
+                            kind,
+                            prefix_stable: committed[failure.caller]
+                                .unwrap_or(stable_how4_FILE_SYNC4)
+                                == stable_how4_FILE_SYNC4,
+                        });
+                        break;
+                    }
+                }
+                if chunk_start == global && part_off == 0 {
+                    // No progress (capacity check failed even for one op): bail.
+                    errors[chunk_start].get_or_insert_with(|| {
+                        OpError::not_attempted(vfsi_core::VfError::nfs(
+                            None,
+                            nfsstat4_NFS4ERR_TOO_MANY_OPS,
+                        ))
+                    });
+                    global = chunk_start + 1;
                 }
             }
-            if failed.is_some() || close_failed.is_some() {
-                break;
-            }
-            if chunk_start == global && part_off == 0 {
-                // No progress (capacity check failed even for one op): bail.
-                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
-                break;
-            }
+            Ok(())
+        })();
+        let fatal = operation.err().map(|error| error_from_rpc(error, None));
+        if !dispatched && let Some(cause) = fatal {
+            return Err(cause);
         }
-        Ok(PathWriteOutcome {
-            counts,
-            committed,
-            opened,
-            failed,
-            close_failed,
-        })
+        if fatal.is_some() && !opened.is_empty() {
+            self.close_path_or_defer(latest_path_open_closes(&opened));
+            opened.clear();
+        }
+        let results = counts
+            .into_iter()
+            .zip(committed)
+            .zip(errors)
+            .enumerate()
+            .map(|(index, ((count, committed), error))| {
+                let confirmed = count.unwrap_or(0);
+                if error.is_none() && count.is_some() && confirmed == ops[index].data.len() {
+                    return Ok((confirmed, committed.unwrap_or(stable_how4_FILE_SYNC4)));
+                }
+                let error = error.unwrap_or_else(|| {
+                    let cause = fatal
+                        .clone()
+                        .unwrap_or_else(|| vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_IO));
+                    if fatal.as_ref().is_some_and(vfsi_core::VfError::is_transport)
+                        && submitted.iter().any(|&(caller, _, _)| caller == index)
+                    {
+                        OpError::unknown(cause, None)
+                    } else if count.is_some() {
+                        OpError::failed(cause, None)
+                    } else {
+                        OpError::not_attempted(cause)
+                    }
+                });
+                Err(io_progress::add_write_prefix(
+                    error,
+                    confirmed,
+                    ops[index].data.len(),
+                ))
+            })
+            .collect();
+        Ok((
+            PathWriteOutcome {
+                results,
+                opened,
+                close_failed,
+            },
+            repair,
+        ))
     }
 
     /// Batched path-based READs in one compound per chunk, same shape as
     /// [`writev_path_compound`](Self::writev_path_compound) but with READ and
     /// no creation. Path references may be resolved again across compound
     /// boundaries or short-I/O repair; Handle references keep the opened object.
+    /// Execute all independent path reads, retaining one outcome per input.
+    /// Only proven unexecuted suffixes are submitted after a known item failure.
     pub fn readv_path_compound(
         &mut self,
         ops: &[PathReadOp],
         close_in_compound: bool,
-    ) -> RpcResult<PathReadOutcome> {
+    ) -> vfsi_core::VfResult<PathReadOutcome> {
+        use vfsi_core::{FailureState, IoProgress, OpError, error_from_rpc};
+        let mut results = Vec::with_capacity(ops.len());
+        let mut opened = Vec::new();
+        let mut close_failed = None;
+        let mut start = 0;
+        while start < ops.len() {
+            let wave = self.read_path_wave(&ops[start..], close_in_compound);
+            if !wave.dispatched
+                && results.is_empty()
+                && let Some(error) = wave.fatal
+            {
+                return Err(error_from_rpc(error, None));
+            }
+            let fatal = wave.fatal.map(|error| error_from_rpc(error, None));
+            let end = if fatal.is_none() && wave.close_failed.is_none() {
+                wave.failed
+                    .map_or(ops.len() - start, |(index, _)| index + 1)
+            } else {
+                ops.len() - start
+            };
+            let fallback = fatal.clone().unwrap_or_else(|| {
+                vfsi_core::VfError::nfs(
+                    None,
+                    wave.failed
+                        .map(|(_, status)| status)
+                        .or(wave.close_failed)
+                        .unwrap_or(nfsstat4_NFS4ERR_IO),
+                )
+            });
+            for (index, ((data, eof), error)) in wave
+                .data
+                .into_iter()
+                .zip(wave.eof)
+                .zip(wave.errors)
+                .chain(std::iter::repeat_with(|| ((None, None), None)))
+                .take(end)
+                .enumerate()
+            {
+                let received = data.is_some();
+                let data = data.unwrap_or_default();
+                let eof = eof.unwrap_or(false);
+                let complete = received && (data.len() >= ops[start + index].count || eof);
+                if error.is_none() && complete {
+                    results.push(Ok((data, eof)));
+                    continue;
+                }
+                let error = error.unwrap_or_else(|| {
+                    let submitted = wave.submitted.iter().any(|&(caller, _, _)| caller == index);
+                    if fatal.as_ref().is_some_and(vfsi_core::VfError::is_transport) && submitted {
+                        OpError::unknown(fallback.clone(), None)
+                    } else if data.is_empty() {
+                        OpError::not_attempted(fallback.clone())
+                    } else {
+                        OpError::failed(fallback.clone(), None)
+                    }
+                });
+                let (cause, mut state, _) = error.into_parts();
+                if !data.is_empty() && state == FailureState::NotAttempted {
+                    state = FailureState::Failed;
+                }
+                let progress = (!data.is_empty()).then(|| {
+                    IoProgress::Read(vfsi_core::api::ReadResult::owned(
+                        ops[start + index].offset,
+                        data,
+                        eof,
+                    ))
+                });
+                results.push(Err(match state {
+                    FailureState::NotAttempted => OpError::not_attempted(cause),
+                    FailureState::Failed => OpError::failed(cause, progress),
+                    FailureState::Unknown => OpError::unknown(cause, progress),
+                }));
+            }
+            opened.extend(wave.opened);
+            close_failed = wave.close_failed;
+            start += end;
+        }
+        Ok(PathReadOutcome {
+            results,
+            opened,
+            close_failed,
+        })
+    }
+
+    fn read_path_wave(&mut self, ops: &[PathReadOp], mut close_in_compound: bool) -> PathReadWave {
         let n = ops.len();
-        let mut data: Vec<Option<Vec<u8>>> = vec![None; n];
-        let mut eof: Vec<Option<bool>> = vec![None; n];
+        let mut data: Vec<Option<Vec<u8>>> = Vec::new();
+        let mut eof: Vec<Option<bool>> = Vec::new();
         let mut opened: Vec<(NfsFh, stateid4)> = Vec::new();
         let mut failed: Option<(usize, u32)> = None;
         let mut close_failed: Option<u32> = None;
-        let per_file = 4;
         let reserve = 8;
         let per_op = self.read_per_op_bytes();
 
-        let mut global = 0usize;
-        // Bytes of ops[global] already fetched across earlier compounds
-        // (>0 means ops[global] is being continued mid-file).
-        let mut part_off = 0usize;
-        let mut max_items = usize::MAX;
-        while global < n {
-            let tag = if close_in_compound {
-                b"readv1".as_slice()
-            } else {
-                b"readv2".as_slice()
-            };
-            let budget = self
-                .op_budget_for(tag, 1 + per_file)
-                .merged_limit(reserve, per_file);
-            let chunk_start = global;
-            let chunk_part_off = part_off;
-            let mut cursor = CfhCursor::default();
-            let mut map = ExecutionMap::new();
-            let mut c = Compound::new();
-            c.tag(tag);
-            let mut opened_path: Option<Box<[u8]>> = None;
-            let mut fh_at_opened = false;
-            let mut opens_in_chunk = 0usize;
-            let base_seq = self.session.path_owner.seqid;
-            let mut payload = 0usize;
-            let mut expected_read_lengths = [0; MAX_COMPOUND_OPS];
-            let mut expected_read_count = 0usize;
-
-            while global < n && map.ranges.len() < max_items && map.next + per_file <= budget {
-                let op = &ops[global];
-                let start = part_off;
-                // Leave reply-array overhead in the response byte budget.
-                let room = if self.max_response_bytes > 0 {
-                    if payload > 0 {
-                        self.read_compound_bytes().saturating_sub(payload + 128)
-                    } else {
-                        self.read_compound_bytes()
-                    }
+        let mut errors = Vec::new();
+        let mut submitted = Vec::new();
+        let mut dispatched = false;
+        let operation = (|| -> RpcResult<()> {
+            let mut global = 0usize;
+            // Bytes of ops[global] already fetched across earlier compounds
+            // (>0 means ops[global] is being continued mid-file).
+            let mut part_off = 0usize;
+            let mut max_items = usize::MAX;
+            while global < n {
+                submitted.clear();
+                self.ensure_usable()?;
+                let per_file = if close_in_compound { 5 } else { 4 };
+                let tag = if close_in_compound {
+                    b"readv1".as_slice()
                 } else {
-                    usize::MAX
+                    b"readv2".as_slice()
                 };
-                let end = match path_io_chunk_end(
-                    start,
-                    op.count,
-                    per_op,
-                    room,
-                    budget.saturating_sub(map.next + 3),
-                    map.next == 0 && payload == 0,
-                ) {
-                    Some(end) => end,
-                    None => break,
-                };
-                map.begin(global);
-                let newly_opened = match self.prepare_path_io_target(
-                    &mut PathIoTarget {
-                        compound: &mut c,
-                        cursor: &mut cursor,
-                        map: &mut map,
-                        close_in_compound,
-                        opened_path: &mut opened_path,
-                        fh_at_opened: &mut fh_at_opened,
-                        base_seq,
-                        opens_in_chunk: &mut opens_in_chunk,
-                    },
-                    &op.file,
-                    PathIoOpen {
-                        access: OPEN4_SHARE_ACCESS_READ,
-                        create: OpenCreate::NoCreate,
-                        truncate_create: false,
-                        truncate_existing: false,
-                    },
-                ) {
-                    Some(opened) => opened,
-                    None => {
-                        failed = Some((global, nfsstat4_NFS4ERR_INVAL));
-                        global = n;
-                        break;
+                let budget = self
+                    .op_budget_for(tag, 1 + per_file)
+                    .merged_limit(reserve, per_file);
+                let chunk_start = global;
+                let chunk_part_off = part_off;
+                let mut cursor = CfhCursor::default();
+                let mut map = ExecutionMap::new();
+                let mut c = Compound::new();
+                c.tag(tag);
+                let mut opened_path: Option<Box<[u8]>> = None;
+                let mut fh_at_opened = false;
+                let mut opens_in_chunk = 0usize;
+                let base_seq = self.session.path_owner.seqid;
+                let mut payload = 0usize;
+                let mut expected_read_lengths = [0; MAX_COMPOUND_OPS];
+                let mut expected_read_count = 0usize;
+
+                while global < n && map.ranges.len() < max_items && map.next + per_file <= budget {
+                    if data.len() <= global {
+                        data.resize_with(global + 1, || None);
+                        eof.resize_with(global + 1, || None);
+                        errors.resize_with(global + 1, || None);
                     }
-                };
-                let stateid = match &op.file {
-                    FileRef::Path(_) => &SPECIAL_STATEID,
-                    FileRef::Handle(_) => op.stateid.as_ref().unwrap_or(&SPECIAL_STATEID),
-                };
-                if end > start {
-                    let mut off = 0usize;
-                    for chunk_len in chunk_lens(start, end, per_op) {
+                    let op = &ops[global];
+                    let start = part_off;
+                    // Leave reply-array overhead in the response byte budget.
+                    let room = if self.max_response_bytes > 0 {
+                        if payload > 0 {
+                            self.read_compound_bytes().saturating_sub(payload + 128)
+                        } else {
+                            self.read_compound_bytes()
+                        }
+                    } else {
+                        usize::MAX
+                    };
+                    let end = match path_io_chunk_end(
+                        start,
+                        op.count,
+                        per_op,
+                        room,
+                        budget.saturating_sub(map.next + 3),
+                        map.next == 0 && payload == 0,
+                    ) {
+                        Some(end) => end,
+                        None => break,
+                    };
+                    map.begin(global);
+                    let newly_opened = match self.prepare_path_io_target(
+                        &mut PathIoTarget {
+                            compound: &mut c,
+                            cursor: &mut cursor,
+                            map: &mut map,
+                            close_in_compound,
+                            opened_path: &mut opened_path,
+                            fh_at_opened: &mut fh_at_opened,
+                            base_seq,
+                            opens_in_chunk: &mut opens_in_chunk,
+                        },
+                        &op.file,
+                        PathIoOpen {
+                            access: OPEN4_SHARE_ACCESS_READ,
+                            create: OpenCreate::NoCreate,
+                            truncate_create: false,
+                            truncate_existing: false,
+                        },
+                    ) {
+                        Some(opened) => opened,
+                        None => {
+                            failed = Some((global, nfsstat4_NFS4ERR_INVAL));
+                            global = n;
+                            break;
+                        }
+                    };
+                    let stateid = match &op.file {
+                        FileRef::Path(_) => &SPECIAL_STATEID,
+                        FileRef::Handle(_) => op.stateid.as_ref().unwrap_or(&SPECIAL_STATEID),
+                    };
+                    #[cfg(feature = "test-faults")]
+                    let invalid_stateid = stateid4 {
+                        seqid: 0,
+                        other: [!0; 12],
+                    };
+                    #[cfg(feature = "test-faults")]
+                    let stateid = if self.fail_merged_read_once == Some(global) {
+                        self.fail_merged_read_once = None;
+                        &invalid_stateid
+                    } else {
+                        stateid
+                    };
+                    if end > start {
+                        let mut off = 0usize;
+                        for chunk_len in chunk_lens(start, end, per_op) {
+                            Self::record_expected_read_length(
+                                &mut expected_read_lengths,
+                                &mut expected_read_count,
+                                chunk_len,
+                            )?;
+                            c.read(
+                                stateid,
+                                checked_offset(op.offset, start + off, global)?,
+                                chunk_len as u32,
+                            );
+                            map.note_ops(1);
+                            off += chunk_len;
+                        }
+                    } else {
+                        // Empty reads still emit a READ to preserve result order.
                         Self::record_expected_read_length(
                             &mut expected_read_lengths,
                             &mut expected_read_count,
-                            chunk_len,
+                            0,
                         )?;
-                        c.read(
-                            stateid,
-                            checked_offset(op.offset, start + off, global)?,
-                            chunk_len as u32,
-                        );
+                        c.read(stateid, checked_offset(op.offset, start, global)?, 0);
                         map.note_ops(1);
-                        off += chunk_len;
                     }
-                } else {
-                    // Empty reads still emit a READ to preserve result order.
-                    Self::record_expected_read_length(
-                        &mut expected_read_lengths,
-                        &mut expected_read_count,
-                        0,
-                    )?;
-                    c.read(stateid, checked_offset(op.offset, start, global)?, 0);
+                    if newly_opened {
+                        cursor.descend();
+                    }
+                    map.end();
+                    payload += 128 + (end - start);
+                    if end == op.count {
+                        global += 1;
+                        part_off = 0;
+                    } else {
+                        part_off = end;
+                        break;
+                    }
+                    if map.next + per_file > budget && global < n {
+                        break;
+                    }
+                }
+
+                if map.ranges.is_empty() {
+                    failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
+                    break;
+                }
+                if close_in_compound && opened_path.is_some() {
+                    c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
                     map.note_ops(1);
                 }
-                if newly_opened {
-                    cursor.descend();
-                }
-                map.end();
-                payload += 128 + (end - start);
-                if end == op.count {
-                    global += 1;
-                    part_off = 0;
-                } else {
-                    part_off = end;
-                    break;
-                }
-                if map.next + per_file > budget && global < n {
-                    break;
-                }
-            }
-
-            if map.ranges.is_empty() {
-                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
-                break;
-            }
-            if close_in_compound && opened_path.is_some() {
-                c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
-                map.note_ops(1);
-            }
-            let res = match self.send_path_io_chunk(PathIoChunk {
-                tag,
-                one_item_ops: 1 + per_file,
-                reserve,
-                per_file,
-                old_budget: budget,
-                allow_repack: failed.is_none(),
-                compound: &mut c,
-                map: &map,
-                base_seq,
-                opens_in_chunk,
-                safety: RequestSafety::ReadOnly,
-            })? {
-                PathIoChunkResult::Repack { max_items: cap } => {
-                    max_items = cap;
+                if failed.is_none()
+                    && self.merged_paths_need_repack(tag, 1 + per_file, &c, map.ranges.len())?
+                {
+                    max_items = map.ranges.len() - 1;
                     global = chunk_start;
                     part_off = chunk_part_off;
                     continue;
                 }
-                PathIoChunkResult::Retry => {
-                    max_items = usize::MAX;
-                    global = chunk_start;
-                    part_off = chunk_part_off;
-                    continue;
+                CompoundBudget::new(self.max_ops).ensure(&c)?;
+                if !self.compound_request_fits(&c)? {
+                    return Err(RpcError::op(chunk_start, nfsstat4_NFS4ERR_REQ_TOO_BIG));
                 }
-                PathIoChunkResult::Response(response) => {
-                    max_items = usize::MAX;
-                    response
-                }
-            };
-            let report = map.analyze(&res).map_err(|error| {
-                RpcError::transport_with_kind(
-                    vfsi_core::TransportKind::InvalidReply,
-                    format!("malformed readv COMPOUND reply: {error}"),
-                )
-            })?;
-            let range_failed = report
-                .failure
-                .map(|failure| (failure.caller, failure.status));
-            if let Some((caller, st)) = range_failed {
-                failed = Some((caller, st));
-                for i in caller + 1..n {
-                    data[i] = None;
-                    eof[i] = None;
-                }
-            }
-            if !close_in_compound {
-                res.for_each_open_result(map.executed_ranges(&report), |fh, stateid| {
-                    opened.push((NfsFh::from_nfs_fh(fh), stateid));
-                });
-            }
-            let mut read_index = 0usize;
-            for (caller, s, e) in map.completed_ranges(&report) {
-                for j in *s..(*e).min(res.nops()) {
-                    let ro = res.op(j);
-                    if ro.resop == nfs_opnum4_NFS4_OP_READ {
-                        // SAFETY: the successful READ owns data_len initialized bytes in
-                        // the live CompoundRes; requested lengths are checked before
-                        // copying or decoding.
-                        let ok = res.read(j);
-                        #[allow(unused_mut)]
-                        let mut len = ok.data.data_len as usize;
-                        #[allow(unused_mut)]
-                        let mut end_of_file = ok.eof != 0;
-                        #[cfg(feature = "test-faults")]
-                        if let Some(count) = self.short_merged_read_once.take()
-                            && count < len
-                        {
-                            len = count;
-                            end_of_file = false;
-                        }
-                        let requested = match expected_read_lengths[..expected_read_count]
-                            .get(read_index)
-                            .copied()
-                        {
-                            Some(requested) => requested,
-                            None => {
-                                let error = RpcError::transport(
-                                    "malformed readv COMPOUND reply: extra READ result",
-                                )
-                                .with_op_index(*caller);
-                                return read_error_with_cleanup(
-                                    &opened,
-                                    close_in_compound,
-                                    self,
-                                    error,
-                                    |client, closes| {
-                                        client.close_path_or_defer(
-                                            closes
-                                                .iter()
-                                                .map(|op| CloseOp {
-                                                    fh: op.fh.clone(),
-                                                    stateid: op.stateid,
-                                                })
-                                                .collect(),
-                                        )
-                                    },
-                                );
-                            }
-                        };
-                        read_index += 1;
-                        if let Err(error) = Self::validate_read_length(len, requested as usize) {
-                            return read_error_with_cleanup(
-                                &opened,
-                                close_in_compound,
-                                self,
-                                error.with_op_index(*caller),
-                                |client, closes| {
-                                    client.close_path_or_defer(
-                                        closes
-                                            .iter()
-                                            .map(|op| CloseOp {
-                                                fh: op.fh.clone(),
-                                                stateid: op.stateid,
-                                            })
-                                            .collect(),
-                                    )
-                                },
-                            );
-                        }
-                        // Borrow the XDR reply while it is alive and
-                        // copy once into the final growing result buffer.
-                        let bytes = &res.read_data(j)[..len];
-                        if eof[*caller] == Some(true) {
-                            continue;
-                        }
-                        let output = data[*caller].get_or_insert_with(Vec::new);
-                        output.extend_from_slice(bytes);
-                        if len == 0 && requested != 0 && !end_of_file {
-                            let error = RpcError::op(*caller, nfsstat4_NFS4ERR_IO);
-                            return read_error_with_cleanup(
-                                &opened,
-                                close_in_compound,
-                                self,
-                                error,
-                                |client, closes| {
-                                    client.close_path_or_defer(
-                                        closes
-                                            .iter()
-                                            .map(|op| CloseOp {
-                                                fh: op.fh.clone(),
-                                                stateid: op.stateid,
-                                            })
-                                            .collect(),
-                                    )
-                                },
-                            );
-                        }
-                        if len < requested as usize && !end_of_file {
-                            let offset =
-                                checked_offset(ops[*caller].offset, output.len(), *caller)?;
-                            match self.repair_path_read(
-                                &ops[*caller],
-                                *caller,
-                                offset,
-                                requested as usize - len,
-                                output,
-                            ) {
-                                Ok(end) => end_of_file = end,
-                                Err(error) => {
-                                    return read_error_with_cleanup(
-                                        &opened,
-                                        close_in_compound,
-                                        self,
-                                        error,
-                                        |client, closes| {
-                                            client.close_path_or_defer(
-                                                closes
-                                                    .iter()
-                                                    .map(|op| CloseOp {
-                                                        fh: op.fh.clone(),
-                                                        stateid: op.stateid,
-                                                    })
-                                                    .collect(),
-                                            )
-                                        },
-                                    );
-                                }
-                            }
-                        }
-                        eof[*caller] = Some(end_of_file);
+                self.session.path_owner.seqid = base_seq.wrapping_add(opens_in_chunk as u32);
+                submitted = map.ranges.clone();
+                dispatched = true;
+                let res = self.call_compound_with_safety(&mut c, RequestSafety::ReadOnly)?;
+                if resource_rejected_before_mutation(&res) {
+                    self.session.path_owner.seqid = base_seq;
+                    if self.can_retry_merged_resource(tag, &res, budget, reserve, per_file) {
+                        max_items = usize::MAX;
+                        global = chunk_start;
+                        part_off = chunk_part_off;
+                        continue;
                     }
                 }
-            }
-            if let Some(status) = report.compound_failure {
-                let close_op = map.ranges.last().map(|(_, _, end)| *end);
-                if close_in_compound
-                    && opened_path.is_some()
-                    && report.compound_failure_op == close_op
+                max_items = usize::MAX;
+                record_path_open_owners(&res, &mut opened);
+                let report = map.analyze(&res).map_err(|error| {
+                    RpcError::transport_with_kind(
+                        vfsi_core::TransportKind::InvalidReply,
+                        format!("malformed readv COMPOUND reply: {error}"),
+                    )
+                })?;
+                // Cleanup of the preceding owner runs before this input.
+                let inline_close_failure = report
+                    .failure
+                    .filter(|failure| res.op(failure.op_index).resop == nfs_opnum4_NFS4_OP_CLOSE);
+                let range_failed = report
+                    .failure
+                    .filter(|_| inline_close_failure.is_none())
+                    .map(|failure| (failure.caller, failure.status));
+                if let Some((caller, st)) = range_failed {
+                    failed = Some((caller, st));
+                }
+                let mut read_index = 0usize;
+                for (caller, s, e) in map
+                    .ranges
+                    .iter()
+                    .filter(|(_, start, _)| *start < res.nops())
                 {
-                    close_failed = Some(status);
-                } else {
-                    return Err(RpcError::op(0, status));
+                    for j in *s..(*e).min(res.nops()) {
+                        let ro = res.op(j);
+                        if ro.resop == nfs_opnum4_NFS4_OP_READ && res.op_status(j) == 0 {
+                            // SAFETY: the successful READ owns data_len initialized bytes in
+                            // the live CompoundRes; requested lengths are checked before
+                            // copying or decoding.
+                            let ok = res.read(j);
+                            #[allow(unused_mut)]
+                            let mut len = ok.data.data_len as usize;
+                            #[allow(unused_mut)]
+                            let mut end_of_file = ok.eof != 0;
+                            #[cfg(feature = "test-faults")]
+                            if let Some(count) = self.short_merged_read_once.take()
+                                && count < len
+                            {
+                                len = count;
+                                end_of_file = false;
+                            }
+                            let requested = match expected_read_lengths[..expected_read_count]
+                                .get(read_index)
+                                .copied()
+                            {
+                                Some(requested) => requested,
+                                None => {
+                                    let error = RpcError::transport(
+                                        "malformed readv COMPOUND reply: extra READ result",
+                                    )
+                                    .with_op_index(*caller);
+                                    errors[*caller] = Some(vfsi_core::OpError::unknown(
+                                        vfsi_core::error_from_rpc(error, None),
+                                        None,
+                                    ));
+                                    continue;
+                                }
+                            };
+                            read_index += 1;
+                            if errors[*caller].is_some() {
+                                continue;
+                            }
+                            if let Err(error) = Self::validate_read_length(len, requested as usize)
+                            {
+                                errors[*caller] = Some(vfsi_core::OpError::unknown(
+                                    vfsi_core::error_from_rpc(error, None),
+                                    None,
+                                ));
+                                continue;
+                            }
+                            // Borrow the XDR reply while it is alive and
+                            // copy once into the final growing result buffer.
+                            let bytes = &res.read_data(j)[..len];
+                            if eof[*caller] == Some(true) {
+                                continue;
+                            }
+                            let output = data[*caller].get_or_insert_with(Vec::new);
+                            output.extend_from_slice(bytes);
+                            if len == 0 && requested != 0 && !end_of_file {
+                                errors[*caller] = Some(vfsi_core::OpError::failed(
+                                    vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_IO),
+                                    None,
+                                ));
+                                continue;
+                            }
+                            if len < requested as usize && !end_of_file {
+                                #[cfg(feature = "test-faults")]
+                                if let Some(injector) = &self.fault_injector
+                                    && let Err(cause) = injector
+                                        .check(&OpenFaultPoint::BeforeReadRepair { index: *caller })
+                                {
+                                    errors[*caller] = Some(vfsi_core::OpError::failed(cause, None));
+                                    continue;
+                                }
+                                let offset =
+                                    checked_offset(ops[*caller].offset, output.len(), *caller)?;
+                                match self.repair_path_read(
+                                    &ops[*caller],
+                                    *caller,
+                                    offset,
+                                    requested as usize - len,
+                                    output,
+                                ) {
+                                    Ok(end) => end_of_file = end,
+                                    Err(error) => {
+                                        let cause = vfsi_core::error_from_rpc(error, None);
+                                        errors[*caller] = Some(if cause.is_transport() {
+                                            vfsi_core::OpError::unknown(cause, None)
+                                        } else {
+                                            vfsi_core::OpError::failed(cause, None)
+                                        });
+                                    }
+                                }
+                            }
+                            eof[*caller] = Some(end_of_file);
+                        }
+                    }
+                }
+                if let Some((caller, status)) = range_failed
+                    && errors[caller].is_none()
+                {
+                    errors[caller] = Some(vfsi_core::OpError::failed(
+                        vfsi_core::VfError::nfs(None, status),
+                        None,
+                    ));
+                }
+                if let Some(failure) = inline_close_failure {
+                    self.close_path_or_defer(latest_path_open_closes(&opened));
+                    opened.clear();
+                    close_in_compound = false;
+                    global = failure.caller;
+                    part_off = 0;
+                    continue;
+                }
+                if let Some(status) = report.compound_failure {
+                    let close_op = map.ranges.last().map(|(_, _, end)| *end);
+                    if close_in_compound
+                        && opened_path.is_some()
+                        && report.compound_failure_op == close_op
+                    {
+                        close_failed = Some(status);
+                    } else {
+                        return Err(RpcError::op(0, status));
+                    }
+                }
+                if failed.is_some() || close_failed.is_some() {
+                    break;
+                }
+                if chunk_start == global && part_off == 0 {
+                    failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
+                    break;
                 }
             }
-            if failed.is_some() || close_failed.is_some() {
-                break;
-            }
-            if chunk_start == global && part_off == 0 {
-                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
-                break;
-            }
+            Ok(())
+        })();
+        let fatal = operation.err();
+        if fatal.is_some() && !opened.is_empty() {
+            self.close_path_or_defer(latest_path_open_closes(&opened));
+            opened.clear();
         }
-        Ok(PathReadOutcome {
+        PathReadWave {
             data,
             eof,
             opened,
             failed,
             close_failed,
-        })
+            errors,
+            fatal,
+            submitted,
+            dispatched,
+        }
     }
 
     /// Batched path-based GETATTRs in one compound per chunk:
@@ -3341,15 +3860,20 @@ impl NfsClient {
     pub fn getattr_path_compound(
         &mut self,
         ops: &[PathGetattrOp],
-    ) -> RpcResult<PathGetattrOutcome> {
-        let n = ops.len();
-        let mut lists: Vec<Option<Vec<u8>>> = vec![None; n];
-        let mut failed: Option<(usize, u32)> = None;
-        let per_file = 4; // RESTOREFH + LOOKUP + GETATTR + margin
+    ) -> vfsi_core::VecResult<Vec<u8>> {
+        use vfsi_core::{OpError, VfError, error_from_rpc};
+        if !ops.is_empty() {
+            self.ensure_usable()
+                .map_err(|error| error_from_rpc(error, None))?;
+        }
+        let mut slots: Vec<Option<vfsi_core::OpResult<Vec<u8>>>> =
+            (0..ops.len()).map(|_| None).collect();
+        let per_file = 4;
         let reserve = 16;
-        let mut global = 0usize;
+        let mut global = 0;
         let mut max_items = usize::MAX;
-        while global < n {
+        let mut dispatched = false;
+        while global < ops.len() {
             let budget = self
                 .op_budget_for(b"getattrv1", 1 + per_file)
                 .merged_limit(reserve, per_file);
@@ -3359,27 +3883,35 @@ impl NfsClient {
             let mut c = Compound::new();
             c.tag(b"getattrv1");
             let mut payload = 0usize;
-            while global < n && map.ranges.len() < max_items && map.next + per_file <= budget {
+            while global < ops.len()
+                && map.ranges.len() < max_items
+                && map.next + per_file <= budget
+            {
+                if slots[global].is_some() {
+                    global += 1;
+                    continue;
+                }
                 let op = &ops[global];
-                let est = 256;
+                let estimate = 256;
                 if payload > 0
                     && self.max_request_arg_bytes() > 0
-                    && payload + est > self.max_request_arg_bytes()
+                    && payload + estimate > self.max_request_arg_bytes()
                 {
                     break;
                 }
                 map.begin(global);
                 match &op.file {
-                    FileRef::Path(p) => {
-                        let (leaf, nops) = match cursor.set_parent(&mut c, p) {
-                            Some(x) => x,
-                            None => {
-                                failed = Some((global, nfsstat4_NFS4ERR_INVAL));
-                                global = n;
-                                break;
-                            }
+                    FileRef::Path(path) => {
+                        let Some((leaf, count)) = cursor.set_parent(&mut c, path) else {
+                            map.ranges.pop();
+                            slots[global] = Some(Err(OpError::not_attempted(VfError::nfs(
+                                None,
+                                nfsstat4_NFS4ERR_INVAL,
+                            ))));
+                            global += 1;
+                            break;
                         };
-                        map.note_ops(nops);
+                        map.note_ops(count);
                         c.lookup(leaf);
                         map.note_ops(1);
                     }
@@ -3392,158 +3924,191 @@ impl NfsClient {
                 map.note_ops(1);
                 map.end();
                 cursor.descend();
-                payload += est;
+                payload += estimate;
                 global += 1;
-                if map.next + per_file > budget && global < n {
-                    break;
-                }
             }
             if map.ranges.is_empty() {
-                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
-                break;
+                if global > chunk_start {
+                    continue;
+                }
+                let error = VfError::nfs(None, nfsstat4_NFS4ERR_TOO_MANY_OPS);
+                if !dispatched {
+                    return Err(error);
+                }
+                return Ok(completion::finish_slots(slots, &[], error));
             }
-            if failed.is_none()
-                && self.merged_paths_need_repack(
-                    b"getattrv1",
-                    1 + per_file,
-                    &c,
-                    map.ranges.len(),
-                )?
-            {
-                max_items = map.ranges.len() - 1;
-                global = chunk_start;
-                continue;
+            match self.merged_paths_need_repack(b"getattrv1", 1 + per_file, &c, map.ranges.len()) {
+                Ok(true) => {
+                    max_items = map.ranges.len() - 1;
+                    global = chunk_start;
+                    continue;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    let error = error_from_rpc(error, None);
+                    if !dispatched {
+                        return Err(error);
+                    }
+                    return Ok(completion::finish_slots(slots, &[], error));
+                }
+            }
+            if map.ranges.len() == 1 {
+                let fits = CompoundBudget::new(self.max_ops)
+                    .ensure(&c)
+                    .and_then(|()| self.compound_request_fits(&c));
+                if !matches!(fits, Ok(true)) {
+                    let cause = fits
+                        .err()
+                        .map(|error| error_from_rpc(error, None))
+                        .unwrap_or_else(|| VfError::nfs(None, nfsstat4_NFS4ERR_REQ_TOO_BIG));
+                    if !dispatched {
+                        return Err(cause);
+                    }
+                    return Ok(completion::finish_slots(slots, &[], cause));
+                }
             }
             max_items = usize::MAX;
-            let res = self.call_compound_with_safety(&mut c, RequestSafety::IdempotentMutation)?;
-            if self.can_retry_read_only_merged_resource(
-                b"getattrv1",
-                &res,
-                budget,
-                reserve,
-                per_file,
-            ) {
-                global = chunk_start;
-                continue;
-            }
-            if let Some((caller, st)) = first_failed_range(&res, &map)? {
-                failed = Some((caller, st));
-                // Keep the prefix results (the caller resumes from here).
-                for (c, s, e) in &map.ranges {
-                    if *c >= caller {
-                        continue;
-                    }
-                    for j in *s..*e {
-                        if res.op(j).resop == nfs_opnum4_NFS4_OP_GETATTR {
-                            lists[*c] = Some(res.getattr_bytes(j));
-                        }
-                    }
+            dispatched = true;
+            let res = match self.call_compound_with_safety(&mut c, RequestSafety::ReadOnly) {
+                Ok(res) => res,
+                Err(error) => {
+                    return Ok(completion::finish_slots(
+                        slots,
+                        &map.ranges,
+                        error_from_rpc(error, None),
+                    ));
                 }
-                break;
-            }
-            for (caller, s, e) in &map.ranges {
-                for j in *s..*e {
-                    if res.op(j).resop == nfs_opnum4_NFS4_OP_GETATTR {
-                        lists[*caller] = Some(res.getattr_bytes(j));
-                    }
+            };
+            let report = match map.analyze(&res) {
+                Ok(report) => report,
+                Err(error) => {
+                    return Ok(completion::finish_slots(
+                        slots,
+                        &map.ranges,
+                        VfError::invalid_reply(None, format!("malformed metadata reply: {error}")),
+                    ));
                 }
+            };
+            for &(input, start, end) in map.completed_ranges(&report) {
+                let result = (start..end)
+                    .find(|&index| res.op(index).resop == nfs_opnum4_NFS4_OP_GETATTR)
+                    .map(|index| res.getattr_bytes(index))
+                    .ok_or_else(|| {
+                        OpError::unknown(
+                            VfError::invalid_reply(None, "missing completed GETATTR payload"),
+                            None,
+                        )
+                    });
+                slots[input] = Some(result);
             }
-            if chunk_start == global {
-                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
-                break;
+            if let Some(failure) = report.failure {
+                if self.can_retry_read_only_merged_resource(
+                    b"getattrv1",
+                    &res,
+                    budget,
+                    reserve,
+                    per_file,
+                ) {
+                    global = failure.caller;
+                } else {
+                    slots[failure.caller] = Some(Err(OpError::failed(
+                        VfError::nfs(None, failure.status),
+                        None,
+                    )));
+                    global = failure.caller + 1;
+                }
+            } else if let Some(status) = report.compound_failure {
+                if self.can_retry_read_only_merged_resource(
+                    b"getattrv1",
+                    &res,
+                    budget,
+                    reserve,
+                    per_file,
+                ) {
+                    global = chunk_start;
+                    continue;
+                }
+                // A compound-level rejection before any item executed.
+                return Ok(completion::finish_slots(
+                    slots,
+                    &[],
+                    VfError::nfs(None, status),
+                ));
             }
         }
-        Ok(PathGetattrOutcome { lists, failed })
+        Ok(slots
+            .into_iter()
+            .map(|slot| {
+                slot.unwrap_or_else(|| {
+                    Err(OpError::unknown(
+                        VfError::invalid_reply(None, "missing merged metadata outcome"),
+                        None,
+                    ))
+                })
+            })
+            .collect())
     }
 
-    /// Batched path-based SETATTRs in one compound per chunk. When
-    /// `check_type` is set, each file's own type is fetched (for symlink
-    /// handling by the caller).
+    /// Independent path-based SETATTR outcomes; optional types are returned
+    /// only for successful logical inputs. Mutations are never replayed after
+    /// ambiguous replies or ordinary SETATTR failures.
     pub fn setattr_path_compound(
         &mut self,
         ops: &[PathSetattrOp],
-    ) -> RpcResult<PathSetattrOutcome> {
+    ) -> vfsi_core::VecResult<Option<u32>> {
         self.setattr_path_compound_inner(ops, None)
+            .map(|(results, _)| results)
     }
 
-    /// Internal variant that inserts an NVERIFY symlink guard before SETATTR
-    /// for selected operations. A matching symlink stops that operation before
-    /// mutation, allowing the caller to resolve and update the target safely.
-    /// Guarded execution does not collect types; `check_type` is ignored.
+    /// Yield before later mutations when a path guard requires repair. The
+    /// continuation is protocol bookkeeping, not a public prefix guarantee.
     pub(crate) fn setattr_path_compound_guarded(
         &mut self,
         ops: &[PathSetattrOp],
-        symlink_guards: &[bool],
-    ) -> RpcResult<PathSetattrOutcome> {
-        if ops.len() != symlink_guards.len() {
-            return Err(RpcError::transport("invalid SETATTR symlink-guard count"));
+        guards: &[bool],
+    ) -> vfsi_core::VfResult<PathMutationRun<Option<u32>>> {
+        if ops.len() != guards.len() {
+            return Err(vfsi_core::VfError::from_kind(
+                None,
+                std::io::ErrorKind::InvalidInput,
+            ));
         }
-        self.setattr_path_compound_inner(ops, Some(symlink_guards))
+        self.setattr_path_compound_inner(ops, Some(guards))
     }
 
     fn setattr_path_compound_inner(
         &mut self,
         ops: &[PathSetattrOp],
-        symlink_guards: Option<&[bool]>,
-    ) -> RpcResult<PathSetattrOutcome> {
-        let n = ops.len();
-        let mut types: Vec<Option<u32>> = if symlink_guards.is_some() {
-            Vec::new()
-        } else {
-            vec![None; n]
-        };
-        let mut failed: Option<(usize, u32)> = None;
-        let per_file = 5; // RESTOREFH + LOOKUP + [GETATTR or NVERIFY] + SETATTR + margin
-        let reserve = 16;
-        let mut global = 0usize;
-        let mut max_items = usize::MAX;
-        while global < n {
-            let budget = self
-                .op_budget_for(b"setattrv1", 1 + per_file)
-                .merged_limit(reserve, per_file);
-            let chunk_start = global;
-            let mut cursor = CfhCursor::default();
-            let mut map = ExecutionMap::new();
-            let mut c = Compound::new();
-            c.tag(b"setattrv1");
-            let mut payload = 0usize;
-            while global < n && map.ranges.len() < max_items && map.next + per_file <= budget {
-                let op = &ops[global];
-                let est = 256;
-                if payload > 0
-                    && self.max_request_arg_bytes() > 0
-                    && payload + est > self.max_request_arg_bytes()
-                {
-                    break;
-                }
-                map.begin(global);
-                match &op.file {
-                    FileRef::Path(p) => {
-                        let (leaf, nops) = match cursor.set_parent(&mut c, p) {
-                            Some(x) => x,
-                            None => {
-                                failed = Some((global, nfsstat4_NFS4ERR_INVAL));
-                                global = n;
-                                break;
-                            }
-                        };
-                        map.note_ops(nops);
-                        c.lookup(leaf);
-                        map.note_ops(1);
+        guards: Option<&[bool]>,
+    ) -> vfsi_core::VfResult<PathMutationRun<Option<u32>>> {
+        use vfsi_core::{OpError, VfError};
+        self.path_mutation_results(
+            b"setattrv1",
+            5,
+            ops.len(),
+            |compound, cursor, index| {
+                let op = &ops[index];
+                let mut count = match &op.file {
+                    FileRef::Path(path) => {
+                        let (name, count) = cursor
+                            .set_parent(compound, path)
+                            .ok_or_else(|| VfError::nfs(None, nfsstat4_NFS4ERR_INVAL))?;
+                        compound.lookup(name);
+                        count + 1
                     }
                     FileRef::Handle(fh) => {
-                        cursor.set_handle(&mut c, fh);
-                        map.note_ops(1);
+                        cursor.set_handle(compound, fh);
+                        1
                     }
+                };
+                if guards.is_some_and(|guards| guards[index]) {
+                    compound.nverify_type(nfs_ftype4_NF4LNK);
+                    count += 1;
+                } else if guards.is_none() && op.check_type {
+                    compound.getattr(&[FATTR4_TYPE]);
+                    count += 1;
                 }
-                if symlink_guards.is_some_and(|guards| guards[global]) {
-                    c.nverify_type(nfs_ftype4_NF4LNK);
-                    map.note_ops(1);
-                } else if symlink_guards.is_none() && op.check_type {
-                    c.getattr(&[FATTR4_TYPE]);
-                    map.note_ops(1);
-                }
-                c.setattr_ownership(
+                compound.setattr_ownership(
                     op.mode,
                     op.size,
                     (op.uid, op.gid),
@@ -3554,69 +4119,32 @@ impl NfsClient {
                         other: [0; 12],
                     },
                 );
-                map.note_ops(1);
-                map.end();
-                cursor.descend();
-                payload += est;
-                global += 1;
-                if map.next + per_file > budget && global < n {
-                    break;
-                }
-            }
-            if map.ranges.is_empty() {
-                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
-                break;
-            }
-            if failed.is_none()
-                && self.merged_paths_need_repack(
-                    b"setattrv1",
-                    1 + per_file,
-                    &c,
-                    map.ranges.len(),
-                )?
-            {
-                max_items = map.ranges.len() - 1;
-                global = chunk_start;
-                continue;
-            }
-            max_items = usize::MAX;
-            let res = self.call_compound(&mut c)?;
-            if self.can_retry_merged_resource(b"setattrv1", &res, budget, reserve, per_file) {
-                global = chunk_start;
-                continue;
-            }
-            if let Some((caller, st)) = first_failed_range(&res, &map)? {
-                failed = Some((caller, st));
-                // Keep the prefix types (the caller resumes from here).
-                for (c, s, e) in &map.ranges {
-                    if *c >= caller {
-                        continue;
-                    }
-                    for j in *s..*e {
-                        if res.op(j).resop == nfs_opnum4_NFS4_OP_GETATTR {
-                            let b = res.getattr_bytes(j);
-                            types[*c] = (b.len() >= 4)
-                                .then(|| u32::from_be_bytes(b[0..4].try_into().unwrap()));
+                Ok(count + 1)
+            },
+            |reply, start, end| {
+                (start..end)
+                    .find(|&index| reply.op(index).resop == nfs_opnum4_NFS4_OP_GETATTR)
+                    .map(|index| {
+                        let bytes = reply.getattr(index);
+                        if bytes.len() != 4 {
+                            Err(OpError::unknown(
+                                VfError::invalid_reply(None, "invalid SETATTR type attribute"),
+                                None,
+                            ))
+                        } else {
+                            Ok(u32::from_be_bytes(bytes.try_into().unwrap()))
                         }
-                    }
-                }
-                break;
-            }
-            for (caller, s, e) in &map.ranges {
-                for j in *s..*e {
-                    if res.op(j).resop == nfs_opnum4_NFS4_OP_GETATTR {
-                        let b = res.getattr_bytes(j);
-                        types[*caller] =
-                            (b.len() >= 4).then(|| u32::from_be_bytes(b[0..4].try_into().unwrap()));
-                    }
-                }
-            }
-            if chunk_start == global {
-                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
-                break;
-            }
-        }
-        Ok(PathSetattrOutcome { types, failed })
+                    })
+                    .transpose()
+            },
+            |status, op| {
+                guards.is_some()
+                    && (status == nfsstat4_NFS4ERR_SAME && op == nfs_opnum4_NFS4_OP_NVERIFY
+                        || status == nfsstat4_NFS4ERR_SYMLINK
+                            && matches!(op, nfs_opnum4_NFS4_OP_LOOKUP | nfs_opnum4_NFS4_OP_LOOKUPP))
+            },
+            |_| Ok(()),
+        )
     }
 
     /// Batched OPENs addressing retained objects, with one independent owner
@@ -3690,404 +4218,99 @@ impl NfsClient {
         }
     }
 
-    /// Batched path-based OPENs in one compound per chunk, returning the
-    /// opened (filehandle, stateid) pairs (the caller keeps them open).
-    pub fn openv_path_compound(&mut self, ops: &[PathOpenOp]) -> RpcResult<PathOpenOutcome> {
-        let n = ops.len();
-        self.drain_deferred_path_closes()?;
-        let public_owner_names: Vec<Box<[u8]>> =
-            (0..n).map(|_| self.next_public_open_owner_name()).collect();
-        let mut opened: Vec<Option<(NfsFh, stateid4)>> = vec![None; n];
-        let mut verifier_attrs: Vec<Option<VerifierStorageAttrs>> = vec![None; n];
-        let mut failed: Option<(usize, u32)> = None;
-        let per_file = 6; // RESTOREFH + OPEN + GETFH + margin
-        let reserve = 16;
-        let mut global = 0usize;
-        let mut max_items = usize::MAX;
-        #[cfg(feature = "test-faults")]
-        let mut chunk_index = 0usize;
-        while global < n {
-            let budget = self
-                .op_budget_for(b"openv1", 1 + per_file)
-                .merged_limit(reserve, per_file);
-            let chunk_start = global;
-            let mut cursor = CfhCursor::default();
-            let mut map = ExecutionMap::new();
-            let mut c = Compound::new();
-            c.tag(b"openv1");
-            let mut payload = 0usize;
-            while global < n && map.ranges.len() < max_items && map.next + per_file <= budget {
-                let op = &ops[global];
-                let est = 256;
-                if payload > 0
-                    && self.max_request_arg_bytes() > 0
-                    && payload + est > self.max_request_arg_bytes()
-                {
-                    break;
-                }
-                map.begin(global);
-                let (leaf, nops) = match cursor.set_parent(&mut c, &op.path) {
-                    Some(x) => x,
-                    None => {
-                        failed = Some((global, nfsstat4_NFS4ERR_INVAL));
-                        global = n;
-                        break;
-                    }
-                };
-                map.note_ops(nops);
-                match op.create {
-                    OpenCreate::Unchecked => {
-                        let mode = op.mode.unwrap_or(0o644);
-                        c.open_claim_null_create_mode(
-                            0,
-                            op.access,
-                            OPEN4_SHARE_DENY_NONE,
-                            self.session.clientid,
-                            &public_owner_names[global],
-                            leaf,
-                            Some(mode),
-                            op.truncate,
-                        );
-                    }
-                    create => c.open_claim_null(
-                        0,
-                        op.access,
-                        OPEN4_SHARE_DENY_NONE,
-                        self.session.clientid,
-                        &public_owner_names[global],
-                        make_open_how(create),
-                        leaf,
-                    ),
-                }
-                map.note_ops(1);
-                c.getfh();
-                map.note_ops(1);
-                map.end();
-                cursor.descend();
-                payload += est;
-                global += 1;
-                if map.next + per_file > budget && global < n {
-                    break;
-                }
-            }
-            if map.ranges.is_empty() {
-                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
-                break;
-            }
-            if failed.is_none()
-                && self.merged_paths_need_repack(b"openv1", 1 + per_file, &c, map.ranges.len())?
-            {
-                max_items = map.ranges.len() - 1;
-                global = chunk_start;
-                continue;
-            }
-            CompoundBudget::new(self.max_ops).ensure(&c)?;
-            max_items = usize::MAX;
-            #[cfg(feature = "test-faults")]
-            if let Some(injector) = self.fault_injector.clone()
-                && let Err(error) =
-                    injector.check(&OpenFaultPoint::BeforeOpenChunk { chunk: chunk_index })
-            {
-                let closes: Vec<CloseOp> = opened
-                    .iter_mut()
-                    .filter_map(Option::take)
-                    .map(|(fh, stateid)| CloseOp { fh, stateid })
-                    .collect();
-                self.close_path_or_defer(closes);
-                return Err(RpcError::transport(error.to_string()));
-            }
-            let res = match self
-                .call_compound_with_safety(&mut c, RequestSafety::NonIdempotentMutation)
-            {
-                Ok(response) => response,
-                Err(error) => {
-                    let closes: Vec<CloseOp> = opened
-                        .iter_mut()
-                        .filter_map(Option::take)
-                        .map(|(fh, stateid)| CloseOp { fh, stateid })
-                        .collect();
-                    self.close_path_or_defer(closes);
-                    return Err(error);
-                }
-            };
-            if resource_rejected_before_mutation(&res)
-                && self.can_retry_merged_resource(b"openv1", &res, budget, reserve, per_file)
-            {
-                global = chunk_start;
-                continue;
-            }
-            if let Some((caller, st)) = first_failed_range(&res, &map)? {
-                failed = Some((caller, st));
-                // Keep the prefix opens (the caller resumes from here).
-                for (c, s, e) in &map.ranges {
-                    if *c >= caller {
-                        continue;
-                    }
-                    for j in *s..*e {
-                        if res.op(j).resop == nfs_opnum4_NFS4_OP_OPEN {
-                            let open_result = res.open(j);
-                            let stateid = open_result.stateid;
-                            let fh = res.getfh(j + 1);
-                            opened[*c] = Some((NfsFh::from_nfs_fh(fh), stateid));
-                            if ops[*c].create == OpenCreate::Exclusive {
-                                verifier_attrs[*c] =
-                                    Some(verifier_storage_attrs(&open_result.attrset));
-                            }
-                        }
-                    }
-                }
-                let completed: Vec<usize> = map
-                    .ranges
-                    .iter()
-                    .filter_map(|(index, _, _)| (*index < caller).then_some(*index))
-                    .collect();
-                if let Err(error) =
-                    self.cleanup_exclusive_path_opens(&opened, &verifier_attrs, ops, &completed)
-                {
-                    let closes: Vec<CloseOp> = opened
-                        .iter_mut()
-                        .filter_map(Option::take)
-                        .map(|(fh, stateid)| CloseOp { fh, stateid })
-                        .collect();
-                    self.close_path_or_defer(closes);
-                    return Err(error);
-                }
-                break;
-            }
-            let mut completed = Vec::new();
-            for (caller, s, e) in &map.ranges {
-                for j in *s..*e {
-                    if res.op(j).resop == nfs_opnum4_NFS4_OP_OPEN {
-                        let open_result = res.open(j);
-                        let stateid = open_result.stateid;
-                        let fh = res.getfh(j + 1);
-                        opened[*caller] = Some((NfsFh::from_nfs_fh(fh), stateid));
-                        if ops[*caller].create == OpenCreate::Exclusive {
-                            verifier_attrs[*caller] =
-                                Some(verifier_storage_attrs(&open_result.attrset));
-                        }
-                        completed.push(*caller);
-                    }
-                }
-            }
-            if let Err(error) =
-                self.cleanup_exclusive_path_opens(&opened, &verifier_attrs, ops, &completed)
-            {
-                let closes: Vec<CloseOp> = opened
-                    .iter_mut()
-                    .filter_map(Option::take)
-                    .map(|(fh, stateid)| CloseOp { fh, stateid })
-                    .collect();
-                self.close_path_or_defer(closes);
-                return Err(error);
-            }
-            if chunk_start == global {
-                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
-                break;
-            }
-            #[cfg(feature = "test-faults")]
-            {
-                chunk_index += 1;
-            }
-        }
-        Ok(PathOpenOutcome { opened, failed })
-    }
-
     /// Batched path-based REMOVEs in one compound per chunk. REMOVE keeps
     /// the current fh on the parent, so same-directory removals chain.
-    pub fn removev_path_compound(&mut self, paths: &[Vec<u8>]) -> RpcResult<PathRemoveOutcome> {
-        let n = paths.len();
-        let mut removed: Vec<Option<()>> = vec![None; n];
-        let mut failed: Option<(usize, u32)> = None;
-        let per_file = 3; // RESTOREFH + REMOVE + margin
-        let reserve = 16;
-        let mut global = 0usize;
-        let mut max_items = usize::MAX;
-        while global < n {
-            let budget = self
-                .op_budget_for(b"removev1", 1 + per_file)
-                .merged_limit(reserve, per_file);
-            let chunk_start = global;
-            let mut cursor = CfhCursor::default();
-            let mut map = ExecutionMap::new();
-            let mut c = Compound::new();
-            c.tag(b"removev1");
-            let mut payload = 0usize;
-            while global < n && map.ranges.len() < max_items && map.next + per_file <= budget {
-                let est = 128;
-                if payload > 0
-                    && self.max_request_arg_bytes() > 0
-                    && payload + est > self.max_request_arg_bytes()
-                {
-                    break;
+    pub fn removev_path_compound(&mut self, paths: &[Vec<u8>]) -> vfsi_core::VecResult<()> {
+        self.remove_path_results(paths, false)
+            .map(|(results, _)| results)
+    }
+
+    pub(crate) fn remove_path_results(
+        &mut self,
+        paths: &[Vec<u8>],
+        repair_ancestors: bool,
+    ) -> vfsi_core::VfResult<PathMutationRun<()>> {
+        self.path_mutation_results(
+            b"removev1",
+            3,
+            paths.len(),
+            |compound, cursor, index| {
+                if paths[index].contains(&0) {
+                    return Err(vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_INVAL));
                 }
-                map.begin(global);
-                let (leaf, nops) = match cursor.set_parent(&mut c, &paths[global]) {
-                    Some(x) => x,
-                    None => {
-                        failed = Some((global, nfsstat4_NFS4ERR_INVAL));
-                        global = n;
-                        break;
-                    }
-                };
-                map.note_ops(nops);
-                c.remove(leaf);
-                map.note_ops(1);
-                map.end();
-                // REMOVE leaves the current fh on the parent: cursor state
-                // is unchanged.
-                payload += est;
-                global += 1;
-                if map.next + per_file > budget && global < n {
-                    break;
-                }
-            }
-            if map.ranges.is_empty() {
-                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
-                break;
-            }
-            if failed.is_none()
-                && self.merged_paths_need_repack(b"removev1", 1 + per_file, &c, map.ranges.len())?
-            {
-                max_items = map.ranges.len() - 1;
-                global = chunk_start;
-                continue;
-            }
-            max_items = usize::MAX;
-            let res =
-                self.call_compound_with_safety(&mut c, RequestSafety::NonIdempotentMutation)?;
-            if self.can_retry_merged_resource(b"removev1", &res, budget, reserve, per_file) {
-                global = chunk_start;
-                continue;
-            }
-            let done = first_failed_range(&res, &map)?;
-            match done {
-                Some((caller, st)) => {
-                    failed = Some((caller, st));
-                    for (c, _, _) in &map.ranges {
-                        if *c < caller {
-                            removed[*c] = Some(());
-                        }
-                    }
-                    break;
-                }
-                None => {
-                    for (c, _, _) in &map.ranges {
-                        removed[*c] = Some(());
-                    }
-                }
-            }
-            if chunk_start == global {
-                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
-                break;
-            }
-        }
-        Ok(PathRemoveOutcome { removed, failed })
+                split_path_bytes(&paths[index])
+                    .map_err(|_| vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_INVAL))?;
+                let (name, count) = cursor
+                    .set_parent(compound, &paths[index])
+                    .expect("validated REMOVE path");
+                compound.remove(name);
+                Ok(count + 1)
+            },
+            |_, _, _| Ok(()),
+            |status, op| {
+                repair_ancestors
+                    && matches!(status, nfsstat4_NFS4ERR_SYMLINK | nfsstat4_NFS4ERR_NOTDIR)
+                    && matches!(
+                        op,
+                        nfs_opnum4_NFS4_OP_LOOKUP
+                            | nfs_opnum4_NFS4_OP_LOOKUPP
+                            | nfs_opnum4_NFS4_OP_REMOVE
+                    )
+            },
+            |_| Ok(()),
+        )
     }
 
     /// Batched path-based RENAMEs in one compound per chunk. Each pair is
     /// `[.. SAVEFH src-dir, .., RENAME]`; RENAME uses the saved fh as the
     /// source directory and the current fh as the destination directory.
-    pub fn renamev_path_compound(
+    pub fn renamev_path_compound(&mut self, pairs: &[PathRenamePair]) -> vfsi_core::VecResult<()> {
+        self.rename_path_results(pairs, false)
+            .map(|(results, _)| results)
+    }
+
+    pub(crate) fn rename_path_results(
         &mut self,
         pairs: &[PathRenamePair],
-    ) -> RpcResult<PathRenameOutcome> {
-        let n = pairs.len();
-        let mut renamed: Vec<Option<()>> = vec![None; n];
-        let mut failed: Option<(usize, u32)> = None;
-        let per_file = 8; // two dir resolutions + RENAME + margin
-        let reserve = 16;
-        let mut global = 0usize;
-        let mut max_items = usize::MAX;
-        while global < n {
-            let budget = self
-                .op_budget_for(b"renamev1", 1 + per_file)
-                .merged_limit(reserve, per_file);
-            let chunk_start = global;
-            let mut cursor = CfhCursor::default();
-            let mut map = ExecutionMap::new();
-            let mut c = Compound::new();
-            c.tag(b"renamev1");
-            let mut payload = 0usize;
-            while global < n && map.ranges.len() < max_items && map.next + per_file <= budget {
-                let pair = &pairs[global];
-                let est = 256;
-                if payload > 0
-                    && self.max_request_arg_bytes() > 0
-                    && payload + est > self.max_request_arg_bytes()
-                {
-                    break;
-                }
-                map.begin(global);
-                let (sname, snops) = match cursor.set_parent(&mut c, &pair.src) {
-                    Some(x) => x,
-                    None => {
-                        failed = Some((global, nfsstat4_NFS4ERR_INVAL));
-                        global = n;
-                        break;
-                    }
-                };
-                map.note_ops(snops);
-                let (dname, dnops) = match cursor.set_current_parent(&mut c, &pair.dst) {
-                    Some(x) => x,
-                    None => {
-                        failed = Some((global, nfsstat4_NFS4ERR_INVAL));
-                        global = n;
-                        break;
-                    }
-                };
-                map.note_ops(dnops);
-                c.rename(sname, dname);
-                map.note_ops(1);
-                map.end();
-                cursor.descend(); // RENAME moved the current fh
-                payload += est;
-                global += 1;
-                if map.next + per_file > budget && global < n {
-                    break;
-                }
-            }
-            if map.ranges.is_empty() {
-                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
-                break;
-            }
-            if failed.is_none()
-                && self.merged_paths_need_repack(b"renamev1", 1 + per_file, &c, map.ranges.len())?
-            {
-                max_items = map.ranges.len() - 1;
-                global = chunk_start;
-                continue;
-            }
-            max_items = usize::MAX;
-            let res =
-                self.call_compound_with_safety(&mut c, RequestSafety::NonIdempotentMutation)?;
-            if self.can_retry_merged_resource(b"renamev1", &res, budget, reserve, per_file) {
-                global = chunk_start;
-                continue;
-            }
-            let done = first_failed_range(&res, &map)?;
-            match done {
-                Some((caller, st)) => {
-                    failed = Some((caller, st));
-                    for (c, _, _) in &map.ranges {
-                        if *c < caller {
-                            renamed[*c] = Some(());
-                        }
-                    }
-                    break;
-                }
-                None => {
-                    for (c, _, _) in &map.ranges {
-                        renamed[*c] = Some(());
-                    }
-                }
-            }
-            if chunk_start == global {
-                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
-                break;
-            }
-        }
-        Ok(PathRenameOutcome { renamed, failed })
+        repair_ancestors: bool,
+    ) -> vfsi_core::VfResult<PathMutationRun<()>> {
+        self.path_mutation_results(
+            b"renamev1",
+            8,
+            pairs.len(),
+            |compound, cursor, index| {
+                let pair = &pairs[index];
+                // Validate BOTH names before either directory walk appends operations.
+                // A rejected destination must not leave orphaned source operations.
+                split_path_bytes(&pair.src)
+                    .map_err(|_| vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_INVAL))?;
+                split_path_bytes(&pair.dst)
+                    .map_err(|_| vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_INVAL))?;
+                let (source, source_ops) = cursor
+                    .set_parent(compound, &pair.src)
+                    .expect("validated source");
+                let (target, target_ops) = cursor
+                    .set_current_parent(compound, &pair.dst)
+                    .expect("validated target");
+                compound.rename(source, target);
+                Ok(source_ops + target_ops + 1)
+            },
+            |_, _, _| Ok(()),
+            |status, op| {
+                // RFC 8881 sections 15.1.2 and 18.26.3: these parent-type
+                // rejections cannot perform the rename. A server may detect a
+                // symlink parent in LOOKUP/LOOKUPP or at RENAME itself.
+                repair_ancestors
+                    && matches!(status, nfsstat4_NFS4ERR_SYMLINK | nfsstat4_NFS4ERR_NOTDIR)
+                    && matches!(
+                        op,
+                        nfs_opnum4_NFS4_OP_LOOKUP
+                            | nfs_opnum4_NFS4_OP_LOOKUPP
+                            | nfs_opnum4_NFS4_OP_RENAME
+                    )
+            },
+            |_| Ok(()),
+        )
     }
 
     fn close_many_slot(&mut self, ops: &[CloseOp], slot: OwnerSlot) -> RpcResult<()> {
@@ -4162,21 +4385,40 @@ impl NfsClient {
     /// Copy bytes entirely on an NFSv4.2 server. The source filehandle is
     /// saved and the destination is current as required by RFC 7862.
     pub fn copy(&mut self, op: &CopyOp) -> RpcResult<u64> {
-        Ok(self.copy_many(std::slice::from_ref(op))?[0])
+        collect_rpc_results(self.copy_many(std::slice::from_ref(op)), 1)
+            .map(|mut results| results.remove(0))
     }
 
     /// Issue multiple COPY operations in as few compounds as the negotiated
     /// operation limit permits.
-    pub fn copy_many(&mut self, ops: &[CopyOp]) -> RpcResult<Vec<u64>> {
-        self.batch_ops(
+    pub fn copy_many(&mut self, ops: &[CopyOp]) -> vfsi_core::VecResult<u64> {
+        use vfsi_core::OpError;
+        let mut prepared = Vec::with_capacity(ops.len());
+        let mut rejected = Vec::new();
+        for (index, op) in ops.iter().enumerate() {
+            if op.src_fh == op.dst_fh
+                || op.count != 0
+                    && (op.src_offset.checked_add(op.count).is_none()
+                        || op.dst_offset.checked_add(op.count).is_none())
+            {
+                rejected.push((
+                    index,
+                    OpError::not_attempted(vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_INVAL)),
+                ));
+            } else {
+                prepared.push((index, op));
+            }
+        }
+        let result = self.fixed_results::<4, _, _>(
             b"copyv",
-            4,
-            ops,
-            |c, op, _| {
-                c.putfh(&op.src_fh.as_nfs_fh());
-                c.savefh();
-                c.putfh(&op.dst_fh.as_nfs_fh());
-                c.copy(
+            &prepared,
+            usize::MAX,
+            |_| 0,
+            |compound, (_, op), _| {
+                compound.putfh(&op.src_fh.as_nfs_fh());
+                compound.savefh();
+                compound.putfh(&op.dst_fh.as_nfs_fh());
+                compound.copy(
                     &op.src_stateid,
                     &op.dst_stateid,
                     op.src_offset,
@@ -4184,8 +4426,31 @@ impl NfsClient {
                     op.count,
                 );
             },
-            |res, i| res.copy(4 + 4 * i).cr_response.wr_count,
-        )
+            |reply, local, input| {
+                validate_copy_result(prepared[input].1, reply.copy(4 + 4 * local))
+            },
+        );
+        if rejected.is_empty() {
+            return result;
+        }
+        let results = match result {
+            Ok(results) => results,
+            Err(cause) => prepared
+                .iter()
+                .map(|_| Err(OpError::not_attempted(cause.clone())))
+                .collect(),
+        };
+        let mut slots = (0..ops.len()).map(|_| None).collect::<Vec<_>>();
+        for (index, error) in rejected {
+            slots[index] = Some(Err(error));
+        }
+        for ((index, _), result) in prepared.into_iter().zip(results) {
+            slots[index] = Some(result);
+        }
+        Ok(slots
+            .into_iter()
+            .map(|slot| slot.expect("every COPY input assigned"))
+            .collect())
     }
 
     /// CLOSE the open file.
@@ -4196,6 +4461,18 @@ impl NfsClient {
     /// Like [`close`](Self::close) but using the path-op open owner.
     pub fn close_path(&mut self, fh: &NfsFh, stateid: &stateid4) -> RpcResult<()> {
         self.close_cleanup_slot(fh, stateid, OwnerSlot::Path)
+    }
+
+    /// Close a temporary shared-owner OPEN once; retain unconfirmed cleanup.
+    pub(crate) fn close_temporary_path(&mut self, fh: &NfsFh, stateid: &stateid4) -> RpcResult<()> {
+        let result = self.close_path(fh, stateid);
+        if result.is_err() {
+            self.deferred_path_closes.push(CloseOp {
+                fh: fh.clone(),
+                stateid: *stateid,
+            });
+        }
+        result
     }
 
     pub(crate) fn close_unregistered(&mut self, fh: &NfsFh, stateid: &stateid4) -> RpcResult<()> {
@@ -4252,7 +4529,7 @@ impl NfsClient {
         let mut c = Compound::new();
         c.tag(b"create");
         c.putfh(&dir.as_nfs_fh());
-        c.create(name.as_bytes(), ftype, linkdata.map(|s| s.as_bytes()));
+        c.create(name.as_bytes(), ftype, linkdata.map(|s| s.as_bytes()), None);
         c.getfh();
         let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
@@ -4450,15 +4727,13 @@ impl NfsClient {
         Ok((out, if ok.reply.eof != 0 { 0 } else { cookie }))
     }
 
-    /// For each `(parent, child_name)` pair, LOOKUP the child, GETFH its
-    /// handle, and READDIR its first page -- all in as few compounds as
-    /// possible (`[PUTFH parent, LOOKUP, GETFH, READDIR]` per child), each
-    /// READDIR requesting `attrs` per entry.
+    /// Acquire one anchored child identity and bounded first page per input.
+    /// Known successful compound prefixes are retained across sibling failures.
     pub fn readdir_children(
         &mut self,
         ops: &[(NfsFh, Vec<u8>)],
         attrs: &[u32],
-    ) -> RpcResult<Vec<ChildListing>> {
+    ) -> vfsi_core::VecResult<ChildListing> {
         self.readdir_children_bounded(ops, attrs, usize::MAX)
     }
 
@@ -4467,73 +4742,42 @@ impl NfsClient {
         ops: &[(NfsFh, Vec<u8>)],
         attrs: &[u32],
         max_page_bytes: usize,
-    ) -> RpcResult<Vec<ChildListing>> {
-        if ops.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut out = Vec::with_capacity(ops.len());
-        let zeroverf: verifier4 = [0; 8];
-        while out.len() < ops.len() {
-            let per_chunk = self
-                .op_budget_for(b"readdir_children", 5)
-                .batch_capacity(4)?;
-            let chunk = &ops[out.len()..(out.len() + per_chunk).min(ops.len())];
-            let (dircount, maxcount) = self.readdir_limits(chunk.len());
-            let maxcount = maxcount.min(max_page_bytes.max(4096).min(u32::MAX as usize) as u32);
-            let dircount = dircount.min(maxcount / 4).max(1);
-            let map = |op_index: usize| {
-                let local = op_index.saturating_sub(1) / 4;
-                chunk.len().saturating_sub(1).min(local)
-            };
-            let mut c = Compound::new();
-            c.tag(b"readdir_children");
-            for (pfh, name) in chunk {
-                c.putfh(&pfh.as_nfs_fh());
-                c.lookup(name);
-                c.getfh();
-                c.readdir(0, &zeroverf, dircount, maxcount, attrs);
-            }
-            let res = self.call_compound(&mut c).map_err(|e| {
-                let idx = map(e.op_index);
-                e.with_op_index(idx)
-            })?;
-            if chunk.len() > 1
-                && matches!(
-                    res.status(),
-                    nfsstat4_NFS4ERR_RESOURCE | nfsstat4_NFS4ERR_TOO_MANY_OPS
-                )
-                && self
-                    .op_budget_for(b"readdir_children", 5)
-                    .batch_capacity(4)?
-                    < chunk.len()
-            {
-                continue;
-            }
-            self.session.expect_all_ok(&res).map_err(|e| {
-                let idx = map(e.op_index);
-                e.with_op_index(idx)
-            })?;
-            for (i, _) in chunk.iter().enumerate() {
-                let fh = res.getfh(3 + 4 * i);
-                let (entries, cookie) = Self::collect_readdir(res.readdir(4 + 4 * i))?;
-                out.push(ChildListing {
-                    fh: NfsFh::from_nfs_fh(fh),
+    ) -> vfsi_core::VecResult<ChildListing> {
+        let response_bytes = self.read_compound_bytes();
+        self.fixed_results::<4, _, _>(
+            b"readdir_children",
+            ops,
+            usize::MAX,
+            |_| 0,
+            |compound, (parent, name), count| {
+                let (dircount, maxcount) =
+                    readdir_response_limits(response_bytes, count, max_page_bytes);
+                compound.putfh(&parent.as_nfs_fh());
+                compound.lookup(name);
+                compound.getfh();
+                compound.readdir(0, &[0; 8], dircount, maxcount, attrs);
+            },
+            |reply, local, _| {
+                let (entries, cookie) = Self::collect_readdir(reply.readdir(4 + 4 * local))
+                    .map_err(|cause| {
+                        vfsi_core::OpError::unknown(vfsi_core::error_from_rpc(cause, None), None)
+                    })?;
+                Ok(ChildListing {
+                    fh: NfsFh::from_nfs_fh(reply.getfh(3 + 4 * local)),
                     entries,
                     cookie,
-                });
-            }
-        }
-        Ok(out)
+                })
+            },
+        )
     }
 
-    /// For each `(fh, cookie)`, continue READDIR with the next page in as few
-    /// compounds as possible (`[PUTFH fh, READDIR(cookie)]` per dir), each
-    /// READDIR requesting `attrs` per entry.
+    /// Return one page per independent retained directory/cookie input.
+    /// A failed input does not discard already decoded pages or healthy siblings.
     pub fn readdir_pages(
         &mut self,
         ops: &[(NfsFh, u64)],
         attrs: &[u32],
-    ) -> RpcResult<Vec<(Vec<DirEntry>, u64)>> {
+    ) -> vfsi_core::VecResult<(Vec<DirEntry>, u64)> {
         self.readdir_pages_bounded(ops, attrs, usize::MAX)
     }
 
@@ -4543,51 +4787,25 @@ impl NfsClient {
         ops: &[(NfsFh, u64)],
         attrs: &[u32],
         max_page_bytes: usize,
-    ) -> RpcResult<Vec<(Vec<DirEntry>, u64)>> {
-        if ops.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut out = Vec::with_capacity(ops.len());
-        let zeroverf: verifier4 = [0; 8];
-        while out.len() < ops.len() {
-            let per_chunk = self.op_budget_for(b"readdir_pages", 3).batch_capacity(2)?;
-            let chunk = &ops[out.len()..(out.len() + per_chunk).min(ops.len())];
-            let (dircount, maxcount) = self.readdir_limits(chunk.len());
-            let maxcount = maxcount.min(max_page_bytes.max(4096).min(u32::MAX as usize) as u32);
-            let dircount = dircount.min(maxcount / 4).max(1);
-            let map = |op_index: usize| {
-                let local = op_index.saturating_sub(1) / 2;
-                chunk.len().saturating_sub(1).min(local)
-            };
-            let mut c = Compound::new();
-            c.tag(b"readdir_pages");
-            for (fh, cookie) in chunk {
-                c.putfh(&fh.as_nfs_fh());
-                c.readdir(*cookie, &zeroverf, dircount, maxcount, attrs);
-            }
-            let res = self.call_compound(&mut c).map_err(|e| {
-                let idx = map(e.op_index);
-                e.with_op_index(idx)
-            })?;
-            if chunk.len() > 1
-                && matches!(
-                    res.status(),
-                    nfsstat4_NFS4ERR_RESOURCE | nfsstat4_NFS4ERR_TOO_MANY_OPS
-                )
-                && self.op_budget_for(b"readdir_pages", 3).batch_capacity(2)? < chunk.len()
-            {
-                continue;
-            }
-            self.session.expect_all_ok(&res).map_err(|e| {
-                let idx = map(e.op_index);
-                e.with_op_index(idx)
-            })?;
-            for (i, _) in chunk.iter().enumerate() {
-                let (entries, cookie) = Self::collect_readdir(res.readdir(2 + 2 * i))?;
-                out.push((entries, cookie));
-            }
-        }
-        Ok(out)
+    ) -> vfsi_core::VecResult<(Vec<DirEntry>, u64)> {
+        let response_bytes = self.read_compound_bytes();
+        self.fixed_results::<2, _, _>(
+            b"readdir_pages",
+            ops,
+            usize::MAX,
+            |_| 0,
+            |compound, (fh, cookie), count| {
+                let (dircount, maxcount) =
+                    readdir_response_limits(response_bytes, count, max_page_bytes);
+                compound.putfh(&fh.as_nfs_fh());
+                compound.readdir(*cookie, &[0; 8], dircount, maxcount, attrs);
+            },
+            |reply, local, _| {
+                Self::collect_readdir(reply.readdir(2 + 2 * local)).map_err(|cause| {
+                    vfsi_core::OpError::unknown(vfsi_core::error_from_rpc(cause, None), None)
+                })
+            },
+        )
     }
 
     /// REMOVE `name` from directory `dir`.
@@ -4708,6 +4926,52 @@ fn make_open_how(create: OpenCreate) -> openflag4 {
 #[cfg(test)]
 #[allow(clippy::undocumented_unsafe_blocks, unsafe_op_in_unsafe_fn)]
 mod tests {
+
+    #[test]
+    fn mkdir_never_reports_success_without_requested_mode_acknowledgement() {
+        let mut set = nfsv41_sys::bitmap4 {
+            bitmap4_len: 0,
+            map: [0; 3],
+        };
+        assert!(super::validate_create_mode(None, &set).is_ok());
+        let error = super::validate_create_mode(Some(0o700), &set).unwrap_err();
+        assert_eq!(error.state(), vfsi_core::FailureState::Unknown);
+        set.bitmap4_len = 2;
+        set.map[1] = 1 << (nfsv41_sys::FATTR4_MODE % 32);
+        assert!(super::validate_create_mode(Some(0o700), &set).is_ok());
+    }
+    #[test]
+    fn write_completion_validation_keeps_short_counts_and_isolates_malformed_replies() {
+        use vfsi_core::FailureState;
+        let results = super::completion::decode_fixed::<2, _>(
+            5,
+            11,
+            0,
+            |_| 0,
+            |index| {
+                let (count, committed, requested) = [
+                    (4, stable_how4_FILE_SYNC4, 4),
+                    (5, stable_how4_FILE_SYNC4, 4),
+                    (2, stable_how4_DATA_SYNC4, 4),
+                    (4, stable_how4_FILE_SYNC4 + 1, 4),
+                    (0, stable_how4_UNSTABLE4, 4),
+                ][index];
+                NfsClient::validate_write_completion(count, committed, requested)
+            },
+        )
+        .unwrap();
+        assert_eq!(results[0], Ok((4, stable_how4_FILE_SYNC4)));
+        assert_eq!(results[2], Ok((2, stable_how4_DATA_SYNC4)));
+        assert_eq!(results[4], Ok((0, stable_how4_UNSTABLE4)));
+        for index in [1, 3] {
+            let error = results[index].as_ref().unwrap_err();
+            assert_eq!(error.state(), FailureState::Unknown);
+            assert!(error.cause().is_transport());
+            assert_eq!(error.cause().index(), None);
+            assert!(error.progress().is_none());
+        }
+    }
+
     #[test]
     fn cleanup_error_remapping_preserves_transport_errors_as_unattributed() {
         let transport = super::remap_cleanup_error(
@@ -5014,7 +5278,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_path_read_reply_closes_open_stateids_before_returning_error() {
+    fn oversized_path_read_reply_retains_both_temporary_cleanup_targets() {
         let opened = vec![
             (
                 super::NfsFh {
@@ -5036,17 +5300,10 @@ mod tests {
             ),
         ];
         let error = super::NfsClient::validate_read_length(6, 5).unwrap_err();
-        let mut closed = Vec::new();
-        let mut client = ();
-        let result: super::RpcResult<()> =
-            super::read_error_with_cleanup(&opened, false, &mut client, error, |_, ops| {
-                closed.extend(
-                    ops.iter()
-                        .map(|op| (op.fh.clone(), op.stateid.seqid, op.stateid.other)),
-                );
-            });
-
-        let error = result.unwrap_err();
+        let closed: Vec<_> = super::latest_path_open_closes(&opened)
+            .iter()
+            .map(|op| (op.fh.clone(), op.stateid.seqid, op.stateid.other))
+            .collect();
         assert!(error.is_transport());
         assert_eq!(
             closed,
@@ -5254,3 +5511,24 @@ mod tests {
 
 #[cfg(test)]
 mod sequence_tests;
+
+#[cfg(all(test, feature = "test-faults"))]
+mod readlink_results_tests;
+
+#[cfg(all(test, feature = "test-faults"))]
+mod link_results_tests;
+
+#[cfg(all(test, feature = "test-faults"))]
+mod setattr_results_tests;
+
+#[cfg(all(test, feature = "test-faults"))]
+mod rename_results_tests;
+
+#[cfg(all(test, feature = "test-faults"))]
+mod copy_results_tests;
+
+#[cfg(all(test, feature = "test-faults"))]
+mod remove_results_tests;
+
+#[cfg(all(test, feature = "test-faults"))]
+mod readdir_results_tests;

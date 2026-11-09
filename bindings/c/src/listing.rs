@@ -457,7 +457,10 @@ pub unsafe extern "C" fn vfsi_walk(
                 masks: fields,
                 ..VfAttrs::default()
             };
-            lock_or_io(&fs.fs)?.vgetattrs_nofollow_impl(std::slice::from_mut(&mut root_attrs))?;
+            vfsi_sync::internal::collect_vec_result(
+                lock_or_io(&fs.fs)?.vgetattrs_nofollow_impl(std::slice::from_mut(&mut root_attrs)),
+                1,
+            )?;
             if !root_attrs.returned.contains(fields) {
                 return Err(VfError::errno(0, libc::ENOTSUP as u32));
             }

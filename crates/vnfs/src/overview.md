@@ -26,8 +26,8 @@ let results = fs.vread([
     ReadOp::whole("/file-1"),
     ReadOp::whole("/file-2"),
 ], Default::default())?;
-assert_eq!(results[0].data(), Some(b"hello".as_slice()));
-assert_eq!(results[1].data(), Some(b"world".as_slice()));
+assert_eq!(results[0].as_ref().unwrap().data(), Some(b"hello".as_slice()));
+assert_eq!(results[1].as_ref().unwrap().data(), Some(b"world".as_slice()));
 # Ok(())
 # }
 # #[cfg(not(feature = "nfs"))]

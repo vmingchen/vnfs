@@ -247,8 +247,16 @@ impl NfsVecFs {
                     })
             })
             .collect::<VfResult<_>>()?;
-        let nfs = Self::connect_client(&self.connection)?;
-        let mut replacement = Self::from_client(nfs, self.connection.clone());
+        let mut connection = self.connection.clone();
+        if self.nfs.needs_fresh_identity() {
+            // Reusing an explicit stable owner would keep an unaddressable
+            // OPEN alive. Leave that identity to teardown/lease expiration;
+            // known descriptors reopen by exact FH under a new identity.
+            connection.client_owner = None;
+            connection.client_verifier = make_verifier();
+        }
+        let nfs = Self::connect_client(&connection)?;
+        let mut replacement = Self::from_client(nfs, connection);
         replacement.nfs.prepare_reconnect(&self.nfs);
         replacement.read_only = self.read_only;
         #[cfg(target_os = "linux")]
@@ -286,10 +294,12 @@ impl NfsVecFs {
                 .iter()
                 .map(|(_, recipe, _, fh)| (fh.clone(), Self::flags_to_access(recipe.flags)))
                 .collect();
-            let outcome = replacement
-                .nfs
-                .openv_handle_compound(&ops)
-                .map_err(vfsi_core::error_from_rpc_indexed)?;
+            let outcome = replacement.nfs.openv_handle_compound(&ops);
+            // A failed replacement may already have acquired unaddressable
+            // state under our stable client ID. Carry that quarantine back
+            // before retrying; dropping the replacement must not forget it.
+            self.nfs.inherit_open_quarantine(&replacement.nfs);
+            let outcome = outcome.map_err(vfsi_core::error_from_rpc_indexed)?;
             for ((old_fd, recipe, offset, _), opened) in snapshots.iter().zip(outcome.opened) {
                 if let Some((fh, stateid)) = opened {
                     replacement.open_files.insert(
@@ -346,6 +356,8 @@ impl NfsVecFs {
     /// Descriptor numbers, independent OPEN owners, and offsets are preserved.
     /// Saved names are diagnostic; recovery never creates/truncates or follows
     /// a replacement pathname. Stale/expired object references fail closed.
+    /// An identity with an unaddressable OPEN is retired, even when a stable
+    /// client owner was configured, so recovery cannot renew leaked OPEN state.
     pub fn reconnect(&mut self) -> VfResult<()> {
         #[cfg(target_os = "linux")]
         if let Some(mount) = &self.mount_source {
@@ -393,6 +405,69 @@ impl NfsVecFs {
         Err(error)
     }
 
+    /// Recover only unsuccessful independent read inputs; retain established
+    /// successes and never turn post-dispatch failures into an outer rejection.
+    pub(super) fn vector_read_with_recovery<T>(
+        &mut self,
+        should_retry: impl Fn(usize, &vfsi_core::OpError) -> bool,
+        mut operation: impl FnMut(&mut Self, Option<&[usize]>) -> vfsi_core::VecResult<T>,
+    ) -> vfsi_core::VecResult<T> {
+        let mut retained: Option<Vec<vfsi_core::OpResult<T>>> = None;
+        let result = self.read_with_recovery(|client| {
+            if let Some(previous) = retained.as_mut() {
+                let indices: Vec<_> = previous
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, result)| match result {
+                        Err(error)
+                            if Self::needs_recovery(error.cause())
+                                && should_retry(index, error) =>
+                        {
+                            Some(index)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let retry = operation(client, Some(&indices))?;
+                if retry.len() == indices.len() {
+                    for (index, result) in indices.into_iter().zip(retry) {
+                        previous[index] = result;
+                    }
+                } else {
+                    for index in indices {
+                        previous[index] = Err(vfsi_core::OpError::unknown(
+                            VfError::invalid_reply(None, "invalid recovery outcome count"),
+                            None,
+                        ));
+                    }
+                }
+                return Ok(retained.take().expect("retained recovery outcomes"));
+            }
+            let outcomes = operation(client, None)?;
+            let recover = outcomes
+                .iter()
+                .enumerate()
+                .find_map(|(index, result)| match result {
+                    Err(error)
+                        if Self::needs_recovery(error.cause()) && should_retry(index, error) =>
+                    {
+                        Some(error.cause().clone())
+                    }
+                    _ => None,
+                });
+            if let Some(error) = recover {
+                retained = Some(outcomes);
+                Err(error)
+            } else {
+                Ok(outcomes)
+            }
+        });
+        match result {
+            Ok(outcomes) => Ok(outcomes),
+            Err(error) => retained.map(Ok).unwrap_or(Err(error)),
+        }
+    }
+
     pub(super) fn read_with_recovery<T>(
         &mut self,
         mut operation: impl FnMut(&mut Self) -> VfResult<T>,
@@ -411,5 +486,49 @@ impl NfsVecFs {
             }
             result => result,
         }
+    }
+}
+
+#[cfg(test)]
+mod vector_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn selective_metadata_recovery_retains_non_prefix_successes() {
+        let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+            assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+            return;
+        };
+        let minor = std::env::var("VFSI_NFS_MINOR")
+            .unwrap_or_else(|_| "1".into())
+            .parse()
+            .unwrap();
+        let mut fs = NfsVecFs::connect_minor(&server, minor).unwrap();
+        let mut requests = Vec::new();
+        let outcomes = fs
+            .vector_read_with_recovery(
+                |_, _| true,
+                |_, indices| {
+                    requests.push(indices.map(<[usize]>::to_vec));
+                    match indices {
+                        None => {
+                            let cause = VfError::transport(None, "injected metadata reply loss");
+                            Ok(vec![
+                                Ok(7),
+                                Err(vfsi_core::OpError::unknown(cause.clone(), None)),
+                                Ok(9),
+                                Err(vfsi_core::OpError::not_attempted(cause)),
+                            ])
+                        }
+                        Some(indices) => {
+                            assert_eq!(indices, [1, 3]);
+                            Ok(vec![Ok(8), Ok(10)])
+                        }
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(requests, [None, Some(vec![1, 3])]);
+        assert_eq!(outcomes, [Ok(7), Ok(8), Ok(9), Ok(10)]);
     }
 }

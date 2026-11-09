@@ -254,7 +254,10 @@ pub unsafe extern "C" fn vfsi_preadv(
                 fail_batch!(item_results, vfsi_result::from_error(error), false)
             }
         };
-        let results = match backend.vread_impl(&reads) {
+        let results = match backend.vread_impl(&reads).and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        }) {
             Ok(results) => results,
             Err(error) => {
                 fail_batch!(item_results, vfsi_result::from_error(error), true)
@@ -389,7 +392,10 @@ pub unsafe extern "C" fn vfsi_pwritev(
                 fail_batch!(item_results, vfsi_result::from_error(error), false)
             }
         };
-        let results = match backend.vwrite_impl(&writes) {
+        let results = match backend.vwrite_impl(&writes).and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        }) {
             Ok(results) => results,
             Err(error) => {
                 fail_batch!(item_results, vfsi_result::from_error(error), true)
@@ -470,7 +476,12 @@ pub unsafe extern "C" fn vfsi_read_streamv(
             &files,
             |_| chunk_size,
             memory_limit,
-            |reads| lock_or_io(&fs.fs)?.vread_impl(reads),
+            |reads| {
+                lock_or_io(&fs.fs)?.vread_impl(reads).and_then(|outcomes| {
+                    let count = outcomes.len();
+                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                })
+            },
             |index, result| {
                 completed += usize::from(result.eof);
                 // SAFETY: callback borrows this owned result only during the
@@ -567,10 +578,14 @@ pub unsafe extern "C" fn vfsi_read_paths_with_limit(
                 .iter()
                 .map(|p| FileOperand::from_os_path(p))
                 .collect();
-            let datas = lock_or_io(&fs.fs)?.vread_all_with_options_impl(
-                &files,
-                vfsi_sync::ReadAllOptions::new().with_max_total_bytes(max_bytes),
-            )?;
+            let datas = lock_or_io(&fs.fs)?
+                .vread_all_with_options_impl(
+                    &files,
+                    vfsi_sync::ReadAllOptions::new().with_max_total_bytes(max_bytes),
+                )
+                .and_then(|outcomes| {
+                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), files.len())
+                })?;
             let c_cb = cb;
             for (i, data) in datas.iter().enumerate() {
                 let Some(path) = cstr_from_os(kernel_paths[i].as_os_str().as_bytes()) else {

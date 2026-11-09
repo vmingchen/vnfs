@@ -1,9 +1,10 @@
 use super::*;
+use vfsi_core::{FailureState, IoProgress, OpError, OpResult, VecResult};
 
 pub fn vread_all_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     files: &[FileOperand],
-) -> VfResult<Vec<Vec<u8>>> {
+) -> VecResult<Vec<u8>> {
     backend.vread_all_with_options_impl(files, ReadAllOptions::default())
 }
 
@@ -11,108 +12,196 @@ pub fn vread_all_with_options_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     files: &[FileOperand],
     options: ReadAllOptions,
-) -> VfResult<Vec<Vec<u8>>> {
-    let mut collector = ReadCollector::new(files.len(), options);
-    let stream_budget = options
+) -> VecResult<Vec<u8>> {
+    let memory = options
         .max_total_bytes()
         .clamp(1, DEFAULT_READ_ALLV_MAX_TOTAL_BYTES);
-    let chunk_size = stream_budget.min(1024 * 1024);
-    backend.vstream_impl(
+    read_all_vectors(
+        backend,
         files,
-        chunk_size,
-        stream_budget,
-        &mut |index, _, data, _| collector.push(index, data),
-    )?;
-    collector.finish()
+        options,
+        |pending, remaining| {
+            let chunk = memory.min(1024 * 1024);
+            let count = pending.min((memory / chunk).max(1)).min(remaining.max(1));
+            (count, chunk.min((remaining / count).max(1)))
+        },
+        false,
+    )
 }
 
-/// Collect retained local read cohorts without copying full small first chunks.
-/// Unlike the ordinary default above, this explicitly uses the shared vector
-/// driver. Backends with specialized stream overrides keep the ordinary default.
+/// Collect retained descriptor cohorts, adopting small full first chunks without
+/// changing the established allocation policy for large-file reads.
 pub fn vread_all_owned_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     files: &[FileOperand],
     options: ReadAllOptions,
     batch_size: std::num::NonZeroUsize,
-) -> VfResult<Vec<Vec<u8>>> {
-    let mut collector = ReadCollector::new(files.len(), options);
-    let budget = options
+) -> VecResult<Vec<u8>> {
+    let memory = options
         .max_total_bytes()
         .clamp(1, DEFAULT_READ_ALLV_MAX_TOTAL_BYTES);
-    stream_read_chunks(
+    read_all_vectors(
+        backend,
         files,
-        |pending| {
-            budget
+        options,
+        |pending, remaining| {
+            let chunk = memory
                 .min(1024 * 1024)
-                .min((budget / pending.clamp(1, batch_size.get())).max(4096))
+                .min((memory / pending.clamp(1, batch_size.get())).max(4096));
+            let count = pending.min((memory / chunk).max(1)).min(remaining.max(1));
+            (count, chunk.min((remaining / count).max(1)))
         },
-        budget,
-        |reads| backend.vread_impl(reads),
-        |index, result| {
-            let data = result.data;
-            if !collector.charge(index, data.len()) {
-                return false;
+        true,
+    )
+}
+
+/// Shared whole-file accumulation. The backend supplies its existing cohort and
+/// chunk policy; each logical file stops only on its own EOF or failure.
+pub fn read_all_vectors<F: VectorBackend + ?Sized>(
+    backend: &mut F,
+    files: &[FileOperand],
+    options: ReadAllOptions,
+    plan: impl Fn(usize, usize) -> (usize, usize),
+    adopt_small: bool,
+) -> VecResult<Vec<u8>> {
+    use std::collections::VecDeque;
+    let mut pending: VecDeque<_> = (0..files.len()).collect();
+    let mut data: Vec<Vec<u8>> = (0..files.len()).map(|_| Vec::new()).collect();
+    let mut output: Vec<Option<OpResult<Vec<u8>>>> = (0..files.len()).map(|_| None).collect();
+    let mut total = 0usize;
+    let mut indices = Vec::new();
+    let mut reads = Vec::new();
+    while !pending.is_empty() {
+        let remaining = options.max_total_bytes() - total;
+        let (count, length) = plan(pending.len(), remaining);
+        // Callers provide a bounded internal policy, never user projection code.
+        assert!(count > 0 && count <= pending.len() && length > 0);
+        indices.clear();
+        reads.clear();
+        for _ in 0..count {
+            let index = pending.pop_front().expect("planned pending file");
+            reads.push(ReadOp::at(
+                files[index].clone(),
+                data[index].len() as u64,
+                length,
+            ));
+            indices.push(index);
+        }
+        let outcomes = match backend.vread_impl(&reads) {
+            Ok(mut outcomes) if outcomes.len() <= reads.len() => {
+                outcomes.resize_with(reads.len(), || {
+                    Err(OpError::unknown(
+                        VfError::invalid_reply(None, "missing whole-file read outcome"),
+                        None,
+                    ))
+                });
+                outcomes
             }
-            let output = &mut collector.out[index];
-            // Keep partial replies right-sized. Preserve the large-chunk
-            // allocation/copy layout too: adopting 1 MiB first chunks regressed
-            // large warm/cold reads in matched benchmarks. Small full chunks
-            // avoid a copy without changing that proven large-file path.
-            if output.is_empty() && data.len() <= 64 * 1024 && data.capacity() == data.len() {
-                *output = data;
+            Ok(_) => reads
+                .iter()
+                .map(|_| {
+                    Err(OpError::unknown(
+                        VfError::invalid_reply(None, "too many whole-file read outcomes"),
+                        None,
+                    ))
+                })
+                .collect(),
+            Err(cause) => reads
+                .iter()
+                .map(|_| Err(OpError::not_attempted(cause.clone())))
+                .collect(),
+        };
+        for ((&index, request), outcome) in indices.iter().zip(&reads).zip(outcomes) {
+            let outcome = outcome.and_then(|read| {
+                validate_read_results(
+                    "read_files",
+                    std::slice::from_ref(request),
+                    std::slice::from_ref(&read),
+                )
+                .map_err(|cause| OpError::unknown(cause, None))?;
+                Ok(read)
+            });
+            let (mut chunk, eof, failure) = match outcome {
+                Ok(read) => (read.data, read.eof, None),
+                Err(error) => {
+                    let (cause, state, progress) = error.into_parts();
+                    match progress {
+                        None => (Vec::new(), false, Some((cause, state))),
+                        Some(IoProgress::Read(prefix))
+                            if prefix.data().is_some()
+                                && prefix.offset() == data[index].len() as u64
+                                && prefix.bytes_read() <= length
+                                && state != FailureState::NotAttempted =>
+                        {
+                            let eof = prefix.eof();
+                            (
+                                prefix.into_data().expect("validated owned prefix"),
+                                eof,
+                                Some((cause, state)),
+                            )
+                        }
+                        _ => (
+                            Vec::new(),
+                            false,
+                            Some((
+                                VfError::invalid_reply(None, "invalid whole-file read prefix"),
+                                FailureState::Unknown,
+                            )),
+                        ),
+                    }
+                }
+            };
+            let available = options.max_total_bytes() - total;
+            let exceeded = chunk.len() > available;
+            if exceeded {
+                chunk.truncate(available);
+            }
+            total += chunk.len();
+            let bytes = &mut data[index];
+            // Preserve the measured small-file adoption and large-file layout.
+            if adopt_small
+                && bytes.is_empty()
+                && chunk.len() <= 64 * 1024
+                && chunk.capacity() == chunk.len()
+            {
+                *bytes = chunk;
             } else {
-                output.extend_from_slice(&data);
+                bytes.extend_from_slice(&chunk);
             }
-            true
-        },
-    )?;
-    collector.finish()
-}
-
-struct ReadCollector {
-    out: Vec<Vec<u8>>,
-    total: usize,
-    limit: usize,
-    limit_error: Option<usize>,
-}
-
-impl ReadCollector {
-    fn new(files: usize, options: ReadAllOptions) -> Self {
-        Self {
-            out: (0..files).map(|_| Vec::new()).collect(),
-            total: 0,
-            limit: options.max_total_bytes(),
-            limit_error: None,
-        }
-    }
-
-    fn charge(&mut self, index: usize, bytes: usize) -> bool {
-        match self.total.checked_add(bytes) {
-            Some(total) if total <= self.limit => {
-                self.total = total;
-                true
-            }
-            _ => {
-                self.limit_error = Some(index);
-                false
+            let failure = failure.or_else(|| {
+                exceeded.then(|| {
+                    (
+                        VfError::errno(None, libc::EFBIG as u32),
+                        FailureState::Failed,
+                    )
+                })
+            });
+            if let Some((cause, state)) = failure {
+                let progress = (!bytes.is_empty()).then(|| {
+                    IoProgress::Read(vfsi_core::api::ReadResult::owned(
+                        0,
+                        std::mem::take(bytes),
+                        eof && !exceeded,
+                    ))
+                });
+                output[index] = Some(Err(match state {
+                    FailureState::Unknown => OpError::unknown(cause, progress),
+                    FailureState::NotAttempted if progress.is_none() => {
+                        OpError::not_attempted(cause)
+                    }
+                    _ => OpError::failed(cause, progress),
+                }));
+            } else if eof {
+                output[index] = Some(Ok(std::mem::take(bytes)));
+            } else {
+                pending.push_back(index);
             }
         }
     }
-
-    fn push(&mut self, index: usize, data: &[u8]) -> bool {
-        if !self.charge(index, data.len()) {
-            return false;
-        }
-        self.out[index].extend_from_slice(data);
-        true
-    }
-
-    fn finish(self) -> VfResult<Vec<Vec<u8>>> {
-        match self.limit_error {
-            Some(index) => Err(VfError::errno(index, libc::EFBIG as u32)),
-            None => Ok(self.out),
-        }
-    }
+    Ok(output
+        .into_iter()
+        .map(|slot| slot.expect("every whole-file outcome assigned"))
+        .collect())
 }
 
 pub fn vstream_impl_default<F: VectorBackend + ?Sized>(
@@ -126,7 +215,12 @@ pub fn vstream_impl_default<F: VectorBackend + ?Sized>(
         files,
         chunk_size,
         memory_limit,
-        |reads| backend.vread_impl(reads),
+        |reads| {
+            backend.vread_impl(reads).and_then(|outcomes| {
+                let count = outcomes.len();
+                crate::internal::collect_vec_result(Ok(outcomes), count)
+            })
+        },
         |index, result| cb(index, result.offset, &result.data, result.eof),
     )
 }
@@ -201,6 +295,10 @@ pub fn native_read_file_impl_default<F: VectorBackend + ?Sized>(
             std::slice::from_ref(file),
             ReadAllOptions::new().with_max_total_bytes(max_bytes),
         )
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            crate::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .and_then(|mut results| {
             if results.len() != 1 {
                 return Err(VfError::invalid_reply(

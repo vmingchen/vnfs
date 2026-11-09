@@ -265,8 +265,10 @@ unsafe fn cursor_snapshot<const IDS: bool>(
                 let probe = budget.probe();
                 let page_size = probe.clamp(1, 256);
                 let states = wave.into_iter().map(|(_, state, _)| state).collect();
-                let pages =
-                    backend.vlistdir_pages_impl(&refs, fields, states, page_size, probe, follow)?;
+                let pages = vfsi_sync::internal::collect_vec_result(
+                    backend.vlistdir_pages_impl(&refs, fields, states, page_size, probe, follow),
+                    refs.len(),
+                )?;
                 if pages.len() != indices.len() {
                     return Err(VfError::invalid_reply(
                         None,

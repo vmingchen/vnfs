@@ -44,9 +44,15 @@ pub fn copy_new_files_batched<F: VectorBackend + ?Sized>(
                 .zip(sizes)
                 .map(|(file, size)| SetAttrsOp::new(Target::File(file)).len(size))
                 .collect();
-            backend.vsetattrs_impl(&updates)?;
+            vfsi_core::internal::collect_vec_result(
+                backend.vsetattrs_impl(&updates),
+                updates.len(),
+            )?;
             if let Some(durability) = durability {
-                backend.vfsync_impl(&destinations, durability)?;
+                crate::internal::collect_vec_result(
+                    backend.vfsync_impl(&destinations, durability),
+                    destinations.len(),
+                )?;
             }
             Ok(())
         })();
@@ -99,7 +105,13 @@ fn copy_handles<F: VectorBackend + ?Sized>(
                 Ok(ReadOp::at(sources[i].clone(), offset, count))
             })
             .collect::<VfResult<_>>()?;
-        let data = backend.vread_impl(&reads).map_err(|e| remap(e, &active))?;
+        let data = backend
+            .vread_impl(&reads)
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                crate::internal::collect_vec_result(Ok(outcomes), count)
+            })
+            .map_err(|e| remap(e, &active))?;
         validate_read_results("copy experiment", &reads, &data).map_err(|e| remap(e, &active))?;
         let mut pending: Vec<_> = data
             .iter()
@@ -129,6 +141,10 @@ fn copy_handles<F: VectorBackend + ?Sized>(
                 .collect::<VfResult<_>>()?;
             let written = backend
                 .vwrite_impl(&writes)
+                .and_then(|outcomes| {
+                    let count = outcomes.len();
+                    crate::internal::collect_vec_result(Ok(outcomes), count)
+                })
                 .map_err(|e| remap(e, &owners))?;
             validate_write_results("copy experiment", &writes, &written)
                 .map_err(|e| remap(e, &owners))?;
@@ -209,6 +225,16 @@ mod tests {
         fn open_impl(&mut self, _: &OpenOp) -> VfResult<FileOperand> {
             Err(VfError::unsupported(0))
         }
+        fn vclose_impl(&mut self, files: &[vfsi_core::FileOperand]) -> vfsi_core::VecResult<()> {
+            Ok(files
+                .iter()
+                .map(|file| {
+                    self.close_impl(file)
+                        .map_err(|error| vfsi_core::OpError::unknown(error, None))
+                })
+                .collect())
+        }
+
         fn close_impl(&mut self, _: &FileOperand) -> VfResult<()> {
             Err(VfError::unsupported(0))
         }
@@ -231,46 +257,111 @@ mod tests {
         fn set_attributes_impl(&mut self, _: &SetAttrsOp<Target<'_, FileOperand>>) -> VfRes {
             Err(VfError::unsupported(0))
         }
+        fn vfsync_impl(
+            &mut self,
+            files: &[FileOperand],
+            _mode: crate::api::SyncMode,
+        ) -> crate::VecResult<()> {
+            Ok(files
+                .iter()
+                .map(|file| {
+                    self.sync_data(file)
+                        .map_err(|cause| crate::OpError::unknown(cause, None))
+                })
+                .collect())
+        }
         fn sync_data(&mut self, _: &FileOperand) -> VfResult<()> {
             Ok(())
         }
     }
     impl VectorBackend for Memory {
-        fn vread_impl(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
-            assert!(reads.iter().map(|r| r.length).sum::<usize>() <= BYTES);
-            self.read_widths.push(reads.len());
-            Ok(reads
+        fn vopen_raw_impl(
+            &mut self,
+            paths: &[&std::path::Path],
+            flags: &[i32],
+            modes: &[u32],
+        ) -> crate::VecResult<crate::FileOperand> {
+            if paths.len() != flags.len() || paths.len() != modes.len() {
+                return Err(crate::VfError::from_kind(
+                    None,
+                    std::io::ErrorKind::InvalidInput,
+                ));
+            }
+            Ok(paths
                 .iter()
-                .map(|r| {
-                    let VfOffset::At(offset) = r.offset else {
-                        panic!("positional read")
-                    };
-                    let source = &self.sources[r.file.fd().unwrap() as usize];
-                    let start = (offset as usize).min(source.len());
-                    let end = source.len().min(start + r.length.min(self.read_limit));
-                    ReadResult {
-                        file: if self.malformed_read {
-                            FileOperand::from_fd(999)
+                .zip(flags)
+                .zip(modes)
+                .map(|((path, flags), mode)| {
+                    self.open_raw_impl(path, *flags, *mode).map_err(|cause| {
+                        if cause.is_transport() {
+                            crate::OpError::unknown(cause, None)
                         } else {
-                            r.file.clone()
-                        },
-                        offset,
-                        data: source[start..end].to_vec(),
-                        eof: end == source.len(),
-                    }
+                            crate::OpError::failed(cause, None)
+                        }
+                    })
                 })
                 .collect())
+        }
+
+        fn vread_impl(&mut self, reads: &[ReadOp]) -> crate::VecResult<ReadResult> {
+            let result: VfResult<Vec<ReadResult>> = {
+                assert!(reads.iter().map(|r| r.length).sum::<usize>() <= BYTES);
+                self.read_widths.push(reads.len());
+                Ok(reads
+                    .iter()
+                    .map(|r| {
+                        let VfOffset::At(offset) = r.offset else {
+                            panic!("positional read")
+                        };
+                        let source = &self.sources[r.file.fd().unwrap() as usize];
+                        let start = (offset as usize).min(source.len());
+                        let end = source.len().min(start + r.length.min(self.read_limit));
+                        ReadResult {
+                            file: if self.malformed_read {
+                                FileOperand::from_fd(999)
+                            } else {
+                                r.file.clone()
+                            },
+                            offset,
+                            data: source[start..end].to_vec(),
+                            eof: end == source.len(),
+                        }
+                    })
+                    .collect())
+            };
+            result.map(|results| results.into_iter().map(Ok).collect())
         }
         fn vwrite_impl(
             &mut self,
             writes: &[WriteOp<&FileOperand, &[u8]>],
-        ) -> VfResult<Vec<WriteResult>> {
+        ) -> crate::VecResult<WriteResult> {
             self.write_calls += 1;
             if self.write_failure {
                 // Simulate an acknowledged-unknown mutation before a lost reply.
                 self.destinations[(writes[0].file().fd().unwrap() - 10) as usize]
                     .push(writes[0].data()[0]);
-                return Err(VfError::transport(Some(1), "lost copy write reply"));
+                return Ok(writes
+                    .iter()
+                    .enumerate()
+                    .map(|(index, write)| {
+                        if index == 0 {
+                            let VfOffset::At(offset) = write.offset() else {
+                                panic!("positional write")
+                            };
+                            Ok(WriteResult {
+                                file: (*write.file()).clone(),
+                                offset,
+                                bytes_written: 1,
+                                stable: true,
+                            })
+                        } else {
+                            Err(crate::OpError::unknown(
+                                VfError::transport(None, "lost copy write reply"),
+                                None,
+                            ))
+                        }
+                    })
+                    .collect());
             }
             Ok(writes
                 .iter()
@@ -291,6 +382,7 @@ mod tests {
                         stable: true,
                     }
                 })
+                .map(Ok)
                 .collect())
         }
     }

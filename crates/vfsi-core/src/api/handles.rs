@@ -23,8 +23,9 @@ pub trait FileHandle {
     fn try_close(&mut self) -> Result<()>;
     /// Local close ownership only, not proof of remote liveness after failure.
     fn is_closed(&self) -> bool;
-    /// Consuming close: on failure the handle is lost and Drop retries cleanup
-    /// best-effort on a later operation or cleanup drain. Prefer `try_close` when
+    /// Consuming close: on failure the handle is lost and Drop queues cleanup
+    /// best-effort. The backend retains uncertain ownership without assuming
+    /// that another CLOSE submission is safe. Prefer `try_close` when
     /// cleanup failures need reconciliation.
     fn close(self) -> Result<()>
     where

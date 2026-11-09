@@ -21,7 +21,7 @@ pub(super) fn listdir<F: Vfsi + ?Sized>(
     let mut stopped = false;
     let mut callback_error = None;
     let completions = fs
-        .vlistdirs(&[root], options, |index, page| {
+        .listdirs_all(&[root], options, |index, page| {
             if index != 0 {
                 return Err(Error::invalid_reply(None, "invalid listdir page index"));
             }

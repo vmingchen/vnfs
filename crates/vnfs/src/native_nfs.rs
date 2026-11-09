@@ -394,7 +394,7 @@ mod mount_tests {
         ])
         .unwrap();
         assert_eq!(
-            fs.vread(
+            fs.read_batch(
                 ["/file-1", "/file-2"]
                     .iter()
                     .map(crate::ReadOp::whole)
@@ -438,7 +438,7 @@ mod mount_tests {
             assert_eq!(result.unwrap_err().raw_code(), libc::EROFS as u32);
         }
         assert_eq!(
-            fs.vread(
+            fs.read_batch(
                 ["/marker"]
                     .iter()
                     .map(crate::ReadOp::whole)

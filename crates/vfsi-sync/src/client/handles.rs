@@ -142,11 +142,14 @@ impl<F: HandleBackend> OpenFile<F> {
         let Some(file) = self.file.as_ref() else {
             return Ok(());
         };
-        self.inner
-            .lock()
-            .map_err(|_| poisoned())?
-            .close_impl(file)
-            .map_err(|error| error.with_context("close", &self.path))?;
+        vfsi_core::internal::collect_vec_result(
+            self.inner
+                .lock()
+                .map_err(|_| poisoned())?
+                .vclose_impl(std::slice::from_ref(file)),
+            1,
+        )
+        .map_err(|error| error.with_context("close", &self.path))?;
         self.file = None;
         Ok(())
     }

@@ -1,10 +1,6 @@
 #![cfg(all(feature = "posix", unix))]
 
-use std::{
-    cell::RefCell,
-    ops::ControlFlow,
-    path::{Path, PathBuf},
-};
+use std::{cell::RefCell, ops::ControlFlow, path::Path};
 use vnfs::{directory::*, error::*, files::*, helpers::*, posix::*};
 
 #[derive(Default)]
@@ -27,28 +23,32 @@ impl Vfsi for Counted {
     fn limits(&self) -> ResourceLimits {
         self.fs.limits()
     }
-    fn vstatfs<P: AsTarget<Self::File>>(&self, p: &[P]) -> Result<Vec<FilesystemStats>> {
+    fn vstatfs<P: AsTarget<Self::File>>(&self, p: &[P]) -> vfsi_core::VecResult<FilesystemStats> {
         self.fs.vstatfs(p)
     }
-    fn vgetattrs<P: AsTarget<Self::File>>(&self, p: &[P], o: AttrsOptions) -> Result<Vec<Attrs>> {
+    fn vgetattrs<P: AsTarget<Self::File>>(
+        &self,
+        p: &[P],
+        o: AttrsOptions,
+    ) -> vfsi_core::VecResult<Attrs> {
         self.fs.vgetattrs(p, o)
     }
-    fn vsetattrs<P: AsTarget<Self::File>>(&self, p: &[SetAttrsOp<P>]) -> Result<()> {
+    fn vsetattrs<P: AsTarget<Self::File>>(&self, p: &[SetAttrsOp<P>]) -> vfsi_core::VecResult<()> {
         self.fs.vsetattrs(p)
     }
-    fn vfsync(&self, p: &[&Self::File], o: SyncMode) -> Result<()> {
+    fn vfsync(&self, p: &[&Self::File], o: SyncMode) -> vnfs::VecResult<()> {
         self.fs.vfsync(p, o)
     }
-    fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, p: &[(P, Q)]) -> Result<()> {
+    fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, p: &[(P, Q)]) -> vfsi_core::VecResult<()> {
         self.fs.vsymlink(p)
     }
-    fn vreadlink<P: AsRef<Path>>(&self, p: &[P]) -> Result<Vec<PathBuf>> {
+    fn vreadlink<P: AsRef<Path>>(&self, p: &[P]) -> vfsi_core::VecResult<std::path::PathBuf> {
         self.fs.vreadlink(p)
     }
-    fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, p: &[(P, Q)]) -> Result<()> {
+    fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, p: &[(P, Q)]) -> vfsi_core::VecResult<()> {
         self.fs.vhardlink(p)
     }
-    fn vopen(&self, p: &[OpenOp]) -> Result<Vec<Self::File>> {
+    fn vopen(&self, p: &[OpenOp]) -> vnfs::VecResult<Self::File> {
         self.calls.borrow_mut().opens.push(p.len());
         self.fs.vopen(p)
     }
@@ -56,7 +56,7 @@ impl Vfsi for Counted {
         &self,
         p: impl IntoIterator<Item = ReadOp<'a, Self::File>>,
         o: ReadOptions,
-    ) -> Result<Vec<ReadResult>> {
+    ) -> vnfs::VecResult<ReadResult> {
         let p: Vec<_> = p.into_iter().collect();
         self.calls.borrow_mut().reads.push(p.len());
         self.fs.vread(p, o)
@@ -65,24 +65,37 @@ impl Vfsi for Counted {
         &self,
         p: &[WriteOp<'a, Self::File>],
         o: WriteOptions,
-    ) -> Result<Vec<WriteResult>> {
+    ) -> vnfs::VecResult<WriteResult> {
         self.calls.borrow_mut().writes.push(p.len());
         self.fs.vwrite(p, o)
     }
-    fn vclose(&self, p: &mut [Self::File]) -> Result<()> {
+    fn vclose(&self, p: &mut [Self::File]) -> vnfs::VecResult<()> {
         self.fs.vclose(p)
     }
-    fn vmkdir<P: AsRef<Path>>(&self, p: &[MkDirOp<P>]) -> Result<()> {
+    fn vmkdir<P: AsRef<Path>>(&self, p: &[MkDirOp<P>]) -> vfsi_core::VecResult<()> {
         self.fs.vmkdir(p)
     }
-    fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, p: &[(P, Q)], o: CopyOptions) -> Result<()> {
+    fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        p: &[(P, Q)],
+        o: CopyOptions,
+    ) -> vfsi_core::VecResult<()> {
         self.calls.borrow_mut().copies.push(p.len());
         self.fs.vcopy(p, o)
     }
-    fn vremove<P: AsRef<Path>>(&self, p: &[P], m: RemoveMode, o: RemoveOptions) -> Result<()> {
+    fn vremove<P: AsRef<Path>>(
+        &self,
+        p: &[P],
+        m: RemoveMode,
+        o: RemoveOptions,
+    ) -> vfsi_core::VecResult<()> {
         self.fs.vremove(p, m, o)
     }
-    fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, p: &[(P, Q)], o: RenameMode) -> Result<()> {
+    fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        p: &[(P, Q)],
+        o: RenameMode,
+    ) -> vfsi_core::VecResult<()> {
         self.fs.vrename(p, o)
     }
     fn vlistdirs<P: AsRef<Path>, C: Into<vfsi_core::api::ListDirControl>>(
@@ -90,7 +103,7 @@ impl Vfsi for Counted {
         p: &[P],
         o: ListDirOptions,
         c: impl FnMut(usize, DirectoryListing) -> Result<C>,
-    ) -> Result<Vec<TraversalCompletion>> {
+    ) -> vfsi_core::VecResult<TraversalCompletion> {
         self.fs.vlistdirs(p, o, c)
     }
     fn vstream<P: AsRef<Path>>(
@@ -98,7 +111,7 @@ impl Vfsi for Counted {
         p: &[P],
         o: StreamOptions,
         c: impl FnMut(usize, u64, &[u8]) -> Result<ControlFlow<()>>,
-    ) -> Result<Vec<StreamCompletion>> {
+    ) -> vfsi_core::VecResult<StreamCompletion> {
         self.fs.vstream(p, o, c)
     }
 }

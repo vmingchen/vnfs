@@ -133,6 +133,8 @@ pub struct Compound {
     // the pointers installed in the wire operations.
     keep: Vec<Box<[u8]>>,
     tag_index: Option<usize>,
+    named_open: bool,
+    opens: bool,
     // Reuse a builder's final XDR preflight at dispatch, but never after a
     // change to the compound's operations or backing data.
     size_check: Cell<Option<(usize, Option<usize>)>>,
@@ -161,6 +163,8 @@ impl Compound {
             ops: Vec::new(),
             keep: Vec::new(),
             tag_index: None,
+            named_open: false,
+            opens: false,
             size_check: Cell::new(None),
         }
     }
@@ -179,6 +183,60 @@ impl Compound {
     /// the mandatory SEQUENCE operation).
     pub(crate) fn op_count(&self) -> usize {
         self.ops.len()
+    }
+
+    /// A lost reply can hide an OPEN stateid, including for CLAIM_FH.
+    pub(crate) fn has_open(&self) -> bool {
+        self.opens
+    }
+
+    /// Named OPEN needs GETFH to establish an exact cleanup operand.
+    pub(crate) fn has_named_open(&self) -> bool {
+        self.named_open
+    }
+
+    /// Called only on a failed reply. Every in-tree named OPEN builder follows
+    /// OPEN with GETFH, so successful compounds need no extra reply scan.
+    pub(crate) fn has_unaddressed_open(&self, reply: &CompoundRes) -> bool {
+        let mut pending = false;
+        for index in 0..reply.nops() {
+            if reply.op_status(index) != nfsstat4_NFS4_OK {
+                break;
+            }
+            match reply.op(index).resop {
+                nfs_opnum4_NFS4_OP_OPEN => {
+                    if pending {
+                        return true;
+                    }
+                    // Session prepends SEQUENCE to this builder before sending;
+                    // the validated request and reply indices therefore match.
+                    let request = &self.ops[index];
+                    // SAFETY: the request opcode is OPEN, as validated against
+                    // the reply; the builder initialized its matching union arm.
+                    let claim = unsafe { request.nfs_argop4_u.opopen.claim.claim };
+                    pending = !matches!(
+                        claim,
+                        open_claim_type4_CLAIM_FH
+                            | open_claim_type4_CLAIM_DELEG_CUR_FH
+                            | open_claim_type4_CLAIM_DELEG_PREV_FH
+                    );
+                }
+                nfs_opnum4_NFS4_OP_GETFH | nfs_opnum4_NFS4_OP_CLOSE => pending = false,
+                nfs_opnum4_NFS4_OP_PUTFH
+                | nfs_opnum4_NFS4_OP_PUTROOTFH
+                | nfs_opnum4_NFS4_OP_PUTPUBFH
+                | nfs_opnum4_NFS4_OP_LOOKUP
+                | nfs_opnum4_NFS4_OP_LOOKUPP
+                | nfs_opnum4_NFS4_OP_RESTOREFH
+                | nfs_opnum4_NFS4_OP_CREATE
+                    if pending =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        pending
     }
 
     /// Encode the actual COMPOUND arguments into bounded scratch space.
@@ -362,6 +420,13 @@ impl Compound {
     }
 
     pub(crate) fn open(&mut self, args: OPEN4args) {
+        self.opens = true;
+        self.named_open |= !matches!(
+            args.claim.claim,
+            open_claim_type4_CLAIM_FH
+                | open_claim_type4_CLAIM_DELEG_CUR_FH
+                | open_claim_type4_CLAIM_DELEG_PREV_FH
+        );
         let op = nfs_argop4 {
             argop: nfs_opnum4_NFS4_OP_OPEN,
             nfs_argop4_u: nfs_argop4__bindgen_ty_1 { opopen: args },
@@ -615,7 +680,30 @@ impl Compound {
     /// type (e.g. NF4DIR for mkdir, NF4LNK for a symlink); when it is NF4LNK,
     /// `linkdata` is the symlink target. This is the single NFSv4 op that
     /// implements the high-level mkdir / symlink calls.
-    pub fn create(&mut self, name: &[u8], ftype: nfs_ftype4, linkdata: Option<&[u8]>) {
+    pub fn create(
+        &mut self,
+        name: &[u8],
+        ftype: nfs_ftype4,
+        linkdata: Option<&[u8]>,
+        mode: Option<u32>,
+    ) {
+        let mut attributes = fattr4 {
+            attrmask: bitmap4 {
+                bitmap4_len: 0,
+                map: [0; 3],
+            },
+            attr_vals: attrlist4 {
+                attrlist4_len: 0,
+                attrlist4_val: std::ptr::null_mut(),
+            },
+        };
+        if let Some(mode) = mode {
+            let (ptr, len) = self.keep(&(mode & 0o7777).to_be_bytes());
+            attributes.attrmask.bitmap4_len = 2;
+            attributes.attrmask.map[1] = 1 << (FATTR4_MODE % 32);
+            attributes.attr_vals.attrlist4_len = len;
+            attributes.attr_vals.attrlist4_val = ptr;
+        }
         let (nptr, nlen) = self.keep(name);
         let objtype = match linkdata {
             Some(target) => {
@@ -658,16 +746,7 @@ impl Compound {
                         utf8string_len: nlen,
                         utf8string_val: nptr,
                     },
-                    createattrs: fattr4 {
-                        attrmask: bitmap4 {
-                            bitmap4_len: 0,
-                            map: [0; 3],
-                        },
-                        attr_vals: attrlist4 {
-                            attrlist4_len: 0,
-                            attrlist4_val: std::ptr::null_mut(),
-                        },
-                    },
+                    createattrs: attributes,
                 },
             },
         };
@@ -1259,9 +1338,11 @@ impl CompoundRes {
         for (start, end) in ranges {
             for index in start..end.min(self.nops()) {
                 if self.op(index).resop == nfs_opnum4_NFS4_OP_OPEN
+                    && self.op_status(index) == 0
                     && index + 1 < end
                     && index + 1 < self.nops()
                     && self.op(index + 1).resop == nfs_opnum4_NFS4_OP_GETFH
+                    && self.op_status(index + 1) == 0
                 {
                     let stateid = self.open(index).stateid;
                     visit(self.getfh(index + 1), stateid);
@@ -1309,7 +1390,25 @@ impl CompoundRes {
         }
     }
 
-    /// The file handle returned by the GETFH at resop `i`.
+    /// Borrow the opaque bytes of a validated successful GETFH.
+    pub(crate) fn getfh_bytes(&self, i: usize) -> &[u8] {
+        let fh = self.getfh(i);
+        if fh.nfs_fh4_len == 0 {
+            return &[];
+        }
+        // SAFETY: the validated GETFH reply owns these initialized bytes;
+        // borrowing self keeps its XDR storage alive.
+        unsafe { std::slice::from_raw_parts(fh.nfs_fh4_val.cast(), fh.nfs_fh4_len as usize) }
+    }
+
+    /// Attributes acknowledged by a successful CREATE.
+    pub(crate) fn create_attrs(&self, i: usize) -> &bitmap4 {
+        let op = self.expect_op(i, nfs_opnum4_NFS4_OP_CREATE, "CREATE");
+        // SAFETY: expect_op validates the CREATE success tag and status.
+        unsafe { &op.nfs_resop4_u.opcreate.CREATE4res_u.resok4.attrset }
+    }
+
+    /// The file handle returned by the GETFH at resop i.
     pub fn getfh(&self, i: usize) -> &nfs_fh4 {
         let ro = self.expect_op(i, nfs_opnum4_NFS4_OP_GETFH, "GETFH");
         // SAFETY: expect_op checks the operation tag and success status, so the selected
@@ -1725,6 +1824,11 @@ mod response_validation_tests {
         let mut opened = 0;
         response.for_each_open_result(map.executed_ranges(&report), |_, _| opened += 1);
         assert_eq!(opened, 0);
+        // OPEN's malformed/reply-loss cleanup scans the submitted ranges,
+        // rather than a report's known-success prefix. Failed GETFH carries
+        // no success union and must not be inspected or visited there either.
+        response.for_each_open_result([(1, 3)], |_, _| opened += 1);
+        assert_eq!(opened, 0);
     }
 
     #[test]
@@ -1910,11 +2014,26 @@ mod request_size_tests {
             (nfs_ftype4_NF4CHR, 44),
         ] {
             let mut compound = Compound::new();
-            compound.create(b"x", kind, None);
+            compound.create(b"x", kind, None, None);
             assert_eq!(compound.encoded_len_up_to(1024).unwrap(), Some(expected));
         }
     }
 
+    #[test]
+    fn directory_create_encodes_restrictive_mode_in_the_creation_request() {
+        let mut compound = Compound::new();
+        compound.create(b"private", nfs_ftype4_NF4DIR, None, Some(0o700));
+        let args = unsafe { &compound.ops[0].nfs_argop4_u.opcreate };
+        assert_eq!(args.createattrs.attrmask.bitmap4_len, 2);
+        assert_eq!(args.createattrs.attrmask.map[1], 1 << (FATTR4_MODE % 32));
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                args.createattrs.attr_vals.attrlist4_val.cast::<u8>(),
+                args.createattrs.attr_vals.attrlist4_len as usize,
+            )
+        };
+        assert_eq!(bytes, &0o700u32.to_be_bytes());
+    }
     #[test]
     fn symlink_nverify_encodes_type_before_guarded_setattr() {
         let mut compound = Compound::new();
@@ -2052,5 +2171,59 @@ mod request_size_tests {
         compound.tag(b"a-longer-compound-tag");
         assert_eq!(compound.size_check.get(), None);
         assert!(compound.encoded_len_up_to(4096).unwrap().unwrap() > second);
+    }
+}
+
+#[cfg(test)]
+mod open_identity_tests {
+    use super::*;
+
+    #[test]
+    fn failed_getfh_preserves_the_need_to_retire_a_successful_named_open() {
+        let mut request = Compound::new();
+        assert!(!request.has_open());
+        request.open_claim_null(
+            0,
+            OPEN4_SHARE_ACCESS_READ,
+            OPEN4_SHARE_DENY_NONE,
+            1,
+            b"owner",
+            no_create_how(),
+            b"file",
+        );
+        request.getfh();
+        assert!(request.has_named_open() && request.has_open());
+
+        // XDR_FREE owns and frees this zero-initialized operation array.
+        // OPEN_DELEGATE_NONE and empty attrset storage require no allocation.
+        // SAFETY: calloc allocates space for two fully initialized zeroed ops.
+        let operations =
+            unsafe { libc::calloc(2, std::mem::size_of::<nfs_resop4>()).cast::<nfs_resop4>() };
+        assert!(!operations.is_null());
+        // SAFETY: both writes stay within the exclusively owned two-op array;
+        // opcode/status select matching initialized union arms.
+        unsafe {
+            (*operations).resop = nfs_opnum4_NFS4_OP_OPEN;
+            (*operations).nfs_resop4_u.opopen.status = nfsstat4_NFS4_OK;
+            (*operations.add(1)).resop = nfs_opnum4_NFS4_OP_GETFH;
+            (*operations.add(1)).nfs_resop4_u.opgetfh.status = nfsstat4_NFS4ERR_ACCESS;
+        }
+        let mut res = empty_response(nfsstat4_NFS4ERR_ACCESS);
+        res.resarray.resarray_val = operations;
+        res.resarray.resarray_len = 2;
+        let reply = CompoundRes { res };
+        assert!(validate_response_ops(&request.ops, &reply.res).is_ok());
+        assert!(request.has_unaddressed_open(&reply));
+
+        let mut retained = Compound::new();
+        retained.open_claim_fh(OPEN4_SHARE_ACCESS_READ, 1, b"retained-owner");
+        assert!(
+            retained.has_open(),
+            "lost CLAIM_FH replies can hide acquired stateids"
+        );
+        assert!(
+            !retained.has_named_open(),
+            "known CLAIM_FH operands do not require GETFH"
+        );
     }
 }

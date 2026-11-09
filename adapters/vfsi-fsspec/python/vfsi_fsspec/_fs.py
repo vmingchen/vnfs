@@ -5098,8 +5098,10 @@ class VfsiFileSystem(AbstractFileSystem):
                 self._client.remove_many([directory])
         remove_dirs = list(dict.fromkeys(remove_dirs))
         remove_dirs.sort(key=lambda p: p.count("/"), reverse=True)
-        if remove_dirs:
-            self._client.remove_many(remove_dirs)
+        # A vector may execute in any order. Keep parent/child dependencies
+        # between calls while batching independent directories at each depth.
+        for _, directories in groupby(remove_dirs, key=lambda p: p.count("/")):
+            self._client.remove_many(list(directories))
 
     def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs):
         if isinstance(path1, list) or isinstance(path2, list):

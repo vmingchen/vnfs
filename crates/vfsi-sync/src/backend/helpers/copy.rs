@@ -4,12 +4,12 @@ pub fn vcopy_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     pairs: &[ExtentPair],
     options: CopyOptions,
-) -> VfRes {
+) -> vfsi_core::VecResult<()> {
     if pairs.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     if !options.follow_source_symlinks() {
-        return Err(VfError::unsupported(0));
+        return Err(VfError::unsupported(None));
     }
     backend.vcopy_data_impl(pairs)
 }
@@ -97,8 +97,10 @@ pub fn copy_tree_batches_with<F: VectorBackend + ?Sized>(
         symlinks,
         masks,
         |backend, path, masks, cursor| {
-            let mut pages =
-                backend.vlistdir_pages_impl(&[path], masks, vec![cursor], 256, usize::MAX, true)?;
+            let mut pages = vfsi_core::internal::collect_vec_result(
+                backend.vlistdir_pages_impl(&[path], masks, vec![cursor], 256, usize::MAX, true),
+                1,
+            )?;
             if pages.len() != 1 {
                 return Err(VfError::invalid_reply(None, "invalid tree-copy page count"));
             }

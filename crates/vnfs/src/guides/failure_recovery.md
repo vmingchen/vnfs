@@ -31,9 +31,12 @@ Positional I/O preserves the handle cursor.
 offset, byte count, and EOF, but no borrowed buffers; `data()` is `None` for
 these operations. Buffers can contain partial progress even on error.
 
-`vclose(&mut files)` retains cleanup ownership on error and disarms handles
-only after confirmed success. Consuming helpers instead fall back to
-best-effort cleanup. Retained ownership does not establish remote open state.
+`vclose(&mut files)` returns one outcome per input and disarms every
+confirmed success, even when a sibling fails. Failed or uncertain inputs
+retain cleanup ownership; already closed inputs succeed without dispatch.
+`close_batch` selects the first error in input order after the batch;
+`close_files` consumes the handles and falls back to best-effort cleanup.
+Retained ownership does not establish remote open state.
 
 ## Automatic NFS recovery
 

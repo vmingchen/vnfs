@@ -5,10 +5,14 @@ pub fn symlink_raw_impl_default<F: VectorBackend + ?Sized>(
     oldpath: &Path,
     newpath: &Path,
 ) -> VfResult<()> {
-    backend.vsymlink_impl(
-        std::slice::from_ref(&oldpath),
-        std::slice::from_ref(&newpath),
+    vfsi_core::internal::collect_vec_result(
+        backend.vsymlink_impl(
+            std::slice::from_ref(&oldpath),
+            std::slice::from_ref(&newpath),
+        ),
+        1,
     )
+    .map(|_| ())
 }
 
 pub fn readlink_raw_impl_default<F: VectorBackend + ?Sized>(
@@ -17,7 +21,10 @@ pub fn readlink_raw_impl_default<F: VectorBackend + ?Sized>(
 ) -> VfResult<Vec<u8>> {
     take_single_result(
         "readlink_raw_impl",
-        backend.vreadlink_impl(std::slice::from_ref(&path))?,
+        vfsi_core::internal::collect_vec_result(
+            backend.vreadlink_impl(std::slice::from_ref(&path)),
+            1,
+        )?,
     )
 }
 
@@ -38,6 +45,7 @@ pub fn native_hard_link_impl_default<F: VectorBackend + ?Sized>(
 ) -> VfResult<()> {
     backend
         .vhardlink_impl(&[source], &[link])
+        .and_then(|results| vfsi_core::internal::collect_vec_result(Ok(results), 1).map(|_| ()))
         .map_err(|error| error.with_context("hard_link", link))
 }
 

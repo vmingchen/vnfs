@@ -1,0 +1,1566 @@
+{
+  "cpu": 0,
+  "profile": "release with allocation instrumentation",
+  "baseline": "7de3f4e",
+  "iterations": 200,
+  "warmup_cohorts": 10,
+  "files": 64,
+  "bytes_per_file": 4096,
+  "failure": "closed handle at input 32; valid independent siblings remain eligible",
+  "cases": [
+    {
+      "backend": "nfs41",
+      "case": "success",
+      "summary": {
+        "wall_ns": {
+          "before": 93955597,
+          "after": 91280847,
+          "after_over_before": 0.9733166009248806,
+          "bootstrap_95_interval": [
+            0.8774039479403625,
+            1.227115718401247
+          ]
+        },
+        "cpu_us": {
+          "before": 30433,
+          "after": 29126,
+          "after_over_before": 0.949536252119278,
+          "bootstrap_95_interval": [
+            0.8927534421930126,
+            1.2424252787087067
+          ]
+        },
+        "allocations": {
+          "before": 69960,
+          "after": 58020,
+          "after_over_before": 0.8293310463121784,
+          "bootstrap_95_interval": [
+            0.8293310463121784,
+            0.8293310463121784
+          ]
+        },
+        "allocated_bytes": {
+          "before": 121560960,
+          "after": 70157760,
+          "after_over_before": 0.5771405556520778,
+          "bootstrap_95_interval": [
+            0.5771405556520778,
+            0.5771405556520778
+          ]
+        },
+        "peak_live_delta": {
+          "before": 543680,
+          "after": 304949,
+          "after_over_before": 0.5608979546792231,
+          "bootstrap_95_interval": [
+            0.5608979546792231,
+            0.5608979546792231
+          ]
+        },
+        "peak_rss_kib": {
+          "before": 14208,
+          "after": 14168,
+          "after_over_before": 0.9960585585585585,
+          "bootstrap_95_interval": [
+            0.9065540194572452,
+            0.9983089064261556
+          ]
+        },
+        "rpc_calls": {
+          "before": 464,
+          "after": 464,
+          "after_over_before": 1.0,
+          "bootstrap_95_interval": [
+            1.0,
+            1.0
+          ]
+        }
+      },
+      "pairs": [
+        {
+          "before": {
+            "allocated_bytes": 121560960,
+            "allocations": 69960,
+            "cpu_us": 29242,
+            "failed": 0,
+            "peak_live_delta": 543680,
+            "peak_rss_kib": 14204,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 93259930
+          },
+          "after": {
+            "allocated_bytes": 70157760,
+            "allocations": 58020,
+            "cpu_us": 36331,
+            "failed": 0,
+            "peak_live_delta": 304949,
+            "peak_rss_kib": 14172,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 114440726
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 70157760,
+            "allocations": 58020,
+            "cpu_us": 50545,
+            "failed": 0,
+            "peak_live_delta": 304949,
+            "peak_rss_kib": 14152,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 168032984
+          },
+          "before": {
+            "allocated_bytes": 121560960,
+            "allocations": 69960,
+            "cpu_us": 33198,
+            "failed": 0,
+            "peak_live_delta": 543680,
+            "peak_rss_kib": 14208,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 108356683
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 121560960,
+            "allocations": 69960,
+            "cpu_us": 35223,
+            "failed": 0,
+            "peak_live_delta": 543680,
+            "peak_rss_kib": 14192,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 107858975
+          },
+          "after": {
+            "allocated_bytes": 70157760,
+            "allocations": 58020,
+            "cpu_us": 29338,
+            "failed": 0,
+            "peak_live_delta": 304949,
+            "peak_rss_kib": 14168,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 91367930
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 70157760,
+            "allocations": 58020,
+            "cpu_us": 29126,
+            "failed": 0,
+            "peak_live_delta": 304949,
+            "peak_rss_kib": 15800,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 91280847
+          },
+          "before": {
+            "allocated_bytes": 121560960,
+            "allocations": 69960,
+            "cpu_us": 29744,
+            "failed": 0,
+            "peak_live_delta": 543680,
+            "peak_rss_kib": 14208,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 93142763
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 70157760,
+            "allocations": 58020,
+            "cpu_us": 28594,
+            "failed": 0,
+            "peak_live_delta": 304949,
+            "peak_rss_kib": 14164,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 89039222
+          },
+          "before": {
+            "allocated_bytes": 121560960,
+            "allocations": 69960,
+            "cpu_us": 32029,
+            "failed": 0,
+            "peak_live_delta": 543680,
+            "peak_rss_kib": 15668,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 101480307
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 70157760,
+            "allocations": 58020,
+            "cpu_us": 28563,
+            "failed": 0,
+            "peak_live_delta": 304949,
+            "peak_rss_kib": 14172,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 90174430
+          },
+          "before": {
+            "allocated_bytes": 121560960,
+            "allocations": 69960,
+            "cpu_us": 30081,
+            "failed": 0,
+            "peak_live_delta": 543680,
+            "peak_rss_kib": 15596,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 92646555
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 70157760,
+            "allocations": 58020,
+            "cpu_us": 28894,
+            "failed": 0,
+            "peak_live_delta": 304949,
+            "peak_rss_kib": 14164,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 88711430
+          },
+          "before": {
+            "allocated_bytes": 121560960,
+            "allocations": 69960,
+            "cpu_us": 30433,
+            "failed": 0,
+            "peak_live_delta": 543680,
+            "peak_rss_kib": 15624,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 93955597
+          }
+        }
+      ]
+    },
+    {
+      "backend": "nfs41",
+      "case": "mixed",
+      "summary": {
+        "wall_ns": {
+          "before": 92875,
+          "after": 89513888,
+          "after_over_before": 963.0450673854448,
+          "bootstrap_95_interval": [
+            935.4899779408645,
+            991.8040915208613
+          ]
+        },
+        "cpu_us": {
+          "before": 94,
+          "after": 29630,
+          "after_over_before": 309.031914893617,
+          "bootstrap_95_interval": [
+            297.4791666666667,
+            321.68367346938777
+          ]
+        },
+        "allocations": {
+          "before": 1000,
+          "after": 58582,
+          "after_over_before": 58.582,
+          "bootstrap_95_interval": [
+            58.582,
+            58.582
+          ]
+        },
+        "allocated_bytes": {
+          "before": 1347200,
+          "after": 70734736,
+          "after_over_before": 52.505,
+          "bootstrap_95_interval": [
+            52.505,
+            52.505
+          ]
+        },
+        "peak_live_delta": {
+          "before": 6736,
+          "after": 301430,
+          "after_over_before": 44.74910926365796,
+          "bootstrap_95_interval": [
+            44.74910926365796,
+            44.74910926365796
+          ]
+        },
+        "peak_rss_kib": {
+          "before": 13672,
+          "after": 14176,
+          "after_over_before": 1.0368636629607957,
+          "bootstrap_95_interval": [
+            1.0356829482304768,
+            1.1684703129570049
+          ]
+        },
+        "rpc_calls": {
+          "before": 0,
+          "after": 464
+        }
+      },
+      "pairs": [
+        {
+          "after": {
+            "allocated_bytes": 70734736,
+            "allocations": 58582,
+            "cpu_us": 28447,
+            "failed": 200,
+            "peak_live_delta": 301430,
+            "peak_rss_kib": 14164,
+            "returned_bytes": 51609600,
+            "rpc_calls": 464,
+            "successful": 12600,
+            "wall_ns": 87223388
+          },
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 94,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 13676,
+            "returned_bytes": 0,
+            "rpc_calls": 0,
+            "successful": 0,
+            "wall_ns": 92875
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 70734736,
+            "allocations": 58582,
+            "cpu_us": 30099,
+            "failed": 200,
+            "peak_live_delta": 301430,
+            "peak_rss_kib": 15780,
+            "returned_bytes": 51609600,
+            "rpc_calls": 464,
+            "successful": 12600,
+            "wall_ns": 89322430
+          },
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 94,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 13664,
+            "returned_bytes": 0,
+            "rpc_calls": 0,
+            "successful": 0,
+            "wall_ns": 92750
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 93,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 13676,
+            "returned_bytes": 0,
+            "rpc_calls": 0,
+            "successful": 0,
+            "wall_ns": 92875
+          },
+          "after": {
+            "allocated_bytes": 70734736,
+            "allocations": 58582,
+            "cpu_us": 30139,
+            "failed": 200,
+            "peak_live_delta": 301430,
+            "peak_rss_kib": 15980,
+            "returned_bytes": 51609600,
+            "rpc_calls": 464,
+            "successful": 12600,
+            "wall_ns": 92113805
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 94,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 15632,
+            "returned_bytes": 0,
+            "rpc_calls": 0,
+            "successful": 0,
+            "wall_ns": 92833
+          },
+          "after": {
+            "allocated_bytes": 70734736,
+            "allocations": 58582,
+            "cpu_us": 29049,
+            "failed": 200,
+            "peak_live_delta": 301430,
+            "peak_rss_kib": 14176,
+            "returned_bytes": 51609600,
+            "rpc_calls": 464,
+            "successful": 12600,
+            "wall_ns": 91458472
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 70734736,
+            "allocations": 58582,
+            "cpu_us": 28558,
+            "failed": 200,
+            "peak_live_delta": 301430,
+            "peak_rss_kib": 14176,
+            "returned_bytes": 51609600,
+            "rpc_calls": 464,
+            "successful": 12600,
+            "wall_ns": 88209221
+          },
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 96,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 13672,
+            "returned_bytes": 0,
+            "rpc_calls": 0,
+            "successful": 0,
+            "wall_ns": 94292
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 70734736,
+            "allocations": 58582,
+            "cpu_us": 29630,
+            "failed": 200,
+            "peak_live_delta": 301430,
+            "peak_rss_kib": 14168,
+            "returned_bytes": 51609600,
+            "rpc_calls": 464,
+            "successful": 12600,
+            "wall_ns": 89513888
+          },
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 107,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 13672,
+            "returned_bytes": 0,
+            "rpc_calls": 0,
+            "successful": 0,
+            "wall_ns": 106833
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 98,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 11624,
+            "returned_bytes": 0,
+            "rpc_calls": 0,
+            "successful": 0,
+            "wall_ns": 97541
+          },
+          "after": {
+            "allocated_bytes": 70734736,
+            "allocations": 58582,
+            "cpu_us": 31525,
+            "failed": 200,
+            "peak_live_delta": 301430,
+            "peak_rss_kib": 14176,
+            "returned_bytes": 51609600,
+            "rpc_calls": 464,
+            "successful": 12600,
+            "wall_ns": 98875473
+          }
+        }
+      ]
+    },
+    {
+      "backend": "nfs42",
+      "case": "success",
+      "summary": {
+        "wall_ns": {
+          "before": 90869180,
+          "after": 88932471,
+          "after_over_before": 0.9880860428345483,
+          "bootstrap_95_interval": [
+            0.9547609278805633,
+            0.9919712902283347
+          ]
+        },
+        "cpu_us": {
+          "before": 29689,
+          "after": 29053,
+          "after_over_before": 0.9838323958368419,
+          "bootstrap_95_interval": [
+            0.9456731240403776,
+            1.0160941628633198
+          ]
+        },
+        "allocations": {
+          "before": 69960,
+          "after": 58020,
+          "after_over_before": 0.8293310463121784,
+          "bootstrap_95_interval": [
+            0.8293310463121784,
+            0.8293310463121784
+          ]
+        },
+        "allocated_bytes": {
+          "before": 121560960,
+          "after": 70157760,
+          "after_over_before": 0.5771405556520778,
+          "bootstrap_95_interval": [
+            0.5771405556520778,
+            0.5771405556520778
+          ]
+        },
+        "peak_live_delta": {
+          "before": 543680,
+          "after": 304949,
+          "after_over_before": 0.5608979546792231,
+          "bootstrap_95_interval": [
+            0.5608979546792231,
+            0.5608979546792231
+          ]
+        },
+        "peak_rss_kib": {
+          "before": 15608,
+          "after": 14164,
+          "after_over_before": 0.9969022810475923,
+          "bootstrap_95_interval": [
+            0.906345957011259,
+            1.0174374526156178
+          ]
+        },
+        "rpc_calls": {
+          "before": 464,
+          "after": 464,
+          "after_over_before": 1.0,
+          "bootstrap_95_interval": [
+            1.0,
+            1.0
+          ]
+        }
+      },
+      "pairs": [
+        {
+          "after": {
+            "allocated_bytes": 70157760,
+            "allocations": 58020,
+            "cpu_us": 28948,
+            "failed": 0,
+            "peak_live_delta": 304949,
+            "peak_rss_kib": 14156,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 87075805
+          },
+          "before": {
+            "allocated_bytes": 121560960,
+            "allocations": 69960,
+            "cpu_us": 30611,
+            "failed": 0,
+            "peak_live_delta": 543680,
+            "peak_rss_kib": 15608,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 89136014
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 70157760,
+            "allocations": 58020,
+            "cpu_us": 33136,
+            "failed": 0,
+            "peak_live_delta": 304949,
+            "peak_rss_kib": 16104,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 106731766
+          },
+          "before": {
+            "allocated_bytes": 121560960,
+            "allocations": 69960,
+            "cpu_us": 29808,
+            "failed": 0,
+            "peak_live_delta": 543680,
+            "peak_rss_kib": 15828,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 90869180
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 70157760,
+            "allocations": 58020,
+            "cpu_us": 29610,
+            "failed": 0,
+            "peak_live_delta": 304949,
+            "peak_rss_kib": 14160,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 89505055
+          },
+          "before": {
+            "allocated_bytes": 121560960,
+            "allocations": 69960,
+            "cpu_us": 29141,
+            "failed": 0,
+            "peak_live_delta": 543680,
+            "peak_rss_kib": 15756,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 90351430
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 121560960,
+            "allocations": 69960,
+            "cpu_us": 31935,
+            "failed": 0,
+            "peak_live_delta": 543680,
+            "peak_rss_kib": 15632,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 93757555
+          },
+          "after": {
+            "allocated_bytes": 70157760,
+            "allocations": 58020,
+            "cpu_us": 28702,
+            "failed": 0,
+            "peak_live_delta": 304949,
+            "peak_rss_kib": 14168,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 87657304
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 121560960,
+            "allocations": 69960,
+            "cpu_us": 29492,
+            "failed": 0,
+            "peak_live_delta": 543680,
+            "peak_rss_kib": 14204,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 89652263
+          },
+          "after": {
+            "allocated_bytes": 70157760,
+            "allocations": 58020,
+            "cpu_us": 29053,
+            "failed": 0,
+            "peak_live_delta": 304949,
+            "peak_rss_kib": 14160,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 88932471
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 70157760,
+            "allocations": 58020,
+            "cpu_us": 28553,
+            "failed": 0,
+            "peak_live_delta": 304949,
+            "peak_rss_kib": 14164,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 91411806
+          },
+          "before": {
+            "allocated_bytes": 121560960,
+            "allocations": 69960,
+            "cpu_us": 29604,
+            "failed": 0,
+            "peak_live_delta": 543680,
+            "peak_rss_kib": 14208,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 92514014
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 121560960,
+            "allocations": 69960,
+            "cpu_us": 29689,
+            "failed": 0,
+            "peak_live_delta": 543680,
+            "peak_rss_kib": 14188,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 91998306
+          },
+          "after": {
+            "allocated_bytes": 70157760,
+            "allocations": 58020,
+            "cpu_us": 29209,
+            "failed": 0,
+            "peak_live_delta": 304949,
+            "peak_rss_kib": 16048,
+            "returned_bytes": 52428800,
+            "rpc_calls": 464,
+            "successful": 12800,
+            "wall_ns": 87836388
+          }
+        }
+      ]
+    },
+    {
+      "backend": "nfs42",
+      "case": "mixed",
+      "summary": {
+        "wall_ns": {
+          "before": 94125,
+          "after": 90672514,
+          "after_over_before": 915.735851275363,
+          "bootstrap_95_interval": [
+            707.8411574734027,
+            988.2002762579991
+          ]
+        },
+        "cpu_us": {
+          "before": 95,
+          "after": 29430,
+          "after_over_before": 302.2,
+          "bootstrap_95_interval": [
+            235.44,
+            316.4731182795699
+          ]
+        },
+        "allocations": {
+          "before": 1000,
+          "after": 58582,
+          "after_over_before": 58.582,
+          "bootstrap_95_interval": [
+            58.582,
+            58.582
+          ]
+        },
+        "allocated_bytes": {
+          "before": 1347200,
+          "after": 70734736,
+          "after_over_before": 52.505,
+          "bootstrap_95_interval": [
+            52.505,
+            52.505
+          ]
+        },
+        "peak_live_delta": {
+          "before": 6736,
+          "after": 301430,
+          "after_over_before": 44.74910926365796,
+          "bootstrap_95_interval": [
+            44.74910926365796,
+            44.74910926365796
+          ]
+        },
+        "peak_rss_kib": {
+          "before": 13676,
+          "after": 14176,
+          "after_over_before": 1.0365603977771278,
+          "bootstrap_95_interval": [
+            1.0217669654289372,
+            1.1541386370283708
+          ]
+        },
+        "rpc_calls": {
+          "before": 0,
+          "after": 464
+        }
+      },
+      "pairs": [
+        {
+          "after": {
+            "allocated_bytes": 70734736,
+            "allocations": 58582,
+            "cpu_us": 29430,
+            "failed": 200,
+            "peak_live_delta": 301430,
+            "peak_rss_kib": 14176,
+            "returned_bytes": 51609600,
+            "rpc_calls": 464,
+            "successful": 12600,
+            "wall_ns": 87890513
+          },
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 125,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 13676,
+            "returned_bytes": 0,
+            "rpc_calls": 0,
+            "successful": 0,
+            "wall_ns": 124167
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 70734736,
+            "allocations": 58582,
+            "cpu_us": 30383,
+            "failed": 200,
+            "peak_live_delta": 301430,
+            "peak_rss_kib": 16124,
+            "returned_bytes": 51609600,
+            "rpc_calls": 464,
+            "successful": 12600,
+            "wall_ns": 95070181
+          },
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 93,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 13664,
+            "returned_bytes": 0,
+            "rpc_calls": 0,
+            "successful": 0,
+            "wall_ns": 92792
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 70734736,
+            "allocations": 58582,
+            "cpu_us": 29306,
+            "failed": 200,
+            "peak_live_delta": 301430,
+            "peak_rss_kib": 14160,
+            "returned_bytes": 51609600,
+            "rpc_calls": 464,
+            "successful": 12600,
+            "wall_ns": 91303305
+          },
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 95,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 13676,
+            "returned_bytes": 0,
+            "rpc_calls": 0,
+            "successful": 0,
+            "wall_ns": 94125
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 93,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 13676,
+            "returned_bytes": 0,
+            "rpc_calls": 0,
+            "successful": 0,
+            "wall_ns": 92667
+          },
+          "after": {
+            "allocated_bytes": 70734736,
+            "allocations": 58582,
+            "cpu_us": 29432,
+            "failed": 200,
+            "peak_live_delta": 301430,
+            "peak_rss_kib": 15784,
+            "returned_bytes": 51609600,
+            "rpc_calls": 464,
+            "successful": 12600,
+            "wall_ns": 91573555
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 130,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 15588,
+            "returned_bytes": 0,
+            "rpc_calls": 0,
+            "successful": 0,
+            "wall_ns": 130125
+          },
+          "after": {
+            "allocated_bytes": 70734736,
+            "allocations": 58582,
+            "cpu_us": 29269,
+            "failed": 200,
+            "peak_live_delta": 301430,
+            "peak_rss_kib": 14160,
+            "returned_bytes": 51609600,
+            "rpc_calls": 464,
+            "successful": 12600,
+            "wall_ns": 89309305
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 103,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 15620,
+            "returned_bytes": 0,
+            "rpc_calls": 0,
+            "successful": 0,
+            "wall_ns": 102375
+          },
+          "after": {
+            "allocated_bytes": 70734736,
+            "allocations": 58582,
+            "cpu_us": 30650,
+            "failed": 200,
+            "peak_live_delta": 301430,
+            "peak_rss_kib": 15960,
+            "returned_bytes": 51609600,
+            "rpc_calls": 464,
+            "successful": 12600,
+            "wall_ns": 90672514
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 70734736,
+            "allocations": 58582,
+            "cpu_us": 28709,
+            "failed": 200,
+            "peak_live_delta": 301430,
+            "peak_rss_kib": 14176,
+            "returned_bytes": 51609600,
+            "rpc_calls": 464,
+            "successful": 12600,
+            "wall_ns": 85659763
+          },
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 95,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 13672,
+            "returned_bytes": 0,
+            "rpc_calls": 0,
+            "successful": 0,
+            "wall_ns": 93542
+          }
+        }
+      ]
+    },
+    {
+      "backend": "smb",
+      "case": "success",
+      "summary": {
+        "wall_ns": {
+          "before": 3999087856,
+          "after": 4216215433,
+          "after_over_before": 1.0345431256156132,
+          "bootstrap_95_interval": [
+            0.9216046829715087,
+            1.0968405300521573
+          ]
+        },
+        "cpu_us": {
+          "before": 1156856,
+          "after": 1164714,
+          "after_over_before": 1.0067925480785853,
+          "bootstrap_95_interval": [
+            0.9533840043413269,
+            1.0955544799750612
+          ]
+        },
+        "allocations": {
+          "before": 628209,
+          "after": 628009,
+          "after_over_before": 0.9996816310677139,
+          "bootstrap_95_interval": [
+            0.9996736780778525,
+            0.9997150675162643
+          ]
+        },
+        "allocated_bytes": {
+          "before": 377151274,
+          "after": 376231274,
+          "after_over_before": 0.9975606562963024,
+          "bootstrap_95_interval": [
+            0.99755953373669,
+            0.9975654810441132
+          ]
+        },
+        "peak_live_delta": {
+          "before": 286248,
+          "after": 286248,
+          "after_over_before": 1.0,
+          "bootstrap_95_interval": [
+            1.0,
+            1.0
+          ]
+        },
+        "peak_rss_kib": {
+          "before": 6432,
+          "after": 6704,
+          "after_over_before": 1.0416666666666667,
+          "bootstrap_95_interval": [
+            1.0392034847542004,
+            1.044803982576229
+          ]
+        }
+      },
+      "pairs": [
+        {
+          "before": {
+            "allocated_bytes": 377150624,
+            "allocations": 628202,
+            "cpu_us": 855012,
+            "failed": 0,
+            "peak_live_delta": 286248,
+            "peak_rss_kib": 6428,
+            "returned_bytes": 52428800,
+            "rpc_calls": null,
+            "successful": 12800,
+            "wall_ns": 2455738158
+          },
+          "after": {
+            "allocated_bytes": 376230624,
+            "allocations": 628002,
+            "cpu_us": 779629,
+            "failed": 0,
+            "peak_live_delta": 286248,
+            "peak_rss_kib": 6716,
+            "returned_bytes": 52428800,
+            "rpc_calls": null,
+            "successful": 12800,
+            "wall_ns": 2098990938
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 376230624,
+            "allocations": 628002,
+            "cpu_us": 859101,
+            "failed": 0,
+            "peak_live_delta": 286248,
+            "peak_rss_kib": 6700,
+            "returned_bytes": 52428800,
+            "rpc_calls": null,
+            "successful": 12800,
+            "wall_ns": 2461658201
+          },
+          "before": {
+            "allocated_bytes": 377150624,
+            "allocations": 628202,
+            "cpu_us": 901107,
+            "failed": 0,
+            "peak_live_delta": 286248,
+            "peak_rss_kib": 6432,
+            "returned_bytes": 52428800,
+            "rpc_calls": null,
+            "successful": 12800,
+            "wall_ns": 2671056524
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 376239256,
+            "allocations": 628103,
+            "cpu_us": 1089968,
+            "failed": 0,
+            "peak_live_delta": 286248,
+            "peak_rss_kib": 6680,
+            "returned_bytes": 52428800,
+            "rpc_calls": null,
+            "successful": 12800,
+            "wall_ns": 3680087383
+          },
+          "before": {
+            "allocated_bytes": 377150624,
+            "allocations": 628202,
+            "cpu_us": 914058,
+            "failed": 0,
+            "peak_live_delta": 286248,
+            "peak_rss_kib": 6428,
+            "returned_bytes": 52428800,
+            "rpc_calls": null,
+            "successful": 12800,
+            "wall_ns": 2724129365
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 376233830,
+            "allocations": 628039,
+            "cpu_us": 1286047,
+            "failed": 0,
+            "peak_live_delta": 286248,
+            "peak_rss_kib": 6712,
+            "returned_bytes": 52428800,
+            "rpc_calls": null,
+            "successful": 12800,
+            "wall_ns": 4596001895
+          },
+          "before": {
+            "allocated_bytes": 377152978,
+            "allocations": 628229,
+            "cpu_us": 1247317,
+            "failed": 0,
+            "peak_live_delta": 286248,
+            "peak_rss_kib": 8272,
+            "returned_bytes": 52428800,
+            "rpc_calls": null,
+            "successful": 12800,
+            "wall_ns": 4459064165
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 377152126,
+            "allocations": 628219,
+            "cpu_us": 1218980,
+            "failed": 0,
+            "peak_live_delta": 286248,
+            "peak_rss_kib": 6432,
+            "returned_bytes": 52428800,
+            "rpc_calls": null,
+            "successful": 12800,
+            "wall_ns": 4466839512
+          },
+          "after": {
+            "allocated_bytes": 376233942,
+            "allocations": 628040,
+            "cpu_us": 1335459,
+            "failed": 0,
+            "peak_live_delta": 286248,
+            "peak_rss_kib": 6700,
+            "returned_bytes": 52428800,
+            "rpc_calls": null,
+            "successful": 12800,
+            "wall_ns": 4899410618
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 376230848,
+            "allocations": 628004,
+            "cpu_us": 1180898,
+            "failed": 0,
+            "peak_live_delta": 286248,
+            "peak_rss_kib": 8472,
+            "returned_bytes": 52428800,
+            "rpc_calls": null,
+            "successful": 12800,
+            "wall_ns": 4335813263
+          },
+          "before": {
+            "allocated_bytes": 377151274,
+            "allocations": 628209,
+            "cpu_us": 1175435,
+            "failed": 0,
+            "peak_live_delta": 286248,
+            "peak_rss_kib": 6432,
+            "returned_bytes": 52428800,
+            "rpc_calls": null,
+            "successful": 12800,
+            "wall_ns": 4191041587
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 376231274,
+            "allocations": 628009,
+            "cpu_us": 1164714,
+            "failed": 0,
+            "peak_live_delta": 286248,
+            "peak_rss_kib": 6704,
+            "returned_bytes": 52428800,
+            "rpc_calls": null,
+            "successful": 12800,
+            "wall_ns": 4216215433
+          },
+          "before": {
+            "allocated_bytes": 377151700,
+            "allocations": 628214,
+            "cpu_us": 1156856,
+            "failed": 0,
+            "peak_live_delta": 286248,
+            "peak_rss_kib": 6424,
+            "returned_bytes": 52428800,
+            "rpc_calls": null,
+            "successful": 12800,
+            "wall_ns": 3999087856
+          }
+        }
+      ]
+    },
+    {
+      "backend": "smb",
+      "case": "mixed",
+      "summary": {
+        "wall_ns": {
+          "before": 93500,
+          "after": 3987247353,
+          "after_over_before": 41117.51979679144,
+          "bootstrap_95_interval": [
+            33958.4849088661,
+            43497.08567968844
+          ]
+        },
+        "cpu_us": {
+          "before": 94,
+          "after": 1113982,
+          "after_over_before": 11510.053191489362,
+          "bootstrap_95_interval": [
+            9668.477876106195,
+            11978.301075268817
+          ]
+        },
+        "allocations": {
+          "before": 1000,
+          "after": 619604,
+          "after_over_before": 619.604,
+          "bootstrap_95_interval": [
+            619.604,
+            619.609
+          ]
+        },
+        "allocated_bytes": {
+          "before": 1347200,
+          "after": 372104248,
+          "after_over_before": 276.20564726840854,
+          "bootstrap_95_interval": [
+            276.20564726840854,
+            276.20596347980995
+          ]
+        },
+        "peak_live_delta": {
+          "before": 6736,
+          "after": 282896,
+          "after_over_before": 41.99762470308789,
+          "bootstrap_95_interval": [
+            41.99762470308789,
+            41.99762470308789
+          ]
+        },
+        "peak_rss_kib": {
+          "before": 6324,
+          "after": 6684,
+          "after_over_before": 1.058191018342821,
+          "bootstrap_95_interval": [
+            1.0562579013906448,
+            1.0596068484464172
+          ]
+        }
+      },
+      "pairs": [
+        {
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 120,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 6324,
+            "returned_bytes": 0,
+            "rpc_calls": null,
+            "successful": 0,
+            "wall_ns": 119542
+          },
+          "after": {
+            "allocated_bytes": 372104674,
+            "allocations": 619609,
+            "cpu_us": 1116210,
+            "failed": 200,
+            "peak_live_delta": 282896,
+            "peak_rss_kib": 6688,
+            "returned_bytes": 51609600,
+            "rpc_calls": null,
+            "successful": 12600,
+            "wall_ns": 4005601839
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 113,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 6324,
+            "returned_bytes": 0,
+            "rpc_calls": null,
+            "successful": 0,
+            "wall_ns": 112417
+          },
+          "after": {
+            "allocated_bytes": 372104064,
+            "allocations": 619602,
+            "cpu_us": 1092538,
+            "failed": 200,
+            "peak_live_delta": 287632,
+            "peak_rss_kib": 6692,
+            "returned_bytes": 51609600,
+            "rpc_calls": null,
+            "successful": 12600,
+            "wall_ns": 3817510998
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 372104248,
+            "allocations": 619604,
+            "cpu_us": 1148795,
+            "failed": 200,
+            "peak_live_delta": 282896,
+            "peak_rss_kib": 6680,
+            "returned_bytes": 51609600,
+            "rpc_calls": null,
+            "successful": 12600,
+            "wall_ns": 4156240329
+          },
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 93,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 6304,
+            "returned_bytes": 0,
+            "rpc_calls": null,
+            "successful": 0,
+            "wall_ns": 92459
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 93,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 6320,
+            "returned_bytes": 0,
+            "rpc_calls": null,
+            "successful": 0,
+            "wall_ns": 91667
+          },
+          "after": {
+            "allocated_bytes": 372104858,
+            "allocations": 619611,
+            "cpu_us": 1113982,
+            "failed": 200,
+            "peak_live_delta": 282896,
+            "peak_rss_kib": 6692,
+            "returned_bytes": 51609600,
+            "rpc_calls": null,
+            "successful": 12600,
+            "wall_ns": 3987247353
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 372104674,
+            "allocations": 619609,
+            "cpu_us": 1082313,
+            "failed": 200,
+            "peak_live_delta": 282896,
+            "peak_rss_kib": 6684,
+            "returned_bytes": 51609600,
+            "rpc_calls": null,
+            "successful": 12600,
+            "wall_ns": 3790411269
+          },
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 94,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 6308,
+            "returned_bytes": 0,
+            "rpc_calls": null,
+            "successful": 0,
+            "wall_ns": 92709
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 372104248,
+            "allocations": 619604,
+            "cpu_us": 1081945,
+            "failed": 200,
+            "peak_live_delta": 282896,
+            "peak_rss_kib": 6672,
+            "returned_bytes": 51609600,
+            "rpc_calls": null,
+            "successful": 12600,
+            "wall_ns": 3844488101
+          },
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 94,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 6324,
+            "returned_bytes": 0,
+            "rpc_calls": null,
+            "successful": 0,
+            "wall_ns": 93500
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 372104248,
+            "allocations": 619604,
+            "cpu_us": 1130608,
+            "failed": 200,
+            "peak_live_delta": 282896,
+            "peak_rss_kib": 6684,
+            "returned_bytes": 51609600,
+            "rpc_calls": null,
+            "successful": 12600,
+            "wall_ns": 4089215449
+          },
+          "before": {
+            "allocated_bytes": 1347200,
+            "allocations": 1000,
+            "cpu_us": 99,
+            "failed": 200,
+            "peak_live_delta": 6736,
+            "peak_rss_kib": 6328,
+            "returned_bytes": 0,
+            "rpc_calls": null,
+            "successful": 0,
+            "wall_ns": 97709
+          }
+        }
+      ]
+    }
+  ],
+  "smb_wire_request_histograms": {
+    "success": {
+      "before": {
+        "0": 1,
+        "1": 2,
+        "3": 1,
+        "5": 64,
+        "16": 13440,
+        "8": 13440,
+        "6": 64,
+        "4": 1
+      },
+      "after": {
+        "0": 1,
+        "1": 2,
+        "3": 1,
+        "5": 64,
+        "16": 13440,
+        "8": 13440,
+        "6": 64,
+        "4": 1
+      }
+    },
+    "mixed": {
+      "before": {
+        "0": 1,
+        "1": 2,
+        "3": 1,
+        "5": 64,
+        "6": 64,
+        "4": 1
+      },
+      "after": {
+        "0": 1,
+        "1": 2,
+        "3": 1,
+        "5": 64,
+        "6": 64,
+        "16": 13230,
+        "8": 13230,
+        "4": 1
+      }
+    }
+  },
+  "smb_wire_read_commands_including_warmup": {
+    "success": {
+      "before": 13440,
+      "after": 13440
+    },
+    "mixed": {
+      "before": 0,
+      "after": 13230
+    }
+  },
+  "before_binary_sha256": "219d43cbe3c2586a136925aa29ab27d2888fced2fcd92ca94ba874a6ee54baaf",
+  "after_binary_sha256": "313f03cc7a695ddae6b512541152e0684a397483309d03e3e8b002c572a4a177",
+  "migration_versions": {
+    "vfsi_crates": "0.2.0",
+    "vnfs": "0.0.32",
+    "smb2": "0.42.1",
+    "source": "reviewed release source based on 7de3f4e"
+  },
+  "timing_control": "No concurrent compilation or test jobs; separate loss-checked packet captures",
+  "wire_control": "64 CREATE and 64 CLOSE per capture, exact READ counts, zero packets dropped by kernel"
+}

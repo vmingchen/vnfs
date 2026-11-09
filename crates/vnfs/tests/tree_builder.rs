@@ -28,7 +28,7 @@ fn duplicate_directories_do_not_consume_planned_entry_slots() {
         .unwrap();
     assert_eq!(
         client
-            .vread(
+            .read_batch(
                 [vnfs::files::ReadOp::whole("/with-file/a/file")],
                 vnfs::files::ReadOptions::default()
             )
@@ -104,7 +104,7 @@ fn builds_nested_binary_empty_and_directory_entries_without_implicit_cleanup() {
     assert_eq!(tree.root(), std::path::Path::new("/fixture"));
     assert_eq!(
         client
-            .vread(
+            .read_batch(
                 [vnfs::files::ReadOp::whole("/fixture/config/app.conf")],
                 vnfs::files::ReadOptions::default()
             )
@@ -116,7 +116,7 @@ fn builds_nested_binary_empty_and_directory_entries_without_implicit_cleanup() {
     );
     assert_eq!(
         client
-            .vread(
+            .read_batch(
                 [vnfs::files::ReadOp::whole("/fixture/data/blob")],
                 vnfs::files::ReadOptions::default()
             )
@@ -128,7 +128,7 @@ fn builds_nested_binary_empty_and_directory_entries_without_implicit_cleanup() {
     );
     assert!(
         client
-            .vread(
+            .read_batch(
                 [vnfs::files::ReadOp::whole("/fixture/logs/app.log")],
                 vnfs::files::ReadOptions::default()
             )
@@ -202,7 +202,7 @@ fn budgets_include_implicit_directories_payloads_and_planned_path_bytes() {
         .unwrap();
     assert_eq!(
         client
-            .vread(
+            .read_batch(
                 [vnfs::files::ReadOp::whole("/fixture/f")],
                 vnfs::files::ReadOptions::default()
             )
@@ -231,7 +231,7 @@ fn existing_root_is_not_overwritten_or_cleaned_up_even_if_it_is_a_symlink() {
         );
         assert_eq!(
             client
-                .vread(
+                .read_batch(
                     [vnfs::files::ReadOp::whole("/existing/keep")],
                     vnfs::files::ReadOptions::default()
                 )
@@ -259,7 +259,7 @@ fn empty_tree_and_missing_root_parent_have_explicit_semantics() {
 }
 
 #[test]
-fn bulk_directory_creation_preserves_error_index_path_and_completed_prefix() {
+fn bulk_directory_creation_preserves_error_context_and_independent_successes() {
     let temp = tempfile::tempdir().unwrap();
     let client = Posix::new(temp.path()).unwrap();
     client.create_dir("/taken").unwrap();
@@ -269,21 +269,32 @@ fn bulk_directory_creation_preserves_error_index_path_and_completed_prefix() {
             vnfs::directory::MkDirOp::new("/taken", 0o777),
             vnfs::directory::MkDirOp::new("/last", 0o777),
         ])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+        })
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::AlreadyExists);
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.path(), Some(std::path::Path::new("/taken")));
     assert!(temp.path().join("first").is_dir());
-    assert!(!temp.path().join("last").exists());
+    assert!(temp.path().join("last").is_dir());
     assert!(
         client
             .vmkdir(&[
                 vnfs::directory::MkDirOp::new("/duplicate", 0o777),
                 vnfs::directory::MkDirOp::new("/duplicate", 0o777)
             ])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+            })
             .is_err()
     );
-    assert!(!temp.path().join("duplicate").exists());
+    assert!(
+        temp.path().join("duplicate").is_dir(),
+        "only the duplicate input is rejected"
+    );
     client.vmkdir::<&str>(&[]).unwrap();
 }
 
@@ -298,7 +309,7 @@ fn routed_client_supports_the_same_builder_and_directory_preflight() {
         .unwrap();
     assert_eq!(
         client
-            .vread(
+            .read_batch(
                 [
                     vnfs::files::ReadOp::whole("/fixture/a/file"),
                     vnfs::files::ReadOp::whole("/fixture/b/file")
@@ -317,9 +328,16 @@ fn routed_client_supports_the_same_builder_and_directory_preflight() {
                 vnfs::directory::MkDirOp::new("/duplicate", 0o777),
                 vnfs::directory::MkDirOp::new("/duplicate", 0o777)
             ])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+            })
             .is_err()
     );
-    assert!(!temp.path().join("duplicate").exists());
+    assert!(
+        temp.path().join("duplicate").is_dir(),
+        "only the duplicate input is rejected"
+    );
     client.vmkdir::<&str>(&[]).unwrap();
     client.remove_dir_all(tree.root()).unwrap();
 }

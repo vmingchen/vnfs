@@ -90,7 +90,10 @@ pub mod directory {
 pub mod error {
     pub use crate::{Error, Result};
     pub use vfsi_core::api::ErrorKind;
-    pub use vfsi_core::{ErrorDomain, StatusCode, TransportKind};
+    pub use vfsi_core::{
+        ErrorDomain, FailureState, IoProgress, OpError, OpResult, StatusCode, TransportKind,
+        VecResult,
+    };
 }
 
 /// Application-facing result type for the Rust-native API.
@@ -98,6 +101,7 @@ pub type Result<T> = vfsi_core::VfResult<T>;
 
 /// Application-facing error type for the Rust-native API.
 pub type Error = vfsi_core::VfError;
+pub use vfsi_core::{OpResult, VecResult};
 
 #[cfg(any(
     feature = "nfs",

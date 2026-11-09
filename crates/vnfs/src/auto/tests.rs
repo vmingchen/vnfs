@@ -62,33 +62,43 @@ fn child_seeds_recheck_routing_and_keep_owner_validation() {
     client.write("/dir/a", b"x").unwrap();
     client.write("/dir/b", b"x").unwrap();
     for reroute in [false, true] {
-        let (first, next, _) = client
-            .read_dir_pages_with_fields(
-                &[Path::new("/dir")],
-                Attributes::MODE,
-                vec![None],
-                1,
-                10,
-                true,
+        let (first, next, _) = {
+            let page_inputs: &[&Path] = &[Path::new("/dir")];
+            vfsi_core::internal::collect_vec_result(
+                client.read_dir_pages_with_fields(
+                    page_inputs,
+                    Attributes::MODE,
+                    vec![None],
+                    1,
+                    10,
+                    true,
+                ),
+                page_inputs.len(),
             )
-            .unwrap()
-            .remove(0);
+        }
+        .unwrap()
+        .remove(0);
         let mut saved = next.unwrap().into_state::<RoutedDirectoryCursor>().unwrap();
         if reroute {
             saved.backend_path = "/obsolete".into();
         }
         let seed = vfsi_sync::DirPageCursor::new(RoutedChildDirectoryCursor(saved));
-        let (page, _, _) = client
-            .read_dir_pages_with_fields(
-                &[Path::new("/dir")],
-                Attributes::MODE,
-                vec![Some(seed)],
-                1,
-                10,
-                true,
+        let (page, _, _) = {
+            let page_inputs: &[&Path] = &[Path::new("/dir")];
+            vfsi_core::internal::collect_vec_result(
+                client.read_dir_pages_with_fields(
+                    page_inputs,
+                    Attributes::MODE,
+                    vec![Some(seed)],
+                    1,
+                    10,
+                    true,
+                ),
+                page_inputs.len(),
             )
-            .unwrap()
-            .remove(0);
+        }
+        .unwrap()
+        .remove(0);
         assert_eq!(page.entries.len(), 1);
         if reroute {
             assert_eq!(
@@ -102,33 +112,43 @@ fn child_seeds_recheck_routing_and_keep_owner_validation() {
             );
         }
     }
-    let (_, next, _) = client
-        .read_dir_pages_with_fields(
-            &[Path::new("/dir")],
-            Attributes::MODE,
-            vec![None],
-            1,
-            10,
-            true,
+    let (_, next, _) = {
+        let page_inputs: &[&Path] = &[Path::new("/dir")];
+        vfsi_core::internal::collect_vec_result(
+            client.read_dir_pages_with_fields(
+                page_inputs,
+                Attributes::MODE,
+                vec![None],
+                1,
+                10,
+                true,
+            ),
+            page_inputs.len(),
         )
-        .unwrap()
-        .remove(0);
+    }
+    .unwrap()
+    .remove(0);
     let saved = next.unwrap().into_state::<RoutedDirectoryCursor>().unwrap();
     let seed = vfsi_sync::DirPageCursor::new(RoutedChildDirectoryCursor(saved));
     let other = Auto::new(root.path()).unwrap();
     assert_eq!(
-        other
-            .read_dir_pages_with_fields(
-                &[Path::new("/dir")],
-                Attributes::MODE,
-                vec![Some(seed)],
-                1,
-                10,
-                true
+        {
+            let page_inputs: &[&Path] = &[Path::new("/dir")];
+            vfsi_core::internal::collect_vec_result(
+                other.read_dir_pages_with_fields(
+                    page_inputs,
+                    Attributes::MODE,
+                    vec![Some(seed)],
+                    1,
+                    10,
+                    true,
+                ),
+                page_inputs.len(),
             )
-            .err()
-            .unwrap()
-            .raw_code(),
+        }
+        .err()
+        .unwrap()
+        .raw_code(),
         libc::EINVAL as u32
     );
 }
@@ -168,7 +188,13 @@ fn live_retained_directory_cursor_rechecks_filesystem_credentials() {
         .unwrap()
         .as_nanos();
     let path = PathBuf::from(format!("/auto-cursor-auth-{}-{nonce}", std::process::id()));
-    remote.vmkdir(&[crate::MkDirOp::new(&path, 0o700)]).unwrap();
+    remote
+        .vmkdir(&[crate::MkDirOp::new(&path, 0o700)])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+        })
+        .unwrap();
     remote.write(path.join("first"), b"private").unwrap();
     remote.write(path.join("second"), b"private").unwrap();
     let local = tempfile::tempdir().unwrap();
@@ -193,11 +219,22 @@ fn live_retained_directory_cursor_rechecks_filesystem_credentials() {
         (true, 1, false),
         (true, 1, true),
     ] {
-        let (_, next, _) = remote
-            .inner
-            .read_dir_pages_with_fields(&[&path], Attributes::MODE, vec![None], 1, 10, true)
-            .unwrap()
-            .remove(0);
+        let (_, next, _) = {
+            let page_inputs: &[&Path] = &[&path];
+            vfsi_core::internal::collect_vec_result(
+                remote.inner.read_dir_pages_with_fields(
+                    page_inputs,
+                    Attributes::MODE,
+                    vec![None],
+                    1,
+                    10,
+                    true,
+                ),
+                page_inputs.len(),
+            )
+        }
+        .unwrap()
+        .remove(0);
         let saved = RoutedDirectoryCursor {
             route: Route::Nfs(connection.clone()),
             backend_path: path.clone(),
@@ -244,16 +281,18 @@ fn live_retained_directory_cursor_rechecks_filesystem_credentials() {
     for (changed, index, mismatched, before, after, result) in outcomes {
         assert_eq!(mismatched, changed);
         if changed {
-            let error = result
+            let result = result.unwrap();
+            let error = result[index]
+                .as_ref()
                 .err()
                 .expect("stale credentials must reject the page");
-            assert_eq!(error.raw_code(), libc::EACCES as u32);
-            assert_eq!(error.index(), Some(index));
-            assert_eq!(error.operation(), Some("auto_auth"));
-            assert_eq!(error.path(), Some(path.as_path()));
+            assert_eq!(error.cause().raw_code(), libc::EACCES as u32);
+            assert_eq!(error.cause().index(), None);
+            assert_eq!(error.state(), vfsi_core::FailureState::NotAttempted);
+            assert_eq!(error.cause().path(), Some(path.as_path()));
             assert_eq!(after, before, "reject before any retained-identity RPC");
         } else {
-            assert_eq!(result.unwrap()[0].0.entries.len(), 1);
+            assert_eq!(result.unwrap()[0].as_ref().unwrap().0.entries.len(), 1);
         }
     }
 }
@@ -280,101 +319,136 @@ fn routed_pages_enforce_public_budgets_and_pin_cursor_ownership() {
         .unwrap_err();
     assert_eq!(error.kind(), crate::ErrorKind::FileTooLarge);
     assert_eq!(error.index(), Some(0));
-    let cursor = client
-        .read_dir_pages_with_fields(
-            &[Path::new("/dir")],
-            Attributes::MODE,
-            vec![None],
-            1,
-            10,
-            true,
+    let cursor = {
+        let page_inputs: &[&Path] = &[Path::new("/dir")];
+        vfsi_core::internal::collect_vec_result(
+            client.read_dir_pages_with_fields(
+                page_inputs,
+                Attributes::MODE,
+                vec![None],
+                1,
+                10,
+                true,
+            ),
+            page_inputs.len(),
         )
-        .unwrap()
-        .remove(0)
-        .1
-        .unwrap();
+    }
+    .unwrap()
+    .remove(0)
+    .1
+    .unwrap();
     let other = Auto::new(root.path()).unwrap();
     assert_eq!(
-        other
-            .read_dir_pages_with_fields(
-                &[Path::new("/dir")],
-                Attributes::MODE,
-                vec![Some(cursor)],
-                1,
-                10,
-                true
+        {
+            let page_inputs: &[&Path] = &[Path::new("/dir")];
+            vfsi_core::internal::collect_vec_result(
+                other.read_dir_pages_with_fields(
+                    page_inputs,
+                    Attributes::MODE,
+                    vec![Some(cursor)],
+                    1,
+                    10,
+                    true,
+                ),
+                page_inputs.len(),
             )
-            .err()
-            .unwrap()
-            .raw_code(),
+        }
+        .err()
+        .unwrap()
+        .raw_code(),
         libc::EINVAL as u32
     );
-    let cursor = client
-        .read_dir_pages_with_fields(
-            &[Path::new("/dir")],
-            Attributes::MODE,
-            vec![None],
-            1,
-            10,
-            true,
+    let cursor = {
+        let page_inputs: &[&Path] = &[Path::new("/dir")];
+        vfsi_core::internal::collect_vec_result(
+            client.read_dir_pages_with_fields(
+                page_inputs,
+                Attributes::MODE,
+                vec![None],
+                1,
+                10,
+                true,
+            ),
+            page_inputs.len(),
         )
-        .unwrap()
-        .remove(0)
-        .1
-        .unwrap();
+    }
+    .unwrap()
+    .remove(0)
+    .1
+    .unwrap();
     assert_eq!(
-        client
-            .read_dir_pages_with_fields(
-                &[Path::new("/other")],
-                Attributes::MODE,
-                vec![Some(cursor)],
-                1,
-                10,
-                true
+        {
+            let page_inputs: &[&Path] = &[Path::new("/other")];
+            vfsi_core::internal::collect_vec_result(
+                client.read_dir_pages_with_fields(
+                    page_inputs,
+                    Attributes::MODE,
+                    vec![Some(cursor)],
+                    1,
+                    10,
+                    true,
+                ),
+                page_inputs.len(),
             )
-            .err()
-            .unwrap()
-            .raw_code(),
+        }
+        .err()
+        .unwrap()
+        .raw_code(),
         libc::EINVAL as u32
     );
-    let cursor = client
-        .read_dir_pages_with_fields(
-            &[Path::new("/dir")],
-            Attributes::MODE,
-            vec![None],
-            1,
-            10,
-            true,
+    let cursor = {
+        let page_inputs: &[&Path] = &[Path::new("/dir")];
+        vfsi_core::internal::collect_vec_result(
+            client.read_dir_pages_with_fields(
+                page_inputs,
+                Attributes::MODE,
+                vec![None],
+                1,
+                10,
+                true,
+            ),
+            page_inputs.len(),
         )
-        .unwrap()
-        .remove(0)
-        .1
-        .unwrap();
-    let (page, next, _) = client
-        .read_dir_pages_with_fields(
-            &[Path::new("/dir")],
-            Attributes::MODE,
-            vec![Some(cursor)],
-            1,
-            10,
-            true,
-        )
-        .unwrap()
-        .remove(0);
-    assert_eq!(page.entries.len(), 1);
-    assert_eq!(page.entries[0].path().parent(), Some(Path::new("/dir")));
-    if let Some(cursor) = next {
-        let (page, next, _) = client
-            .read_dir_pages_with_fields(
-                &[Path::new("/dir")],
+    }
+    .unwrap()
+    .remove(0)
+    .1
+    .unwrap();
+    let (page, next, _) = {
+        let page_inputs: &[&Path] = &[Path::new("/dir")];
+        vfsi_core::internal::collect_vec_result(
+            client.read_dir_pages_with_fields(
+                page_inputs,
                 Attributes::MODE,
                 vec![Some(cursor)],
                 1,
                 10,
                 true,
+            ),
+            page_inputs.len(),
+        )
+    }
+    .unwrap()
+    .remove(0);
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].path().parent(), Some(Path::new("/dir")));
+    if let Some(cursor) = next {
+        let (page, next, _) = {
+            let page_inputs: &[&Path] = &[Path::new("/dir")];
+            vfsi_core::internal::collect_vec_result(
+                client.read_dir_pages_with_fields(
+                    page_inputs,
+                    Attributes::MODE,
+                    vec![Some(cursor)],
+                    1,
+                    10,
+                    true,
+                ),
+                page_inputs.len(),
             )
-            .unwrap()
-            .remove(0);
+        }
+        .unwrap()
+        .remove(0);
         assert!(page.entries.is_empty());
         assert!(next.is_none());
     }
@@ -498,7 +572,7 @@ fn local_paths_stay_mounted_and_open_file_roundtrips() {
     let client = Auto::new(&root).unwrap();
     assert_eq!(client.route_for("/file"), AutoRoute::Posix);
     let files = client
-        .vopen(&[
+        .open_batch(&[
             OpenOp::new(
                 "/one",
                 OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE,
@@ -510,7 +584,7 @@ fn local_paths_stay_mounted_and_open_file_roundtrips() {
         ])
         .unwrap();
     client
-        .vwrite(
+        .write_batch(
             &[
                 crate::WriteOp::at(&files[0], 0, b"one"),
                 crate::WriteOp::at(&files[1], 0, b"two"),
@@ -519,7 +593,7 @@ fn local_paths_stay_mounted_and_open_file_roundtrips() {
         )
         .unwrap();
     let reads = client
-        .vread(
+        .read_batch(
             [
                 crate::ReadOp::range(&files[0], 0, 3),
                 crate::ReadOp::range(&files[1], 0, 3),
@@ -532,7 +606,7 @@ fn local_paths_stay_mounted_and_open_file_roundtrips() {
     std::os::unix::fs::symlink("one", root.join("link")).unwrap();
     let metadata = client
         .mounted
-        .vgetattrs(
+        .getattrs_all(
             &[Path::new("/one"), Path::new("/link")],
             crate::AttrsOptions::new().with_follow_final_symlink(false),
         )
@@ -541,7 +615,7 @@ fn local_paths_stay_mounted_and_open_file_roundtrips() {
     assert_eq!(metadata[1].file_type(), crate::FileType::Symlink);
     let error = client
         .mounted
-        .vgetattrs(
+        .getattrs_all(
             &[Path::new("/one"), Path::new("/missing")],
             crate::AttrsOptions::new().with_follow_final_symlink(false),
         )
@@ -552,14 +626,14 @@ fn local_paths_stay_mounted_and_open_file_roundtrips() {
         .with_limits(ResourceLimits::new().with_max_read_bytes(5));
     let tiny_file = tiny.open("/one").unwrap();
     let error = tiny
-        .vread(
+        .read_batch(
             [crate::ReadOp::range(&tiny_file, 0, 6)],
             crate::ReadOptions::default(),
         )
         .unwrap_err();
     assert_eq!(error.raw_code(), libc::EFBIG as u32);
     assert_eq!(
-        tiny.vread(
+        tiny.read_batch(
             [crate::ReadOp::range(&tiny_file, 0, 3)],
             crate::ReadOptions::default()
         )
@@ -570,7 +644,7 @@ fn local_paths_stay_mounted_and_open_file_roundtrips() {
     );
     tiny_file.close().unwrap();
     let error = client
-        .vread(
+        .read_batch(
             [crate::ReadOp::range(
                 &files[0],
                 0,
@@ -585,7 +659,7 @@ fn local_paths_stay_mounted_and_open_file_roundtrips() {
 }
 
 #[test]
-fn write_allv_preflights_closed_empty_and_overflowing_requests_locally() {
+fn strict_write_all_collection_retains_healthy_effects_around_local_rejection() {
     let root = std::env::temp_dir().join(format!(
         "auto-local-preflight-{}-{:?}",
         std::process::id(),
@@ -597,7 +671,7 @@ fn write_allv_preflights_closed_empty_and_overflowing_requests_locally() {
         client.write("/first", b"original").unwrap();
         client.write("/second", b"original").unwrap();
         let mut files = client
-            .vopen(
+            .open_batch(
                 &["/first", "/second"]
                     .map(|path| OpenOp::new(path, OpenFlags::READ | OpenFlags::WRITE)),
             )
@@ -606,7 +680,7 @@ fn write_allv_preflights_closed_empty_and_overflowing_requests_locally() {
             files[1].try_close().unwrap();
         }
         let error = client
-            .vwrite(
+            .write_batch(
                 &[
                     crate::WriteOp::at(&files[0], 0, b"changed"),
                     crate::WriteOp::at(
@@ -619,8 +693,8 @@ fn write_allv_preflights_closed_empty_and_overflowing_requests_locally() {
             )
             .unwrap_err();
         let first = client.read("/first").unwrap();
-        client.vclose(&mut files).unwrap();
-        assert_eq!(first, b"original");
+        client.close_batch(&mut files).unwrap();
+        assert_eq!(first, b"changedl");
         assert_eq!(error.index(), Some(1));
         assert_eq!(
             error.raw_code(),
@@ -670,12 +744,12 @@ fn live_nfs_mount_uses_direct_connection() {
             OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE_NEW,
         )
     });
-    let files = client.vopen(&requests).unwrap();
+    let files = client.open_batch(&requests).unwrap();
     assert!(matches!(files[0].route(), AutoRoute::DirectNfs { .. }));
     assert!(matches!(files[1].route(), AutoRoute::DirectNfs { .. }));
     assert_eq!(files[2].route(), AutoRoute::Posix);
     client
-        .vwrite(
+        .write_batch(
             &[
                 crate::WriteOp::at(&files[0], 0, b"first"),
                 crate::WriteOp::at(&files[1], 0, b"second"),
@@ -685,7 +759,7 @@ fn live_nfs_mount_uses_direct_connection() {
         )
         .unwrap();
     let reads = client
-        .vread(
+        .read_batch(
             [
                 crate::ReadOp::range(&files[0], 0, 5),
                 crate::ReadOp::range(&files[1], 0, 6),
@@ -700,7 +774,7 @@ fn live_nfs_mount_uses_direct_connection() {
     let mut buffers = [[0_u8; 8]; 3];
     let [first_buffer, second_buffer, local_buffer] = &mut buffers;
     let reads = client
-        .vread(
+        .read_batch(
             [
                 crate::ReadOp::into(&files[0], 0, first_buffer),
                 crate::ReadOp::into(&files[1], 0, second_buffer),
@@ -721,7 +795,7 @@ fn live_nfs_mount_uses_direct_connection() {
     // only a subsequent zero-byte read proves the local file is exhausted.
     assert!(!reads[2].eof());
     let probe = client
-        .vread(
+        .read_batch(
             [crate::ReadOp::into(&files[2], 5, local_buffer)],
             Default::default(),
         )
@@ -732,7 +806,7 @@ fn live_nfs_mount_uses_direct_connection() {
     assert_eq!(&buffers[1][..6], b"second");
     assert_eq!(&buffers[2][..5], b"local");
     client
-        .vwrite(
+        .write_batch(
             &[
                 crate::WriteOp::at(&files[0], 0, b"FIRST"),
                 crate::WriteOp::at(&files[1], 0, b"SECOND"),
@@ -742,8 +816,8 @@ fn live_nfs_mount_uses_direct_connection() {
         )
         .unwrap();
     let mut files = files;
-    client.vclose(&mut files).unwrap();
-    client.vclose(&mut files).unwrap();
+    client.close_batch(&mut files).unwrap();
+    client.close_batch(&mut files).unwrap();
     assert!(files.iter().all(AutoFile::is_closed));
     let paths = [first.as_path(), second.as_path(), local.as_path()];
     assert_eq!(
@@ -760,7 +834,7 @@ fn live_nfs_mount_uses_direct_connection() {
             .is_err()
     );
     let existing = client
-        .vopen(&[
+        .open_batch(&[
             OpenOp::new(
                 &first,
                 OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE,
@@ -779,7 +853,7 @@ fn live_nfs_mount_uses_direct_connection() {
     client.close_files(existing).unwrap();
     let missing = std::env::temp_dir().join(format!("{unique}-missing"));
     let error = client
-        .vopen(&[
+        .open_batch(&[
             OpenOp::new(&first, OpenFlags::READ),
             OpenOp::new(&second, OpenFlags::READ),
             OpenOp::new(&missing, OpenFlags::READ),
@@ -854,7 +928,7 @@ fn live_changed_auto_limits_apply_to_cached_connections_and_open_handles() {
         let mut buffer = [0; 6];
         outcomes.push(
             client
-                .vread(
+                .read_batch(
                     [crate::ReadOp::into(&file, 0, &mut buffer)],
                     Default::default(),
                 )
@@ -867,7 +941,7 @@ fn live_changed_auto_limits_apply_to_cached_connections_and_open_handles() {
         buffer.fill(0xff);
         assert_eq!(
             client
-                .vread(
+                .read_batch(
                     [crate::ReadOp::into(&file, 0, &mut buffer)],
                     Default::default()
                 )
@@ -915,7 +989,9 @@ fn live_write_allv_preflights_invalid_later_requests_across_routes() {
                 [&local, &remote]
             };
             let mut files = client
-                .vopen(&paths.map(|path| OpenOp::new(path, OpenFlags::READ | OpenFlags::WRITE)))
+                .open_batch(
+                    &paths.map(|path| OpenOp::new(path, OpenFlags::READ | OpenFlags::WRITE)),
+                )
                 .unwrap();
             assert_eq!(
                 matches!(files[0].route(), AutoRoute::DirectNfs { .. }),
@@ -930,7 +1006,7 @@ fn live_write_allv_preflights_invalid_later_requests_across_routes() {
             }
             let payload: &[u8] = if invalid == 2 { b"" } else { b"XX" };
             let error = client
-                .vwrite(
+                .write_batch(
                     &[
                         crate::WriteOp::at(&files[0], 0, b"changed"),
                         crate::WriteOp::at(
@@ -956,7 +1032,7 @@ fn live_write_allv_preflights_invalid_later_requests_across_routes() {
                 second,
                 paths[1].to_path_buf(),
             ));
-            client.vclose(&mut files).unwrap();
+            client.close_batch(&mut files).unwrap();
             fs::remove_file(&remote).unwrap();
             fs::remove_file(&local).unwrap();
         }
@@ -1123,20 +1199,20 @@ fn live_directory_open_errors_report_application_operands() {
     for path in [&first, &missing, &file] {
         require_live_direct_route(&fs, path);
     }
-    let error = fs.vopen_dirs(&[&first, &missing]).unwrap_err();
+    let error = fs.open_dirs(&[&first, &missing]).unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.path(), Some(missing.as_path()));
     assert_eq!(error.operation(), Some("vopen_dirs"));
     assert_eq!(error.kind(), crate::ErrorKind::NotFound);
     fs.drain_cleanup().unwrap();
 
-    let error = fs.vopen_dirs(&[&file]).unwrap_err();
+    let error = fs.open_dirs(&[&file]).unwrap_err();
     assert_eq!(error.index(), Some(0));
     assert_eq!(error.path(), Some(file.as_path()));
     assert_eq!(error.operation(), Some("vopen_dirs"));
     assert_eq!(error.kind(), crate::ErrorKind::NotADirectory);
     assert_eq!(std::fs::read(&file).unwrap(), b"keep");
-    fs.vopen_dirs(&[&first]).unwrap().remove(0).close().unwrap();
+    fs.open_dirs(&[&first]).unwrap().remove(0).close().unwrap();
 }
 
 #[test]
@@ -1199,7 +1275,7 @@ fn live_mount_alias_clients_share_identity_and_cross_routes_never_use_kernel_cop
     client.write(&source, b"original").unwrap();
     assert!(
         client
-            .vcopy(&[(&source, &destination)], crate::CopyOptions::default())
+            .copies_all(&[(&source, &destination)], crate::CopyOptions::default())
             .unwrap_err()
             .kind()
             == std::io::ErrorKind::Unsupported
@@ -1207,14 +1283,14 @@ fn live_mount_alias_clients_share_identity_and_cross_routes_never_use_kernel_cop
     assert!(!destination.exists());
     assert_eq!(
         client
-            .vhardlink(&[(&source, &destination)])
+            .hardlinks_all(&[(&source, &destination)])
             .unwrap_err()
             .raw_code(),
         libc::EXDEV as u32
     );
     assert_eq!(
         client
-            .vrename(&[(&source, &destination)], Default::default())
+            .renames_all(&[(&source, &destination)], Default::default())
             .unwrap_err()
             .raw_code(),
         libc::EXDEV as u32
@@ -1283,7 +1359,12 @@ fn live_vector_open_retains_each_mount_alias_route() {
             route,
         })
         .collect();
-    let files = client.vopen_resolved(&requests, &resolved).unwrap();
+    let files: Vec<_> = client
+        .vopen_resolved(&requests, &resolved)
+        .unwrap()
+        .into_iter()
+        .map(Result::unwrap)
+        .collect();
     assert_eq!(files.len(), requests.len());
     for (index, file) in files.iter().enumerate() {
         assert_eq!(file.path(), public_paths[index]);
@@ -1297,7 +1378,7 @@ fn live_vector_open_retains_each_mount_alias_route() {
         }
     }
     let reads = client
-        .vread(
+        .read_batch(
             files.iter().map(|file| crate::ReadOp::range(file, 0, 5)),
             Default::default(),
         )
@@ -1330,7 +1411,7 @@ fn live_remove_continues_after_errors_across_routes() {
         let last = remote.path().join("last");
         fs::write(&last, b"last").unwrap();
         let error = client
-            .vremove(
+            .removes_all(
                 &[&blocked, &local_file, &last],
                 crate::RemoveMode::Entry,
                 crate::RemoveOptions::new().with_continue_on_error(continue_on_error),
@@ -1389,7 +1470,7 @@ fn live_remove_stops_on_transport_error_with_continuation_enabled() {
     fs::write(&local_file, b"keep").unwrap();
     fs::write(&remote_file, b"keep").unwrap();
     let error = client
-        .vremove(
+        .removes_all(
             &[&local_file, &remote_file],
             crate::RemoveMode::Entry,
             crate::RemoveOptions::new().with_continue_on_error(true),
@@ -1403,4 +1484,136 @@ fn live_remove_stops_on_transport_error_with_continuation_enabled() {
     assert!(script.is_consumed());
     assert_eq!(client.read(&remote_file).unwrap(), b"keep");
     assert_eq!(fs::read(&local_file).unwrap(), b"keep");
+}
+
+#[test]
+fn live_directory_open_results_keep_siblings_across_route_cohorts() {
+    use crate::{
+        VfsiExt,
+        nfs::{Nfs, NfsVersion},
+    };
+    let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+        assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+        return;
+    };
+    let export = std::env::var("VFSI_NFS_EXPORT").unwrap_or_else(|_| "/".into());
+    let minor = std::env::var("VFSI_NFS_MINOR")
+        .unwrap_or_else(|_| "2".into())
+        .parse()
+        .unwrap();
+    let remote = Nfs::builder(&server)
+        .root(&export)
+        .version(NfsVersion::try_from(Some(minor)).unwrap())
+        .connect()
+        .unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let client = Auto::new(local.path()).unwrap();
+    client.create_dir("/local").unwrap();
+    let base = PathBuf::from(format!("/routed-directory-open-{}", std::process::id()));
+    let first = base.join("first");
+    let last = base.join("last");
+    remote.create_dir_all(&first).unwrap();
+    remote.create_dir_all(&last).unwrap();
+    remote.write(first.join("file"), b"first").unwrap();
+    remote.write(last.join("file"), b"last").unwrap();
+    let connection = Arc::new(routing::NfsConnectionState {
+        spec: MountSpec {
+            id: u64::MAX,
+            mount_point: local.path().to_owned(),
+            export: export.into(),
+            server: server.into_boxed_str(),
+            minor,
+        },
+        client: remote.inner.clone(),
+        identity: Arc::new(()),
+        credentials: AuthSysIdentity::current().unwrap(),
+    });
+    let mut alias_spec = connection.spec.clone();
+    alias_spec.id -= 1;
+    alias_spec.mount_point = PathBuf::from("/directory-test-alias");
+    let alias = Arc::new(routing::NfsConnectionState {
+        spec: alias_spec,
+        client: connection.client.clone(),
+        identity: connection.identity.clone(),
+        credentials: connection.credentials.clone(),
+    });
+    let public: Vec<_> = [
+        "/local-before",
+        "/remote-first",
+        "/remote-missing",
+        "/local-between",
+        "/alias-last",
+        "/remote-first-again",
+    ]
+    .into_iter()
+    .map(Path::new)
+    .collect();
+    let resolved = [
+        Resolved {
+            route: Route::Posix,
+            path: "/local".into(),
+        },
+        Resolved {
+            route: Route::Nfs(connection.clone()),
+            path: first.clone(),
+        },
+        Resolved {
+            route: Route::Nfs(alias.clone()),
+            path: base.join("missing"),
+        },
+        Resolved {
+            route: Route::Posix,
+            path: "/local".into(),
+        },
+        Resolved {
+            route: Route::Nfs(alias),
+            path: last.clone(),
+        },
+        Resolved {
+            route: Route::Nfs(connection),
+            path: first.clone(),
+        },
+    ];
+    let results = client.vopen_dirs_resolved(&public, &resolved).unwrap();
+    assert_eq!(results.len(), public.len());
+    let mut dirs = Vec::new();
+    for (index, result) in results.into_iter().enumerate() {
+        match index {
+            0 | 3 => assert_eq!(
+                result.err().unwrap().cause().kind(),
+                crate::ErrorKind::Unsupported
+            ),
+            2 => {
+                let error = result.err().unwrap();
+                assert_eq!(error.cause().kind(), crate::ErrorKind::NotFound);
+                assert_eq!(error.cause().path(), Some(public[index]));
+            }
+            _ => {
+                let dir = result.unwrap();
+                assert_eq!(dir.path(), public[index]);
+                let Route::Nfs(actual) = &dir.route else {
+                    panic!("lost NFS route")
+                };
+                let Route::Nfs(expected) = &resolved[index].route else {
+                    unreachable!()
+                };
+                assert!(Arc::ptr_eq(actual, expected), "retain each mount alias");
+                dirs.push(dir);
+            }
+        }
+    }
+    remote.rename(&first, base.join("moved")).unwrap();
+    remote.create_dir(&first).unwrap();
+    remote.write(first.join("keep"), b"replacement").unwrap();
+    let results = client
+        .vremove_dir_contents(&dirs.iter().collect::<Vec<_>>(), Default::default())
+        .unwrap();
+    assert!(results.iter().all(Result::is_ok));
+    assert!(remote.read_dir(base.join("moved")).unwrap().is_empty());
+    assert!(remote.read_dir(&last).unwrap().is_empty());
+    assert_eq!(remote.read(first.join("keep")).unwrap(), b"replacement");
+    for dir in dirs {
+        dir.close().unwrap();
+    }
+    remote.remove_dir_all(&base).unwrap();
 }

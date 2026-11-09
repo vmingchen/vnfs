@@ -51,13 +51,28 @@ fn supported_rpcsec_gss_protection_levels_access_the_export() {
         )
         .with_creation()
         .with_truncate()]))
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap_or_else(|error| panic!("write using {name}: {error}"));
         let result = fs
             .vread_impl(&[ReadOp::from_path(&path, VfOffset::At(0), payload.len())])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap_or_else(|error| panic!("read using {name}: {error}"));
         assert_eq!(result[0].data, payload, "payload using {name}");
-        fs.vremove_impl(&[FileOperand::from_path(&path)])
-            .unwrap_or_else(|error| panic!("remove using {name}: {error}"));
+        {
+            let remove_files = &[FileOperand::from_path(&path)];
+            vfsi_core::internal::collect_vec_result(
+                fs.vremove_impl(remove_files),
+                remove_files.len(),
+            )
+            .map(|_| ())
+        }
+        .unwrap_or_else(|error| panic!("remove using {name}: {error}"));
     }
 }
 
@@ -105,6 +120,10 @@ fn renewable_ticket_allows_reconnect_after_ticket_expiry() {
     )
     .with_creation()
     .with_truncate()]))
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .expect("initial authenticated write");
 
     // The integration script obtains a one-minute renewable TGT. Let it
@@ -132,8 +151,16 @@ fn renewable_ticket_allows_reconnect_after_ticket_expiry() {
         .expect("reconnect using renewed GSS credentials");
     let read = fs
         .vread_impl(&[ReadOp::from_path(&path, VfOffset::At(0), payload.len())])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .expect("read after GSS reconnect");
     assert_eq!(read[0].data, payload);
-    fs.vremove_impl(&[FileOperand::from_path(&path)])
-        .expect("remove authenticated fixture");
+    {
+        let remove_files = &[FileOperand::from_path(&path)];
+        vfsi_core::internal::collect_vec_result(fs.vremove_impl(remove_files), remove_files.len())
+            .map(|_| ())
+    }
+    .expect("remove authenticated fixture");
 }

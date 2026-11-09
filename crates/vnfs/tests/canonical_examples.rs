@@ -17,7 +17,6 @@ mod small_files_benchmark;
 mod stream_file;
 
 use vnfs::Result;
-use vnfs::files::Vfsi;
 use vnfs::files::VfsiExt;
 use vnfs::posix::Posix;
 
@@ -43,7 +42,7 @@ fn bulk_roundtrip_cleanup_and_existing_directory_protection() -> Result<()> {
     fs.write("/existing/precious", b"keep")?;
     assert!(bulk_files::run(&fs, "/existing").is_err());
     assert_eq!(
-        fs.vread(
+        fs.read_batch(
             [vnfs::files::ReadOp::whole("/existing/precious")],
             vnfs::files::ReadOptions::default()
         )?[0]
@@ -153,7 +152,7 @@ fn canonical_workflows_on_nfsv41_and_nfsv42() -> Result<()> {
             assert_eq!(stream_file::run(&fs, &paths[0])?, bytes as u64);
             let file = fs.open(&paths[0])?;
             let mut buffer = [0; 4];
-            let mixed = fs.vread(
+            let mixed = fs.read_batch(
                 [
                     vnfs::files::ReadOp::whole(&paths[2]),
                     vnfs::files::ReadOp::range(&file, 10, 3),

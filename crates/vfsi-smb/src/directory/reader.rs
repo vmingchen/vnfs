@@ -13,7 +13,7 @@ use smb2::types::SessionId;
 
 pub(super) struct DirectoryReader {
     connection: Connection,
-    tree: Tree,
+    tree: Arc<ShareSession>,
     runtime: tokio::runtime::Handle,
     session: (u64, SessionId),
     file_id: Option<FileId>,
@@ -60,7 +60,7 @@ impl DirectoryReader {
                         tree.is_dfs || tree.dfs_origin.is_some(),
                         &tree.share_name,
                     )?;
-                    fs.tree = tree;
+                    fs.tree = Arc::new(ShareSession::new(tree, fs.client.connection().clone()));
                     retried = true;
                 }
                 Err(error) => return Err(smb_error(error, 0)),

@@ -8,7 +8,7 @@ pub fn run(fs: &impl Vfsi, paths: &[String]) -> vnfs::Result<Vec<Vec<u8>>> {
         .iter()
         .map(|path| OpenOp::new(path, OpenFlags::READ))
         .collect();
-    let files = fs.vopen(&requests)?;
+    let files = fs.open_batch(&requests)?;
     let mut buffers = vec![[0_u8; 4096]; files.len()];
     let result = {
         let reads: Vec<_> = files
@@ -16,7 +16,7 @@ pub fn run(fs: &impl Vfsi, paths: &[String]) -> vnfs::Result<Vec<Vec<u8>>> {
             .zip(&mut buffers)
             .map(|(file, buffer)| vnfs::files::ReadOp::into(file, 0, buffer))
             .collect();
-        fs.vread(reads, Default::default())
+        fs.read_batch(reads, Default::default())
     };
     // Explicit close surfaces errors; dropping handles is best-effort only.
     let close = fs.close_files(files);

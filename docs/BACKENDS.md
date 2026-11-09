@@ -47,9 +47,8 @@ Protocol wire structs, method names, and compound tags retain their vocabulary.
 
 | Seam | Responsibility |
 |---|---|
-| `vopen_impl` | Typed strict OPEN; preserve input order and resource cleanup on failure. |
-| `vopen_outcomes_impl` | Raw paths/flags/modes to `VfResult<ManyResults<FileOperand>>`; retain confirmed partial successes for the strict collector. |
-| `vopen_raw_impl` | Raw-flags adapter, not another application OPEN API. |
+| `vopen_impl` | Typed OPEN returning `VecResult<FileOperand>`; transfer each successful descriptor owner independently. |
+| `vopen_raw_impl` | Required native raw-flags engine returning `VecResult<FileOperand>`; no singleton-loop default. |
 | `vread_impl`, `vread_into_impl` | Allocating and caller-buffer reads; validate result cardinality, operand/offset association, and progress bounds. |
 | `vread_all_with_options_impl`, `read_file_impl` | Bounded vector/scalar whole-file collection; scalar collection takes an explicit byte bound. |
 | `vwrite_impl` | Single borrowed write boundary; short progress is acknowledged progress, not permission to replay an ambiguous failure. |
@@ -71,20 +70,19 @@ remain protocol representations, not additional portable request contracts.
 ## Strict results and resource ownership
 
 The application [error contract](RUST_API.md#durability-and-failure-rules)
-returns no partial value vector on failure; it does not roll back mutations.
-`ManyResults<T>` is a doc-hidden native mechanism, not an application result
-type. Position `n` always corresponds to request `n`:
+preserves per-input values for migrated vectors, including OPEN. Position `n`
+identifies input `n`; an inner error's cause has no separate input index.
+Successful OPENs transfer independent cleanup owners to the caller.
 
-- NFS executes a COMPOUND in order and stops at its first failing operation.
-  Confirmed prefix handles remain available for cleanup. Missing suffix results
-  are not fabricated successes. Splitting translates errors to original request
-  positions rather than wire operation/chunk numbers.
-- SMB requests may complete concurrently and out of order. Native outcomes
-  retain original request positions, including successes after a failed item.
-- The ordered local OPEN implementation stops at the first failure. This is
-  not a promise that every io_uring descriptor-I/O wave completes a prefix.
+- NFS resumes only a protocol-proven unexecuted suffix after COMPOUND failure.
+  Submitted inputs with lost replies are Unknown; untouched inputs are
+  NotAttempted. Earlier handles remain available and are never replayed.
+- SMB retains concurrent request results in input order. Its alias scheduling
+  policy does not turn an ordinary error into cancellation of later inputs.
+- Local OPEN collects each syscall result and continues independent inputs.
+  This backend mechanism does not impose sequential execution on io_uring I/O.
 
-The strict OPEN collector chooses the lowest request-position failure among
+The explicit strict OPEN collector chooses the lowest request-position failure among
 reported outcomes and attempts cleanup of every confirmed successful handle.
 It preserves the original failure if cleanup also fails and retains failed
 cleanup ownership for later draining. Never discard successful suffix handles

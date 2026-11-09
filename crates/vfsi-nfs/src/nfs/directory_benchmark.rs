@@ -110,28 +110,38 @@ impl Scan {
             if cookie == 0 {
                 return;
             }
-            first = backend
-                .nfs
-                .readdir_pages_bounded(
-                    &[(handle.clone(), cookie)],
-                    strategy.attrs(),
-                    strategy.page_bytes,
+            first = {
+                let page_ops = &[(handle.clone(), cookie)];
+                crate::client::collect_rpc_results(
+                    backend.nfs.readdir_pages_bounded(
+                        page_ops,
+                        strategy.attrs(),
+                        strategy.page_bytes,
+                    ),
+                    page_ops.len(),
                 )
-                .unwrap()
-                .pop()
-                .unwrap();
+            }
+            .unwrap()
+            .pop()
+            .unwrap();
         }
     }
 }
 
 fn scan(backend: &mut NfsVecFs, root: &NfsFh, strategy: Strategy) -> Scan {
     let mut result = Scan::default();
-    let first = backend
-        .nfs
-        .readdir_pages_bounded(&[(root.clone(), 0)], strategy.attrs(), strategy.page_bytes)
-        .unwrap()
-        .pop()
-        .unwrap();
+    let first = {
+        let page_ops = &[(root.clone(), 0)];
+        crate::client::collect_rpc_results(
+            backend
+                .nfs
+                .readdir_pages_bounded(page_ops, strategy.attrs(), strategy.page_bytes),
+            page_ops.len(),
+        )
+    }
+    .unwrap()
+    .pop()
+    .unwrap();
     result.directory(backend, root, b"", first, strategy);
     while !result.pending.is_empty() {
         let batch: Vec<_> = result
@@ -143,10 +153,18 @@ fn scan(backend: &mut NfsVecFs, root: &NfsFh, strategy: Strategy) -> Scan {
                 .iter()
                 .map(|work| (work.handle.clone().unwrap(), 0))
                 .collect();
-            let pages = backend
-                .nfs
-                .readdir_pages_bounded(&ops, strategy.attrs(), strategy.page_bytes)
-                .unwrap();
+            let pages = {
+                let page_ops = &ops;
+                crate::client::collect_rpc_results(
+                    backend.nfs.readdir_pages_bounded(
+                        page_ops,
+                        strategy.attrs(),
+                        strategy.page_bytes,
+                    ),
+                    page_ops.len(),
+                )
+            }
+            .unwrap();
             assert_eq!(pages.len(), batch.len());
             for ((work, (handle, _)), page) in batch.into_iter().zip(ops).zip(pages) {
                 result.directory(backend, &handle, &work.relative, page, strategy);
@@ -156,10 +174,18 @@ fn scan(backend: &mut NfsVecFs, root: &NfsFh, strategy: Strategy) -> Scan {
                 .iter()
                 .map(|work| (work.parent.clone(), work.name.clone()))
                 .collect();
-            let pages = backend
-                .nfs
-                .readdir_children_bounded(&ops, strategy.attrs(), strategy.page_bytes)
-                .unwrap();
+            let pages = {
+                let page_ops = &ops;
+                crate::client::collect_rpc_results(
+                    backend.nfs.readdir_children_bounded(
+                        page_ops,
+                        strategy.attrs(),
+                        strategy.page_bytes,
+                    ),
+                    page_ops.len(),
+                )
+            }
+            .unwrap();
             assert_eq!(pages.len(), batch.len());
             for (work, page) in batch.into_iter().zip(pages) {
                 result.directory(

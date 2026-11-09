@@ -111,7 +111,7 @@ fn run(config: support::Config) -> Result<(), Box<dyn std::error::Error>> {
         let files = if whole {
             Vec::new()
         } else {
-            fs.vopen(
+            fs.open_batch(
                 &paths
                     .iter()
                     .map(|path| OpenOp::new(path, OpenFlags::READ | OpenFlags::WRITE))
@@ -209,7 +209,7 @@ fn run(config: support::Config) -> Result<(), Box<dyn std::error::Error>> {
                     .enumerate()
                     .map(|(i, (offset, data))| WriteOp::at(&files[i % file_count], *offset, data))
                     .collect();
-                let results = fs.vwrite(&ops, WriteOptions::new().with_write_all(true))?;
+                let results = fs.write_batch(&ops, WriteOptions::new().with_write_all(true))?;
                 assert_eq!(results.len(), offsets.len());
                 assert!(
                     results
@@ -219,9 +219,9 @@ fn run(config: support::Config) -> Result<(), Box<dyn std::error::Error>> {
                 );
             } else if owned {
                 let results = if whole {
-                    fs.vread(paths.iter().map(ReadOp::whole), budget)?
+                    fs.read_batch(paths.iter().map(ReadOp::whole), budget)?
                 } else {
-                    fs.vread(
+                    fs.read_batch(
                         offsets.iter().enumerate().map(|(i, offset)| {
                             ReadOp::range(&files[i % file_count], *offset, lengths[i])
                         }),
@@ -248,7 +248,7 @@ fn run(config: support::Config) -> Result<(), Box<dyn std::error::Error>> {
                         ReadOp::into(&files[i % file_count], *offset, buffer)
                     })
                     .collect();
-                let results = fs.vread(ops, budget)?;
+                let results = fs.read_batch(ops, budget)?;
                 assert_eq!(results.len(), offsets.len());
                 assert!(
                     results

@@ -1,6 +1,6 @@
 #![cfg(feature = "nfs")]
 
-use vnfs::files::{Vfsi, VfsiExt};
+use vnfs::files::VfsiExt;
 use vnfs::helpers::TreeBuilder;
 use vnfs::nfs::{Nfs, NfsVersion};
 
@@ -44,12 +44,14 @@ fn tree_creation_batches_compounds_on_nfsv41_and_nfsv42() {
         );
         let paths: Vec<_> = (0..16).map(|i| format!("{root}/dir-{i}/file")).collect();
         let requests: Vec<_> = paths.iter().map(vnfs::files::ReadOp::whole).collect();
-        let contents = client.vread(requests, Default::default()).map(|results| {
-            results
-                .into_iter()
-                .map(|result| result.into_data().unwrap())
-                .collect::<Vec<_>>()
-        });
+        let contents = client
+            .read_batch(requests, Default::default())
+            .map(|results| {
+                results
+                    .into_iter()
+                    .map(|result| result.into_data().unwrap())
+                    .collect::<Vec<_>>()
+            });
         // Clean the successfully created fixture before assertions, including
         // when verification failed. Never remove a root we failed to create.
         let cleanup = client.remove_dir_all(tree.root());

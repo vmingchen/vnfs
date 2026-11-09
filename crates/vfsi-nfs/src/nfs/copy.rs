@@ -2,28 +2,55 @@
 
 use super::*;
 
-struct CopyBatchFailure {
-    error: VfError,
-    fallback_safe: bool,
-}
-
-impl CopyBatchFailure {
-    fn without_fallback(error: VfError) -> Self {
-        Self {
-            error,
-            fallback_safe: false,
-        }
+fn copy_error(cause: VfError) -> vfsi_core::OpError {
+    if cause.is_transport() {
+        vfsi_core::OpError::unknown(cause, None)
+    } else {
+        vfsi_core::OpError::failed(cause, None)
     }
 }
 
-impl From<VfError> for CopyBatchFailure {
-    fn from(error: VfError) -> Self {
-        let fallback_safe = is_server_copy_fallback_status(error.raw_code());
-        Self {
-            error,
-            fallback_safe,
-        }
+// Preparation may create the destination, and a later size/CLOSE failure can
+// follow confirmed writes. Such a logical copy is no longer untouched.
+fn copy_after_effect(error: vfsi_core::OpError) -> vfsi_core::OpError {
+    let (cause, state, _) = error.into_parts();
+    if state == vfsi_core::FailureState::Unknown {
+        vfsi_core::OpError::unknown(cause, None)
+    } else {
+        vfsi_core::OpError::failed(cause, None)
     }
+}
+
+pub(super) fn copy_slots<T>(
+    results: vfsi_core::VecResult<T>,
+    count: usize,
+) -> Vec<vfsi_core::OpResult<T>> {
+    use vfsi_core::OpError;
+    let mut results = match results {
+        Ok(results) if results.len() <= count => results,
+        Ok(_) => {
+            return (0..count)
+                .map(|_| {
+                    Err(OpError::unknown(
+                        VfError::invalid_reply(None, "excess COPY outcomes"),
+                        None,
+                    ))
+                })
+                .collect();
+        }
+        Err(cause) => {
+            return (0..count)
+                .map(|_| Err(OpError::not_attempted(cause.clone())))
+                .collect();
+        }
+    };
+    results.resize_with(count, || {
+        Err(OpError::unknown(
+            VfError::invalid_reply(None, "missing COPY outcomes"),
+            None,
+        ))
+    });
+    results
 }
 
 fn is_server_copy_fallback_status(status: u32) -> bool {
@@ -39,10 +66,29 @@ fn is_server_copy_fallback_status(status: u32) -> bool {
     )
 }
 
-fn server_copy_failure_allows_fallback(status: u32, active_index: usize, totals: &[u64]) -> bool {
-    is_server_copy_fallback_status(status)
-        && active_index == 0
-        && totals.iter().all(|&total| total == 0)
+fn copy_rejection_allows_fallback(result: &vfsi_core::OpResult<u64>, copied: u64) -> bool {
+    copied == 0 && result.as_ref().err().is_some_and(|error| {
+        error.state() != vfsi_core::FailureState::Unknown
+            && error.progress().is_none()
+            && matches!(error.cause().status(), Some(vfsi_core::StatusCode::Nfs(status)) if is_server_copy_fallback_status(status))
+    })
+}
+
+fn effective_copy_length(pair: &ExtentPair, source: &VfAttrs) -> VfResult<Option<u64>> {
+    match pair.length {
+        Some(requested) if requested > 0 => {
+            if !source.returned.contains(AttrMask::SIZE) {
+                return Err(VfError::invalid_reply(
+                    None,
+                    "COPY source size was not returned",
+                ));
+            }
+            Ok(Some(
+                requested.min(source.size.saturating_sub(pair.src_offset)),
+            ))
+        }
+        length => Ok(length),
+    }
 }
 
 // Compare borrowed object identities, never stateids or allocation addresses.
@@ -161,15 +207,37 @@ impl NfsVecFs {
                     .map_err(|error| vfsi_core::error_from_rpc(error, 0))
             },
             |nfs| {
-                let _ = nfs.close_path(&sfh, &ssid);
+                let _ = nfs.close_temporary_path(&sfh, &ssid);
             },
         )?;
 
-        // Temporary path OPENs share one owner. Opening an alias for writing
-        // advances the source's stateid; use and close only the latest state.
         let same_file = sfh == dfh;
         let read_state = if same_file { &dsid } else { &ssid };
-        let result = (|| {
+        let result = self.copy_opened_extent(&sfh, read_state, &dfh, &dsid, p);
+        let source_close = if same_file {
+            Ok(())
+        } else {
+            self.nfs
+                .close_temporary_path(&sfh, &ssid)
+                .map_err(|e| vfsi_core::error_from_rpc(e, 0))
+        };
+        let destination_close = self
+            .nfs
+            .close_temporary_path(&dfh, &dsid)
+            .map_err(|e| vfsi_core::error_from_rpc(e, 0));
+        result.and(source_close).and(destination_close)
+    }
+
+    fn copy_opened_extent(
+        &mut self,
+        sfh: &NfsFh,
+        ssid: &stateid4,
+        dfh: &NfsFh,
+        dsid: &stateid4,
+        p: &ExtentPair,
+    ) -> VfResult<()> {
+        let same_file = sfh == dfh;
+        (|| {
             let length = if same_file && p.dst_offset > p.src_offset {
                 // Forward writes can extend their own source. Bound both the
                 // overlap check and every READ by the original available data.
@@ -179,7 +247,7 @@ impl NfsVecFs {
                 let length = if length == 0 {
                     0
                 } else {
-                    length.min(self.file_size(&sfh)?.saturating_sub(p.src_offset))
+                    length.min(self.file_size(sfh)?.saturating_sub(p.src_offset))
                 };
                 if p.dst_offset - p.src_offset < length {
                     return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
@@ -194,256 +262,329 @@ impl NfsVecFs {
                 p.dst_offset,
                 length,
                 |nfs, offset, count| {
-                    nfs.read(&sfh, read_state, offset, count)
+                    nfs.read(sfh, ssid, offset, count)
                         .map_err(|error| vfsi_core::error_from_rpc(error, 0))
                 },
                 |nfs, offset, data| {
-                    nfs.write(&dfh, &dsid, offset, data)
+                    nfs.write(dfh, dsid, offset, data)
                         .map(|(written, _)| written as usize)
                         .map_err(|error| vfsi_core::error_from_rpc(error, 0))
                 },
             )?;
             // Truncate any stale tail beyond what was copied (cp semantics).
             self.nfs
-                .setattr(&dfh, None, Some(final_size))
+                .setattr(dfh, None, Some(final_size))
                 .map_err(|error| vfsi_core::error_from_rpc(error, 0))
-        })();
-        let source_close = if same_file {
+        })()
+    }
+
+    fn copy_extents_server_side(&mut self, pairs: &[ExtentPair]) -> Vec<vfsi_core::OpResult<()>> {
+        use vfsi_core::{OpError, OpResult};
+        let mut output: Vec<Option<OpResult<()>>> = (0..pairs.len()).map(|_| None).collect();
+        let sources: Vec<_> = pairs.iter().map(|pair| pair.src_path.as_path()).collect();
+        let opened = copy_slots(
+            self.vopen_raw_impl(
+                &sources,
+                &vec![libc::O_RDONLY; pairs.len()],
+                &vec![0; pairs.len()],
+            ),
+            pairs.len(),
+        );
+        let mut src = vec![None; pairs.len()];
+        let mut dst = vec![None; pairs.len()];
+        let mut active = Vec::new();
+        for (index, result) in opened.into_iter().enumerate() {
+            match result {
+                Ok(file) => {
+                    src[index] = Some(file);
+                    active.push(index);
+                }
+                Err(error) => output[index] = Some(Err(error)),
+            }
+        }
+        let paths: Vec<_> = active
+            .iter()
+            .map(|&index| pairs[index].dst_path.as_path())
+            .collect();
+        let opened = copy_slots(
+            self.vopen_raw_impl(
+                &paths,
+                &vec![libc::O_WRONLY | libc::O_CREAT; paths.len()],
+                &vec![0o644; paths.len()],
+            ),
+            paths.len(),
+        );
+        let mut ready = Vec::new();
+        for (index, result) in active.into_iter().zip(opened) {
+            match result {
+                Ok(file) => {
+                    dst[index] = Some(file);
+                    ready.push(index);
+                }
+                Err(error) => output[index] = Some(Err(error)),
+            }
+        }
+        let copies: Vec<_> = ready
+            .iter()
+            .map(|&index| {
+                let source = &self.open_files[&src[index].as_ref().unwrap().fd().unwrap()];
+                let destination = &self.open_files[&dst[index].as_ref().unwrap().fd().unwrap()];
+                crate::client::CopyOp {
+                    src_fh: source.fh.clone(),
+                    src_stateid: source.stateid,
+                    dst_fh: destination.fh.clone(),
+                    dst_stateid: destination.stateid,
+                    src_offset: pairs[index].src_offset,
+                    dst_offset: pairs[index].dst_offset,
+                    count: pairs[index].length.unwrap_or(0),
+                }
+            })
+            .collect();
+        // Identity dependencies retain the existing serial backend semantics;
+        // unique OPEN owners let us reuse the admitted handles without reopening.
+        let aliases = copy_pairs_alias(copies.iter().map(|copy| (&copy.src_fh, &copy.dst_fh)));
+        if aliases {
+            for (position, &index) in ready.iter().enumerate() {
+                self.copy_opened_batch(
+                    pairs,
+                    &src,
+                    &ready[position..position + 1],
+                    &copies[position..position + 1],
+                    &mut output,
+                );
+                debug_assert!(output[index].is_some());
+            }
+        } else {
+            self.copy_opened_batch(pairs, &src, &ready, &copies, &mut output);
+        }
+        let mut cleanup = Vec::new();
+        let mut owners = Vec::new();
+        for (index, (source, destination)) in src.into_iter().zip(dst).enumerate() {
+            for file in [source, destination].into_iter().flatten() {
+                owners.push(index);
+                cleanup.push(file);
+            }
+        }
+        let count = cleanup.len();
+        for (index, result) in owners
+            .into_iter()
+            .zip(copy_slots(self.close_temporary_descriptors(cleanup), count))
+        {
+            if let Err(error) = result
+                && output[index].as_ref().is_some_and(Result::is_ok)
+            {
+                output[index] = Some(Err(copy_after_effect(error)));
+            }
+        }
+        output
+            .into_iter()
+            .map(|slot| {
+                slot.unwrap_or_else(|| {
+                    Err(OpError::unknown(
+                        VfError::invalid_reply(None, "missing COPY outcome"),
+                        None,
+                    ))
+                })
+            })
+            .collect()
+    }
+
+    fn copy_opened_batch(
+        &mut self,
+        pairs: &[ExtentPair],
+        sources: &[Option<FileOperand>],
+        indices: &[usize],
+        copies: &[crate::client::CopyOp],
+        output: &mut [Option<vfsi_core::OpResult<()>>],
+    ) {
+        use vfsi_core::OpError;
+        let explicit: Vec<_> = indices
+            .iter()
+            .copied()
+            .filter(|&index| pairs[index].length.is_some_and(|length| length > 0))
+            .collect();
+        let mut attrs: Vec<_> = explicit
+            .iter()
+            .map(|&index| VfAttrs {
+                file: sources[index].as_ref().unwrap().clone(),
+                masks: AttrMask::SIZE,
+                ..VfAttrs::default()
+            })
+            .collect();
+        #[cfg(feature = "test-faults")]
+        let readiness = if attrs.is_empty() {
             Ok(())
         } else {
-            self.nfs
-                .close_path(&sfh, &ssid)
-                .map_err(|e| vfsi_core::error_from_rpc(e, 0))
+            self.inject_open_fault(OpenFaultPoint::BeforeCopySourceAttrs)
         };
-        let destination_close = self
-            .nfs
-            .close_path(&dfh, &dsid)
-            .map_err(|e| vfsi_core::error_from_rpc(e, 0));
-        result.and(source_close).and(destination_close)
-    }
-
-    fn copy_extents_server_side(&mut self, pairs: &[ExtentPair]) -> Result<(), CopyBatchFailure> {
-        let src_files: Vec<FileOperand> = pairs
-            .iter()
-            .map(|p| FileOperand::from_os_path(&p.src_path))
-            .collect();
-        let dst_files: Vec<FileOperand> = pairs
-            .iter()
-            .map(|p| FileOperand::from_os_path(&p.dst_path))
-            .collect();
-        let src_refs: Vec<&FileOperand> = src_files.iter().collect();
-        let dst_refs: Vec<&FileOperand> = dst_files.iter().collect();
-        let no_create = vec![false; pairs.len()];
-        let create = vec![true; pairs.len()];
-        let no_truncate = vec![false; pairs.len()];
-
-        let src_tmp = self
-            .open_path_batch(&src_refs, &no_create, false, &no_truncate)
-            .map_err(CopyBatchFailure::from)?;
-        let dst_tmp = match self.open_path_batch(&dst_refs, &create, true, &no_truncate) {
-            Ok(tmp) => tmp,
-            Err(e) => {
-                self.close_tmp(&src_tmp);
-                return Err(CopyBatchFailure::from(e));
-            }
+        #[cfg(not(feature = "test-faults"))]
+        let readiness: VfResult<()> = Ok(());
+        let results = if attrs.is_empty() {
+            Ok(Vec::new())
+        } else {
+            readiness.and_then(|()| self.vgetattrs_impl(&mut attrs))
         };
-
-        // OPENs through the shared path owner can advance the stateid of any
-        // earlier OPEN of the same object, including read-only fanout. Filehandle
-        // identity also catches hardlink and symlink aliases without another RPC.
-        // Keep independent pairs batched; aliases must complete in caller order.
-        let aliases =
-            copy_pairs_alias(src_tmp.iter().zip(&dst_tmp).map(|(source, destination)| {
-                (
-                    &self.open_files[&source.expect("path source was opened")].fh,
-                    &self.open_files[&destination.expect("path destination was opened")].fh,
-                )
-            }));
-        if aliases {
-            // Obsolete stateids can fail CLOSE. Attempt every descriptor so
-            // one such error cannot skip cleanup of later independent objects.
-            for descriptor in src_tmp.iter().chain(&dst_tmp) {
-                self.close_tmp(std::slice::from_ref(descriptor));
+        #[cfg(feature = "test-faults")]
+        let results = results.map(|mut outcomes| {
+            for (index, outcome) in outcomes.iter_mut().enumerate() {
+                if let Err(cause) =
+                    self.inject_open_fault(OpenFaultPoint::AfterCopySourceAttrs { index })
+                {
+                    *outcome = Err(copy_error(cause));
+                }
             }
-            for (index, pair) in pairs.iter().enumerate() {
-                self.copy_extents_server_side(std::slice::from_ref(pair))
-                    .map_err(|mut failure| {
-                        failure.error = failure.error.map_index(|_| index);
-                        // A previous pair may already have changed its destination.
-                        // Never ask the caller to replay that successful prefix.
-                        failure.fallback_safe &= index == 0;
-                        failure
-                    })?;
+            outcomes
+        });
+        let mut lengths: Vec<_> = indices.iter().map(|&index| pairs[index].length).collect();
+        for ((index, attrs), result) in explicit.into_iter().zip(attrs).zip(copy_slots(
+            results,
+            lengths
+                .iter()
+                .filter(|length| length.is_some_and(|length| length > 0))
+                .count(),
+        )) {
+            match result.and_then(|()| {
+                effective_copy_length(&pairs[index], &attrs).map_err(OpError::not_attempted)
+            }) {
+                Ok(length) => {
+                    lengths[indices
+                        .iter()
+                        .position(|&original| original == index)
+                        .unwrap()] = length
+                }
+                Err(error) => output[index] = Some(Err(copy_after_effect(error))),
             }
-            return Ok(());
         }
-
-        let result = (|| -> Result<(), CopyBatchFailure> {
-            let explicit: Vec<usize> = pairs
+        let mut totals = vec![0u64; copies.len()];
+        let mut pending: Vec<_> = (0..indices.len())
+            .filter(|&position| output[indices[position]].is_none() && lengths[position] != Some(0))
+            .collect();
+        // Same-object server COPY remains rejected before dispatch. The
+        // client-only copier retains its separately documented alias rules.
+        pending.retain(|&position| {
+            let op = &copies[position];
+            let index = indices[position];
+            if op.src_fh == op.dst_fh {
+                output[index] = Some(Err(OpError::not_attempted(VfError::errno(None, ERR_INVAL))));
+                false
+            } else if !self.server_copy_enabled {
+                output[index] = Some(
+                    self.copy_opened_extent(
+                        &op.src_fh,
+                        &op.src_stateid,
+                        &op.dst_fh,
+                        &op.dst_stateid,
+                        &pairs[index],
+                    )
+                    .map_err(copy_error),
+                );
+                false
+            } else {
+                true
+            }
+        });
+        while !pending.is_empty() {
+            let active: Vec<_> = pending
                 .iter()
-                .enumerate()
-                .filter_map(|(i, pair)| pair.length.is_some_and(|length| length > 0).then_some(i))
-                .collect();
-            let mut source_attrs: Vec<VfAttrs> = explicit
-                .iter()
-                .map(|&i| VfAttrs {
-                    file: FileOperand::from_fd(src_tmp[i].expect("path source was opened")),
-                    masks: AttrMask::SIZE,
-                    ..VfAttrs::default()
+                .map(|&position| {
+                    let op = &copies[position];
+                    crate::client::CopyOp {
+                        src_fh: op.src_fh.clone(),
+                        src_stateid: op.src_stateid,
+                        dst_fh: op.dst_fh.clone(),
+                        dst_stateid: op.dst_stateid,
+                        src_offset: op.src_offset + totals[position],
+                        dst_offset: op.dst_offset + totals[position],
+                        count: lengths[position]
+                            .map(|length| length - totals[position])
+                            .unwrap_or(0),
+                    }
                 })
                 .collect();
-            if !source_attrs.is_empty() {
-                self.vgetattrs_impl(&mut source_attrs)?;
-            }
-            let mut effective_lengths: Vec<Option<u64>> =
-                pairs.iter().map(|pair| pair.length).collect();
-            for (&i, attrs) in explicit.iter().zip(&source_attrs) {
-                effective_lengths[i] = pairs[i]
-                    .length
-                    .map(|length| length.min(attrs.size.saturating_sub(pairs[i].src_offset)));
-            }
-            let mut copies = Vec::with_capacity(pairs.len());
-            for (i, p) in pairs.iter().enumerate() {
-                let src = self
-                    .open_files
-                    .get(&src_tmp[i].expect("path source was opened"))
-                    .expect("temporary source descriptor");
-                let dst = self
-                    .open_files
-                    .get(&dst_tmp[i].expect("path destination was opened"))
-                    .expect("temporary destination descriptor");
-                copies.push(crate::client::CopyOp {
-                    src_fh: src.fh.clone(),
-                    src_stateid: src.stateid,
-                    dst_fh: dst.fh.clone(),
-                    dst_stateid: dst.stateid,
-                    src_offset: p.src_offset,
-                    dst_offset: p.dst_offset,
-                    count: effective_lengths[i].unwrap_or(0),
-                });
-            }
-            let mut totals = vec![0u64; copies.len()];
-            // NFSv4.2 uses count=0 to mean "through EOF", while the VFSI API
-            // uses Some(0) for an explicit zero-byte copy. Do not put those
-            // operations on the wire; the SETATTR phase below still applies
-            // the destination-size semantics.
-            let mut pending: Vec<usize> = pairs
-                .iter()
-                .enumerate()
-                .filter_map(|(i, _)| (effective_lengths[i] != Some(0)).then_some(i))
-                .collect();
-            while !pending.is_empty() {
-                let active: Vec<crate::client::CopyOp> = pending
-                    .iter()
-                    .map(|&i| crate::client::CopyOp {
-                        src_fh: copies[i].src_fh.clone(),
-                        src_stateid: copies[i].src_stateid,
-                        dst_fh: copies[i].dst_fh.clone(),
-                        dst_stateid: copies[i].dst_stateid,
-                        src_offset: copies[i].src_offset,
-                        dst_offset: copies[i].dst_offset,
-                        count: effective_lengths[i]
-                            .map(|length| length.saturating_sub(totals[i]))
-                            .unwrap_or(0),
-                    })
-                    .collect();
-                self.server_copy_stats.requests += 1;
-                let counts = match self.nfs.copy_many(&active) {
-                    Ok(counts) => counts,
-                    Err(error) => {
-                        let active_index = error.op_index;
-                        let original = pending.get(active_index).copied().unwrap_or(0);
-                        let fallback_safe = server_copy_failure_allows_fallback(
-                            error.status,
-                            active_index,
-                            &totals,
-                        );
-                        let error =
-                            vfsi_core::error_from_rpc_indexed(error.with_op_index(original));
-                        return Err(CopyBatchFailure {
-                            error,
-                            fallback_safe,
-                        });
-                    }
-                };
-                self.server_copy_stats.operations += counts.len() as u64;
-                let mut next = Vec::new();
-                for (&i, n) in pending.iter().zip(counts) {
-                    totals[i] = totals[i]
-                        .checked_add(n)
-                        .ok_or_else(|| VfError::errno(i, libc::EOVERFLOW as u32))?;
-                    copies[i].src_offset = copies[i]
-                        .src_offset
-                        .checked_add(n)
-                        .ok_or_else(|| VfError::errno(i, libc::EOVERFLOW as u32))?;
-                    copies[i].dst_offset = copies[i]
-                        .dst_offset
-                        .checked_add(n)
-                        .ok_or_else(|| VfError::errno(i, libc::EOVERFLOW as u32))?;
-                    // A zero-byte continuation means EOF. For an explicit
-                    // count this matches vcopy_data_impl's short-at-EOF behavior; for a
-                    // count of zero it confirms that a possibly partial COPY
-                    // has reached EOF.
-                    if n != 0
-                        && effective_lengths[i]
-                            .map(|length| totals[i] < length)
-                            .unwrap_or(true)
-                    {
-                        next.push(i);
-                    }
-                }
-                pending = next;
-            }
-            let mut attrs = Vec::with_capacity(pairs.len());
-            for (i, (&n, p)) in totals.iter().zip(pairs).enumerate() {
-                let size = p
-                    .dst_offset
-                    .checked_add(n)
-                    .ok_or_else(|| VfError::errno(i, libc::EOVERFLOW as u32))?;
-                attrs.push(crate::client::SetattrOp {
-                    fh: copies[i].dst_fh.clone(),
-                    mode: None,
-                    uid: None,
-                    gid: None,
-                    size: Some(size),
-                    atime: None,
-                    mtime: None,
-                });
-            }
-            self.nfs
-                .setattr_many(&attrs)
-                .map_err(vfsi_core::error_from_rpc_indexed)
-                .map_err(CopyBatchFailure::without_fallback)
-        })();
-        self.close_tmp(&src_tmp);
-        self.close_tmp(&dst_tmp);
-        result
-    }
-
-    pub(super) fn vcopy_data_nfs(&mut self, pairs: &[ExtentPair]) -> VfRes {
-        self.ensure_writable(pairs.len())?;
-        if !self.server_copy_enabled {
-            return self.vcopy_data_impl(pairs);
-        }
-        // Keep the number of simultaneously open source/destination states
-        // bounded while still amortizing OPEN, COPY, SETATTR, and CLOSE.
-        const FILES_PER_COPY_BATCH: usize = 8;
-        for (base, batch) in pairs.chunks(FILES_PER_COPY_BATCH).enumerate() {
-            if let Err(failure) = self.copy_extents_server_side(batch) {
-                if failure.fallback_safe {
+            self.server_copy_stats.requests += 1;
+            let outcomes = copy_slots(self.nfs.copy_many(&active), active.len());
+            let mut next = Vec::new();
+            for (&position, result) in pending.iter().zip(outcomes) {
+                let index = indices[position];
+                if copy_rejection_allows_fallback(&result, totals[position]) {
                     self.server_copy_enabled = false;
                     self.server_copy_stats.fallbacks += 1;
-                    let start = base * FILES_PER_COPY_BATCH;
-                    return self
-                        .vcopy_data_impl(&pairs[start..])
-                        .map_err(|fallback| fallback.map_index(|index| start + index));
+                    let op = &copies[position];
+                    output[index] = Some(
+                        self.copy_opened_extent(
+                            &op.src_fh,
+                            &op.src_stateid,
+                            &op.dst_fh,
+                            &op.dst_stateid,
+                            &pairs[index],
+                        )
+                        .map_err(copy_error),
+                    );
+                    continue;
                 }
-                return Err(failure
-                    .error
-                    .map_index(|index| base * FILES_PER_COPY_BATCH + index));
+                match result {
+                    Ok(count) => {
+                        self.server_copy_stats.operations += 1;
+                        let op = &copies[position];
+                        let updated = totals[position].checked_add(count).filter(|&total| {
+                            op.src_offset.checked_add(total).is_some()
+                                && op.dst_offset.checked_add(total).is_some()
+                        });
+                        let Some(total) = updated else {
+                            output[index] = Some(Err(OpError::unknown(
+                                VfError::errno(None, libc::EOVERFLOW as u32),
+                                None,
+                            )));
+                            continue;
+                        };
+                        totals[position] = total;
+                        if count != 0 && lengths[position].is_none_or(|length| total < length) {
+                            next.push(position);
+                        }
+                    }
+                    Err(error) => {
+                        // Destination OPEN may already have created an entry.
+                        // Never advertise a logical copy as untouched afterwards.
+                        output[index] = Some(Err(copy_after_effect(error)));
+                    }
+                }
+            }
+            pending = next;
+        }
+        let finished: Vec<_> = (0..indices.len())
+            .filter(|&position| output[indices[position]].is_none())
+            .collect();
+        let attrs: Vec<_> = finished
+            .iter()
+            .map(|&position| crate::client::SetattrOp {
+                fh: copies[position].dst_fh.clone(),
+                mode: None,
+                uid: None,
+                gid: None,
+                size: copies[position].dst_offset.checked_add(totals[position]),
+                atime: None,
+                mtime: None,
+            })
+            .collect();
+        for (&position, result) in finished
+            .iter()
+            .zip(copy_slots(self.nfs.setattr_many(&attrs), attrs.len()))
+        {
+            output[indices[position]] = Some(result.map_err(copy_after_effect));
+        }
+    }
+
+    pub(super) fn vcopy_data_nfs(&mut self, pairs: &[ExtentPair]) -> vfsi_core::VecResult<()> {
+        self.ensure_writable(pairs.len())?;
+        let mut output = Vec::with_capacity(pairs.len());
+        for batch in pairs.chunks(8) {
+            if self.server_copy_enabled {
+                output.extend(self.copy_extents_server_side(batch));
+            } else {
+                output.extend(copy_slots(self.vcopy_data_impl(batch), batch.len()));
             }
         }
-        Ok(())
+        Ok(output)
     }
 }
 
@@ -540,25 +681,57 @@ mod tests {
     }
 
     #[test]
-    fn server_copy_fallback_requires_no_completed_prefix() {
-        assert!(server_copy_failure_allows_fallback(
-            nfsstat4_NFS4ERR_OFFLOAD_DENIED,
-            0,
-            &[0, 0, 0],
+    fn explicit_copy_lengths_require_confirmed_size_and_preserve_zero_and_eof() {
+        let mut pair = ExtentPair::new("/source", 3, "/destination", 0, Some(4));
+        let mut source = VfAttrs {
+            size: 9,
+            returned: AttrMask::SIZE,
+            ..Default::default()
+        };
+        assert_eq!(effective_copy_length(&pair, &source).unwrap(), Some(4));
+        pair.src_offset = 8;
+        assert_eq!(effective_copy_length(&pair, &source).unwrap(), Some(1));
+        pair.src_offset = u64::MAX;
+        assert_eq!(effective_copy_length(&pair, &source).unwrap(), Some(0));
+        source.returned = AttrMask::empty();
+        source.size = 999; // A stale payload cannot substitute for a returned field.
+        let error = effective_copy_length(&pair, &source).unwrap_err();
+        assert_eq!(
+            error.transport_kind(),
+            Some(vfsi_core::TransportKind::InvalidReply)
+        );
+        for length in [None, Some(0)] {
+            pair.length = length;
+            assert_eq!(effective_copy_length(&pair, &source).unwrap(), length);
+        }
+    }
+
+    #[test]
+    fn copy_fallback_requires_an_individual_rejection_without_confirmed_progress() {
+        use vfsi_core::{IoProgress, OpError};
+        let rejected = |status| Err(OpError::failed(VfError::nfs(None, status), None));
+        let unsupported = nfsstat4_NFS4ERR_OFFLOAD_DENIED;
+        assert!(copy_rejection_allows_fallback(&rejected(unsupported), 0));
+        assert!(!copy_rejection_allows_fallback(&rejected(unsupported), 8));
+        for count in [0, 8] {
+            assert!(
+                !copy_rejection_allows_fallback(&Ok(count), 0),
+                "successful siblings are never replayed"
+            );
+        }
+        assert!(!copy_rejection_allows_fallback(
+            &Err(OpError::unknown(VfError::nfs(None, unsupported), None)),
+            0
         ));
-        assert!(!server_copy_failure_allows_fallback(
-            nfsstat4_NFS4ERR_OFFLOAD_DENIED,
-            2,
-            &[0, 0, 0],
-        ));
-        assert!(!server_copy_failure_allows_fallback(
-            nfsstat4_NFS4ERR_OFFLOAD_DENIED,
-            0,
-            &[8, 0, 0],
+        assert!(!copy_rejection_allows_fallback(
+            &Err(OpError::failed(
+                VfError::nfs(None, unsupported),
+                Some(IoProgress::Write { bytes_written: 1 })
+            )),
+            0
         ));
         for status in [nfsstat4_NFS4ERR_ACCESS, nfsstat4_NFS4ERR_MOVED] {
-            assert!(!server_copy_failure_allows_fallback(status, 0, &[0, 0, 0]));
-            assert!(!CopyBatchFailure::from(VfError::nfs(0, status)).fallback_safe);
+            assert!(!copy_rejection_allows_fallback(&rejected(status), 0));
         }
     }
 

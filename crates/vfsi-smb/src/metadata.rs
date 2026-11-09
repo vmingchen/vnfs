@@ -153,19 +153,18 @@ impl SmbVecFs {
 
     pub(super) fn set_times_path(
         &mut self,
-        path: &Path,
+        path: &str,
         atime: Option<(i64, u32)>,
         mtime: Option<(i64, u32)>,
         index: usize,
     ) -> VfResult<()> {
-        let path = self.local_path_string(path)?;
-        let is_directory = self.client_stat(&path)?.is_directory;
+        let is_directory = self.client_stat(path)?.is_directory;
         let flags = if is_directory {
             libc::O_RDONLY | libc::O_DIRECTORY
         } else {
             libc::O_RDONLY
         };
-        let mut request = self.open_request(&path, flags)?;
+        let mut request = self.open_request(path, flags)?;
         request.desired_access = FileAccessMask::new(
             FileAccessMask::FILE_READ_ATTRIBUTES
                 | FileAccessMask::FILE_WRITE_ATTRIBUTES
@@ -190,20 +189,20 @@ impl SmbVecFs {
         result.and(close)
     }
 
-    pub(super) fn set_size_path(&mut self, path: &Path, size: u64) -> VfResult<()> {
-        let path = self.local_path_string(path)?;
-        let (file_id, _) = self.raw_open(&path, libc::O_WRONLY)?;
+    pub(super) fn set_size_encoded_path(&mut self, path: &str, size: u64) -> VfResult<()> {
+        let (file_id, _) = self.raw_open(path, libc::O_WRONLY)?;
         let result = self.set_size_handle(file_id, size);
         let close = self.close_temporary_handle(file_id);
         result.and(close)
     }
 
     pub(super) fn client_stat(&mut self, path: &str) -> VfResult<smb2::client::FileInfo> {
+        let tree = Arc::make_mut(&mut self.tree);
         let info = self
             .runtime
-            .block_on(self.client.stat(&mut self.tree, path))
-            .map_err(|e| smb_error(e, 0))?;
-        self.follow_stat_link(path, info)
+            .block_on(self.client.stat(tree.sdk_tree_mut(), path));
+        tree.refresh_connection(self.client.connection().clone());
+        self.follow_stat_link(path, info.map_err(|error| smb_error(error, 0))?)
     }
 
     pub(super) fn follow_stat_link(

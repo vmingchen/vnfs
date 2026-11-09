@@ -183,6 +183,10 @@ pub enum StatusCode {
 }
 
 impl VfError {
+    pub(crate) fn clear_input_index(&mut self) {
+        self.index = None;
+    }
+
     pub fn from_status(index: impl Into<Option<usize>>, status: StatusCode) -> Self {
         Self {
             index: index.into(),

@@ -5,6 +5,31 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+Prepared Rust release: vnfs 0.0.32 and vfsi-core/vfsi-sync/backend crates 0.2.0.
+Prepared compatible C SDK: vfsi-c 0.3.16, retaining ABI v3 and optional symbols.
+Prepared Python patches: nfs4fs 0.3.13, vfsi-fsspec 0.1.13, vsmb/vsmbfs 0.1.7.
+
+- Change every canonical Vfsi vector directly to VecResult, with one outcome
+  per input and explicit failure certainty and acknowledged I/O progress.
+  Update implementors to vfsi-* 0.2.0 together; older 0.1.x trait identities
+  cannot be mixed with the new clients.
+- Preserve backend concurrency and healthy siblings after ordinary failures;
+  keep strict conveniences in VfsiExt without implicit mutation replay.
+- Retain NFS OPEN cleanup identities and retire unaddressable client identities.
+  Retain session-pinned SMB CLOSE ownership without replaying ambiguous closes.
+- Acknowledge standard-I/O write prefixes without losing their pending error,
+  and reject stale SMB descriptors before they can address a new session's IDs.
+- Consume Python small-copy WRITE outcomes without replaying truncating suffixes;
+  preserve confirmed SMB read prefixes instead of splicing an unverified
+  replacement pathname after reconnect. Validate metadata before mutation and
+  retain accurate submission certainty after local or session rejection.
+- Preserve C ABI v3 and legacy Python return/exception conventions through
+  deliberate compatibility adapters. Require vfsi-fsspec 0.1.13 for the new
+  Python wheels and vsmb 0.1.7 for vsmbfs.
+- Document the NFS GETFH wire-cost increase and paired local/NFS/SMB controls,
+  including known timing/storage costs rather than claiming universal speedup.
+
+
 ## vnfs 0.0.31 (2026-11-08)
 
 Supporting Rust release: `vfsi-core 0.1.20`. The matching C SDK is

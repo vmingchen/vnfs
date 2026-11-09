@@ -20,6 +20,12 @@ enum Fault {
     Rename,
     IndexedRead,
     PartialCrossDevice,
+    NonprefixCrossDevice,
+    UnknownCrossDevice,
+    ShortRename,
+    LongRename,
+    RenameProgress,
+    RejectedRename,
     LostRename,
     MissingSize,
     OwnedShortRead,
@@ -75,7 +81,10 @@ impl Vfsi for Harness {
     fn capabilities(&self) -> Result<Capabilities> {
         self.fs.capabilities()
     }
-    fn vsetattrs<P: AsTarget<Self::File>>(&self, targets: &[SetAttrsOp<P>]) -> Result<()> {
+    fn vsetattrs<P: AsTarget<Self::File>>(
+        &self,
+        targets: &[SetAttrsOp<P>],
+    ) -> vfsi_core::VecResult<()> {
         assert!(
             targets
                 .iter()
@@ -84,26 +93,39 @@ impl Vfsi for Harness {
         self.calls.borrow_mut().attrs.push(targets.len());
         self.fs.vsetattrs(targets)
     }
-    fn vfsync(&self, files: &[&Self::File], mode: SyncMode) -> Result<()> {
+    fn vfsync(&self, files: &[&Self::File], mode: SyncMode) -> vnfs::VecResult<()> {
         self.calls.borrow_mut().syncs.push((mode, files.len()));
         self.fs.vfsync(files, mode)
     }
-    fn vstatfs<P: AsTarget<Self::File>>(&self, targets: &[P]) -> Result<Vec<FilesystemStats>> {
+    fn vstatfs<P: AsTarget<Self::File>>(
+        &self,
+        targets: &[P],
+    ) -> vfsi_core::VecResult<FilesystemStats> {
         self.fs.vstatfs(targets)
     }
-    fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
+    fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        pairs: &[(P, Q)],
+    ) -> vfsi_core::VecResult<()> {
         self.fs.vsymlink(pairs)
     }
-    fn vreadlink<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<std::path::PathBuf>> {
+    fn vreadlink<P: AsRef<Path>>(&self, paths: &[P]) -> vfsi_core::VecResult<std::path::PathBuf> {
         self.fs.vreadlink(paths)
     }
-    fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
+    fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        pairs: &[(P, Q)],
+    ) -> vfsi_core::VecResult<()> {
         self.fs.vhardlink(pairs)
     }
     fn limits(&self) -> ResourceLimits {
         self.fs.limits()
     }
-    fn vgetattrs<P: AsTarget<Self::File>>(&self, p: &[P], o: AttrsOptions) -> Result<Vec<Attrs>> {
+    fn vgetattrs<P: AsTarget<Self::File>>(
+        &self,
+        p: &[P],
+        o: AttrsOptions,
+    ) -> vfsi_core::VecResult<Attrs> {
         self.calls.borrow_mut().metadata.push(p.len());
         if self.fault.get() == Fault::MissingSize {
             return Ok(p
@@ -117,11 +139,12 @@ impl Vfsi for Harness {
                         ..Default::default()
                     })
                 })
+                .map(Ok)
                 .collect());
         }
         self.fs.vgetattrs(p, o)
     }
-    fn vopen(&self, r: &[OpenOp]) -> Result<Vec<Self::File>> {
+    fn vopen(&self, r: &[OpenOp]) -> vnfs::VecResult<Self::File> {
         self.calls.borrow_mut().opens += 1;
         self.calls.borrow_mut().open_batches.push(r.len());
         if self.fault.get() == Fault::BadOpenIndex {
@@ -137,7 +160,7 @@ impl Vfsi for Harness {
         &self,
         r: impl IntoIterator<Item = ReadOp<'a, Self::File>>,
         o: ReadOptions,
-    ) -> Result<Vec<ReadResult>> {
+    ) -> vnfs::VecResult<ReadResult> {
         let r: Vec<_> = r.into_iter().collect();
         let ranges: Vec<_> = r
             .iter()
@@ -173,34 +196,43 @@ impl Vfsi for Harness {
         let mut c = self.calls.borrow_mut();
         c.reads += 1;
         c.max_files = c.max_files.max(out.len());
-        c.max_bytes = c
-            .max_bytes
-            .max(out.iter().map(ReadResult::bytes_read).sum());
+        c.max_bytes = c.max_bytes.max(
+            out.iter()
+                .filter_map(|result| result.as_ref().ok())
+                .map(ReadResult::bytes_read)
+                .sum(),
+        );
         if self.fault.get() == Fault::ShortRead {
-            for result in &mut out {
+            for result in out.iter_mut().filter_map(|result| result.as_mut().ok()) {
                 if result.bytes_read() > 3 {
                     *result = ReadResult::buffered(result.offset(), 3, false);
                 }
             }
         }
         if self.fault.get() == Fault::OwnedShortRead {
-            for result in &mut out {
+            for result in out.iter_mut().filter_map(|result| result.as_mut().ok()) {
                 if let Some(data) = result.data().filter(|data| data.len() > 3) {
                     *result = ReadResult::owned(result.offset(), data[..3].to_vec(), false);
                 }
             }
         }
-        if self.fault.get() == Fault::NoReadProgress {
-            out[0] = ReadResult::owned(out[0].offset(), Vec::new(), false);
+        if self.fault.get() == Fault::NoReadProgress
+            && let Some(Ok(read)) = out.first_mut()
+        {
+            *read = ReadResult::owned(read.offset(), Vec::new(), false);
         }
-        if self.fault.get() == Fault::OversizedOwnedRead {
-            out[0] = ReadResult::owned(out[0].offset(), vec![0; ranges[0].1 + 1], true);
+        if self.fault.get() == Fault::OversizedOwnedRead
+            && let Some(Ok(read)) = out.first_mut()
+        {
+            *read = ReadResult::owned(read.offset(), vec![0; ranges[0].1 + 1], true);
         }
         if self.fault.get() == Fault::BadRead {
             out.pop();
         }
-        if self.fault.get() == Fault::WrongOffset {
-            out[0] = ReadResult::buffered(1, out[0].bytes_read(), out[0].eof());
+        if self.fault.get() == Fault::WrongOffset
+            && let Some(Ok(read)) = out.first_mut()
+        {
+            *read = ReadResult::buffered(1, read.bytes_read(), read.eof());
         }
         Ok(out)
     }
@@ -208,44 +240,57 @@ impl Vfsi for Harness {
         &self,
         r: &[WriteOp<'a, Self::File>],
         o: WriteOptions,
-    ) -> Result<Vec<WriteResult>> {
+    ) -> vnfs::VecResult<WriteResult> {
         self.calls.borrow_mut().writes += 1;
         let mut out = self.fs.vwrite(r, o)?;
         if self.fault.get() == Fault::LostWrite {
-            return Err(Error::transport_with_kind(
-                None,
-                TransportKind::InvalidReply,
-                "lost write reply",
-            ));
+            return Ok(out
+                .into_iter()
+                .map(|_| {
+                    Err(vnfs::error::OpError::unknown(
+                        Error::transport_with_kind(
+                            None,
+                            TransportKind::InvalidReply,
+                            "lost write reply",
+                        ),
+                        None,
+                    ))
+                })
+                .collect());
         }
         if self.fault.get() == Fault::BadWrite {
-            out[0].bytes_written += 1;
+            out[0].as_mut().unwrap().bytes_written += 1;
         }
         Ok(out)
     }
-    fn vclose(&self, f: &mut [Self::File]) -> Result<()> {
+    fn vclose(&self, f: &mut [Self::File]) -> vnfs::VecResult<()> {
         self.calls.borrow_mut().closes += f.len();
-        self.fs.vclose(f)?;
+        let outcomes = self.fs.vclose(f)?;
         if self.fault.get() == Fault::BadCloseIndex {
             return Err(Error::errno(f.len(), libc::EIO as u32));
         }
         if self.fault.get() == Fault::Close {
             return Err(Error::errno(0, libc::EIO as u32));
         }
-        Ok(())
+        Ok(outcomes)
     }
-    fn vmkdir<P: AsRef<Path>>(&self, p: &[MkDirOp<P>]) -> Result<()> {
+    fn vmkdir<P: AsRef<Path>>(&self, p: &[MkDirOp<P>]) -> vfsi_core::VecResult<()> {
         self.fs.vmkdir(p)
     }
     fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         p: &[(P, Q)],
         options: vnfs::files::CopyOptions,
-    ) -> Result<()> {
+    ) -> vfsi_core::VecResult<()> {
         self.calls.borrow_mut().copies += 1;
         self.fs.vcopy(p, options)
     }
-    fn vremove<P: AsRef<Path>>(&self, p: &[P], m: RemoveMode, o: RemoveOptions) -> Result<()> {
+    fn vremove<P: AsRef<Path>>(
+        &self,
+        p: &[P],
+        m: RemoveMode,
+        o: RemoveOptions,
+    ) -> vfsi_core::VecResult<()> {
         self.calls.borrow_mut().removes += 1;
         self.fs.vremove(p, m, o)
     }
@@ -253,24 +298,97 @@ impl Vfsi for Harness {
         &self,
         p: &[(P, Q)],
         options: RenameMode,
-    ) -> Result<()> {
+    ) -> vnfs::VecResult<()> {
+        use vnfs::error::OpError;
         self.calls.borrow_mut().renames += 1;
         match self.fault.get() {
             Fault::PartialCrossDevice => {
                 self.fs
-                    .vrename(&[(p[0].0.as_ref(), p[0].1.as_ref())], options)?;
-                Err(Error::errno(1, libc::EXDEV as u32))
+                    .renames_all(&[(p[0].0.as_ref(), p[0].1.as_ref())], options)?;
+                Ok((0..p.len())
+                    .map(|index| {
+                        if index == 0 {
+                            Ok(())
+                        } else {
+                            Err(OpError::not_attempted(Error::errno(
+                                None,
+                                libc::EXDEV as u32,
+                            )))
+                        }
+                    })
+                    .collect())
             }
+            Fault::NonprefixCrossDevice => {
+                self.fs.renames_all(
+                    &[
+                        (p[0].0.as_ref(), p[0].1.as_ref()),
+                        (p[2].0.as_ref(), p[2].1.as_ref()),
+                    ],
+                    options,
+                )?;
+                Ok(p.iter()
+                    .enumerate()
+                    .map(|(index, _)| {
+                        if index == 1 {
+                            Err(OpError::failed(
+                                Error::errno(None, libc::EXDEV as u32),
+                                None,
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .collect())
+            }
+            Fault::UnknownCrossDevice => Ok(p
+                .iter()
+                .map(|_| {
+                    Err(OpError::unknown(
+                        Error::errno(None, libc::EXDEV as u32),
+                        None,
+                    ))
+                })
+                .collect()),
+            Fault::ShortRename => Ok(vec![Ok(()); p.len().saturating_sub(1)]),
+            Fault::LongRename => Ok(vec![Ok(()); p.len() + 1]),
+            Fault::RenameProgress => Ok(p
+                .iter()
+                .map(|_| {
+                    Err(OpError::failed(
+                        Error::errno(None, libc::EXDEV as u32),
+                        Some(vnfs::error::IoProgress::Write { bytes_written: 1 }),
+                    ))
+                })
+                .collect()),
+            Fault::RejectedRename => Err(Error::unsupported(None)),
             Fault::LostRename => {
-                self.fs.vrename(p, options)?;
-                Err(Error::transport_with_kind(
-                    None,
-                    TransportKind::InvalidReply,
-                    "lost rename reply",
-                ))
+                self.fs.renames_all(p, options)?;
+                Ok(p.iter()
+                    .map(|_| {
+                        Err(OpError::unknown(
+                            Error::transport_with_kind(
+                                None,
+                                TransportKind::InvalidReply,
+                                "lost rename reply",
+                            ),
+                            None,
+                        ))
+                    })
+                    .collect())
             }
-            Fault::CrossDevice => Err(Error::errno(0, libc::EXDEV as u32)),
-            Fault::Rename => Err(Error::errno(0, libc::EIO as u32)),
+            Fault::CrossDevice => Ok(p
+                .iter()
+                .map(|_| {
+                    Err(OpError::failed(
+                        Error::errno(None, libc::EXDEV as u32),
+                        None,
+                    ))
+                })
+                .collect()),
+            Fault::Rename => Ok(p
+                .iter()
+                .map(|_| Err(OpError::failed(Error::errno(None, libc::EIO as u32), None)))
+                .collect()),
             _ => self.fs.vrename(p, options),
         }
     }
@@ -279,7 +397,7 @@ impl Vfsi for Harness {
         p: &[P],
         o: ListDirOptions,
         c: impl FnMut(usize, DirectoryListing) -> Result<C>,
-    ) -> Result<Vec<TraversalCompletion>> {
+    ) -> vfsi_core::VecResult<TraversalCompletion> {
         self.fs.vlistdirs(p, o, c)
     }
     fn vstream<P: AsRef<Path>>(
@@ -287,7 +405,7 @@ impl Vfsi for Harness {
         p: &[P],
         o: StreamOptions,
         c: impl FnMut(usize, u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
-    ) -> Result<Vec<StreamCompletion>> {
+    ) -> vfsi_core::VecResult<StreamCompletion> {
         self.fs.vstream(p, o, c)
     }
 }
@@ -862,12 +980,12 @@ fn no_replace_is_atomic_and_reports_existing_destination() {
     std::fs::write(t.path().join("source"), b"source").unwrap();
     std::fs::write(t.path().join("exists"), b"existing").unwrap();
     let error = fs
-        .vrename(&[("/source", "/exists")], RenameMode::NoReplace)
+        .renames_all(&[("/source", "/exists")], RenameMode::NoReplace)
         .unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
     assert_eq!(std::fs::read(t.path().join("source")).unwrap(), b"source");
     assert_eq!(std::fs::read(t.path().join("exists")).unwrap(), b"existing");
-    fs.vrename(&[("/source", "/new")], RenameMode::NoReplace)
+    fs.renames_all(&[("/source", "/new")], RenameMode::NoReplace)
         .unwrap();
     assert_eq!(std::fs::read(t.path().join("new")).unwrap(), b"source");
 }
@@ -879,7 +997,7 @@ fn exchange_swaps_names_atomically() {
     std::fs::write(root.path().join("left"), b"left data").unwrap();
     std::fs::write(root.path().join("right"), b"right data").unwrap();
 
-    fs.vrename(&[("/left", "/right")], RenameMode::Exchange)
+    fs.renames_all(&[("/left", "/right")], RenameMode::Exchange)
         .unwrap();
 
     assert_eq!(
@@ -899,7 +1017,7 @@ fn exchange_requires_both_names_to_exist() {
     std::fs::write(root.path().join("source"), b"source data").unwrap();
 
     let error = fs
-        .vrename(&[("/source", "/missing")], RenameMode::Exchange)
+        .renames_all(&[("/source", "/missing")], RenameMode::Exchange)
         .unwrap_err();
 
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
@@ -911,23 +1029,28 @@ fn exchange_requires_both_names_to_exist() {
 }
 
 #[test]
-fn no_replace_vector_reports_the_failing_pair_after_a_successful_prefix() {
+fn strict_no_replace_selects_the_error_without_suppressing_later_success() {
     let t = tempfile::tempdir().unwrap();
     let fs = Posix::new(t.path()).unwrap();
     std::fs::write(t.path().join("a"), b"a").unwrap();
     std::fs::write(t.path().join("b"), b"b").unwrap();
+    std::fs::write(t.path().join("c"), b"c").unwrap();
     std::fs::write(t.path().join("exists"), b"old").unwrap();
     let error = fs
-        .vrename(&[("/a", "/x"), ("/b", "/exists")], RenameMode::NoReplace)
+        .renames_all(
+            &[("/a", "/x"), ("/b", "/exists"), ("/c", "/y")],
+            RenameMode::NoReplace,
+        )
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(std::fs::read(t.path().join("x")).unwrap(), b"a");
+    assert_eq!(std::fs::read(t.path().join("y")).unwrap(), b"c");
     assert_eq!(std::fs::read(t.path().join("b")).unwrap(), b"b");
     assert_eq!(std::fs::read(t.path().join("exists")).unwrap(), b"old");
 }
 
 #[test]
-fn partial_cross_device_rename_reconciles_without_replaying_prefix() {
+fn partial_cross_device_rename_copies_only_explicit_unattempted_inputs() {
     let (t, fs) = fixture();
     fs.fault.set(Fault::PartialCrossDevice);
     let result = move_items(
@@ -1187,3 +1310,81 @@ fn shared_open_builder_dispatches_scalar_and_batch_opens_through_vfsi() {
 
 #[path = "support/writer_copies.rs"]
 mod writer_copies;
+
+#[test]
+fn move_uses_nonprefix_rename_outcomes_without_replaying_completed_roots() {
+    let (root, fs) = fixture();
+    fs.fault.set(Fault::NonprefixCrossDevice);
+    let result = move_items(
+        &fs,
+        &["/src/a", "/src/empty", "/src/nested"],
+        "/out",
+        TransferOptions::new().with_existing(Existing::Replace),
+    )
+    .unwrap();
+    assert_eq!(result.roots_renamed, 2);
+    assert_eq!(result.roots_removed, 1);
+    assert_eq!(fs.calls.borrow().renames, 1);
+    assert_eq!(fs.calls.borrow().removes, 1);
+    assert_eq!(std::fs::read(root.path().join("out/a")).unwrap(), payload());
+    assert_eq!(std::fs::read(root.path().join("out/empty")).unwrap(), b"");
+    assert_eq!(
+        std::fs::read(root.path().join("out/nested/b")).unwrap(),
+        b"second"
+    );
+    for name in ["src/a", "src/empty", "src/nested"] {
+        assert!(!root.path().join(name).exists());
+    }
+}
+
+#[test]
+fn move_never_falls_back_on_unknown_or_malformed_rename_outcomes() {
+    for fault in [
+        Fault::UnknownCrossDevice,
+        Fault::ShortRename,
+        Fault::LongRename,
+        Fault::RenameProgress,
+    ] {
+        let (root, fs) = fixture();
+        fs.fault.set(fault);
+        let error = move_items(
+            &fs,
+            &["/src/a", "/src/empty"],
+            "/out",
+            TransferOptions::new().with_existing(Existing::Replace),
+        )
+        .unwrap_err();
+        if fault == Fault::UnknownCrossDevice {
+            assert_eq!(error.kind(), std::io::ErrorKind::CrossesDevices);
+            assert_eq!(error.index(), Some(0));
+        } else {
+            assert_eq!(error.transport_kind(), Some(TransportKind::InvalidReply));
+        }
+        let calls = fs.calls.borrow();
+        assert_eq!(calls.renames, 1);
+        assert_eq!(calls.opens, 0);
+        assert_eq!(calls.copies, 0);
+        assert_eq!(calls.removes, 0);
+        assert_eq!(std::fs::read(root.path().join("src/a")).unwrap(), payload());
+        assert!(root.path().join("src/empty").exists());
+        assert!(!root.path().join("out/a").exists());
+    }
+}
+
+#[test]
+fn move_can_copy_after_a_whole_vector_pre_dispatch_rename_rejection() {
+    let (root, fs) = fixture();
+    fs.fault.set(Fault::RejectedRename);
+    let result = move_items(
+        &fs,
+        &["/src/a", "/src/empty"],
+        "/out",
+        TransferOptions::new().with_existing(Existing::Replace),
+    )
+    .unwrap();
+    assert_eq!(result.roots_renamed, 0);
+    assert_eq!(result.roots_removed, 2);
+    assert_eq!(fs.calls.borrow().renames, 1);
+    assert_eq!(std::fs::read(root.path().join("out/a")).unwrap(), payload());
+    assert!(!root.path().join("src/a").exists());
+}

@@ -1051,13 +1051,14 @@ struct RemoveFlags {
 ///
 /// The `continue_on_error`/`retries` behavior was previously hardcoded in the
 /// NFS backend; exposing it lets callers choose GNU `rm -r` semantics (delete
-/// as much as possible, report the first error) or fail fast. Backends using
+/// as much as possible within a root, report its error) or stop that root.
+/// Independent roots remain eligible regardless of this option. Backends using
 /// the generic remover support only the default options and reject others.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use = "configuration and requests have no effect until used"]
 pub struct RemoveOptions {
-    /// Keep removing after a per-entry failure and report the first error at
-    /// the end. When `false`, the first failure aborts.
+    /// Continue within a root after a per-entry failure. When false, stop that
+    /// root after already-submitted work completes; independent roots continue.
     flags: RemoveFlags,
     /// Maximum batch size for vectorized removals; `None` lets the backend learn
     /// a safe size from useful work, starting at a conservative default.
@@ -1095,7 +1096,7 @@ impl RemoveOptions {
         self
     }
 
-    /// Whether removal continues after semantic per-entry failures.
+    /// Whether removal continues within a root after semantic per-entry failures.
     pub const fn continue_on_error(self) -> bool {
         self.flags.continue_on_error()
     }

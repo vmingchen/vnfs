@@ -19,6 +19,8 @@
 //! their offset types preserve positional versus cursor/append semantics.
 
 mod error;
+mod outcome;
+pub use outcome::{FailureState, IoProgress, OpError, OpResult, VecResult};
 #[doc(hidden)]
 pub mod internal;
 pub mod path;

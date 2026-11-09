@@ -55,8 +55,9 @@ fn system_time_parts(time: std::time::SystemTime) -> VfResult<(i64, u32)> {
         }
     }
 }
-/// Ordered partial results produced by a native backend outcome hook, such as
-/// `vfsi_sync::backend::VectorBackend::vopen_outcomes_impl`.
+/// Legacy strict collection and cleanup for independent native results.
+/// Canonical execution hooks return VecResult; this adapter deliberately
+/// selects one error after execution and does not restore prefix semantics.
 ///
 /// Entry `n` always corresponds to request `n`. The vector may be shorter
 /// than `requested` when an ordered protocol stopped after a failure.
@@ -197,24 +198,156 @@ pub mod faults {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum OpenFaultPoint {
-        BeforeDispatch { chunk: usize },
-        AfterReply { chunk: usize },
-        BeforeRegister { index: usize },
-        AfterRegister { index: usize },
-        BeforeCleanup { index: usize },
-        BeforeCloseDispatch { index: usize },
-        AfterWriteChunk { chunk: usize },
-        BeforeReadRepair { index: usize },
-        BeforeDirectoryPage { continuation: bool },
+        BeforeDispatch {
+            chunk: usize,
+        },
+        AfterReply {
+            chunk: usize,
+        },
+        BeforeRegister {
+            index: usize,
+        },
+        AfterRegister {
+            index: usize,
+        },
+        BeforeCleanup {
+            index: usize,
+        },
+        BeforeCloseDispatch {
+            index: usize,
+        },
+        BeforeWriteChunk {
+            chunk: usize,
+        },
+        AfterWriteChunk {
+            chunk: usize,
+        },
+        BeforeWriteCompound {
+            first: usize,
+        },
+        AfterWriteCompoundReply {
+            first: usize,
+        },
+        AfterReadlinkCompoundReply {
+            first: usize,
+        },
+        AfterLookupChunkReply {
+            first: usize,
+        },
+        BeforeReadDirCompound {
+            children: bool,
+            first: usize,
+            count: usize,
+        },
+        AfterReadDirCompoundReply {
+            children: bool,
+            first: usize,
+            count: usize,
+        },
+        BeforeSmbCopyRequest {
+            copied: u64,
+        },
+        AfterSmbCopyReply {
+            copied: u64,
+        },
+        BeforeCopyCleanup {
+            destination: bool,
+        },
+        BeforeCopySourceAttrs,
+        AfterCopySourceAttrs {
+            index: usize,
+        },
+        BeforeCopyCompound {
+            first: usize,
+        },
+        AfterCopyCompoundReply {
+            first: usize,
+        },
+        BeforeRenameCompound {
+            first: usize,
+        },
+        AfterRenameCompoundReply {
+            first: usize,
+        },
+        BeforeSetattrCompound {
+            first: usize,
+        },
+        AfterSetattrCompoundReply {
+            first: usize,
+        },
+        BeforeCreateCompound {
+            first: usize,
+        },
+        AfterCreateCompoundReply {
+            first: usize,
+        },
+        BeforeLinkCompound {
+            first: usize,
+        },
+        AfterLinkCompoundReply {
+            first: usize,
+        },
+        BeforeReadRepair {
+            index: usize,
+        },
+        BeforeWriteRepair {
+            index: usize,
+        },
+        BeforeReadChunk {
+            chunk: usize,
+        },
+        BeforeSyncDispatch {
+            index: usize,
+        },
+        AfterSyncReply {
+            index: usize,
+        },
+        BeforeDirectoryPage {
+            continuation: bool,
+        },
         BeforeSizeQuery,
-        BeforeFollowSymlink { index: usize },
-        BeforeSetPermissions { index: usize },
-        AfterNoFollowSetattrTypeCheck { index: usize },
-        BeforeRemoveType { index: usize },
-        BeforeRemoveChunk { first_name: Vec<u8> },
-        BeforeRemovePage { cookie: u64 },
-        BeforeOpenChunk { chunk: usize },
-        BeforeCloseItem { index: usize },
+        BeforeFollowSymlink {
+            index: usize,
+        },
+        BeforeSetPermissions {
+            index: usize,
+        },
+        AfterNoFollowSetattrTypeCheck {
+            index: usize,
+        },
+        BeforeRemoveCompound {
+            first: usize,
+        },
+        AfterRemoveCompoundReply {
+            first: usize,
+        },
+        BeforeRemoveType {
+            index: usize,
+        },
+        BeforeRemoveChunk {
+            first_name: Vec<u8>,
+        },
+        BeforeRemovePage {
+            cookie: u64,
+        },
+        BeforeOpenChunk {
+            chunk: usize,
+        },
+        AfterOpenChunkReply {
+            chunk: usize,
+        },
+        BeforeOpenFinalize {
+            index: usize,
+        },
+        AfterOpenReply {
+            index: usize,
+        },
+        BeforeCloseItem {
+            index: usize,
+        },
+        AfterCloseReply {
+            index: usize,
+        },
         BeforePathClose,
         BeforePathCloseBatch,
     }
@@ -291,3 +424,122 @@ pub use adb::adb_layout;
 
 mod budget;
 pub use budget::TraversalBudget;
+
+/// Lossy all-success convenience policy. This never schedules or retries I/O.
+/// Error selection is by input position, not execution/completion order.
+pub fn collect_vec_result<T>(
+    results: crate::VecResult<T>,
+    expected: usize,
+) -> crate::VfResult<Vec<T>> {
+    let results = results?;
+    if results.len() != expected {
+        return Err(VfError::invalid_reply(None, "invalid vector outcome count"));
+    }
+    results
+        .into_iter()
+        .enumerate()
+        .map(|(index, result)| result.map_err(|error| error.into_cause().with_index(index)))
+        .collect()
+}
+
+/// Normalize an accepted subgroup to exactly one slot per input. Preserve known
+/// slots, quarantine ambiguous excess output, and classify an outer rejection
+/// as unattempted work. Whole-call structural rejection stays with the caller.
+pub fn vec_result_slots<T>(
+    result: crate::VecResult<T>,
+    expected: usize,
+) -> Vec<crate::OpResult<T>> {
+    use crate::OpError;
+    match result {
+        Ok(mut results) if results.len() <= expected => {
+            results.resize_with(expected, || {
+                Err(OpError::unknown(
+                    VfError::invalid_reply(None, "missing vector outcome"),
+                    None,
+                ))
+            });
+            results
+        }
+        Ok(_) => (0..expected)
+            .map(|_| {
+                Err(OpError::unknown(
+                    VfError::invalid_reply(None, "excess vector outcomes"),
+                    None,
+                ))
+            })
+            .collect(),
+        Err(cause) => (0..expected)
+            .map(|_| Err(OpError::not_attempted(cause.clone())))
+            .collect(),
+    }
+}
+
+/// Move a borrowed destination's confirmed prefix into an owned error.
+pub fn own_read_error(error: crate::OpError, offset: u64, mut buffer: Vec<u8>) -> crate::OpError {
+    use crate::{FailureState, IoProgress, OpError, VfError};
+    let (cause, state, progress) = error.into_parts();
+    let progress = match progress {
+        Some(IoProgress::Read(prefix))
+            if prefix.is_buffered()
+                && prefix.offset() == offset
+                && prefix.bytes_read() <= buffer.len() =>
+        {
+            buffer.truncate(prefix.bytes_read());
+            Some(IoProgress::Read(crate::api::ReadResult::owned(
+                offset,
+                buffer,
+                prefix.eof(),
+            )))
+        }
+        Some(_) => {
+            return OpError::unknown(VfError::invalid_reply(None, "invalid read progress"), None);
+        }
+        None => None,
+    };
+    match state {
+        FailureState::NotAttempted => OpError::not_attempted(cause),
+        FailureState::Failed => OpError::failed(cause, progress),
+        FailureState::Unknown => OpError::unknown(cause, progress),
+    }
+}
+
+/// Add an earlier acknowledged prefix without weakening completion knowledge.
+/// Invalid callback progress cannot erase already validated bytes.
+pub fn add_write_prefix(
+    error: crate::OpError,
+    confirmed: usize,
+    requested: usize,
+) -> crate::OpError {
+    use crate::{FailureState, IoProgress, OpError};
+    if confirmed > requested {
+        return OpError::unknown(
+            VfError::invalid_reply(None, "WRITE prefix exceeds source"),
+            None,
+        );
+    }
+    let (cause, state, progress) = error.into_parts();
+    let additional = match progress {
+        None => 0,
+        Some(IoProgress::Write { bytes_written }) if bytes_written <= requested - confirmed => {
+            bytes_written
+        }
+        _ => {
+            return OpError::unknown(
+                VfError::invalid_reply(None, "invalid WRITE repair progress"),
+                (confirmed != 0).then_some(IoProgress::Write {
+                    bytes_written: confirmed,
+                }),
+            );
+        }
+    };
+    let total = confirmed + additional;
+    let progress = (total != 0).then_some(IoProgress::Write {
+        bytes_written: total,
+    });
+    match state {
+        FailureState::Unknown => OpError::unknown(cause, progress),
+        FailureState::Failed => OpError::failed(cause, progress),
+        FailureState::NotAttempted if total != 0 => OpError::failed(cause, progress),
+        FailureState::NotAttempted => OpError::not_attempted(cause),
+    }
+}

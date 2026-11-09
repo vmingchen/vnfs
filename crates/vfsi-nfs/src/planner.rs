@@ -235,6 +235,7 @@ impl ExecutionMap {
     /// Operation ranges whose success is confirmed, including the successful
     /// prefix of the first failed item. Cleanup uses this to capture resources
     /// such as stateids created before a later operation in that item failed.
+    #[cfg(test)]
     pub(crate) fn executed_ranges(
         &self,
         report: &ExecutionReport,
@@ -378,6 +379,9 @@ pub(crate) struct ExecutionReport {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RequestSafety {
     ReadOnly,
+    // Keep this policy independently tested as metadata stops pretending to
+    // mutate. The mutation migration will use it for idempotent updates.
+    #[cfg_attr(not(test), allow(dead_code))]
     IdempotentMutation,
     NonIdempotentMutation,
 }

@@ -13,7 +13,7 @@ fn mixed<C: Vfsi>(fs: &C) {
     let file = fs.open("/a").unwrap();
     let mut buffer = [0xcc; 4];
     let results = fs
-        .vread(
+        .read_batch(
             [
                 ReadOp::whole("/b"),
                 ReadOp::range(&file, 2, 2),
@@ -32,7 +32,7 @@ fn mixed<C: Vfsi>(fs: &C) {
         "a positive local short read is not proof of EOF"
     );
     let eof = fs
-        .vread([ReadOp::range(&file, 6, 1)], ReadOptions::new())
+        .read_batch([ReadOp::range(&file, 6, 1)], ReadOptions::new())
         .unwrap();
     assert_eq!(eof[0].bytes_read(), 0);
     assert!(eof[0].eof());
@@ -63,7 +63,7 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
         .with_limits(ResourceLimits::new().with_max_read_bytes(4));
     fs.write_files(&[("/a", b"abc"), ("/b", b"xyz")]).unwrap();
     assert_eq!(
-        fs.vread(
+        fs.read_batch(
             [ReadOp::whole("/a"), ReadOp::whole("/b")],
             Default::default()
         )
@@ -72,7 +72,7 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
         ErrorKind::FileTooLarge
     );
     assert_eq!(
-        fs.vread(
+        fs.read_batch(
             [ReadOp::whole("/a"), ReadOp::whole("/b")],
             ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(6).unwrap())
         )
@@ -83,7 +83,7 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
     let file = fs.open("/a").unwrap();
     let mut buffer = [0xaa; 3];
     let error = fs
-        .vread(
+        .read_batch(
             [
                 ReadOp::into(&file, 0, &mut buffer),
                 ReadOp::range(&file, 0, 2),
@@ -94,14 +94,14 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
     assert_eq!(error.index(), Some(1));
     assert_eq!(buffer, [0xaa; 3]);
     let error = fs
-        .vread(
+        .read_batch(
             [ReadOp::whole("/b"), ReadOp::into(&file, 0, &mut buffer)],
             Default::default(),
         )
         .unwrap_err();
     assert_eq!(error.index(), Some(0));
     assert_eq!(&buffer, b"abc"); // Reads are not atomic; earlier buffers may be filled.
-    assert!(fs.vread([], ReadOptions::new()).unwrap().is_empty());
+    assert!(fs.read_batch([], ReadOptions::new()).unwrap().is_empty());
 }
 #[test]
 fn failure_indices_and_buffer_borrows_survive_consumption() {
@@ -111,7 +111,7 @@ fn failure_indices_and_buffer_borrows_survive_consumption() {
     let file = fs.open("/a").unwrap();
     let mut buffer = [0; 1];
     let error = fs
-        .vread(
+        .read_batch(
             [
                 ReadOp::whole("/a"),
                 ReadOp::into(&file, 0, &mut buffer),
@@ -126,7 +126,7 @@ fn failure_indices_and_buffer_borrows_survive_consumption() {
     let other = Posix::new(temp.path()).unwrap();
     let foreign = other.open("/a").unwrap();
     let error = fs
-        .vread(
+        .read_batch(
             [
                 ReadOp::whole("/missing"),
                 ReadOp::into(&foreign, 0, &mut buffer),
@@ -134,7 +134,8 @@ fn failure_indices_and_buffer_borrows_survive_consumption() {
             Default::default(),
         )
         .unwrap_err();
-    assert_eq!(error.index(), Some(1));
+    assert_eq!(error.index(), Some(0));
+    assert_eq!(error.kind(), ErrorKind::NotFound);
     assert_eq!(buffer, [7]);
 }
 #[test]
@@ -144,7 +145,7 @@ fn zero_length_buffers_and_owned_reads_keep_distinct_data_ownership() {
     fs.write("/a", b"abc").unwrap();
     let file = fs.open("/a").unwrap();
     let results = fs
-        .vread(
+        .read_batch(
             [ReadOp::range(&file, 0, 0), ReadOp::into(&file, 0, &mut [])],
             Default::default(),
         )
@@ -163,7 +164,7 @@ fn path_conversions_and_iterators_construct_whole_file_operations() {
     let fs = Posix::new(temp.path()).unwrap();
     fs.write_files(&[("/a", b"abc"), ("/b", b"xyz")]).unwrap();
     let results = fs
-        .vread(
+        .read_batch(
             ["/a".into(), std::path::Path::new("/b").into()],
             Default::default(),
         )
@@ -173,7 +174,7 @@ fn path_conversions_and_iterators_construct_whole_file_operations() {
         [3, 3]
     );
     let results = fs
-        .vread(
+        .read_batch(
             ["/a", "/b"].into_iter().map(ReadOp::whole),
             Default::default(),
         )
@@ -238,7 +239,7 @@ fn an_exhausted_internal_budget_never_restores_the_default() {
     let file = fs.open("/a").unwrap();
     let mut buffer = [0; 3];
     let results = fs
-        .vread(
+        .read_batch(
             [ReadOp::into(&file, 0, &mut buffer), ReadOp::whole("/empty")],
             Default::default(),
         )
@@ -246,7 +247,7 @@ fn an_exhausted_internal_budget_never_restores_the_default() {
     assert_eq!(&buffer, b"abc");
     assert_eq!(results[1].data(), Some(&b""[..]));
     let error = fs
-        .vread(
+        .read_batch(
             [ReadOp::into(&file, 0, &mut buffer), ReadOp::whole("/extra")],
             Default::default(),
         )

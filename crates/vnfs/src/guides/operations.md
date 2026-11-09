@@ -34,6 +34,11 @@ getters return `None` when a field was not returned.
 `vstream` delivers bounded chunks (1 MiB by default), possibly smaller according
 to negotiated limits. Its callback may reenter the client. Consume rather than
 retain chunks to keep memory bounded; reads do not promise snapshot consistency.
+The result contains one outcome per file, including successful siblings around a
+failure. Callback errors affect their file; explicit Stop ends delivery for the
+whole call. Errors retain the offset accepted by successful callbacks, while a
+failing callback may have consumed additional bytes. `streams_all` deliberately
+selects the first error by input position and discards those richer outcomes.
 
 ```rust,no_run
 use vnfs::prelude::*;
@@ -42,7 +47,7 @@ use vnfs::directory::{Attributes, ControlFlow, ListDirOptions};
 use std::num::NonZeroUsize;
 # fn example(fs: &vnfs::nfs::NfsClient) -> vnfs::Result<()> {
 let mut bytes_seen = 0u64;
-fs.vstream(
+fs.streams_all(
     &["/dataset/large.bin"],
     StreamOptions::new().with_chunk_size(NonZeroUsize::new(4 * 1024 * 1024).unwrap()),
     |index, offset, chunk| {
@@ -71,7 +76,14 @@ compares single-session and pooled reads and reports setup separately.
 
 ## Directory callbacks
 
-`vlistdirs` delivers bounded pages; `read_dirs_with_options` collects them.
+`vlistdirs` delivers bounded pages and returns one outcome per root;
+`vlistdir_pages` returns one owned page outcome per input cursor.
+A root's filesystem or callback error does not cancel independent roots.
+`Stop` ends delivery, marks unfinished roots `Stopped`, and retains failures
+already known from submitted sibling work. Callbacks are never replayed.
+Use `listdirs_all` or `dir_pages_all` to require every root to succeed; these
+helpers discard sibling outcomes on error and imply no retry safety.
+`read_dirs_with_options` collects bounded pages.
 `listdir` visits entries. Pass
 `WalkOptions::new(ListDirOptions::new().with_recursive(true)).with_enter_leave(true)` for
 depth-first Enter/Entry/Leave events and prune with `SkipSubtree` on Enter.

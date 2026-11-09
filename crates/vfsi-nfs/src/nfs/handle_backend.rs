@@ -75,9 +75,10 @@ impl HandleBackend for NfsVecFs {
                 });
             }
         }
-        self.vgetattrs_impl(&mut attrs).map_err(|error| {
-            error.map_index(|index| indices.get(index).copied().unwrap_or(index))
-        })?;
+        vfsi_core::internal::collect_vec_result(self.vgetattrs_impl(&mut attrs), attrs.len())
+            .map_err(|error| {
+                error.map_index(|index| indices.get(index).copied().unwrap_or(index))
+            })?;
         for attr in attrs {
             let fd = attr.file.fd().unwrap();
             self.open_object_ids
@@ -104,38 +105,146 @@ impl HandleBackend for NfsVecFs {
         ))
     }
 
-    fn vstatfs_impl(&mut self, files: &[FileOperand]) -> VfResult<Vec<FilesystemStats>> {
+    fn vstatfs_impl(&mut self, files: &[FileOperand]) -> vfsi_core::VecResult<FilesystemStats> {
+        use vfsi_core::OpError;
         if files.is_empty() {
             return Ok(Vec::new());
         }
         if !self.recovery_in_progress {
-            return self.read_with_recovery(|client| HandleBackend::vstatfs_impl(client, files));
+            return self.vector_read_with_recovery(
+                |_, _| true,
+                |client, indices| match indices {
+                    None => HandleBackend::vstatfs_impl(client, files),
+                    Some(indices) => {
+                        let pending: Vec<_> =
+                            indices.iter().map(|&index| files[index].clone()).collect();
+                        HandleBackend::vstatfs_impl(client, &pending)
+                    }
+                },
+            );
         }
+        // Resolution performs protocol I/O. Its failure must remain in slots,
+        // never escape as a pre-dispatch outer rejection.
         let refs: Vec<_> = files.iter().collect();
-        let resolved = self.resolve_files_nfs(&refs, true)?;
+        let resolved = match self.resolve_files_nfs(&refs, true) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                return Ok(files
+                    .iter()
+                    .map(|_| Err(OpError::unknown(error.clone(), None)))
+                    .collect());
+            }
+        };
+        let mut output: Vec<Option<vfsi_core::OpResult<FilesystemStats>>> =
+            (0..files.len()).map(|_| None).collect();
+        let mut indices = Vec::with_capacity(files.len());
         let mut ops = Vec::with_capacity(files.len());
         for (index, result) in resolved.into_iter().enumerate() {
-            let (fh, _) = result.map_err(|status| VfError::nfs(index, status))?;
-            ops.push(crate::client::GetattrOp {
-                fh,
-                attrs: filesystem_attributes(),
-            });
-        }
-        self.nfs
-            .getattr_many_with_bitmap(&ops)
-            .map_err(vfsi_core::error_from_rpc_indexed)?
-            .into_iter()
-            .enumerate()
-            .map(|(index, (bitmap, bytes))| {
-                let mut stats =
-                    decode_filesystem_stats(bitmap, &bytes).map_err(|e| e.with_index(index))?;
-                // Client mount policy is known; the protocol has no filesystem read-only attribute.
-                if self.read_only {
-                    stats = stats.with_read_only(Some(true));
+            match result {
+                Ok((fh, _)) => {
+                    indices.push(index);
+                    ops.push(crate::client::GetattrOp {
+                        fh,
+                        attrs: filesystem_attributes(),
+                    });
                 }
-                Ok(stats)
+                Err(error) => output[index] = Some(Err(error)),
+            }
+        }
+        match self.nfs.getattr_many_with_bitmap(&ops) {
+            Ok(results) => {
+                for (index, result) in indices.into_iter().zip(results) {
+                    output[index] = Some(result.and_then(|(bitmap, bytes)| {
+                        decode_filesystem_stats(bitmap, &bytes)
+                            .map(|stats| {
+                                if self.read_only {
+                                    stats.with_read_only(Some(true))
+                                } else {
+                                    stats
+                                }
+                            })
+                            .map_err(|error| OpError::failed(error, None))
+                    }));
+                }
+            }
+            Err(error) => {
+                for index in indices {
+                    output[index] = Some(Err(OpError::not_attempted(error.clone())));
+                }
+            }
+        }
+        Ok(output
+            .into_iter()
+            .map(|slot| {
+                slot.unwrap_or_else(|| {
+                    Err(OpError::unknown(
+                        VfError::invalid_reply(None, "missing statfs outcome"),
+                        None,
+                    ))
+                })
             })
-            .collect()
+            .collect())
+    }
+
+    fn vclose_impl(&mut self, files: &[FileOperand]) -> vfsi_core::VecResult<()> {
+        use vfsi_core::OpError;
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::BeforeCloseDispatch { index: 0 })?;
+        let mut slots: Vec<_> = (0..files.len()).map(|_| None).collect();
+        let mut ops = Vec::with_capacity(files.len());
+        let mut prepared = Vec::with_capacity(files.len());
+        for (index, file) in files.iter().enumerate() {
+            let fd = file
+                .fd()
+                .ok_or_else(|| VfError::errno(None, libc::EINVAL as u32));
+            let open = fd.and_then(|fd| {
+                self.open_files
+                    .get(&fd)
+                    .map(|open| (fd, open))
+                    .ok_or_else(|| VfError::errno(None, ERR_EBADF))
+            });
+            match open {
+                Ok((fd, open)) => {
+                    #[cfg(feature = "test-faults")]
+                    if let Some(injector) = &self.fault_injector
+                        && let Err(error) =
+                            injector.check(&OpenFaultPoint::BeforeCloseItem { index })
+                    {
+                        slots[index] = Some(Err(OpError::not_attempted(error)));
+                        continue;
+                    }
+                    ops.push(crate::client::CloseOp {
+                        fh: open.fh.clone(),
+                        stateid: open.stateid,
+                    });
+                    prepared.push((index, fd));
+                }
+                Err(error) => slots[index] = Some(Err(OpError::not_attempted(error))),
+            }
+        }
+        let outcomes = match self.nfs.close_descriptors(&ops) {
+            Ok(outcomes) => outcomes,
+            Err(error) if prepared.len() == files.len() => return Err(error),
+            Err(error) => ops
+                .iter()
+                .map(|_| Err(OpError::not_attempted(error.clone())))
+                .collect(),
+        };
+        for ((index, fd), outcome) in prepared.into_iter().zip(outcomes) {
+            #[cfg(feature = "test-faults")]
+            let outcome = outcome.and_then(|()| {
+                self.inject_open_fault(OpenFaultPoint::AfterCloseReply { index })
+                    .map_err(|error| OpError::unknown(error, None))
+            });
+            if outcome.is_ok() {
+                self.open_files.remove(&fd);
+            }
+            slots[index] = Some(outcome);
+        }
+        Ok(slots
+            .into_iter()
+            .map(|slot| slot.expect("every CLOSE decoded"))
+            .collect())
     }
 
     fn close_deferred(&mut self, file: &FileOperand) -> VfResult<()> {
@@ -307,25 +416,31 @@ impl HandleBackend for NfsVecFs {
         }
     }
 
-    fn vfsync_impl(&mut self, files: &[FileOperand], _mode: vfsi_core::api::SyncMode) -> VfRes {
-        for (index, file) in files.iter().enumerate() {
-            self.sync_data(file)
-                .map_err(|error| error.map_index(|_| index))?;
-        }
-        Ok(())
-    }
-
-    fn sync_data(&mut self, tcf: &FileOperand) -> VfResult<()> {
-        let fd = tcf
-            .fd()
-            .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
-        if self.open_files.contains_key(&fd) {
-            // All writes request NFS FILE_SYNC4 stability. Validate the
-            // descriptor so flush cannot incorrectly succeed after close.
-            Ok(())
-        } else {
-            Err(VfError::errno(0, ERR_EBADF))
-        }
+    fn vfsync_impl(
+        &mut self,
+        files: &[FileOperand],
+        _mode: vfsi_core::api::SyncMode,
+    ) -> vfsi_core::VecResult<()> {
+        // Writes already request FILE_SYNC4 stability, so no COMMIT RPC is
+        // needed. Validate every descriptor without suppressing valid siblings.
+        Ok(files
+            .iter()
+            .map(|file| {
+                let fd = file.fd().ok_or_else(|| {
+                    vfsi_core::OpError::not_attempted(VfError::from_kind(
+                        None,
+                        std::io::ErrorKind::InvalidInput,
+                    ))
+                })?;
+                if self.open_files.contains_key(&fd) {
+                    Ok(())
+                } else {
+                    Err(vfsi_core::OpError::not_attempted(VfError::errno(
+                        None, ERR_EBADF,
+                    )))
+                }
+            })
+            .collect())
     }
 
     fn chdir(&mut self, path: &Path) -> VfResult<()> {
@@ -411,7 +526,10 @@ impl HandleBackend for NfsVecFs {
     ) -> VfResult<()> {
         vfsi_sync::backend::helpers::native_set_attributes_impl_default(self, update)
     }
-    fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, FileOperand>>]) -> VfResult<()> {
+    fn vsetattrs_impl(
+        &mut self,
+        updates: &[SetAttrsOp<Target<'_, FileOperand>>],
+    ) -> vfsi_core::VecResult<()> {
         vfsi_sync::backend::helpers::vsetattrs_typed_default(self, updates)
     }
 }

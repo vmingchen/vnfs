@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use vfsi_core::api::internal::OwnedReadResult as FsReadResult;
 use vfsi_core::api::{
-    DirectoryListing, ReadIntoResult as FsReadIntoResult, ResourceLimits, StreamCompletion,
+    DirectoryListing, ReadIntoResult as FsReadIntoResult, ResourceLimits,
     WriteResult as FsWriteResult,
 };
 
@@ -15,8 +15,7 @@ use crate::backend::{HandleBackend, VectorBackend};
 use crate::contracts::{validate_read_into_results, validate_read_results, validate_write_results};
 use crate::{
     AttrMask, Attrs, Capabilities, DirEntry, FileOperand, OpenFlags, OpenOp, ReadAllOptions,
-    ReadOp, ReadResult, RemoveOptions, StreamOptions, VfDir, VfError, VfOffset, VfResult, WriteOp,
-    WriteResult,
+    ReadOp, ReadResult, RemoveOptions, VfDir, VfError, VfOffset, VfResult, WriteOp, WriteResult,
 };
 
 fn with_indexed_context<'a>(
@@ -48,14 +47,6 @@ fn write_result(result: WriteResult) -> FsWriteResult {
 
 fn poisoned() -> VfError {
     VfError::errno(0, crate::ERR_IO)
-}
-
-fn wrong_result_count(operation: &str, expected: usize, actual: usize) -> VfError {
-    VfError::transport_with_kind(
-        None,
-        crate::TransportKind::InvalidReply,
-        format!("{operation} backend returned {actual} results for {expected} requests"),
-    )
 }
 
 /// Cloneable owner of one synchronous backend connection.
@@ -143,114 +134,225 @@ impl<F: HandleBackend> FsClient<F> {
     pub(crate) fn capabilities(&self) -> VfResult<Capabilities> {
         Ok(self.lock()?.capabilities())
     }
-    /// Open a path read-only.
-    pub(crate) fn open(&self, path: impl AsRef<Path>) -> VfResult<OpenFile<F>> {
-        self.open_with_native(OpenOp::new(path.as_ref(), OpenFlags::READ))
-    }
-
-    pub(crate) fn open_with_native(&self, request: OpenOp) -> VfResult<OpenFile<F>> {
-        vfsi_core::internal::validate_open_requests(std::slice::from_ref(&request))?;
-        let file = self.lock()?.open_impl(&request)?;
-        Ok(OpenFile {
-            inner: Arc::clone(&self.inner),
-            file: Some(file),
-            append: request.flags().contains(OpenFlags::APPEND),
-            path: request.into_path(),
-        })
-    }
 }
 
 impl<F: VectorBackend> FsClient<F> {
-    /// Open an ordered vector of files.
-    ///
-    /// Success returns one RAII handle per request. Failure returns no
-    /// handles; VFSI does not promise transactional rollback of other
-    /// filesystem effects such as file creation.
-    pub(crate) fn vopen(&self, requests: &[OpenOp]) -> VfResult<Vec<OpenFile<F>>> {
+    /// Acquire one independent owned handle per successful input.
+    pub(crate) fn vopen(&self, requests: &[OpenOp]) -> vfsi_core::VecResult<OpenFile<F>> {
+        use vfsi_core::OpError;
         vfsi_core::internal::validate_open_requests(requests)?;
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut filesystem = self.lock()?;
-        let files = filesystem.vopen_impl(requests).map_err(|error| {
-            with_indexed_context(error, "vopen", |index| {
-                requests.get(index).map(|request| request.path())
-            })
+        let mut outcomes = filesystem.vopen_impl(requests).map_err(|error| {
+            if error.index().is_some_and(|index| index >= requests.len()) {
+                VfError::invalid_reply(None, "invalid open rejection index")
+            } else {
+                with_indexed_context(error, "vopen", |index| {
+                    requests.get(index).map(|request| request.path())
+                })
+            }
         })?;
-        if files.len() != requests.len() {
-            let error = wrong_result_count("vopen", requests.len(), files.len());
-            for (index, file) in files.into_iter().enumerate() {
-                if filesystem.close_impl(&file).is_err() {
-                    // Keep failed cleanup under the same RAII/deferred-close
-                    // ownership as ordinary handles, preserving the shape error.
-                    drop(OpenFile {
-                        inner: Arc::clone(&self.inner),
-                        file: Some(file),
-                        append: false,
-                        path: requests
-                            .get(index)
-                            .map(|request| request.path().to_path_buf())
-                            .unwrap_or_default(),
-                    });
+        let own = |file, index: usize| OpenFile {
+            inner: Arc::clone(&self.inner),
+            file: Some(file),
+            append: requests
+                .get(index)
+                .is_some_and(|request| request.flags().contains(OpenFlags::APPEND)),
+            path: requests
+                .get(index)
+                .map(|request| request.path().to_path_buf())
+                .unwrap_or_default(),
+        };
+        if outcomes.len() > requests.len() {
+            let mut seen = HashSet::new();
+            for (index, file) in outcomes
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, outcome)| outcome.ok().map(|file| (index, file)))
+            {
+                if file.fd().is_some_and(|fd| fd >= 0 && seen.insert(fd)) {
+                    drop(own(file, index));
                 }
             }
-            return Err(error);
+            let output = requests
+                .iter()
+                .map(|request| {
+                    Err(OpError::unknown(
+                        VfError::invalid_reply(None, "too many open outcomes"),
+                        None,
+                    )
+                    .with_context("vopen", request.path()))
+                })
+                .collect();
+            drop(filesystem);
+            return Ok(output);
         }
-        drop(filesystem);
-        Ok(files
+        // Native allocators normally return increasing descriptor slots.
+        // Avoid a hash allocation on that common path; unordered external
+        // backends still receive full duplicate-owner validation.
+        let mut previous = None;
+        let increasing = outcomes
+            .iter()
+            .filter_map(|outcome| outcome.as_ref().ok().and_then(FileOperand::fd))
+            .all(|fd| {
+                let valid = previous.is_none_or(|previous| previous < fd);
+                previous = Some(fd);
+                valid
+            });
+        if !increasing {
+            let mut seen = HashMap::new();
+            for index in 0..outcomes.len() {
+                let Some(fd) = outcomes[index]
+                    .as_ref()
+                    .ok()
+                    .and_then(FileOperand::fd)
+                    .filter(|fd| *fd >= 0)
+                else {
+                    continue;
+                };
+                if let Some(&first) = seen.get(&fd) {
+                    let cause = VfError::invalid_reply(None, "duplicate open descriptor");
+                    let original = std::mem::replace(
+                        &mut outcomes[first],
+                        Err(OpError::unknown(cause.clone(), None)),
+                    );
+                    if let Ok(file) = original {
+                        drop(own(file, first));
+                    }
+                    outcomes[index] = Err(OpError::unknown(cause, None));
+                } else {
+                    seen.insert(fd, index);
+                }
+            }
+        }
+        outcomes.resize_with(requests.len(), || {
+            Err(OpError::unknown(
+                VfError::invalid_reply(None, "missing open outcome"),
+                None,
+            ))
+        });
+        let output = outcomes
             .into_iter()
-            .zip(requests)
-            .map(|(file, request)| OpenFile {
-                inner: Arc::clone(&self.inner),
-                file: Some(file),
-                append: request.flags().contains(OpenFlags::APPEND),
-                path: request.path().to_path_buf(),
+            .enumerate()
+            .map(|(index, result)| {
+                match result {
+                    Ok(file) if file.fd().is_some_and(|fd| fd >= 0) => Ok(own(file, index)),
+                    Ok(_) => Err(OpError::unknown(
+                        VfError::invalid_reply(None, "open did not return a valid descriptor"),
+                        None,
+                    )),
+                    Err(error) if error.progress().is_some() => Err(OpError::unknown(
+                        VfError::invalid_reply(None, "open cannot report I/O byte progress"),
+                        None,
+                    )),
+                    Err(error) => Err(error),
+                }
+                .map_err(|error| error.with_context("vopen", requests[index].path()))
             })
-            .collect())
+            .collect();
+        drop(filesystem);
+        Ok(output)
     }
 
-    /// Try to close a group through one vector operation without consuming
-    /// the handles. On failure, all handles remain armed: the backend may
-    /// have closed a prefix, so callers must reconcile before retrying.
+    /// Close one native batch, preserving cleanup ownership per outcome.
     #[doc(hidden)]
-    pub fn vclose<'a>(&self, files: impl IntoIterator<Item = &'a mut OpenFile<F>>) -> VfResult<()>
+    pub fn vclose<'a>(
+        &self,
+        files: impl IntoIterator<Item = &'a mut OpenFile<F>>,
+    ) -> vfsi_core::VecResult<()>
     where
         F: 'a,
     {
+        use vfsi_core::OpError;
         let mut files: Vec<_> = files.into_iter().collect();
-        for (index, file) in files.iter().enumerate() {
-            self.validate_owner(file, index)?;
-        }
-        let positions: Vec<_> = files
-            .iter()
-            .enumerate()
-            .filter_map(|(index, file)| (!file.is_closed()).then_some(index))
-            .collect();
-        files.retain(|file| !file.is_closed());
         if files.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
-        let descriptors: Vec<FileOperand> = files
-            .iter()
-            .map(|file| file.raw().cloned())
-            .collect::<VfResult<_>>()?;
-        self.lock()?.vclose_impl(&descriptors).map_err(|error| {
-            with_indexed_context(error, "vclose_owned", |index| {
-                files.get(index).map(|file| file.path())
-            })
-            .map_index(|index| positions.get(index).copied().unwrap_or(index))
-        })?;
-        for file in &mut files {
-            file.file = None;
+        let mut output: Vec<_> = (0..files.len()).map(|_| None).collect();
+        let mut positions = Vec::with_capacity(files.len());
+        let mut descriptors = Vec::with_capacity(files.len());
+        for (index, file) in files.iter().enumerate() {
+            if let Err(error) = self.validate_owner(file, index) {
+                output[index] = Some(Err(
+                    OpError::not_attempted(error).with_context("vclose", file.path())
+                ));
+            } else if file.is_closed() {
+                output[index] = Some(Ok(()));
+            } else {
+                positions.push(index);
+                descriptors.push(file.raw()?.clone());
+            }
         }
-        Ok(())
+        if !descriptors.is_empty() {
+            let result = self.lock()?.vclose_impl(&descriptors);
+            let mut results = match result {
+                Ok(results) if results.len() <= descriptors.len() => results,
+                Ok(_) => descriptors
+                    .iter()
+                    .map(|_| {
+                        Err(OpError::unknown(
+                            VfError::invalid_reply(None, "too many close outcomes"),
+                            None,
+                        ))
+                    })
+                    .collect(),
+                Err(error) => {
+                    let error = if error
+                        .index()
+                        .is_some_and(|index| index >= descriptors.len())
+                    {
+                        VfError::invalid_reply(
+                            None,
+                            "close backend returned an invalid error index",
+                        )
+                    } else {
+                        error
+                    };
+                    if positions.len() == files.len() {
+                        return Err(with_indexed_context(error, "vclose", |index| {
+                            files.get(index).map(|file| file.path())
+                        }));
+                    }
+                    descriptors
+                        .iter()
+                        .map(|_| Err(OpError::not_attempted(error.clone())))
+                        .collect()
+                }
+            };
+            results.resize_with(descriptors.len(), || {
+                Err(OpError::unknown(
+                    VfError::invalid_reply(None, "missing close outcome"),
+                    None,
+                ))
+            });
+            for (index, result) in positions.into_iter().zip(results) {
+                let result = match result {
+                    Err(error) if error.progress().is_some() => Err(OpError::unknown(
+                        VfError::invalid_reply(None, "close cannot report I/O byte progress"),
+                        None,
+                    )),
+                    result => result,
+                };
+                if result.is_ok() {
+                    files[index].file = None;
+                }
+                output[index] =
+                    Some(result.map_err(|error| error.with_context("vclose", files[index].path())));
+            }
+        }
+        Ok(output
+            .into_iter()
+            .map(|slot| slot.expect("every close input assigned"))
+            .collect())
     }
 
-    /// Close a group of files through one vector operation.
-    ///
-    /// On failure, the handles are dropped and the backend receives
-    /// best-effort scalar cleanup attempts. Use [`vclose`](Self::vclose)
-    /// to retain the handles after an error.
+    /// Consume handles after selecting the first error in input order.
     #[doc(hidden)]
     pub fn vclose_owned(&self, mut files: Vec<OpenFile<F>>) -> VfResult<()> {
-        self.vclose(&mut files)
+        let expected = files.len();
+        vfsi_core::internal::collect_vec_result(self.vclose(&mut files), expected).map(|_| ())
     }
 }
 

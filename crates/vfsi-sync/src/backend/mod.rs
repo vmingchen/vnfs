@@ -34,7 +34,6 @@ pub mod helpers;
 
 use crate::*;
 use std::path::{Path, PathBuf};
-use vfsi_core::internal::ManyResults;
 
 /// Object reference borrowed from a backend while grouping writes. Scoped to
 /// that backend; opaque references must establish object grouping, never OPEN
@@ -46,8 +45,8 @@ pub enum OpenObjectRef<'a> {
 }
 
 /// Minimum contract for owned handles and descriptor lifecycle.
-/// This includes handle-level metadata/statistics hooks, but does not require
-/// namespace operations, directory enumeration, or native vector I/O.
+/// This includes handle-level metadata/statistics and synchronization vectors,
+/// but does not require namespace operations, enumeration or read/write vectors.
 pub trait HandleBackend {
     /// Prepare object references in one backend batch when metadata is needed.
     /// Inputs retain request order so failure indices remain attributable.
@@ -65,7 +64,7 @@ pub trait HandleBackend {
         Ok(None)
     }
 
-    fn vstatfs_impl(&mut self, files: &[FileOperand]) -> VfResult<Vec<FilesystemStats>> {
+    fn vstatfs_impl(&mut self, files: &[FileOperand]) -> vfsi_core::VecResult<FilesystemStats> {
         if files.is_empty() {
             Ok(Vec::new())
         } else {
@@ -99,23 +98,28 @@ pub trait HandleBackend {
         Err(VfError::unsupported(0))
     }
 
-    /// One backend synchronization vector. POSIX backends may loop under one
-    /// lock because fsync has no vector syscall; protocol backends may batch.
-    fn vfsync_impl(&mut self, files: &[FileOperand], mode: vfsi_core::api::SyncMode) -> VfRes {
-        for (index, file) in files.iter().enumerate() {
-            match mode {
-                vfsi_core::api::SyncMode::Data => self.sync_data(file),
-                vfsi_core::api::SyncMode::All => self.sync_all(file),
-            }
-            .map_err(|error| error.map_index(|_| index))?;
-        }
-        Ok(())
+    /// Independent synchronization outcomes. Native implementations retain
+    /// their batching and distinguish rejected, failed and uncertain inputs.
+    fn vfsync_impl(
+        &mut self,
+        files: &[FileOperand],
+        mode: vfsi_core::api::SyncMode,
+    ) -> vfsi_core::VecResult<()>;
+
+    fn sync_data(&mut self, file: &FileOperand) -> VfResult<()> {
+        vfsi_core::internal::collect_vec_result(
+            self.vfsync_impl(std::slice::from_ref(file), vfsi_core::api::SyncMode::Data),
+            1,
+        )
+        .map(|_| ())
     }
 
-    fn sync_data(&mut self, tcf: &FileOperand) -> VfResult<()>;
-
-    fn sync_all(&mut self, tcf: &FileOperand) -> VfResult<()> {
-        self.sync_data(tcf)
+    fn sync_all(&mut self, file: &FileOperand) -> VfResult<()> {
+        vfsi_core::internal::collect_vec_result(
+            self.vfsync_impl(std::slice::from_ref(file), vfsi_core::api::SyncMode::All),
+            1,
+        )
+        .map(|_| ())
     }
 
     fn chdir(&mut self, _path: &Path) -> VfResult<()> {
@@ -162,6 +166,10 @@ pub trait HandleBackend {
 
     fn open_impl(&mut self, request: &OpenOp) -> VfResult<FileOperand>;
 
+    /// Close independent descriptors, retiring only confirmed successes.
+    /// Failure retains the backend's cleanup ownership.
+    fn vclose_impl(&mut self, files: &[FileOperand]) -> vfsi_core::VecResult<()>;
+
     fn close_impl(&mut self, file: &FileOperand) -> VfResult<()>;
 
     fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult>;
@@ -187,10 +195,14 @@ pub trait HandleBackend {
     fn set_attributes_impl(&mut self, update: &SetAttrsOp<Target<'_, FileOperand>>)
     -> VfResult<()>;
 
-    /// Borrow an ordered batch without transferring request ownership.
-    /// Each operation carries its own final-symlink policy; native backends
-    /// batch contiguous equal-policy runs and validate all inputs before I/O.
-    fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, FileOperand>>]) -> VfResult<()> {
+    /// Borrow an attribute vector without transferring request ownership.
+    /// Preserve one independent outcome per input. Each operation carries its
+    /// own final-symlink policy; native backends retain equal-policy batching.
+    /// Outer errors reject the entire call before mutation dispatch.
+    fn vsetattrs_impl(
+        &mut self,
+        updates: &[SetAttrsOp<Target<'_, FileOperand>>],
+    ) -> vfsi_core::VecResult<()> {
         crate::backend::helpers::vsetattrs_impl_default(self, updates)
     }
 }
@@ -207,21 +219,25 @@ pub trait HandleBackend {
 /// synthesizes a complete backend from scalar methods.
 pub trait VectorBackend: HandleBackend {
     // Vector I/O and strict opens.
-    fn vread_impl(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>>;
+    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_core::VecResult<ReadResult>;
 
     fn vread_into_impl(
         &mut self,
         reads: &[ReadOp],
         buffers: &mut [&mut [u8]],
-    ) -> VfResult<Vec<ReadIntoResult>> {
+    ) -> vfsi_core::VecResult<ReadIntoResult> {
         crate::backend::helpers::vread_into_impl_default(self, reads, buffers)
     }
-    /// Execute a borrowed ordered vector. Payloads and target storage remain
-    /// with the caller; implementations must not retain them after returning.
+    /// Execute independent borrowed WRITE requests. One outcome corresponds to
+    /// each input; ordinary failures do not discard siblings or stop later waves.
+    /// Outer errors reject the vector before dispatch. Failed inputs retain
+    /// confirmed byte prefixes through IoProgress::Write, without implying that
+    /// later bytes were untouched. Payloads remain borrowed until all submitted
+    /// operations have completed or their storage is safely retained.
     fn vwrite_impl(
         &mut self,
         writes: &[WriteOp<&FileOperand, &[u8]>],
-    ) -> VfResult<Vec<WriteResult>> {
+    ) -> vfsi_core::VecResult<WriteResult> {
         let _ = writes;
         Err(VfError::unsupported(0))
     }
@@ -237,29 +253,16 @@ pub trait VectorBackend: HandleBackend {
         Ok(())
     }
 
-    /// Indexed partial outcomes for strict-open collection and cleanup.
-    /// This internal ownership seam is distinct from the strict typed boundary.
-    #[doc(hidden)]
-    fn vopen_outcomes_impl(
-        &mut self,
-        paths: &[&Path],
-        flags: &[i32],
-        modes: &[u32],
-    ) -> VfResult<ManyResults<FileOperand>> {
-        crate::backend::helpers::vopen_outcomes_impl_default(self, paths, flags, modes)
-    }
-
-    fn before_open_cleanup(&mut self, _index: usize, _file: &FileOperand) -> VfResult<()> {
-        crate::backend::helpers::before_open_cleanup_default(self, _index, _file)
-    }
-
+    /// Open independent inputs, retaining successful descriptors on sibling failure.
     fn vopen_raw_impl(
         &mut self,
         paths: &[&Path],
         flags: &[i32],
         modes: &[u32],
-    ) -> VfResult<Vec<FileOperand>> {
-        crate::backend::helpers::vopen_raw_impl_default(self, paths, flags, modes)
+    ) -> vfsi_core::VecResult<FileOperand>;
+
+    fn before_open_cleanup(&mut self, _index: usize, _file: &FileOperand) -> VfResult<()> {
+        crate::backend::helpers::before_open_cleanup_default(self, _index, _file)
     }
 
     fn vopen_raw_simple_impl(
@@ -271,35 +274,44 @@ pub trait VectorBackend: HandleBackend {
         crate::backend::helpers::vopen_raw_simple_impl_default(self, paths, flags, mode)
     }
 
-    fn vclose_impl(&mut self, files: &[FileOperand]) -> VfRes {
-        crate::backend::helpers::vclose_impl_default(self, files)
-    }
-
-    /// Open every typed request or return an error, cleaning confirmed handles.
+    /// Acquire independent typed OPEN results. Each success transfers one
+    /// descriptor owner; the backend retains cleanup for resources not returned.
     /// Creation and truncation effects are not rolled back.
-    fn vopen_impl(&mut self, requests: &[OpenOp]) -> VfResult<Vec<FileOperand>> {
+    fn vopen_impl(&mut self, requests: &[OpenOp]) -> vfsi_core::VecResult<FileOperand> {
         crate::backend::helpers::vopen_typed_default(self, requests)
     }
 
     // Path metadata and vector attribute engines.
-    fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
-        let _ = (attrs,);
-        Err(VfError::unsupported(0))
+    fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_core::VecResult<()> {
+        if attrs.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(VfError::unsupported(None))
+        }
     }
 
-    fn vgetattrs_nofollow_impl(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
-        let _ = (attrs,);
-        Err(VfError::unsupported(0))
+    fn vgetattrs_nofollow_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_core::VecResult<()> {
+        if attrs.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(VfError::unsupported(None))
+        }
     }
 
-    fn vsetattrs_raw_impl(&mut self, attrs: &[VfAttrs]) -> VfRes {
-        let _ = (attrs,);
-        Err(VfError::unsupported(0))
+    fn vsetattrs_raw_impl(&mut self, attrs: &[VfAttrs]) -> vfsi_core::VecResult<()> {
+        if attrs.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(VfError::unsupported(None))
+        }
     }
 
-    fn vsetattrs_raw_nofollow_impl(&mut self, attrs: &[VfAttrs]) -> VfRes {
-        let _ = (attrs,);
-        Err(VfError::unsupported(0))
+    fn vsetattrs_raw_nofollow_impl(&mut self, attrs: &[VfAttrs]) -> vfsi_core::VecResult<()> {
+        if attrs.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(VfError::unsupported(None))
+        }
     }
 
     fn stat_impl(&mut self, path: &Path) -> VfResult<VfAttrs> {
@@ -369,6 +381,9 @@ pub trait VectorBackend: HandleBackend {
         crate::backend::helpers::directory_page_batch_size_default(self)
     }
 
+    /// One bounded page outcome per input, retaining successful siblings and
+    /// their continuation/child ownership. Ordinary failures do not cancel
+    /// independent directories. Cursors move into the call and are not replayed.
     fn vlistdir_pages_impl(
         &mut self,
         dirs: &[&Path],
@@ -377,7 +392,7 @@ pub trait VectorBackend: HandleBackend {
         page_size: usize,
         max_entries: usize,
         follow_symlinks: bool,
-    ) -> VfResult<Vec<BackendDirectoryPage>> {
+    ) -> vfsi_core::VecResult<BackendDirectoryPage> {
         crate::backend::helpers::vlistdir_pages_impl_default(
             self,
             dirs,
@@ -488,9 +503,12 @@ pub trait VectorBackend: HandleBackend {
     }
 
     // Namespace mutations and scalar adapters.
-    fn vrename_impl(&mut self, pairs: &[(FileOperand, FileOperand)]) -> VfRes {
-        let _ = (pairs,);
-        Err(VfError::unsupported(0))
+    fn vrename_impl(&mut self, pairs: &[(FileOperand, FileOperand)]) -> vfsi_core::VecResult<()> {
+        if pairs.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(VfError::unsupported(None))
+        }
     }
 
     /// Native atomic rename policy; never emulate no-replace with an existence check.
@@ -498,28 +516,33 @@ pub trait VectorBackend: HandleBackend {
         &mut self,
         pairs: &[(FileOperand, FileOperand)],
         options: vfsi_core::api::RenameMode,
-    ) -> VfRes {
-        match options {
-            vfsi_core::api::RenameMode::Replace => self.vrename_impl(pairs),
-            vfsi_core::api::RenameMode::NoReplace | vfsi_core::api::RenameMode::Exchange
-                if pairs.is_empty() =>
-            {
-                Ok(())
-            }
-            vfsi_core::api::RenameMode::NoReplace | vfsi_core::api::RenameMode::Exchange => {
-                Err(VfError::unsupported(0))
-            }
+    ) -> vfsi_core::VecResult<()> {
+        if options == vfsi_core::api::RenameMode::Replace {
+            self.vrename_impl(pairs)
+        } else if pairs.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(VfError::unsupported(None))
         }
     }
 
-    fn vremove_impl(&mut self, files: &[FileOperand]) -> VfRes {
-        let _ = (files,);
-        Err(VfError::unsupported(0))
+    /// Remove independent entries, including empty directories, without recursion.
+    /// Result position identifies an input, never a completed prefix. Ordinary
+    /// failure does not suppress independent siblings; ambiguous effects are not replayed.
+    fn vremove_impl(&mut self, files: &[FileOperand]) -> vfsi_core::VecResult<()> {
+        if files.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(VfError::unsupported(None))
+        }
     }
 
-    fn vmkdir_impl(&mut self, dirs: &[VfAttrs]) -> VfRes {
-        let _ = (dirs,);
-        Err(VfError::unsupported(0))
+    fn vmkdir_impl(&mut self, dirs: &[VfAttrs]) -> vfsi_core::VecResult<()> {
+        if dirs.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(VfError::unsupported(None))
+        }
     }
 
     fn unlink_impl(&mut self, pathname: &Path) -> VfResult<()> {
@@ -551,19 +574,42 @@ pub trait VectorBackend: HandleBackend {
     }
 
     // Links.
-    fn vsymlink_impl(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
-        let _ = (oldpaths, newpaths);
-        Err(VfError::unsupported(0))
+    fn vsymlink_impl(
+        &mut self,
+        oldpaths: &[&Path],
+        newpaths: &[&Path],
+    ) -> vfsi_core::VecResult<()> {
+        if oldpaths.len() != newpaths.len() {
+            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+        }
+        if oldpaths.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(VfError::unsupported(None))
+        }
     }
 
-    fn vreadlink_impl(&mut self, paths: &[&Path]) -> VfResult<Vec<Vec<u8>>> {
-        let _ = (paths,);
-        Err(VfError::unsupported(0))
+    fn vreadlink_impl(&mut self, paths: &[&Path]) -> vfsi_core::VecResult<Vec<u8>> {
+        if paths.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(VfError::unsupported(None))
+        }
     }
 
-    fn vhardlink_impl(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
-        let _ = (oldpaths, newpaths);
-        Err(VfError::unsupported(0))
+    fn vhardlink_impl(
+        &mut self,
+        oldpaths: &[&Path],
+        newpaths: &[&Path],
+    ) -> vfsi_core::VecResult<()> {
+        if oldpaths.len() != newpaths.len() {
+            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+        }
+        if oldpaths.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(VfError::unsupported(None))
+        }
     }
 
     fn symlink_raw_impl(&mut self, oldpath: &Path, newpath: &Path) -> VfResult<()> {
@@ -587,12 +633,19 @@ pub trait VectorBackend: HandleBackend {
     }
 
     // Extent and tree copy.
-    fn vcopy_data_impl(&mut self, pairs: &[ExtentPair]) -> VfRes {
-        let _ = (pairs,);
-        Err(VfError::unsupported(0))
+    fn vcopy_data_impl(&mut self, pairs: &[ExtentPair]) -> vfsi_core::VecResult<()> {
+        if pairs.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(VfError::unsupported(None))
+        }
     }
 
-    fn vcopy_impl(&mut self, pairs: &[ExtentPair], options: CopyOptions) -> VfRes {
+    fn vcopy_impl(
+        &mut self,
+        pairs: &[ExtentPair],
+        options: CopyOptions,
+    ) -> vfsi_core::VecResult<()> {
         crate::backend::helpers::vcopy_impl_default(self, pairs, options)
     }
 
@@ -608,7 +661,7 @@ pub trait VectorBackend: HandleBackend {
     }
 
     // Bounded whole-file reads and streams.
-    fn vread_all_impl(&mut self, files: &[FileOperand]) -> VfResult<Vec<Vec<u8>>> {
+    fn vread_all_impl(&mut self, files: &[FileOperand]) -> vfsi_core::VecResult<Vec<u8>> {
         crate::backend::helpers::vread_all_impl_default(self, files)
     }
 
@@ -616,7 +669,7 @@ pub trait VectorBackend: HandleBackend {
         &mut self,
         files: &[FileOperand],
         options: ReadAllOptions,
-    ) -> VfResult<Vec<Vec<u8>>> {
+    ) -> vfsi_core::VecResult<Vec<u8>> {
         crate::backend::helpers::vread_all_with_options_impl_default(self, files, options)
     }
 
@@ -635,23 +688,36 @@ pub trait VectorBackend: HandleBackend {
         crate::backend::helpers::before_remove_type_default(self, _index)
     }
 
-    fn remove_paths_impl(&mut self, objs: &[&Path], recursive: bool) -> VfRes {
+    fn remove_paths_impl(&mut self, objs: &[&Path], recursive: bool) -> vfsi_core::VecResult<()> {
         crate::backend::helpers::remove_paths_impl_default(self, objs, recursive)
     }
 
     fn remove_paths_with_options_impl(
         &mut self,
         objs: &[&Path],
-        recursive: bool,
+        mode: vfsi_core::api::RemoveMode,
         options: RemoveOptions,
-    ) -> VfRes {
-        crate::backend::helpers::remove_paths_with_options_impl_default(
-            self, objs, recursive, options,
-        )
+    ) -> vfsi_core::VecResult<()> {
+        crate::backend::helpers::remove_paths_with_options_impl_default(self, objs, mode, options)
+    }
+
+    /// Acquire independent directory objects in one native vector.
+    fn vopen_dirs_impl(&mut self, paths: &[&Path]) -> vfsi_core::VecResult<VfDir> {
+        crate::backend::helpers::vopen_dirs_impl_default(self, paths)
     }
 
     fn open_dir_impl(&mut self, path: &Path) -> VfResult<VfDir> {
         crate::backend::helpers::open_dir_impl_default(self, path)
+    }
+
+    fn remove_dir_contents_handles_with_options_impl(
+        &mut self,
+        dirs: &[&VfDir],
+        options: RemoveOptions,
+    ) -> vfsi_core::VecResult<()> {
+        crate::backend::helpers::remove_dir_contents_handles_with_options_impl_default(
+            self, dirs, options,
+        )
     }
 
     fn remove_dir_contents_handle_impl(&mut self, dir: &VfDir) -> VfRes {

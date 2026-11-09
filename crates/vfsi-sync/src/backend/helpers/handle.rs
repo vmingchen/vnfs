@@ -101,7 +101,11 @@ pub fn native_set_attributes_impl_default<F: HandleBackend + ?Sized>(
         Target::Path(path) => Some(*path),
         Target::File(file) => file.path(),
     };
-    let result = backend.vsetattrs_impl(std::slice::from_ref(update));
+    let result = vfsi_core::internal::collect_vec_result(
+        backend.vsetattrs_impl(std::slice::from_ref(update)),
+        1,
+    )
+    .map(|_| ());
     result.map_err(|error| match path {
         Some(path) => error.with_context("set_attributes", path),
         None => error,
@@ -169,10 +173,18 @@ pub fn read_into_impl_default<F: HandleBackend + ?Sized>(
 pub fn vsetattrs_impl_default<F: HandleBackend + ?Sized>(
     backend: &mut F,
     updates: &[SetAttrsOp<Target<'_, FileOperand>>],
-) -> VfResult<()> {
+) -> vfsi_core::VecResult<()> {
     match updates.len() {
-        0 => Ok(()),
-        1 => backend.set_attributes_impl(&updates[0]),
-        _ => Err(VfError::unsupported(0)),
+        0 => Ok(Vec::new()),
+        1 => Ok(vec![backend.set_attributes_impl(&updates[0]).map_err(
+            |cause| {
+                if cause.is_transport() {
+                    vfsi_core::OpError::unknown(cause, None)
+                } else {
+                    vfsi_core::OpError::failed(cause, None)
+                }
+            },
+        )]),
+        _ => Err(VfError::unsupported(None)),
     }
 }

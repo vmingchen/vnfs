@@ -41,16 +41,32 @@ fn client_policy_applies_to_scalar_vector_and_into_reads_before_dispatch() {
     );
     let file = client.open("/file").unwrap();
     let before = read_calls.load(Ordering::SeqCst);
-    assert!(client.vread_native(&[file.read_request_at(0, 4)]).is_err());
+    assert!(
+        client
+            .vread_native(&[file.read_request_at(0, 4)])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
+            .is_err()
+    );
     let mut buffer = [0; 4];
     assert!(
         client
             .vread_into_native(&mut [file.read_request_at_into(0, &mut buffer)])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .is_err()
     );
     assert_eq!(read_calls.load(Ordering::SeqCst), before);
     let result = client
         .vread_into_with_limit_native(&mut [file.read_request_at_into(0, &mut buffer)], 4)
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     assert_eq!(result[0].bytes_read, 4);
     assert_eq!(&buffer, b"abcd");
@@ -59,6 +75,10 @@ fn client_policy_applies_to_scalar_vector_and_into_reads_before_dispatch() {
     assert!(
         client
             .vread_into_with_limit_native(&mut [file.read_request_at_into(0, &mut buffer)], 3)
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .is_err()
     );
     assert_eq!(read_calls.load(Ordering::SeqCst), before);
@@ -144,6 +164,8 @@ type AttributeCalls = Arc<Mutex<Vec<(bool, Vec<Option<u64>>)>>>;
 
 #[derive(Default)]
 struct ScalarOnly {
+    identity_preflight_failure: bool,
+    identity_ref_failure: bool,
     descriptor_objects: std::collections::HashMap<i32, u64>,
     named_objects: std::collections::HashMap<std::path::PathBuf, u64>,
     unknown_objects: bool,
@@ -151,6 +173,7 @@ struct ScalarOnly {
     alias_objects: bool,
     sync_calls: SyncCalls,
     sync_failure: Option<VfError>,
+    sync_result_count: Option<usize>,
     attrs_calls: AttributeCalls,
     attrs_failure: Option<(usize, VfError)>,
     stats_calls: Arc<AtomicUsize>,
@@ -215,7 +238,36 @@ fn std_io_collection_obeys_client_limits_and_retains_cursor() {
 }
 
 impl VectorBackend for ScalarOnly {
-    fn vopen_impl(&mut self, requests: &[OpenOp]) -> VfResult<Vec<FileOperand>> {
+    fn vopen_raw_impl(
+        &mut self,
+        paths: &[&std::path::Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> vfsi_sync::VecResult<vfsi_sync::FileOperand> {
+        if paths.len() != flags.len() || paths.len() != modes.len() {
+            return Err(vfsi_sync::VfError::from_kind(
+                None,
+                std::io::ErrorKind::InvalidInput,
+            ));
+        }
+        Ok(paths
+            .iter()
+            .zip(flags)
+            .zip(modes)
+            .map(|((path, _flags), mode)| {
+                self.open_impl(&OpenOp::new(path, OpenFlags::READ).mode(*mode))
+                    .map_err(|cause| {
+                        if cause.is_transport() {
+                            vfsi_sync::OpError::unknown(cause, None)
+                        } else {
+                            vfsi_sync::OpError::failed(cause, None)
+                        }
+                    })
+            })
+            .collect())
+    }
+
+    fn vopen_impl(&mut self, requests: &[OpenOp]) -> vfsi_core::VecResult<FileOperand> {
         if self.transport_failure {
             return Err(VfError::transport(None, "reply lost"));
         }
@@ -224,18 +276,14 @@ impl VectorBackend for ScalarOnly {
             .lock()
             .expect("vector limit poisoned")
             .unwrap_or(usize::MAX);
-        requests
+        Ok(requests
             .iter()
             .take(limit)
-            .map(|request| self.open_impl(request))
-            .collect()
-    }
-
-    fn vclose_impl(&mut self, files: &[FileOperand]) -> VfResult<()> {
-        for file in files {
-            self.close_impl(file)?;
-        }
-        Ok(())
+            .map(|request| {
+                self.open_impl(request)
+                    .map_err(|error| vfsi_core::OpError::failed(error, None))
+            })
+            .collect())
     }
 
     fn listdir_page_impl(
@@ -272,33 +320,36 @@ impl VectorBackend for ScalarOnly {
         Ok((entries, (end < count).then(|| DirPageCursor::new(end))))
     }
 
-    fn vread_impl(&mut self, requests: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
-        let limit = self
-            .vector_result_limit
-            .lock()
-            .expect("vector limit poisoned")
-            .unwrap_or(usize::MAX);
-        let mut results: Vec<_> = requests
-            .iter()
-            .take(limit)
-            .map(|request| self.read_impl(request))
-            .collect::<VfResult<_>>()?;
-        if let Some(result) = results.first_mut() {
-            if self.wrong_result_file {
-                result.file = FileOperand::from_fd(999);
+    fn vread_impl(&mut self, requests: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
+        let result: VfResult<Vec<ReadResult>> = {
+            let limit = self
+                .vector_result_limit
+                .lock()
+                .expect("vector limit poisoned")
+                .unwrap_or(usize::MAX);
+            let mut results: Vec<_> = requests
+                .iter()
+                .take(limit)
+                .map(|request| self.read_impl(request))
+                .collect::<VfResult<_>>()?;
+            if let Some(result) = results.first_mut() {
+                if self.wrong_result_file {
+                    result.file = FileOperand::from_fd(999);
+                }
+                if self.wrong_result_offset {
+                    result.offset = result.offset.saturating_add(1);
+                }
             }
-            if self.wrong_result_offset {
-                result.offset = result.offset.saturating_add(1);
-            }
-        }
-        Ok(results)
+            Ok(results)
+        };
+        result.map(|results| results.into_iter().map(Ok).collect())
     }
 
     fn vread_into_impl(
         &mut self,
         requests: &[ReadOp],
         buffers: &mut [&mut [u8]],
-    ) -> VfResult<Vec<ReadIntoResult>> {
+    ) -> vfsi_sync::VecResult<ReadIntoResult> {
         if requests.len() != buffers.len() {
             return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
@@ -307,17 +358,17 @@ impl VectorBackend for ScalarOnly {
             .lock()
             .expect("vector limit poisoned")
             .unwrap_or(usize::MAX);
-        let mut results: Vec<ReadIntoResult> = requests
+        let mut results: Vec<vfsi_sync::OpResult<ReadIntoResult>> = requests
             .iter()
             .zip(buffers.iter_mut())
             .take(limit)
             .enumerate()
             .map(|(index, (request, buffer))| {
                 self.read_into_impl(request, buffer)
-                    .map_err(|error| error.with_index(index))
+                    .map_err(|error| vfsi_sync::OpError::failed(error.with_index(index), None))
             })
-            .collect::<VfResult<_>>()?;
-        if let Some(result) = results.first_mut() {
+            .collect();
+        if let Some(Ok(result)) = results.first_mut() {
             if self.wrong_result_file {
                 result.file = FileOperand::from_fd(999);
             }
@@ -331,7 +382,7 @@ impl VectorBackend for ScalarOnly {
     fn vwrite_impl(
         &mut self,
         requests: &[WriteOp<&FileOperand, &[u8]>],
-    ) -> VfResult<Vec<WriteResult>> {
+    ) -> vfsi_sync::VecResult<WriteResult> {
         let limit = self
             .vector_result_limit
             .lock()
@@ -340,9 +391,12 @@ impl VectorBackend for ScalarOnly {
         let mut results: Vec<_> = requests
             .iter()
             .take(limit)
-            .map(|request| self.write_impl(*request))
-            .collect::<VfResult<_>>()?;
-        if let Some(result) = results.first_mut() {
+            .map(|request| {
+                self.write_impl(*request)
+                    .map_err(|cause| vfsi_sync::OpError::failed(cause, None))
+            })
+            .collect();
+        if let Some(Ok(result)) = results.first_mut() {
             if self.wrong_result_file {
                 result.file = FileOperand::from_fd(999);
             }
@@ -418,8 +472,16 @@ struct PagedBackend {
 }
 
 macro_rules! handle_contract {
-    ($backend:ty) => {
+    (@close $close:item) => { $close };
+    (@close) => {
+        fn vclose_impl(&mut self, files: &[FileOperand]) -> vfsi_core::VecResult<()> {
+            self.scalar.vclose_impl(files)
+        }
+    };
+    ($backend:ty $(, $close:item)? $(; $extra:item)*) => {
         impl HandleBackend for $backend {
+            handle_contract!(@close $($close)?);
+            $($extra)*
             fn open_object_ref(
                 &self,
                 file: &FileOperand,
@@ -446,7 +508,7 @@ macro_rules! handle_contract {
                 &mut self,
                 files: &[FileOperand],
                 mode: vfsi_core::api::SyncMode,
-            ) -> VfResult<()> {
+            ) -> vfsi_sync::VecResult<()> {
                 self.scalar.vfsync_impl(files, mode)
             }
             fn sync_all(&mut self, file: &FileOperand) -> VfResult<()> {
@@ -494,7 +556,16 @@ struct LegacyDirectoryBackend {
 }
 handle_contract!(LegacyDirectoryBackend);
 impl VectorBackend for LegacyDirectoryBackend {
-    fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+    fn vopen_raw_impl(
+        &mut self,
+        paths: &[&std::path::Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> vfsi_sync::VecResult<vfsi_sync::FileOperand> {
+        self.scalar.vopen_raw_impl(paths, flags, modes)
+    }
+
+    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
         panic!("unexpected read")
     }
     fn listdir_impl(
@@ -516,13 +587,15 @@ fn legacy_directory_fallback_fails_closed_without_no_follow_support() {
     let page = backend
         .vlistdir_pages_impl(&[dir], vfsi_sync::AttrMask::MODE, vec![None], 1, 4, true)
         .unwrap();
-    assert!(page[0].0.is_empty());
+    assert!(page[0].as_ref().unwrap().0.is_empty());
     assert_eq!(backend.calls, 1);
     let error = backend
         .vlistdir_pages_impl(&[dir], vfsi_sync::AttrMask::MODE, vec![None], 1, 4, false)
+        .unwrap()
+        .remove(0)
         .err()
         .expect("legacy listing cannot provide no-follow guarantees");
-    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::Unsupported);
     assert_eq!(
         backend.calls, 1,
         "do not check and then call a following backend"
@@ -544,18 +617,30 @@ struct WriteBoundaryProbe {
     append_end: Option<u64>,
     append_gap: u64,
     calls: Arc<Mutex<Vec<Vec<WriteObservation>>>>,
+    write_waves: std::collections::VecDeque<Vec<vfsi_sync::OpResult<usize>>>,
+    write_outcomes: Option<Vec<vfsi_sync::OpResult<usize>>>,
     failure: Option<VfError>,
     failure_after: usize,
 }
 handle_contract!(WriteBoundaryProbe);
 impl VectorBackend for WriteBoundaryProbe {
-    fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
-        Err(VfError::unsupported(0))
+    fn vopen_raw_impl(
+        &mut self,
+        paths: &[&std::path::Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> vfsi_sync::VecResult<vfsi_sync::FileOperand> {
+        self.scalar.vopen_raw_impl(paths, flags, modes)
+    }
+
+    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
+        let result: VfResult<Vec<ReadResult>> = { Err(VfError::unsupported(0)) };
+        result.map(|results| results.into_iter().map(Ok).collect())
     }
     fn vwrite_impl(
         &mut self,
         writes: &[WriteOp<&FileOperand, &[u8]>],
-    ) -> VfResult<Vec<WriteResult>> {
+    ) -> vfsi_sync::VecResult<WriteResult> {
         self.calls.lock().unwrap().push(
             writes
                 .iter()
@@ -568,6 +653,28 @@ impl VectorBackend for WriteBoundaryProbe {
                 })
                 .collect(),
         );
+        if let Some(outcomes) = self
+            .write_outcomes
+            .take()
+            .or_else(|| self.write_waves.pop_front())
+        {
+            return Ok(outcomes
+                .into_iter()
+                .enumerate()
+                .map(|(index, result)| {
+                    let write = writes.get(index).unwrap_or(&writes[0]);
+                    result.map(|bytes_written| WriteResult {
+                        file: (*write.file()).clone(),
+                        offset: match write.offset() {
+                            VfOffset::At(offset) => offset,
+                            _ => 0,
+                        },
+                        bytes_written,
+                        stable: true,
+                    })
+                })
+                .collect());
+        }
         if let Some(error) = &self.failure
             && self.calls.lock().unwrap().len() > self.failure_after
         {
@@ -590,6 +697,7 @@ impl VectorBackend for WriteBoundaryProbe {
                 bytes_written: op.data().len().min(2),
                 stable: true,
             })
+            .map(Ok)
             .collect())
     }
 }
@@ -606,7 +714,13 @@ fn shared_write_operations_keep_storage_borrowed_through_dynamic_vector_dispatch
         WriteOp::from_fd(7, VfOffset::Cur, b"def".to_vec()),
     ];
     let writes: Vec<_> = storage.iter().map(vfsi_core::WriteOp::borrowed).collect();
-    let results = backend.vwrite_impl(&writes).unwrap();
+    let results = backend
+        .vwrite_impl(&writes)
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
+        .unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].file, *storage[0].file());
     assert_eq!(results[1].file, *storage[1].file());
@@ -653,14 +767,21 @@ fn consolidated_write_dispatch_retries_only_successful_short_writes_without_copy
             files[0].write_request_at(0, data),
             files[1].write_request_at(10, data),
         ];
-        let result = client.vwrite_all_native(&ops);
+        let result = client.vwrite_all_native(&ops).and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        });
         let calls = calls.lock().unwrap();
         if let Some(error) = failure {
             let actual = result.unwrap_err();
-            assert_eq!(actual.index(), error.index());
+            assert_eq!(
+                actual.index(),
+                Some(0),
+                "strict selection identifies the first rejected input"
+            );
             assert_eq!(actual.is_transport(), error.is_transport());
             if error.index().is_some() {
-                assert_eq!(actual.path(), Some(std::path::Path::new("/second")));
+                assert_eq!(actual.path(), Some(std::path::Path::new("/first")));
             }
             assert_eq!(
                 calls.len(),
@@ -690,7 +811,9 @@ fn consolidated_write_dispatch_retries_only_successful_short_writes_without_copy
 
 #[derive(Default)]
 struct AttrsBackend {
+    removals: usize,
     metadata_calls: MetadataCalls,
+    metadata_failure: Option<usize>,
     scalar: ScalarOnly,
     calls: Vec<(bool, Vec<VfAttrs>)>,
     failure: Option<(usize, VfError)>,
@@ -698,43 +821,93 @@ struct AttrsBackend {
 }
 handle_contract!(AttrsBackend);
 impl VectorBackend for AttrsBackend {
-    fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
-        Err(VfError::unsupported(0))
+    fn vremove_impl(&mut self, files: &[FileOperand]) -> vfsi_core::VecResult<()> {
+        self.removals += files.len();
+        Ok(files.iter().map(|_| Ok(())).collect())
     }
-    fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> VfResult<()> {
+
+    fn vopen_raw_impl(
+        &mut self,
+        paths: &[&std::path::Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> vfsi_sync::VecResult<vfsi_sync::FileOperand> {
+        self.scalar.vopen_raw_impl(paths, flags, modes)
+    }
+
+    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
+        let result: VfResult<Vec<ReadResult>> = { Err(VfError::unsupported(0)) };
+        result.map(|results| results.into_iter().map(Ok).collect())
+    }
+    fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_core::VecResult<()> {
+        let requested = attrs.len();
         self.metadata_calls
             .lock()
             .unwrap()
             .push((true, attrs.iter().map(|a| a.file.clone()).collect()));
         self.queries
             .push((true, attrs[0].file.clone(), attrs[0].masks));
-        Ok(())
+        Ok((0..requested)
+            .map(|index| {
+                if self.metadata_failure == Some(index) {
+                    Err(vfsi_core::OpError::failed(
+                        VfError::errno(None, libc::EACCES as u32),
+                        None,
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+            .collect())
     }
-    fn vgetattrs_nofollow_impl(&mut self, attrs: &mut [VfAttrs]) -> VfResult<()> {
+    fn vgetattrs_nofollow_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_core::VecResult<()> {
+        let requested = attrs.len();
         self.metadata_calls
             .lock()
             .unwrap()
             .push((false, attrs.iter().map(|a| a.file.clone()).collect()));
         self.queries
             .push((false, attrs[0].file.clone(), attrs[0].masks));
-        Ok(())
+        Ok((0..requested)
+            .map(|index| {
+                if self.metadata_failure == Some(index) {
+                    Err(vfsi_core::OpError::failed(
+                        VfError::errno(None, libc::EACCES as u32),
+                        None,
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+            .collect())
     }
-    fn vsetattrs_raw_impl(&mut self, attrs: &[VfAttrs]) -> VfResult<()> {
+    fn vsetattrs_raw_impl(&mut self, attrs: &[VfAttrs]) -> vfsi_core::VecResult<()> {
         self.record_attrs(true, attrs)
     }
-    fn vsetattrs_raw_nofollow_impl(&mut self, attrs: &[VfAttrs]) -> VfResult<()> {
+    fn vsetattrs_raw_nofollow_impl(&mut self, attrs: &[VfAttrs]) -> vfsi_core::VecResult<()> {
         self.record_attrs(false, attrs)
     }
 }
 impl AttrsBackend {
-    fn record_attrs(&mut self, follow: bool, attrs: &[VfAttrs]) -> VfResult<()> {
+    fn record_attrs(&mut self, follow: bool, attrs: &[VfAttrs]) -> vfsi_core::VecResult<()> {
         self.calls.push((follow, attrs.to_vec()));
         if let Some((call, error)) = &self.failure
             && self.calls.len() == *call
         {
+            if let Some(index) = error.index().filter(|&index| index < attrs.len()) {
+                return Ok((0..attrs.len())
+                    .map(|position| {
+                        if position == index {
+                            Err(vfsi_core::OpError::failed(error.clone(), None))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .collect());
+            }
             return Err(error.clone());
         }
-        Ok(())
+        Ok(attrs.iter().map(|_| Ok(())).collect())
     }
 }
 
@@ -823,7 +996,7 @@ fn shared_attribute_ops_preserve_all_fields_at_the_raw_backend_boundary() {
 }
 
 #[test]
-fn shared_native_attribute_batches_preflight_and_remap_policy_run_errors() {
+fn shared_native_attribute_batches_isolate_validation_and_preserve_policy_runs() {
     use vfsi_sync::backend::helpers::vsetattrs_typed_default;
     let ops = [
         SetAttrsOp::new(Target::Path(std::path::Path::new("/a"))).len(1),
@@ -849,10 +1022,15 @@ fn shared_native_attribute_batches_preflight_and_remap_policy_run_errors() {
     );
     backend.calls.clear();
     for invalid in [ops[3].uid(u32::MAX), ops[3].gid(u32::MAX)] {
-        let error = vsetattrs_typed_default(&mut backend, &[ops[0], invalid]).unwrap_err();
-        assert_eq!(error.index(), Some(1));
-        assert_eq!(error.path(), Some(std::path::Path::new("/a")));
-        assert!(backend.calls.is_empty());
+        backend.calls.clear();
+        let results = vsetattrs_typed_default(&mut backend, &[ops[0], invalid]).unwrap();
+        assert!(results[0].is_ok());
+        let error = results[1].as_ref().unwrap_err();
+        assert_eq!(error.state(), vfsi_core::FailureState::NotAttempted);
+        assert_eq!(error.cause().index(), None);
+        assert_eq!(error.cause().path(), Some(std::path::Path::new("/a")));
+        assert_eq!(backend.calls.len(), 1);
+        assert_eq!(backend.calls[0].1.len(), 1);
     }
     for failure in [
         VfError::errno(1, libc::ENOENT as u32),
@@ -861,20 +1039,31 @@ fn shared_native_attribute_batches_preflight_and_remap_policy_run_errors() {
     ] {
         backend.failure = Some((2, failure.clone()));
         backend.calls.clear();
-        let error = vsetattrs_typed_default(&mut backend, &ops).unwrap_err();
-        assert_eq!(backend.calls.len(), 2);
+        let results = vsetattrs_typed_default(&mut backend, &ops).unwrap();
+        assert!(results[0].is_ok() && results[3].is_ok());
+        let error = vfsi_core::internal::collect_vec_result(Ok(results), ops.len()).unwrap_err();
+        assert_eq!(backend.calls.len(), 3);
         if failure.index() == Some(1) {
             assert_eq!(error.index(), Some(2));
             assert_eq!(error.raw_code(), libc::ENOENT as u32);
         } else {
             assert!(error.is_transport());
-            assert_eq!(error.index(), None);
+            assert_eq!(error.index(), Some(1));
         }
     }
 }
 
 impl VectorBackend for PagedBackend {
-    fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+    fn vopen_raw_impl(
+        &mut self,
+        paths: &[&std::path::Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> vfsi_sync::VecResult<vfsi_sync::FileOperand> {
+        self.scalar.vopen_raw_impl(paths, flags, modes)
+    }
+
+    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
         panic!("directory paging must not issue reads")
     }
 
@@ -1021,8 +1210,26 @@ struct WorkflowOverride {
 handle_contract!(WorkflowOverride);
 
 impl VectorBackend for WorkflowOverride {
-    fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+    fn vopen_raw_impl(
+        &mut self,
+        paths: &[&std::path::Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> vfsi_sync::VecResult<vfsi_sync::FileOperand> {
+        self.scalar.vopen_raw_impl(paths, flags, modes)
+    }
+
+    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
         panic!("specialized workflows must not fall back to generic vector reads")
+    }
+
+    fn vread_all_with_options_impl(
+        &mut self,
+        files: &[FileOperand],
+        _: vfsi_sync::ReadAllOptions,
+    ) -> vfsi_sync::VecResult<Vec<u8>> {
+        self.calls.push("read_all");
+        Ok(files.iter().map(|_| Ok(b"override".to_vec())).collect())
     }
 
     fn read_dir_page_with_fields_impl(
@@ -1064,21 +1271,21 @@ impl VectorBackend for WorkflowOverride {
 
     fn remove_paths_with_options_impl(
         &mut self,
-        _: &[&std::path::Path],
-        _: bool,
+        paths: &[&std::path::Path],
+        _: vfsi_core::api::RemoveMode,
         _: vfsi_sync::RemoveOptions,
-    ) -> vfsi_sync::VfRes {
+    ) -> vfsi_core::VecResult<()> {
         self.calls.push("remove");
-        Ok(())
+        Ok(paths.iter().map(|_| Ok(())).collect())
     }
 
     fn vcopy_impl(
         &mut self,
-        _: &[vfsi_sync::ExtentPair],
+        pairs: &[vfsi_sync::ExtentPair],
         _: vfsi_sync::CopyOptions,
-    ) -> vfsi_sync::VfRes {
+    ) -> vfsi_core::VecResult<()> {
         self.calls.push("copy");
-        Ok(())
+        Ok(pairs.iter().map(|_| Ok(())).collect())
     }
 }
 
@@ -1088,9 +1295,23 @@ fn shared_workflows_keep_dynamic_backend_overrides_reachable() {
     let backend: &mut dyn VectorBackend = &mut concrete;
     let files = [FileOperand::from_fd(1)];
     assert_eq!(
-        backend.vread_all_impl(&files).unwrap(),
+        backend
+            .vread_all_impl(&files)
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
+            .unwrap(),
         [b"override".to_vec()]
     );
+    let mut observed = Vec::new();
+    backend
+        .vstream_impl(&files, 16, 16, &mut |_, _, data, _| {
+            observed.extend_from_slice(data);
+            true
+        })
+        .unwrap();
+    assert_eq!(observed, b"override");
     assert!(
         backend
             .walk_impl(
@@ -1104,18 +1325,21 @@ fn shared_workflows_keep_dynamic_backend_overrides_reachable() {
     backend
         .remove_impl(std::path::Path::new("/tree"), true)
         .unwrap();
-    backend
-        .vcopy_impl(
-            &[vfsi_sync::ExtentPair::from_os_paths(
-                std::path::Path::new("/a"),
-                0,
-                std::path::Path::new("/b"),
-                0,
-                None,
-            )],
-            vfsi_sync::CopyOptions::default(),
+    {
+        let copy_pairs = &[vfsi_sync::ExtentPair::from_os_paths(
+            std::path::Path::new("/a"),
+            0,
+            std::path::Path::new("/b"),
+            0,
+            None,
+        )];
+        vfsi_core::internal::collect_vec_result(
+            backend.vcopy_impl(copy_pairs, vfsi_sync::CopyOptions::default()),
+            copy_pairs.len(),
         )
-        .unwrap();
+        .map(|_| ())
+    }
+    .unwrap();
     let (entries, next) = backend
         .read_dir_page_impl(std::path::Path::new("/tree"), None, 1, 4)
         .unwrap();
@@ -1123,17 +1347,29 @@ fn shared_workflows_keep_dynamic_backend_overrides_reachable() {
     assert!(next.is_none());
     assert_eq!(
         concrete.calls,
-        ["stream", "walk", "remove", "copy", "directory"]
+        ["read_all", "stream", "walk", "remove", "copy", "directory"]
     );
 }
 
 impl VectorBackend for DefaultBackend {
-    fn vread_impl(&mut self, requests: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
-        self.vector_reads += 1;
-        requests
-            .iter()
-            .map(|request| self.read_impl(request))
-            .collect()
+    fn vopen_raw_impl(
+        &mut self,
+        paths: &[&std::path::Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> vfsi_sync::VecResult<vfsi_sync::FileOperand> {
+        self.scalar.vopen_raw_impl(paths, flags, modes)
+    }
+
+    fn vread_impl(&mut self, requests: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
+        let result: VfResult<Vec<ReadResult>> = {
+            self.vector_reads += 1;
+            requests
+                .iter()
+                .map(|request| self.read_impl(request))
+                .collect()
+        };
+        result.map(|results| results.into_iter().map(Ok).collect())
     }
 }
 
@@ -1165,12 +1401,19 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
     );
     let files = backend
         .vopen_impl(&[OpenOp::new("/file", OpenFlags::READ)])
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        .map(|result| result.unwrap())
+        .collect::<Vec<_>>();
     let data = backend
         .vread_all_with_options_impl(
             &files,
             vfsi_sync::ReadAllOptions::new().with_max_total_bytes(6),
         )
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     assert_eq!(data, [b"abcdef".to_vec()]);
     assert_eq!(
@@ -1179,6 +1422,10 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
                 &files,
                 vfsi_sync::ReadAllOptions::new().with_max_total_bytes(3),
             )
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap_err()
             .kind(),
         std::io::ErrorKind::FileTooLarge
@@ -1198,6 +1445,10 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
     let mut buffer = [0; 3];
     let result = backend
         .vread_into_impl(&[ReadOp::at(files[0].clone(), 2, 3)], &mut [&mut buffer])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     assert_eq!(buffer, *b"cde");
     assert_eq!(result[0].bytes_read, 3);
@@ -1216,10 +1467,17 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
         std::io::ErrorKind::Unsupported
     );
     assert_eq!(
-        backend
-            .vrename_with_options_impl(&paths, vfsi_core::api::RenameMode::NoReplace)
-            .unwrap_err()
-            .kind(),
+        {
+            let rename_pairs = &paths;
+            vfsi_core::internal::collect_vec_result(
+                backend
+                    .vrename_with_options_impl(rename_pairs, vfsi_core::api::RenameMode::NoReplace),
+                rename_pairs.len(),
+            )
+            .map(|_| ())
+        }
+        .unwrap_err()
+        .kind(),
         std::io::ErrorKind::Unsupported
     );
     assert_eq!(
@@ -1232,6 +1490,10 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
     assert_eq!(
         backend
             .vwrite_impl(&[WriteOp::new(&files[0], VfOffset::At(0), b"x")])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap_err()
             .kind(),
         std::io::ErrorKind::Unsupported
@@ -1240,18 +1502,48 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
     backend.close_deferred(&files[0]).unwrap();
     let files = backend
         .vopen_impl(&[OpenOp::new("/file", OpenFlags::READ)])
-        .unwrap();
-    backend.vclose_impl(&files).unwrap();
+        .unwrap()
+        .into_iter()
+        .map(|result| result.unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        backend
+            .vclose_impl(&files)
+            .unwrap()
+            .into_iter()
+            .all(|result| result.is_ok())
+    );
     assert!(!concrete.scalar.open);
     assert_eq!(concrete.scalar.close_calls, 2);
     assert!(concrete.vector_reads >= 5);
 }
 
 impl HandleBackend for ScalarOnly {
+    fn prepare_object_refs(&mut self, _: &[&FileOperand]) -> VfResult<()> {
+        if self.identity_preflight_failure {
+            Err(VfError::errno(None, libc::EACCES as u32))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn vclose_impl(&mut self, files: &[FileOperand]) -> vfsi_core::VecResult<()> {
+        Ok(files
+            .iter()
+            .map(|file| {
+                self.close_impl(file)
+                    .map_err(|error| vfsi_core::OpError::unknown(error, None))
+            })
+            .collect())
+    }
+
     fn open_object_ref(
         &self,
         file: &FileOperand,
     ) -> VfResult<Option<vfsi_sync::backend::OpenObjectRef<'_>>> {
+        if self.identity_ref_failure {
+            return Err(VfError::errno(None, libc::EACCES as u32));
+        }
         Ok(
             if self.unknown_objects || self.unknown_object_fd == file.fd() {
                 None
@@ -1267,11 +1559,35 @@ impl HandleBackend for ScalarOnly {
         &mut self,
         files: &[FileOperand],
         mode: vfsi_core::api::SyncMode,
-    ) -> VfResult<()> {
+    ) -> vfsi_sync::VecResult<()> {
         self.sync_calls.lock().unwrap().push((mode, files.to_vec()));
-        self.sync_failure.clone().map_or(Ok(()), Err)
+        let Some(error) = self.sync_failure.clone() else {
+            return Ok((0..self.sync_result_count.unwrap_or(files.len()))
+                .map(|_| Ok(()))
+                .collect());
+        };
+        let Some(index) = error.index().filter(|index| *index < files.len()) else {
+            return Err(error);
+        };
+        Ok(files
+            .iter()
+            .enumerate()
+            .map(|(position, _)| {
+                if position != index {
+                    return Ok(());
+                }
+                Err(if error.is_transport() {
+                    vfsi_sync::OpError::unknown(error.clone(), None)
+                } else {
+                    vfsi_sync::OpError::failed(error.clone(), None)
+                })
+            })
+            .collect())
     }
-    fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, FileOperand>>]) -> VfResult<()> {
+    fn vsetattrs_impl(
+        &mut self,
+        updates: &[SetAttrsOp<Target<'_, FileOperand>>],
+    ) -> vfsi_core::VecResult<()> {
         let mut calls = self.attrs_calls.lock().unwrap();
         calls.push((
             updates[0].follow_final_symlink(),
@@ -1280,19 +1596,44 @@ impl HandleBackend for ScalarOnly {
         if let Some((call, error)) = &self.attrs_failure
             && calls.len() == *call
         {
+            if let Some(index) = error.index().filter(|&index| index < updates.len()) {
+                return Ok((0..updates.len())
+                    .map(|position| {
+                        if position == index {
+                            Err(vfsi_core::OpError::failed(error.clone(), None))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .collect());
+            }
             return Err(error.clone());
         }
-        Ok(())
+        Ok(updates.iter().map(|_| Ok(())).collect())
     }
-    fn vstatfs_impl(&mut self, files: &[FileOperand]) -> VfResult<Vec<vfsi_sync::FilesystemStats>> {
+    fn vstatfs_impl(
+        &mut self,
+        files: &[FileOperand],
+    ) -> vfsi_core::VecResult<vfsi_sync::FilesystemStats> {
         self.stats_calls.fetch_add(1, Ordering::SeqCst);
-        if let Some(index) = self.stats_error_index {
-            return Err(VfError::errno(index, libc::ENOENT as u32));
-        }
-        Ok(vec![
-            vfsi_sync::FilesystemStats::default();
+        let mut results = vec![
+            Ok(vfsi_sync::FilesystemStats::default());
             self.stats_result_count.unwrap_or(files.len())
-        ])
+        ];
+        if let Some(index) = self.stats_error_index {
+            if let Some(slot) = results.get_mut(index) {
+                *slot = Err(vfsi_core::OpError::failed(
+                    VfError::errno(index, libc::ENOENT as u32),
+                    None,
+                ));
+            } else {
+                results.push(Err(vfsi_core::OpError::failed(
+                    VfError::invalid_reply(None, "invalid injected statfs index"),
+                    None,
+                )));
+            }
+        }
+        Ok(results)
     }
 
     fn take_notifications(&mut self) -> Vec<Box<dyn FnOnce() + Send>> {
@@ -1474,14 +1815,14 @@ impl HandleBackend for ScalarOnly {
 }
 
 #[test]
-fn setattrs_ops_batch_policy_runs_in_order_and_preflight_before_dispatch() {
+fn setattrs_ops_batch_policy_runs_and_isolate_invalid_siblings() {
     use vfsi_core::SetAttrsOp;
     let backend = ScalarOnly::default();
     let calls = Arc::clone(&backend.attrs_calls);
     let fs = FsClient::new(backend);
     fs.vsetattrs::<&str>(&[]).unwrap();
     assert!(calls.lock().unwrap().is_empty());
-    fs.vsetattrs(&[
+    fs.setattrs_all(&[
         SetAttrsOp::new("/a").len(1),
         SetAttrsOp::new("/b").len(2),
         SetAttrsOp::new("/c")
@@ -1503,7 +1844,7 @@ fn setattrs_ops_batch_policy_runs_in_order_and_preflight_before_dispatch() {
     );
     calls.lock().unwrap().clear();
     let error = fs
-        .vsetattrs(&[
+        .setattrs_all(&[
             SetAttrsOp::new("/a").len(6),
             SetAttrsOp::new("/b")
                 .uid(u32::MAX)
@@ -1512,11 +1853,11 @@ fn setattrs_ops_batch_policy_runs_in_order_and_preflight_before_dispatch() {
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.raw_code(), libc::EINVAL as u32);
-    assert!(calls.lock().unwrap().is_empty());
+    assert_eq!(*calls.lock().unwrap(), [(true, vec![Some(6)])]);
 }
 
 #[test]
-fn setattrs_ops_remap_later_run_failures_without_replaying_or_dispatching_suffix() {
+fn setattrs_ops_remap_later_run_failures_without_replaying_successes() {
     use vfsi_core::SetAttrsOp;
     for failure in [
         VfError::errno(1, libc::ENOENT as u32),
@@ -1530,7 +1871,7 @@ fn setattrs_ops_remap_later_run_failures_without_replaying_or_dispatching_suffix
         let calls = Arc::clone(&backend.attrs_calls);
         let fs = FsClient::new(backend);
         let error = fs
-            .vsetattrs(&[
+            .setattrs_all(&[
                 SetAttrsOp::new("/a").len(1),
                 SetAttrsOp::new("/b")
                     .len(2)
@@ -1541,14 +1882,14 @@ fn setattrs_ops_remap_later_run_failures_without_replaying_or_dispatching_suffix
                 SetAttrsOp::new("/d").len(4),
             ])
             .unwrap_err();
-        assert_eq!(calls.lock().unwrap().len(), 2);
+        assert_eq!(calls.lock().unwrap().len(), 3);
         if failure.index() == Some(1) {
             assert_eq!(error.index(), Some(2));
             assert_eq!(error.raw_code(), libc::ENOENT as u32);
             assert_eq!(error.path(), Some(std::path::Path::new("/c")));
         } else {
             assert!(error.is_transport());
-            assert_eq!(error.index(), None);
+            assert_eq!(error.index(), Some(1));
         }
     }
 }
@@ -1599,7 +1940,13 @@ fn std_io_rejects_backend_results_that_violate_io_contracts() {
         .open_with(OpenOp::new("/file", OpenFlags::WRITE))
         .unwrap();
     let error = client.std_io(&file).write(b"data").unwrap_err();
-    let error = error.get_ref().unwrap().downcast_ref::<VfError>().unwrap();
+    let outcome = error
+        .get_ref()
+        .unwrap()
+        .downcast_ref::<vfsi_sync::OpError>()
+        .unwrap();
+    assert_eq!(outcome.state(), vfsi_sync::FailureState::Unknown);
+    let error = outcome.cause();
     assert!(error.is_transport());
     assert_eq!(error.operation(), Some("vwrite_native"));
     assert_eq!(error.path(), Some(std::path::Path::new("/file")));
@@ -1683,7 +2030,7 @@ fn vector_transport_failure_does_not_invent_request_zero_context() {
         ..ScalarOnly::default()
     });
     let error = client
-        .vopen(&[
+        .open_batch(&[
             OpenOp::new("/first", OpenFlags::READ),
             OpenOp::new("/second", OpenFlags::READ),
         ])
@@ -1700,14 +2047,14 @@ fn openv_rejects_wrong_result_count_and_cleans_returned_handles() {
         ..ScalarOnly::default()
     });
     let error = client
-        .vopen(&[
+        .open_batch(&[
             OpenOp::new("/first", OpenFlags::READ),
             OpenOp::new("/second", OpenFlags::READ),
         ])
         .unwrap_err();
     assert!(error.is_transport());
-    assert_eq!(error.index(), None);
-    assert!(error.to_string().contains("1 results for 2 requests"));
+    assert_eq!(error.index(), Some(1));
+    assert!(error.to_string().contains("missing open outcome"));
     assert!(!client.into_inner().unwrap().open);
 }
 
@@ -1717,7 +2064,7 @@ fn readv_and_writev_reject_wrong_result_counts() {
     let vector_result_limit = Arc::clone(&backend.vector_result_limit);
     let client = FsClient::new(backend);
     let files = client
-        .vopen(&[
+        .open_batch(&[
             OpenOp::new("/first", OpenFlags::READ | OpenFlags::WRITE),
             OpenOp::new("/second", OpenFlags::READ | OpenFlags::WRITE),
         ])
@@ -1729,18 +2076,26 @@ fn readv_and_writev_reject_wrong_result_counts() {
             files[0].read_request_at(0, 1),
             files[1].read_request_at(0, 1),
         ])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap_err();
     assert!(read_error.is_transport());
-    assert_eq!(read_error.index(), None);
+    assert_eq!(read_error.index(), Some(1));
 
     let write_error = client
         .vwrite_native(&[
             files[0].write_request_at(0, b"a"),
             files[1].write_request_at(0, b"b"),
         ])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap_err();
     assert!(write_error.is_transport());
-    assert_eq!(write_error.index(), None);
+    assert_eq!(write_error.index(), Some(1));
 
     client.vclose_owned(files).unwrap();
 }
@@ -1756,6 +2111,10 @@ fn owned_vector_reads_reject_oversized_batches_before_backend_io() {
     let file = client.open("/file").unwrap();
     let error = client
         .vread_with_limit_native(&[file.read_request_at(0, 3), file.read_request_at(3, 3)], 5)
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.raw_code(), libc::EFBIG as u32);
@@ -1764,12 +2123,20 @@ fn owned_vector_reads_reject_oversized_batches_before_backend_io() {
 
     let error = client
         .vread_native(&[file.read_request_at(0, vfsi_sync::DEFAULT_READV_MAX_TOTAL_BYTES + 1)])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap_err();
     assert_eq!(error.raw_code(), libc::EFBIG as u32);
     assert_eq!(read_calls.load(Ordering::SeqCst), 0);
 
     let results = client
         .vread_with_limit_native(&[file.read_request_at(0, 3)], 3)
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     assert_eq!(results[0].data, b"abc");
 }
@@ -1790,6 +2157,10 @@ fn write_allv_dependency_schedule_visits_requests_only_when_ready() {
         .vwrite_all_mapped_native(&requests, |request| {
             projections.set(projections.get() + 1);
             *request
+        })
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
         })
         .unwrap();
     assert!(results.iter().all(|result| result.bytes_written == 1));
@@ -1829,7 +2200,13 @@ fn write_allv_dependency_schedule_orders_newly_ready_and_partial_requests() {
         b.write_request_at(10, payloads[2]),
         a.write_request_at(1, payloads[3]),
     ];
-    let results = client.vwrite_all_native(&requests).unwrap();
+    let results = client
+        .vwrite_all_native(&requests)
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
+        .unwrap();
     assert_eq!(
         results
             .iter()
@@ -1878,6 +2255,10 @@ fn write_allv_dependency_schedule_treats_validated_empty_requests_as_complete() 
             file.write_request_at(10, b""),
             file.write_request_at(20, independent),
         ])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     assert_eq!(
         results
@@ -1902,6 +2283,10 @@ fn write_allv_dependency_schedule_treats_validated_empty_requests_as_complete() 
             file.write_request_at(3, b""),
             append.write_request_at(7, b""),
         ])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     assert_eq!(
         results
@@ -2008,7 +2393,13 @@ fn write_allv_dependency_schedule_matches_reference_waves() {
                 file.write_request_at(offset, &payloads[index])
             })
             .collect();
-        let results = client.vwrite_all_native(&requests).unwrap();
+        let results = client
+            .vwrite_all_native(&requests)
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
+            .unwrap();
         for (result, &(_, append, offset, length)) in results.iter().zip(&specifications) {
             assert_eq!(result.bytes_written, length);
             if !append || length == 0 {
@@ -2026,7 +2417,7 @@ fn write_allv_dependency_schedule_matches_reference_waves() {
 }
 
 #[test]
-fn write_allv_dependency_schedule_maps_later_wave_errors_without_replay() {
+fn write_allv_whole_wave_rejection_preserves_prior_progress_without_replay() {
     for error in [
         VfError::errno(0, libc::ENOSPC as u32),
         VfError::errno(1, libc::ENOSPC as u32),
@@ -2042,22 +2433,30 @@ fn write_allv_dependency_schedule_maps_later_wave_errors_without_replay() {
         let a = client.open("/a").unwrap();
         let b = client.open("/b").unwrap();
         let payloads: [&[u8]; 4] = [b"AA", b"BB", b"CCCC", b"DD"];
-        let actual = client
+        let results = client
             .vwrite_all_native(&[
                 a.write_request_at(0, payloads[0]),
                 a.write_request_at(0, payloads[1]),
                 b.write_request_at(0, payloads[2]),
                 a.write_request_at(0, payloads[3]),
             ])
-            .unwrap_err();
-        assert_eq!(actual.index(), error.index().map(|index| index + 1));
-        assert_eq!(actual.is_transport(), error.is_transport());
-        if let Some(index) = error.index() {
-            assert_eq!(
-                actual.path(),
-                Some(std::path::Path::new(if index == 0 { "/a" } else { "/b" }))
-            );
+            .unwrap();
+        assert_eq!(results[0].as_ref().unwrap().bytes_written, 2);
+        for (index, state) in [
+            (1, vfsi_sync::FailureState::NotAttempted),
+            (2, vfsi_sync::FailureState::Failed),
+            (3, vfsi_sync::FailureState::NotAttempted),
+        ] {
+            let actual = results[index].as_ref().unwrap_err();
+            assert_eq!(actual.state(), state);
+            assert_eq!(actual.cause().is_transport(), error.is_transport());
+            assert_eq!(actual.cause().raw_code(), error.raw_code());
+            assert_eq!(actual.cause().index(), None);
         }
+        assert_eq!(
+            results[2].as_ref().unwrap_err().progress(),
+            Some(&vfsi_sync::IoProgress::Write { bytes_written: 2 })
+        );
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 2, "a failed wave must not be replayed");
         assert_eq!(calls.iter().map(Vec::len).collect::<Vec<_>>(), [2, 2]);
@@ -2084,6 +2483,10 @@ fn write_allv_retries_short_writes_in_vector_waves() {
             file.write_request_at(0, b"abcde"),
             file.write_request_at(10, b"VWXYZ"),
         ])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     assert_eq!(
         results
@@ -2114,6 +2517,10 @@ fn write_allv_preserves_order_for_overlapping_short_writes() {
             file.write_request_at(0, b"AAAA"),
             file.write_request_at(2, b"BBBB"),
         ])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     assert_eq!(
         results
@@ -2141,6 +2548,10 @@ fn write_allv_waits_for_every_earlier_overlapping_request() {
             file.write_request_at(6, b"BB"),
             file.write_request_at(4, b"CCCC"),
         ])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     drop(file);
     assert_eq!(client.into_inner().unwrap().data, b"AAAACCCC");
@@ -2157,13 +2568,17 @@ fn write_allv_rejects_zero_progress() {
         .unwrap();
     let error = client
         .vwrite_all_native(&[file.write_request_at(0, b"data")])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap_err();
     assert_eq!(error.raw_code(), vfsi_sync::ERR_IO);
     assert_eq!(error.index(), Some(0));
 }
 
 #[test]
-fn write_allv_validates_every_request_before_writing_a_prefix() {
+fn strict_write_all_collection_does_not_suppress_a_healthy_sibling() {
     let write_calls = Arc::new(AtomicUsize::new(0));
     let client = FsClient::new(ScalarOnly {
         write_calls: Arc::clone(&write_calls),
@@ -2181,9 +2596,15 @@ fn write_allv_validates_every_request_before_writing_a_prefix() {
             local_file.write_request_at(0, b"would-write"),
             foreign_file.write_request_at(0, b"invalid"),
         ])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(write_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(write_calls.load(Ordering::SeqCst), 1);
+    drop(local_file);
+    assert_eq!(client.into_inner().unwrap().data, b"would-write");
 }
 
 #[test]
@@ -2206,6 +2627,10 @@ fn vector_results_must_match_their_requests_and_io_limits() {
         let file = client.open("/file").unwrap();
         let error = client
             .vread_native(&[file.read_request_at(0, 1)])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap_err();
         assert!(error.is_transport());
         assert_eq!(error.index(), Some(0));
@@ -2222,6 +2647,10 @@ fn vector_results_must_match_their_requests_and_io_limits() {
         .unwrap();
     let error = client
         .vwrite_native(&[file.write_request_at(0, b"x")])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap_err();
     assert!(error.is_transport());
     assert_eq!(error.index(), Some(0));
@@ -2266,9 +2695,9 @@ fn failed_try_closev_retains_handles_for_explicit_retry() {
         ..ScalarOnly::default()
     });
     let mut files = vec![client.open("/file").unwrap()];
-    assert!(client.vclose(&mut files).is_err());
+    assert!(client.close_batch(&mut files).is_err());
     assert_eq!(files[0].path(), std::path::Path::new("/file"));
-    client.vclose(&mut files).unwrap();
+    client.close_batch(&mut files).unwrap();
     drop(files);
     let backend = client.into_inner().unwrap();
     assert_eq!(backend.close_calls, 2);
@@ -2284,7 +2713,15 @@ fn successfully_closed_handle_returns_ebadf_instead_of_panicking() {
         client.std_io(&file).read(&mut [0u8; 1]).unwrap_err(),
         client.std_io(&file).write(b"x").unwrap_err(),
     ] {
-        let error = error.get_ref().unwrap().downcast_ref::<VfError>().unwrap();
+        let source = error.get_ref().unwrap();
+        let error = source
+            .downcast_ref::<VfError>()
+            .or_else(|| {
+                source
+                    .downcast_ref::<vfsi_sync::OpError>()
+                    .map(vfsi_sync::OpError::cause)
+            })
+            .unwrap();
         assert_eq!(error.raw_code(), vfsi_sync::ERR_EBADF);
     }
 }
@@ -2337,7 +2774,13 @@ fn stream_callback_errors_keep_nested_operation_indices_and_close_the_stream() {
         live.read_request_at(1, 1),
         closed.read_request_at(0, 1),
     ];
-    let expected = client.vread_native(&nested).unwrap_err();
+    let expected = client
+        .vread_native(&nested)
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
+        .unwrap_err();
     assert_eq!(expected.index(), Some(2));
     assert_eq!(
         expected.path(),
@@ -2352,17 +2795,32 @@ fn stream_callback_errors_keep_nested_operation_indices_and_close_the_stream() {
             |index, _, _| {
                 seen.push(index);
                 if index == 1 {
-                    client.vread_native(&nested)?;
+                    client.vread_native(&nested).and_then(|outcomes| {
+                        let count = outcomes.len();
+                        vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    })?;
                 }
                 Ok(std::ops::ControlFlow::Continue(()))
             },
         )
-        .unwrap_err();
-    assert_eq!(actual, expected);
-    assert_eq!(seen, [0, 1]);
+        .unwrap();
+    assert_eq!(actual.len(), 3);
+    assert_eq!(
+        actual[0].as_ref().unwrap(),
+        &vfsi_sync::StreamCompletion::Complete
+    );
+    assert_eq!(
+        actual[2].as_ref().unwrap(),
+        &vfsi_sync::StreamCompletion::Complete
+    );
+    let actual = actual.into_iter().nth(1).unwrap().unwrap_err();
+    assert_eq!(actual.cause().index(), None);
+    assert_eq!(actual.into_cause().with_index(2), expected);
+    assert_eq!(seen, [0, 1, 2]);
     // One bounded chunk may be prefetched for later files, but their
-    // callbacks never run after the nested error and every handle closes.
-    assert_eq!(reads.load(Ordering::SeqCst), 3);
+    // healthy sibling callbacks still run after the nested error; every handle closes.
+    // Each nested vector executes its two valid siblings despite the closed handle.
+    assert_eq!(reads.load(Ordering::SeqCst), 7);
     assert_eq!(closes.load(Ordering::SeqCst) - closes_before, 3);
 }
 
@@ -2372,34 +2830,106 @@ struct StreamBackend {
     batches: Vec<(&'static str, usize)>,
     open_error: Option<VfError>,
     read_error: Option<VfError>,
+    read_error_prefix: bool,
     close_error: Option<VfError>,
 }
-handle_contract!(StreamBackend);
+handle_contract!(
+    StreamBackend,
+    fn vclose_impl(&mut self, files: &[FileOperand]) -> vfsi_core::VecResult<()> {
+        self.batches.push(("close", files.len()));
+        if let Some(error) = &self.close_error {
+            let Some(failed) = error.index() else {
+                return Err(error.clone());
+            };
+            return Ok(files
+                .iter()
+                .enumerate()
+                .map(|(index, file)| {
+                    if index == failed {
+                        Err(vfsi_core::OpError::unknown(error.clone(), None))
+                    } else {
+                        self.scalar
+                            .close_impl(file)
+                            .map_err(|cause| vfsi_core::OpError::unknown(cause, None))
+                    }
+                })
+                .collect());
+        }
+        self.scalar.vclose_impl(files)
+    }
+);
 impl VectorBackend for StreamBackend {
-    fn vopen_impl(&mut self, requests: &[OpenOp]) -> VfResult<Vec<FileOperand>> {
+    fn vopen_raw_impl(
+        &mut self,
+        paths: &[&std::path::Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> vfsi_sync::VecResult<vfsi_sync::FileOperand> {
+        self.scalar.vopen_raw_impl(paths, flags, modes)
+    }
+
+    fn vopen_impl(&mut self, requests: &[OpenOp]) -> vfsi_core::VecResult<FileOperand> {
         self.batches.push(("open", requests.len()));
-        if let Some(error) = &self.open_error
-            && error.index().is_none_or(|index| index < requests.len())
-        {
-            return Err(error.clone());
+        if let Some(error) = &self.open_error {
+            let Some(failed) = error.index() else {
+                return Err(error.clone());
+            };
+            if failed < requests.len() {
+                return Ok(requests
+                    .iter()
+                    .enumerate()
+                    .map(|(index, request)| {
+                        if index == failed {
+                            Err(if error.is_transport() {
+                                vfsi_core::OpError::unknown(error.clone(), None)
+                            } else {
+                                vfsi_core::OpError::failed(error.clone(), None)
+                            })
+                        } else {
+                            self.scalar
+                                .open_impl(request)
+                                .map_err(|cause| vfsi_core::OpError::failed(cause, None))
+                        }
+                    })
+                    .collect());
+            }
         }
         self.scalar.vopen_impl(requests)
     }
-    fn vread_impl(&mut self, requests: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+    fn vread_impl(&mut self, requests: &[ReadOp]) -> vfsi_sync::VecResult<ReadResult> {
         self.batches.push(("read", requests.len()));
         if let Some(error) = &self.read_error
-            && error.index().is_none_or(|index| index < requests.len())
+            && error.index().is_none()
         {
-            return Err(error.clone());
+            return Ok(requests
+                .iter()
+                .map(|_| Err(vfsi_sync::OpError::unknown(error.clone(), None)))
+                .collect());
         }
-        self.scalar.vread_impl(requests)
-    }
-    fn vclose_impl(&mut self, files: &[FileOperand]) -> VfResult<()> {
-        self.batches.push(("close", files.len()));
-        if let Some(error) = &self.close_error {
-            return Err(error.clone());
+        let mut outcomes = self.scalar.vread_impl(requests)?;
+        if let Some(error) = &self.read_error
+            && let Some(index) = error.index().filter(|index| *index < outcomes.len())
+        {
+            let progress = if self.read_error_prefix {
+                let previous = std::mem::replace(
+                    &mut outcomes[index],
+                    Err(vfsi_sync::OpError::failed(VfError::unsupported(None), None)),
+                );
+                let mut read = previous.unwrap();
+                read.data.truncate(1);
+                Some(vfsi_core::IoProgress::Read(
+                    vfsi_core::api::ReadResult::owned(read.offset, read.data, false),
+                ))
+            } else {
+                None
+            };
+            outcomes[index] = Err(if error.is_transport() {
+                vfsi_sync::OpError::unknown(error.clone(), progress)
+            } else {
+                vfsi_sync::OpError::failed(error.clone(), progress)
+            });
         }
-        self.scalar.vclose_impl(files)
+        Ok(outcomes)
     }
 }
 
@@ -2415,7 +2945,7 @@ fn stream_cohorts_batch_small_files_with_bounded_memory_and_ordered_callbacks() 
     .with_limits(vfsi_sync::ResourceLimits::new().with_max_read_bytes(16));
     let mut seen = Vec::new();
     let result = client
-        .vstream(
+        .streams_all(
             &["/a", "/b", "/c", "/d", "/e"],
             vfsi_sync::StreamOptions::new()
                 .with_chunk_size(std::num::NonZeroUsize::new(8).unwrap()),
@@ -2445,6 +2975,7 @@ fn stream_cohorts_batch_small_files_with_bounded_memory_and_ordered_callbacks() 
             ("open", 2),
             ("read", 2),
             ("close", 2),
+            ("open", 1),
             ("read", 1),
             ("close", 1)
         ]
@@ -2453,7 +2984,7 @@ fn stream_cohorts_batch_small_files_with_bounded_memory_and_ordered_callbacks() 
 }
 
 #[test]
-fn stream_cohorts_preserve_stop_prefix_and_defer_later_semantic_failures() {
+fn stream_cohorts_keep_known_failures_and_independent_siblings_on_stop_or_error() {
     for at_open in [false, true] {
         for stop in [false, true] {
             let error = VfError::errno(1, libc::ENOENT as u32);
@@ -2480,25 +3011,54 @@ fn stream_cohorts_preserve_stop_prefix_and_defer_later_semantic_failures() {
                     })
                 },
             );
+            let outcomes = result.unwrap();
+            assert_eq!(outcomes.len(), 3);
+            let failed = outcomes[1].as_ref().unwrap_err();
+            assert_eq!(failed.state(), vfsi_core::FailureState::Failed);
+            assert_eq!(failed.cause().index(), None);
+            assert_eq!(failed.cause().raw_code(), libc::ENOENT as u32);
             if stop {
                 assert_eq!(
-                    result.unwrap(),
-                    [vfsi_sync::StreamCompletion::Stopped { next_offset: 2 }]
+                    outcomes[0].as_ref().unwrap(),
+                    &vfsi_sync::StreamCompletion::Stopped { next_offset: 2 }
+                );
+                assert_eq!(
+                    outcomes[2].as_ref().unwrap(),
+                    &vfsi_sync::StreamCompletion::Stopped { next_offset: 0 }
                 );
                 assert_eq!(seen, [(0, 0, b"ab".to_vec())]);
             } else {
-                assert_eq!(result.unwrap_err().index(), Some(1));
+                assert_eq!(
+                    outcomes[0].as_ref().unwrap(),
+                    &vfsi_sync::StreamCompletion::Complete
+                );
+                assert_eq!(
+                    outcomes[2].as_ref().unwrap(),
+                    &vfsi_sync::StreamCompletion::Complete
+                );
                 assert_eq!(
                     seen,
-                    [
-                        (0, 0, b"ab".to_vec()),
-                        (0, 2, b"cd".to_vec()),
-                        (0, 4, b"e".to_vec())
-                    ]
+                    [0, 2]
+                        .into_iter()
+                        .flat_map(|index| [
+                            (index, 0, b"ab".to_vec()),
+                            (index, 2, b"cd".to_vec()),
+                            (index, 4, b"e".to_vec()),
+                        ])
+                        .collect::<Vec<_>>()
                 );
             }
             let backend = client.into_inner().unwrap();
-            assert_eq!(backend.scalar.close_calls, if at_open { 1 } else { 3 });
+            assert_eq!(backend.scalar.close_calls, if at_open { 2 } else { 3 });
+            assert_eq!(
+                backend
+                    .batches
+                    .iter()
+                    .filter(|(kind, _)| *kind == "open")
+                    .count(),
+                1,
+                "successful OPENs are never replayed to recover a prefix"
+            );
         }
     }
 }
@@ -2512,11 +3072,11 @@ fn stream_cohorts_never_replay_transport_failures_and_close_all_opened_files() {
             ..Default::default()
         });
         let error = client
-            .vstream(&["/a", "/b"], vfsi_sync::StreamOptions::new(), |_, _, _| {
+            .streams_all(&["/a", "/b"], vfsi_sync::StreamOptions::new(), |_, _, _| {
                 panic!("no data confirmed")
             })
             .unwrap_err();
-        assert_eq!(error.index(), expected.index());
+        assert_eq!(error.index(), Some(index.unwrap_or(0)));
         assert!(error.is_transport());
         assert!(error.to_string().contains("lost read reply"));
         let backend = client.into_inner().unwrap();
@@ -2526,7 +3086,7 @@ fn stream_cohorts_never_replay_transport_failures_and_close_all_opened_files() {
 }
 
 #[test]
-fn stream_cohorts_preserve_callback_errors_and_stop_before_unvisited_cleanup_errors() {
+fn stream_cohorts_keep_cleanup_failures_and_isolate_callback_errors() {
     for close_index in [Some(0), Some(2), None] {
         let backend = || StreamBackend {
             scalar: ScalarOnly {
@@ -2542,13 +3102,33 @@ fn stream_cohorts_preserve_callback_errors_and_stop_before_unvisited_cleanup_err
             vfsi_sync::StreamOptions::new(),
             |_, _, _| Ok(std::ops::ControlFlow::Break(())),
         );
-        if close_index == Some(2) {
-            assert_eq!(
-                result.unwrap(),
-                [vfsi_sync::StreamCompletion::Stopped { next_offset: 4 }]
-            );
-        } else {
-            assert!(result.unwrap_err().is_transport());
+        let outcomes = result.unwrap();
+        assert_eq!(outcomes.len(), 3);
+        for (index, outcome) in outcomes.into_iter().enumerate() {
+            if close_index.is_none_or(|failed| failed == index) {
+                let error = outcome.unwrap_err();
+                assert_eq!(
+                    error.state(),
+                    if close_index.is_some() {
+                        vfsi_core::FailureState::Unknown
+                    } else {
+                        vfsi_core::FailureState::Failed
+                    }
+                );
+                assert_eq!(error.cause().index(), None);
+                assert!(error.cause().is_transport());
+                assert_eq!(
+                    error.progress(),
+                    (index == 0).then_some(&vfsi_core::IoProgress::Stream { next_offset: 4 })
+                );
+            } else {
+                assert_eq!(
+                    outcome.unwrap(),
+                    vfsi_sync::StreamCompletion::Stopped {
+                        next_offset: if index == 0 { 4 } else { 0 },
+                    }
+                );
+            }
         }
         assert_eq!(client.into_inner().unwrap().scalar.close_calls, 3);
         let client = FsClient::new(backend());
@@ -2559,8 +3139,13 @@ fn stream_cohorts_preserve_callback_errors_and_stop_before_unvisited_cleanup_err
                 vfsi_sync::StreamOptions::new(),
                 |_, _, _| Err(expected.clone()),
             )
-            .unwrap_err();
-        assert_eq!(error, expected);
+            .unwrap();
+        assert_eq!(error.len(), 3);
+        for outcome in error {
+            let error = outcome.unwrap_err();
+            assert_eq!(error.cause().index(), None);
+            assert_eq!(error.into_cause().with_index(9), expected);
+        }
         assert_eq!(client.into_inner().unwrap().scalar.close_calls, 3);
     }
 }
@@ -2704,6 +3289,10 @@ fn native_read_into_dispatches_without_owned_read_results() {
             file.read_request_at_into(0, &mut first),
             file.read_request_at_into(3, &mut second),
         ])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     assert_eq!(
         lengths
@@ -2730,7 +3319,7 @@ fn native_read_into_dispatches_without_owned_read_results() {
     assert_eq!(&scalar, b"cd");
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     let results = client
-        .vread(
+        .read_batch(
             [
                 vfsi_sync::api::ReadOp::into(&file, 0, &mut first),
                 vfsi_sync::api::ReadOp::into(&file, 3, &mut second),
@@ -2759,6 +3348,10 @@ fn native_read_into_rejects_malformed_backend_results() {
     let mut buffer = [0u8; 3];
     let error = client
         .vread_into_native(&mut [file.read_request_at_into(0, &mut buffer)])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap_err();
     assert!(error.is_transport());
     assert_eq!(error.index(), Some(0));
@@ -2774,9 +3367,13 @@ fn native_read_into_rejects_malformed_backend_results() {
     *limit.lock().unwrap() = Some(0);
     let error = client
         .vread_into_native(&mut [file.read_request_at_into(0, &mut buffer)])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap_err();
     assert!(error.is_transport());
-    assert_eq!(error.index(), None);
+    assert_eq!(error.index(), Some(0));
 }
 
 #[test]
@@ -2890,23 +3487,42 @@ fn ordinary_operation_drains_dropped_handles() {
 }
 
 #[test]
-fn filesystem_statistics_validate_backend_shape_and_preflight_all_handles() {
+fn filesystem_statistics_keep_successes_around_backend_failure_in_one_batch() {
+    let backend = ScalarOnly {
+        stats_error_index: Some(1),
+        ..Default::default()
+    };
+    let calls = backend.stats_calls.clone();
+    let client = FsClient::new(backend);
+    let outcomes = client.vstatfs(&["/a", "/missing", "/b"]).unwrap();
+    assert_eq!(outcomes.len(), 3);
+    assert!(outcomes[0].is_ok());
+    assert!(outcomes[2].is_ok());
+    let error = outcomes[1].as_ref().unwrap_err();
+    assert_eq!(error.state(), vfsi_core::FailureState::Failed);
+    assert_eq!(error.cause().path(), Some(std::path::Path::new("/missing")));
+    assert_eq!(error.cause().index(), None);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn filesystem_statistics_validate_backend_shape_and_isolate_invalid_handles() {
     for count in [0, 1, 3] {
         let client = FsClient::new(ScalarOnly {
             stats_result_count: Some(count),
             ..Default::default()
         });
-        assert!(client.vstatfs(&["/a", "/b"]).unwrap_err().is_transport());
+        assert!(client.statfs_all(&["/a", "/b"]).unwrap_err().is_transport());
     }
     let client = FsClient::new(ScalarOnly {
         stats_error_index: Some(2),
         ..Default::default()
     });
-    assert!(client.vstatfs(&["/a", "/b"]).unwrap_err().is_transport());
+    assert!(client.statfs_all(&["/a", "/b"]).unwrap_err().is_transport());
     let backend = ScalarOnly::default();
     let calls = backend.stats_calls.clone();
     let client = FsClient::new(backend);
-    client.vstatfs::<&str>(&[]).unwrap();
+    client.statfs_all::<&str>(&[]).unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     let mut file = client.open("/file").unwrap();
     file.try_close().unwrap();
@@ -2914,20 +3530,20 @@ fn filesystem_statistics_validate_backend_shape_and_preflight_all_handles() {
         vfsi_sync::Target::Path(std::path::Path::new("/a")),
         vfsi_sync::Target::File(&file),
     ];
-    assert_eq!(client.vstatfs(&targets).unwrap_err().index(), Some(1));
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(client.statfs_all(&targets).unwrap_err().index(), Some(1));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     let other = FsClient::new(ScalarOnly::default());
     let foreign = other.open("/foreign").unwrap();
     let targets = [
         vfsi_sync::Target::Path(std::path::Path::new("/a")),
         vfsi_sync::Target::File(&foreign),
     ];
-    assert_eq!(client.vstatfs(&targets).unwrap_err().index(), Some(1));
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(client.statfs_all(&targets).unwrap_err().index(), Some(1));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
 #[test]
-fn portable_handle_queries_and_sync_batch_and_preflight_every_handle() {
+fn portable_handle_queries_and_sync_preserve_valid_siblings() {
     use vfsi_core::api::{AttrsOptions, SyncMode};
     let backend = AttrsBackend::default();
     let queries = Arc::clone(&backend.metadata_calls);
@@ -2935,7 +3551,7 @@ fn portable_handle_queries_and_sync_batch_and_preflight_every_handle() {
     let fs = FsClient::new(backend);
     let a = fs.open("/a").unwrap();
     let mut b = fs.open("/b").unwrap();
-    fs.vgetattrs(
+    fs.getattrs_all(
         &[
             Target::file(&a),
             Target::Path(std::path::Path::new("/path")),
@@ -2947,7 +3563,7 @@ fn portable_handle_queries_and_sync_batch_and_preflight_every_handle() {
     assert_eq!(queries.lock().unwrap()[0].1.len(), 3);
     assert!(queries.lock().unwrap()[0].1[0].is_fd());
     // No-follow applies to path operands, not retained objects.
-    fs.vgetattrs(
+    fs.getattrs_all(
         &[
             Target::file(&a),
             Target::Path(std::path::Path::new("/link")),
@@ -2965,14 +3581,14 @@ fn portable_handle_queries_and_sync_batch_and_preflight_every_handle() {
             .collect::<Vec<_>>(),
         [true, true, false, true]
     );
-    fs.vfsync(&[&a, &b], SyncMode::All).unwrap();
+    fs.sync_batch(&[&a, &b], SyncMode::All).unwrap();
     assert_eq!(syncs.lock().unwrap()[0].0, SyncMode::All);
     assert_eq!(syncs.lock().unwrap()[0].1.len(), 2);
     let foreign_fs = FsClient::new(AttrsBackend::default());
     let foreign = foreign_fs.open("/foreign").unwrap();
     let before = queries.lock().unwrap().len();
     assert_eq!(
-        fs.vgetattrs(
+        fs.getattrs_all(
             &[Target::file(&a), Target::file(&foreign)],
             AttrsOptions::new()
         )
@@ -2981,28 +3597,32 @@ fn portable_handle_queries_and_sync_batch_and_preflight_every_handle() {
         Some(1)
     );
     assert_eq!(
-        fs.vfsync(&[&a, &foreign], SyncMode::Data)
+        fs.sync_batch(&[&a, &foreign], SyncMode::Data)
             .unwrap_err()
             .index(),
         Some(1)
     );
     b.try_close().unwrap();
     assert_eq!(
-        fs.vgetattrs(&[Target::file(&a), Target::file(&b)], AttrsOptions::new())
+        fs.getattrs_all(&[Target::file(&a), Target::file(&b)], AttrsOptions::new())
             .unwrap_err()
             .index(),
         Some(1)
     );
     assert_eq!(
-        fs.vfsync(&[&a, &b], SyncMode::All).unwrap_err().index(),
+        fs.sync_batch(&[&a, &b], SyncMode::All).unwrap_err().index(),
         Some(1)
     );
-    assert_eq!(queries.lock().unwrap().len(), before);
-    assert_eq!(syncs.lock().unwrap().len(), 1);
-    fs.vgetattrs::<&str>(&[], AttrsOptions::new()).unwrap();
-    fs.vfsync(&[], SyncMode::All).unwrap();
-    assert_eq!(queries.lock().unwrap().len(), before);
-    assert_eq!(syncs.lock().unwrap().len(), 1);
+    assert_eq!(queries.lock().unwrap().len(), before + 2);
+    assert_eq!(syncs.lock().unwrap().len(), 3);
+    assert_eq!(syncs.lock().unwrap()[1].1.len(), 1);
+    assert_eq!(syncs.lock().unwrap()[2].1.len(), 1);
+    fs.getattrs_all::<&str>(&[], AttrsOptions::new()).unwrap();
+    fs.sync_batch(&[], SyncMode::All).unwrap();
+    assert_eq!(queries.lock().unwrap().len(), before + 2);
+    assert_eq!(syncs.lock().unwrap().len(), 3);
+    assert_eq!(syncs.lock().unwrap()[1].1.len(), 1);
+    assert_eq!(syncs.lock().unwrap()[2].1.len(), 1);
 }
 #[test]
 fn sync_errors_preserve_valid_indices_and_reject_invalid_backend_indices() {
@@ -3015,7 +3635,7 @@ fn sync_errors_preserve_valid_indices_and_reject_invalid_backend_indices() {
     use vfsi_core::api::SyncMode;
     for index in [None, Some(1), Some(2)] {
         let error = index.map_or_else(
-            || VfError::transport(None, "lost sync reply"),
+            || VfError::transport(None, "sync batch rejected before dispatch"),
             |i| VfError::errno(i, libc::EIO as u32),
         );
         let fs = FsClient::new(DefaultBackend {
@@ -3027,7 +3647,7 @@ fn sync_errors_preserve_valid_indices_and_reject_invalid_backend_indices() {
         });
         let a = fs.open("/a").unwrap();
         let b = fs.open("/b").unwrap();
-        let error = fs.vfsync(&[&a, &b], SyncMode::Data).unwrap_err();
+        let error = fs.sync_batch(&[&a, &b], SyncMode::Data).unwrap_err();
         let calls = std::cell::Cell::new(0);
         let projected_error = fs
             .vfsync_projected_native(&[&a, &b], SyncMode::Data, |file| {
@@ -3037,6 +3657,7 @@ fn sync_errors_preserve_valid_indices_and_reject_invalid_backend_indices() {
                 fs.capabilities().unwrap();
                 *file
             })
+            .and_then(|outcomes| vfsi_sync::internal::collect_vec_result(Ok(outcomes), 2))
             .unwrap_err();
         assert_eq!(calls.get(), 2, "project each input exactly once");
         for error in [error, projected_error] {
@@ -3118,7 +3739,7 @@ fn append_adapters_share_completion_and_report_actual_end_after_short_writes() {
         });
         let file = if vector_open {
             client
-                .vopen(&[OpenOp::new("/file", OpenFlags::READ | OpenFlags::APPEND)])
+                .open_batch(&[OpenOp::new("/file", OpenFlags::READ | OpenFlags::APPEND)])
                 .unwrap()
                 .remove(0)
         } else {
@@ -3166,7 +3787,7 @@ fn complete_append_vectors_order_short_writes_and_never_replay_failures() {
     });
     let file = client.open_options().append(true).open("/file").unwrap();
     let results = client
-        .vwrite(
+        .write_batch(
             &[
                 vfsi_core::api::WriteOp::at(&file, 0, b"AAAA"),
                 vfsi_core::api::WriteOp::at(&file, 100, b"BBBB"),
@@ -3218,39 +3839,91 @@ fn complete_append_vectors_order_short_writes_and_never_replay_failures() {
 #[derive(Default)]
 struct DirectoryProbe {
     scalar: ScalarOnly,
+    opens: Arc<AtomicUsize>,
+    open_shape: u8,
     removed: Arc<Mutex<Vec<i32>>>,
     closed: Arc<Mutex<Vec<i32>>>,
     failure: Option<(i32, VfError)>,
 }
 handle_contract!(DirectoryProbe);
 impl VectorBackend for DirectoryProbe {
-    fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+    fn vopen_raw_impl(
+        &mut self,
+        paths: &[&std::path::Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> vfsi_sync::VecResult<vfsi_sync::FileOperand> {
+        self.scalar.vopen_raw_impl(paths, flags, modes)
+    }
+
+    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
         unreachable!("directory test must not issue file reads")
     }
-    fn open_dir_impl(&mut self, path: &std::path::Path) -> VfResult<vfsi_sync::VfDir> {
-        let fd = path
-            .to_str()
-            .unwrap()
-            .trim_start_matches('/')
-            .parse::<i32>()
-            .map_err(|_| VfError::errno(0, libc::ENOENT as u32))?;
-        Ok(vfsi_sync::VfDir::Descriptor { fd, owner: 1 })
-    }
-    fn remove_dir_contents_handle_with_options_impl(
+    fn vopen_dirs_impl(
         &mut self,
-        dir: &vfsi_sync::VfDir,
-        _: vfsi_sync::RemoveOptions,
-    ) -> VfResult<()> {
-        let vfsi_sync::VfDir::Descriptor { fd, .. } = dir else {
-            panic!("path fallback");
-        };
-        self.removed.lock().unwrap().push(*fd);
-        if let Some((failed, error)) = &self.failure
-            && fd == failed
-        {
-            return Err(error.clone());
+        paths: &[&std::path::Path],
+    ) -> vfsi_sync::VecResult<vfsi_sync::VfDir> {
+        use vfsi_sync::{IoProgress, OpError, VfDir};
+        self.opens.fetch_add(1, Ordering::SeqCst);
+        if self.open_shape == 4 {
+            return Err(VfError::unsupported(None));
         }
-        Ok(())
+        let mut results: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                path.to_str()
+                    .unwrap()
+                    .trim_start_matches('/')
+                    .parse::<i32>()
+                    .map(|fd| VfDir::Descriptor { fd, owner: 1 })
+                    .map_err(|_| OpError::failed(VfError::errno(None, libc::ENOENT as u32), None))
+            })
+            .collect();
+        match self.open_shape {
+            1 => results.truncate(1),
+            2 => results.push(Ok(VfDir::Descriptor { fd: 3, owner: 1 })),
+            3 => {
+                results[1] = Err(OpError::failed(
+                    VfError::errno(None, libc::EACCES as u32),
+                    Some(IoProgress::Write { bytes_written: 1 }),
+                ))
+            }
+            5 => results[2] = Ok(VfDir::Descriptor { fd: 0, owner: 1 }),
+            6 => results[2] = Ok(VfDir::Descriptor { fd: -1, owner: 1 }),
+            _ => {}
+        }
+        Ok(results)
+    }
+    fn remove_dir_contents_handles_with_options_impl(
+        &mut self,
+        dirs: &[&vfsi_sync::VfDir],
+        _: vfsi_sync::RemoveOptions,
+    ) -> vfsi_sync::VecResult<()> {
+        use vfsi_sync::OpError;
+        let mut fatal: Option<VfError> = None;
+        Ok(dirs
+            .iter()
+            .map(|dir| {
+                if let Some(cause) = &fatal {
+                    return Err(OpError::not_attempted(cause.clone()));
+                }
+                let vfsi_sync::VfDir::Descriptor { fd, .. } = dir else {
+                    panic!("path fallback");
+                };
+                self.removed.lock().unwrap().push(*fd);
+                if let Some((failed, cause)) = &self.failure
+                    && fd == failed
+                {
+                    return Err(if cause.is_transport() {
+                        fatal = Some(cause.clone());
+                        OpError::unknown(cause.clone(), None)
+                    } else {
+                        OpError::failed(cause.clone(), None)
+                    });
+                }
+                Ok(())
+            })
+            .collect())
     }
     fn close_dir_impl(&mut self, dir: &vfsi_sync::VfDir) -> VfResult<()> {
         let vfsi_sync::VfDir::Descriptor { fd, .. } = dir else {
@@ -3268,27 +3941,35 @@ fn directory_vectors_preflight_all_handles_and_use_retained_descriptors() {
     let removed = Arc::clone(&backend.removed);
     let closed = Arc::clone(&backend.closed);
     let fs = FsClient::new(backend);
-    assert!(fs.vopen_dirs::<&str>(&[]).unwrap().is_empty());
+    assert!(fs.open_dirs::<&str>(&[]).unwrap().is_empty());
     fs.vremove_dir_contents(&[], RemoveOptions::default())
         .unwrap();
-    let mut dirs = fs.vopen_dirs(&["/0", "/1"]).unwrap();
+    let mut dirs = fs.open_dirs(&["/0", "/1"]).unwrap();
     let other = FsClient::new(DirectoryProbe::default());
-    let foreign = other.vopen_dirs(&["/1"]).unwrap().remove(0);
-    let error = fs
+    let foreign = other.open_dirs(&["/1"]).unwrap().remove(0);
+    let outcomes = fs
         .vremove_dir_contents(&[&dirs[0], &foreign], RemoveOptions::default())
-        .unwrap_err();
-    assert_eq!(error.index(), Some(1));
-    assert!(removed.lock().unwrap().is_empty());
+        .unwrap();
+    assert!(outcomes[0].is_ok());
+    assert_eq!(
+        outcomes[1].as_ref().unwrap_err().state(),
+        vfsi_sync::FailureState::NotAttempted
+    );
+    assert_eq!(*removed.lock().unwrap(), [0]);
     dirs[1].try_close().unwrap();
-    let error = fs
+    let outcomes = fs
         .vremove_dir_contents(
-            &[&dirs[0], &dirs[1]],
+            &[&dirs[1], &dirs[0]],
             RemoveOptions::new().with_continue_on_error(true),
         )
-        .unwrap_err();
-    assert_eq!(error.index(), Some(1));
-    assert!(removed.lock().unwrap().is_empty());
-    let second = fs.vopen_dirs(&["/2"]).unwrap().remove(0);
+        .unwrap();
+    assert_eq!(
+        outcomes[0].as_ref().unwrap_err().cause().raw_code(),
+        libc::EBADF as u32
+    );
+    assert!(outcomes[1].is_ok());
+    assert_eq!(*removed.lock().unwrap(), [0, 0]);
+    let second = fs.open_dirs(&["/2"]).unwrap().remove(0);
     fs.clone()
         .vremove_dir_contents(&[&dirs[0], &second], RemoveOptions::default())
         .unwrap();
@@ -3297,7 +3978,7 @@ fn directory_vectors_preflight_all_handles_and_use_retained_descriptors() {
         RemoveOptions::new().with_batch_size(std::num::NonZeroUsize::new(1)),
     )
     .unwrap();
-    assert_eq!(*removed.lock().unwrap(), [0, 2, 2]);
+    assert_eq!(*removed.lock().unwrap(), [0, 0, 0, 2, 2]);
     for dir in dirs {
         dir.close().unwrap();
     }
@@ -3308,7 +3989,7 @@ fn directory_vectors_preflight_all_handles_and_use_retained_descriptors() {
 #[test]
 fn directory_vector_errors_preserve_index_and_do_not_replay_transport_failures() {
     for (keep_going, transport, expected) in [
-        (false, false, vec![0, 1]),
+        (false, false, vec![0, 1, 2]),
         (true, false, vec![0, 1, 2]),
         (true, true, vec![0, 1]),
     ] {
@@ -3325,30 +4006,51 @@ fn directory_vector_errors_preserve_index_and_do_not_replay_transport_failures()
         };
         let removed = Arc::clone(&backend.removed);
         let fs = FsClient::new(backend);
-        let dirs = fs.vopen_dirs(&["/0", "/1", "/2"]).unwrap();
-        let error = fs
+        let dirs = fs.open_dirs(&["/0", "/1", "/2"]).unwrap();
+        let outcomes = fs
             .vremove_dir_contents(
                 &dirs.iter().collect::<Vec<_>>(),
                 vfsi_sync::RemoveOptions::new().with_continue_on_error(keep_going),
             )
-            .unwrap_err();
-        assert_eq!(error.index(), Some(1));
-        assert_eq!(error.path(), Some(std::path::Path::new("/1")));
+            .unwrap();
+        assert_eq!(outcomes.len(), 3);
+        assert!(outcomes[0].is_ok());
+        let error = outcomes[1].as_ref().unwrap_err();
+        assert_eq!(error.cause().index(), None);
+        assert_eq!(error.cause().path(), Some(std::path::Path::new("/1")));
+        assert_eq!(
+            error.state(),
+            if transport {
+                vfsi_sync::FailureState::Unknown
+            } else {
+                vfsi_sync::FailureState::Failed
+            }
+        );
+        if transport {
+            assert_eq!(
+                outcomes[2].as_ref().unwrap_err().state(),
+                vfsi_sync::FailureState::NotAttempted
+            );
+        } else {
+            assert!(outcomes[2].is_ok());
+        }
         assert_eq!(*removed.lock().unwrap(), expected);
     }
 }
 
 #[test]
-fn failed_directory_open_cleans_up_the_opened_prefix() {
+fn strict_directory_open_cleans_up_all_successful_siblings() {
     let backend = DirectoryProbe::default();
     let closed = Arc::clone(&backend.closed);
     let fs = FsClient::new(backend);
     assert_eq!(
-        fs.vopen_dirs(&["/0", "/missing"]).unwrap_err().index(),
+        fs.open_dirs(&["/0", "/missing", "/2"]).unwrap_err().index(),
         Some(1)
     );
     fs.drain_cleanup().unwrap();
-    assert_eq!(*closed.lock().unwrap(), [0]);
+    let mut closed = closed.lock().unwrap().clone();
+    closed.sort_unstable();
+    assert_eq!(closed, [0, 2]);
 }
 
 #[test]
@@ -3441,7 +4143,13 @@ fn write_allv_orders_aliases_and_unknown_objects_across_short_writes() {
                 }
             })
             .collect();
-        client.vwrite_all_native(&requests).unwrap();
+        client
+            .vwrite_all_native(&requests)
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
+            .unwrap();
         let waves = calls.lock().unwrap();
         assert_eq!(waves.len(), 128);
         assert!(waves.iter().all(|wave| wave.len() == 1));
@@ -3478,9 +4186,15 @@ fn indexed_write_frontier_stops_at_late_short_write_failure_without_replay() {
             .iter()
             .map(|data| file.write_request_at(0, data))
             .collect();
-        let actual = fs.vwrite_all_native(&requests).unwrap_err();
+        let actual = fs
+            .vwrite_all_native(&requests)
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
+            .unwrap_err();
         assert_eq!(actual.is_transport(), error.is_transport());
-        assert_eq!(actual.index(), error.index().map(|_| 26));
+        assert_eq!(actual.index(), Some(26));
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 54, "failed suffix must not be replayed");
         for (index, wave) in calls.iter().enumerate() {
@@ -3497,7 +4211,7 @@ fn indexed_write_frontier_stops_at_late_short_write_failure_without_replay() {
 }
 
 #[test]
-fn projected_metadata_vectors_convert_each_target_once_and_preflight_all_mutations() {
+fn projected_metadata_vectors_convert_each_target_once_and_isolate_foreign_mutations() {
     use std::cell::Cell;
     let backend = AttrsBackend::default();
     let queries = backend.metadata_calls.clone();
@@ -3533,14 +4247,20 @@ fn projected_metadata_vectors_convert_each_target_once_and_preflight_all_mutatio
         SetAttrsOp::file(&foreign).len(2),
     ];
     calls.set(0);
-    assert_eq!(
-        fs.vsetattrs_projected_native(&ops, |target| {
+    let outcomes = fs
+        .vsetattrs_projected_native(&ops, |target| {
             calls.set(calls.get() + 1);
             *target
         })
-        .unwrap_err()
-        .index(),
-        Some(1)
+        .unwrap();
+    let error = outcomes[1].as_ref().unwrap_err();
+    assert_eq!(error.state(), vfsi_core::FailureState::NotAttempted);
+    assert_eq!(error.cause().index(), None);
+    assert_eq!(error.cause().path(), Some(std::path::Path::new("/foreign")));
+    // The valid sibling reaches the scalar-only backend and reports its own Unsupported.
+    assert_eq!(
+        outcomes[0].as_ref().unwrap_err().cause().kind(),
+        std::io::ErrorKind::Unsupported
     );
     assert_eq!(calls.get(), 2);
     assert!(updates.lock().unwrap().is_empty());
@@ -3566,6 +4286,10 @@ fn projected_io_errors_allow_client_reentry() {
             fs.capabilities().unwrap();
             request
         })
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap_err();
     assert_eq!(error.index(), Some(0));
     assert_eq!(error.path(), Some(std::path::Path::new("/file")));
@@ -3576,6 +4300,10 @@ fn projected_io_errors_allow_client_reentry() {
             projections.set(projections.get() + 1);
             fs.capabilities().unwrap();
             *request
+        })
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
         })
         .unwrap_err();
     assert_eq!(error.raw_code(), libc::ENOSPC as u32);
@@ -3615,6 +4343,10 @@ fn complete_write_projection_can_reenter_during_alias_planning() {
                 fs.capabilities().unwrap();
                 *request
             })
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         assert!(results.iter().all(|result| result.bytes_written == 3));
         assert_eq!(calls.get(), writes.len());
@@ -3640,14 +4372,14 @@ fn malformed_open_results_retain_failed_cleanup_for_retry() {
         let observed = backend.close_observed.clone();
         let client = FsClient::new(backend);
         let error = client
-            .vopen(&[
+            .open_batch(&[
                 OpenOp::new("/first", OpenFlags::READ),
                 OpenOp::new("/second", OpenFlags::READ),
             ])
             .unwrap_err();
         assert!(error.is_transport());
-        assert_eq!(error.index(), None);
-        assert!(error.to_string().contains("1 results for 2 requests"));
+        assert_eq!(error.index(), Some(1));
+        assert!(error.to_string().contains("missing open outcome"));
         assert_eq!(observed.load(Ordering::SeqCst), 1);
         for _ in 1..failures {
             assert!(client.drain_cleanup().is_err());
@@ -3689,6 +4421,10 @@ fn generic_path_conversion_can_reenter_namespace_operations() {
     );
     assert!(
         fs.vmkdir(&[vfsi_core::api::MkDirOp::new(path("/dir"), 0o777)])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+            })
             .is_err()
     );
     assert!(
@@ -3697,13 +4433,17 @@ fn generic_path_conversion_can_reenter_namespace_operations() {
     );
     assert!(
         fs.read_files_native(&[path("/file")], Default::default())
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .is_err()
     );
     assert!(fs.ensure_empty_dir(path("/dir")).is_err());
 
     let fs = FsClient::new(DirectoryProbe::default());
     let closed = fs
-        .vopen_dirs(&[
+        .open_dirs(&[
             ReentrantPath(&fs, std::path::Path::new("/0")),
             ReentrantPath(&fs, std::path::Path::new("/1")),
         ])
@@ -3730,7 +4470,7 @@ fn complete_append_ignores_overflowing_offsets_in_planning_and_short_repairs() {
             let client = FsClient::new(backend);
             let first = client.open_options().append(true).open("/same").unwrap();
             let alias = client.open_options().append(true).open("/same").unwrap();
-            let result = client.vwrite(
+            let result = client.write_batch(
                 &[
                     PublicWrite::at(&first, offset, b"abcde"),
                     PublicWrite::at(&alias, offset, b"XY"),
@@ -3740,7 +4480,7 @@ fn complete_append_ignores_overflowing_offsets_in_planning_and_short_repairs() {
             if let Some(failure) = failure {
                 let error = result.unwrap_err();
                 assert_eq!(error.transport_message(), failure.transport_message());
-                assert_eq!(error.index(), None);
+                assert_eq!(error.index(), Some(0));
                 assert_eq!(
                     calls.lock().unwrap().len(),
                     2,
@@ -3767,7 +4507,7 @@ fn complete_append_ignores_overflowing_offsets_in_planning_and_short_repairs() {
     });
     let file = client.open_options().append(true).open("/file").unwrap();
     client
-        .vwrite(
+        .write_batch(
             &[PublicWrite::at(&file, u64::MAX, b"abcde")],
             WriteOptions::new().with_write_all(true),
         )
@@ -3788,11 +4528,16 @@ fn mapped_io_projects_each_operand_once_on_success_and_invalid_replies() {
         let b = fs.open("/b").unwrap();
         let reads = [a.read_request_at(0, 1), b.read_request_at(1, 1)];
         let calls = std::cell::Cell::new(0);
-        let result = fs.vread_with_limit_projected_native(&reads, 2, |request| {
-            calls.set(calls.get() + 1);
-            fs.capabilities().unwrap();
-            request
-        });
+        let result = fs
+            .vread_with_limit_projected_native(&reads, 2, |request| {
+                calls.set(calls.get() + 1);
+                fs.capabilities().unwrap();
+                request
+            })
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            });
         assert_eq!(calls.get(), 2);
         if invalid_reply {
             assert_eq!(result.unwrap_err().path(), Some(std::path::Path::new("/a")));
@@ -3801,11 +4546,16 @@ fn mapped_io_projects_each_operand_once_on_success_and_invalid_replies() {
         }
         let writes = [a.write_request_at(0, b"x"), b.write_request_at(1, b"y")];
         calls.set(0);
-        let result = fs.vwrite_mapped_native(&writes, |request| {
-            calls.set(calls.get() + 1);
-            fs.capabilities().unwrap();
-            *request
-        });
+        let result = fs
+            .vwrite_mapped_native(&writes, |request| {
+                calls.set(calls.get() + 1);
+                fs.capabilities().unwrap();
+                *request
+            })
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            });
         assert_eq!(calls.get(), 2);
         if invalid_reply {
             assert_eq!(result.unwrap_err().path(), Some(std::path::Path::new("/a")));
@@ -3827,7 +4577,7 @@ fn directory_projection_does_not_add_or_fabricate_unrequested_size() {
     });
     let options = vfsi_sync::ListDirOptions::new().with_fields(vfsi_sync::AttrMask::MODE);
     let page = client
-        .vlistdir_pages(
+        .dir_pages_all(
             &["/tree"],
             vec![None],
             options,
@@ -3846,7 +4596,7 @@ fn directory_projection_does_not_add_or_fabricate_unrequested_size() {
     drop(page);
     fields.lock().unwrap().clear();
     client
-        .vlistdirs(&["/tree"], options, |_, page| {
+        .listdirs_all(&["/tree"], options, |_, page| {
             assert!(
                 page.entries
                     .iter()
@@ -3862,4 +4612,2689 @@ fn directory_projection_does_not_add_or_fabricate_unrequested_size() {
             .iter()
             .all(|fields| *fields == vfsi_sync::AttrMask::MODE)
     );
+}
+
+#[test]
+fn metadata_vector_keeps_successes_around_an_item_failure_in_one_call() {
+    let backend = AttrsBackend {
+        metadata_failure: Some(1),
+        ..Default::default()
+    };
+    let calls = backend.metadata_calls.clone();
+    let fs = FsClient::new(backend);
+    let outcomes = fs
+        .vgetattrs(&["/a", "/bad", "/b"], vfsi_core::api::AttrsOptions::new())
+        .unwrap();
+    assert_eq!(outcomes.len(), 3);
+    assert!(outcomes[0].is_ok());
+    assert!(outcomes[2].is_ok());
+    let error = outcomes[1].as_ref().unwrap_err();
+    assert_eq!(error.state(), vfsi_core::FailureState::Failed);
+    assert_eq!(error.cause().index(), None);
+    assert_eq!(error.cause().path(), Some(std::path::Path::new("/bad")));
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].1.len(), 3);
+}
+
+#[test]
+fn native_directory_preflight_propagates_inner_metadata_failure() {
+    let mut backend = AttrsBackend {
+        metadata_failure: Some(0),
+        ..Default::default()
+    };
+    let error = backend
+        .open_dir_impl(std::path::Path::new("/root"))
+        .unwrap_err();
+    assert_eq!(error.raw_code(), libc::EACCES as u32);
+    assert_eq!(error.index(), Some(0));
+}
+
+#[derive(Default)]
+struct ReadOutcomes {
+    scalar: ScalarOnly,
+    calls: usize,
+    lengths: Vec<usize>,
+    malformed: bool,
+    fail_first: bool,
+}
+handle_contract!(ReadOutcomes);
+impl VectorBackend for ReadOutcomes {
+    fn vopen_raw_impl(
+        &mut self,
+        paths: &[&std::path::Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> vfsi_sync::VecResult<vfsi_sync::FileOperand> {
+        self.scalar.vopen_raw_impl(paths, flags, modes)
+    }
+
+    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_sync::VecResult<ReadResult> {
+        self.calls += 1;
+        self.lengths.push(reads.len());
+        Ok(reads
+            .iter()
+            .enumerate()
+            .map(|(index, read)| {
+                if index == 1 || self.fail_first {
+                    if self.malformed {
+                        return Ok(ReadResult {
+                            file: read.file.clone(),
+                            offset: 999,
+                            data: b"bad".to_vec(),
+                            eof: false,
+                        });
+                    }
+                    return Err(vfsi_sync::OpError::unknown(
+                        VfError::transport(Some(99), "lost reply after prefix"),
+                        Some(vfsi_sync::IoProgress::Read(
+                            vfsi_core::api::ReadResult::owned(0, b"p".to_vec(), false),
+                        )),
+                    ));
+                }
+                Ok(ReadResult {
+                    file: read.file.clone(),
+                    offset: 0,
+                    data: b"x".to_vec(),
+                    eof: true,
+                })
+            })
+            .collect())
+    }
+}
+
+#[test]
+fn native_client_reads_keep_successes_and_owned_error_progress() {
+    let client = FsClient::new(ReadOutcomes::default());
+    let a = client.open("/a").unwrap();
+    let b = client.open("/b").unwrap();
+    let c = client.open("/c").unwrap();
+    let mut outcomes = client
+        .vread_native(&[
+            a.read_request_at(0, 3),
+            b.read_request_at(0, 3),
+            c.read_request_at(0, 3),
+        ])
+        .unwrap();
+    assert_eq!(outcomes[0].as_ref().unwrap().data, b"x");
+    assert_eq!(outcomes[2].as_ref().unwrap().data, b"x");
+    let error = outcomes.remove(1).unwrap_err();
+    assert_eq!(error.state(), vfsi_sync::FailureState::Unknown);
+    assert_eq!(error.cause().index(), None);
+    assert_eq!(error.cause().path(), Some(std::path::Path::new("/b")));
+    let (_, _, Some(vfsi_sync::IoProgress::Read(prefix))) = error.into_parts() else {
+        panic!("confirmed owned prefix missing");
+    };
+    assert_eq!(prefix.into_data().unwrap(), b"p");
+    client.vclose_owned(vec![a, b, c]).unwrap();
+    let backend = client.into_inner().unwrap();
+    assert_eq!(backend.calls, 1);
+    assert_eq!(backend.lengths, [3]);
+}
+
+#[test]
+fn native_client_isolates_closed_and_foreign_handles_without_splitting_dispatch() {
+    let client = FsClient::new(ReadOutcomes::default());
+    let other = FsClient::new(ReadOutcomes::default());
+    let live = client.open("/live").unwrap();
+    let mut closed = client.open("/closed").unwrap();
+    closed.try_close().unwrap();
+    let foreign = other.open("/foreign").unwrap();
+    let outcomes = client
+        .vread_native(&[
+            closed.read_request_at(0, 1),
+            live.read_request_at(0, 1),
+            foreign.read_request_at(0, 1),
+        ])
+        .unwrap();
+    for index in [0, 2] {
+        assert_eq!(
+            outcomes[index].as_ref().unwrap_err().state(),
+            vfsi_sync::FailureState::NotAttempted
+        );
+    }
+    assert_eq!(outcomes[1].as_ref().unwrap().data, b"x");
+    assert!(client.vread_native(&[]).unwrap().is_empty());
+    live.close().unwrap();
+    foreign.close().unwrap();
+    drop(closed);
+    let backend = client.into_inner().unwrap();
+    assert_eq!(backend.calls, 1);
+    assert_eq!(backend.lengths, [1]);
+}
+
+#[test]
+fn native_client_invalid_read_completion_does_not_discard_valid_siblings() {
+    let client = FsClient::new(ReadOutcomes {
+        malformed: true,
+        ..Default::default()
+    });
+    let file = client.open("/file").unwrap();
+    let outcomes = client
+        .vread_native(&[
+            file.read_request_at(0, 3),
+            file.read_request_at(0, 3),
+            file.read_request_at(0, 3),
+        ])
+        .unwrap();
+    assert!(outcomes[0].is_ok());
+    assert!(outcomes[2].is_ok());
+    let error = outcomes[1].as_ref().unwrap_err();
+    assert_eq!(error.state(), vfsi_sync::FailureState::Unknown);
+    assert!(error.cause().is_transport());
+    assert!(error.progress().is_none());
+    file.close().unwrap();
+    assert_eq!(client.into_inner().unwrap().calls, 1);
+}
+
+#[test]
+fn native_buffer_client_keeps_confirmed_prefix_and_successful_sibling_storage() {
+    let client = FsClient::new(ReadOutcomes::default());
+    let file = client.open("/file").unwrap();
+    let (mut first, mut failed, mut last) = ([99; 3], [99; 3], [99; 3]);
+    let outcomes = client
+        .vread_into_native(&mut [
+            file.read_request_at_into(0, &mut first),
+            file.read_request_at_into(0, &mut failed),
+            file.read_request_at_into(0, &mut last),
+        ])
+        .unwrap();
+    assert_eq!(outcomes[0].as_ref().unwrap().bytes_read, 1);
+    assert_eq!(outcomes[2].as_ref().unwrap().bytes_read, 1);
+    let error = outcomes[1].as_ref().unwrap_err();
+    assert_eq!(error.state(), vfsi_sync::FailureState::Unknown);
+    assert_eq!(error.cause().index(), None);
+    let Some(vfsi_sync::IoProgress::Read(prefix)) = error.progress() else {
+        panic!("confirmed buffered prefix missing");
+    };
+    assert!(prefix.is_buffered());
+    assert_eq!((prefix.offset(), prefix.bytes_read()), (0, 1));
+    assert_eq!(first, [b'x', 99, 99]);
+    assert_eq!(failed, [b'p', 99, 99]);
+    assert_eq!(last, [b'x', 99, 99]);
+    file.close().unwrap();
+    let backend = client.into_inner().unwrap();
+    assert_eq!(backend.calls, 1);
+    assert_eq!(backend.lengths, [3]);
+}
+
+#[test]
+fn native_buffer_client_rejected_handles_leave_buffers_untouched() {
+    let client = FsClient::new(ReadOutcomes::default());
+    let other = FsClient::new(ReadOutcomes::default());
+    let live = client.open("/live").unwrap();
+    let foreign = other.open("/foreign").unwrap();
+    let mut closed = client.open("/closed").unwrap();
+    closed.try_close().unwrap();
+    let (mut first, mut valid, mut last) = ([99; 3], [99; 3], [99; 3]);
+    let outcomes = client
+        .vread_into_native(&mut [
+            closed.read_request_at_into(0, &mut first),
+            live.read_request_at_into(0, &mut valid),
+            foreign.read_request_at_into(0, &mut last),
+        ])
+        .unwrap();
+    assert_eq!(outcomes[1].as_ref().unwrap().bytes_read, 1);
+    for index in [0, 2] {
+        assert_eq!(
+            outcomes[index].as_ref().unwrap_err().state(),
+            vfsi_sync::FailureState::NotAttempted
+        );
+    }
+    assert_eq!(first, [99; 3]);
+    assert_eq!(last, [99; 3]);
+    assert_eq!(valid, [b'x', 99, 99]);
+    assert!(client.vread_into_native(&mut []).unwrap().is_empty());
+    live.close().unwrap();
+    foreign.close().unwrap();
+    drop(closed);
+    let backend = client.into_inner().unwrap();
+    assert_eq!(backend.calls, 1);
+    assert_eq!(backend.lengths, [1]);
+}
+
+#[test]
+fn native_clients_preserve_known_results_when_a_backend_omits_later_outcomes() {
+    for buffered in [false, true] {
+        let backend = ScalarOnly {
+            data: b"abc".to_vec(),
+            ..Default::default()
+        };
+        let limit = Arc::clone(&backend.vector_result_limit);
+        let client = FsClient::new(backend);
+        let file = client.open("/file").unwrap();
+        *limit.lock().unwrap() = Some(1);
+        let mut first = [99; 1];
+        let mut missing = [99; 1];
+        let outcomes = if buffered {
+            client
+                .vread_into_native(&mut [
+                    file.read_request_at_into(0, &mut first),
+                    file.read_request_at_into(1, &mut missing),
+                ])
+                .map(|outcomes| {
+                    outcomes
+                        .into_iter()
+                        .map(|result| result.map(|read| read.bytes_read))
+                        .collect::<Vec<_>>()
+                })
+        } else {
+            client
+                .vread_native(&[file.read_request_at(0, 1), file.read_request_at(1, 1)])
+                .map(|outcomes| {
+                    outcomes
+                        .into_iter()
+                        .map(|result| result.map(|read| read.data.len()))
+                        .collect::<Vec<_>>()
+                })
+        }
+        .unwrap();
+        assert_eq!(*outcomes[0].as_ref().unwrap(), 1);
+        let error = outcomes[1].as_ref().unwrap_err();
+        assert_eq!(error.state(), vfsi_sync::FailureState::Unknown);
+        assert_eq!(error.cause().index(), None);
+        assert!(error.cause().is_transport());
+        if buffered {
+            assert_eq!(first, *b"a");
+            assert_eq!(missing, [99; 1]);
+        }
+        file.close().unwrap();
+    }
+}
+
+#[derive(Default)]
+struct WholeReadProbe {
+    scalar: ScalarOnly,
+    waves: Vec<Vec<(FileOperand, VfOffset)>>,
+    fail: bool,
+    stall: bool,
+    shrink: bool,
+}
+handle_contract!(WholeReadProbe);
+impl VectorBackend for WholeReadProbe {
+    fn vopen_raw_impl(
+        &mut self,
+        paths: &[&std::path::Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> vfsi_sync::VecResult<vfsi_sync::FileOperand> {
+        self.scalar.vopen_raw_impl(paths, flags, modes)
+    }
+
+    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_sync::VecResult<ReadResult> {
+        self.waves.push(
+            reads
+                .iter()
+                .map(|read| (read.file.clone(), read.offset))
+                .collect(),
+        );
+        Ok(reads
+            .iter()
+            .map(|read| {
+                let VfOffset::At(offset) = read.offset else {
+                    panic!("positional whole-file chunk");
+                };
+                let bad = read.file == FileOperand::from_path("/bad");
+                if bad && self.fail && offset == 2 {
+                    return Err(vfsi_sync::OpError::unknown(
+                        VfError::transport(None, "lost READ suffix"),
+                        Some(vfsi_sync::IoProgress::Read(
+                            vfsi_core::api::ReadResult::owned(offset, b"c".to_vec(), false),
+                        )),
+                    ));
+                }
+                if bad && self.stall && offset == 2 {
+                    return Ok(ReadResult {
+                        file: read.file.clone(),
+                        offset,
+                        data: Vec::new(),
+                        eof: false,
+                    });
+                }
+                let bytes: &[u8] = if bad {
+                    b"abcd"
+                } else if self.shrink {
+                    b"a"
+                } else {
+                    b"wxyz"
+                };
+                let start = (offset as usize).min(bytes.len());
+                let end = start.saturating_add(read.length).min(bytes.len());
+                Ok(ReadResult {
+                    file: read.file.clone(),
+                    offset,
+                    data: bytes[start..end].to_vec(),
+                    eof: end == bytes.len(),
+                })
+            })
+            .collect())
+    }
+}
+
+#[test]
+fn whole_file_vectors_keep_prior_chunks_and_later_siblings_without_replay() {
+    let mut backend = WholeReadProbe {
+        fail: true,
+        ..Default::default()
+    };
+    let files: Vec<_> = ["/first", "/bad", "/last"]
+        .map(FileOperand::from_path)
+        .into();
+    let outcomes = vfsi_sync::backend::helpers::read_all_vectors(
+        &mut backend,
+        &files,
+        vfsi_sync::ReadAllOptions::new(),
+        |pending, _| (pending, 2),
+        false,
+    )
+    .unwrap();
+    assert_eq!(outcomes[0].as_ref().unwrap(), b"wxyz");
+    assert_eq!(outcomes[2].as_ref().unwrap(), b"wxyz");
+    let error = outcomes[1].as_ref().unwrap_err();
+    assert_eq!(error.state(), vfsi_sync::FailureState::Unknown);
+    assert_eq!(error.cause().index(), None);
+    let Some(vfsi_sync::IoProgress::Read(prefix)) = error.progress() else {
+        panic!("whole-file prefix was lost");
+    };
+    assert_eq!(prefix.offset(), 0);
+    assert_eq!(prefix.data().unwrap(), b"abc");
+    assert!(!prefix.eof());
+    assert_eq!(backend.waves.len(), 2);
+    for (wave, offset) in backend.waves.iter().zip([0, 2]) {
+        assert_eq!(wave.len(), 3);
+        assert!(
+            wave.iter()
+                .all(|(_, actual)| *actual == VfOffset::At(offset))
+        );
+    }
+}
+
+#[test]
+fn whole_file_budget_counts_successes_and_failed_prefixes_together() {
+    let mut backend = WholeReadProbe::default();
+    let files: Vec<_> = ["/first", "/bad", "/last"]
+        .map(FileOperand::from_path)
+        .into();
+    let outcomes = vfsi_sync::backend::helpers::read_all_vectors(
+        &mut backend,
+        &files,
+        vfsi_sync::ReadAllOptions::new().with_max_total_bytes(5),
+        |pending, remaining| {
+            let count = pending.min(remaining.max(1));
+            (count, 2.min((remaining / count).max(1)))
+        },
+        true,
+    )
+    .unwrap();
+    assert_eq!(outcomes.len(), 3);
+    let mut retained = 0;
+    for outcome in outcomes {
+        match outcome {
+            Ok(data) => retained += data.len(),
+            Err(error) => {
+                assert_eq!(error.state(), vfsi_sync::FailureState::Failed);
+                assert_eq!(error.cause().raw_code(), libc::EFBIG as u32);
+                if let Some(vfsi_sync::IoProgress::Read(prefix)) = error.progress() {
+                    retained += prefix.bytes_read();
+                    assert!(!prefix.eof());
+                }
+            }
+        }
+    }
+    assert_eq!(retained, 5);
+    let mut seen = Vec::new();
+    for request in backend.waves.into_iter().flatten() {
+        assert!(!seen.contains(&request), "a completed range was replayed");
+        seen.push(request);
+    }
+}
+
+#[test]
+fn default_whole_file_adapter_preserves_each_native_outcome() {
+    let mut backend = ReadOutcomes::default();
+    let files = [
+        FileOperand::from_path("/first"),
+        FileOperand::from_path("/bad"),
+        FileOperand::from_path("/last"),
+    ];
+    let outcomes = backend.vread_all_impl(&files).unwrap();
+    assert_eq!(outcomes[0].as_ref().unwrap(), b"x");
+    assert_eq!(outcomes[2].as_ref().unwrap(), b"x");
+    assert!(matches!(outcomes[1].as_ref().unwrap_err().progress(),
+        Some(vfsi_sync::IoProgress::Read(prefix)) if prefix.data() == Some(b"p")));
+    assert_eq!(backend.calls, 1);
+    assert_eq!(backend.lengths, [3]);
+}
+
+#[test]
+fn whole_file_zero_progress_keeps_original_slot() {
+    let mut backend = WholeReadProbe {
+        stall: true,
+        shrink: true,
+        ..Default::default()
+    };
+    let files: Vec<_> = ["/a", "/b", "/c", "/d", "/e", "/bad"]
+        .map(FileOperand::from_path)
+        .into();
+    let outcomes = vfsi_sync::backend::helpers::read_all_vectors(
+        &mut backend,
+        &files,
+        vfsi_sync::ReadAllOptions::new(),
+        |pending, _| (pending, 2),
+        false,
+    )
+    .unwrap();
+    for outcome in &outcomes[..5] {
+        assert_eq!(outcome.as_ref().unwrap(), b"a");
+    }
+    let error = outcomes[5].as_ref().unwrap_err();
+    assert_eq!(error.state(), vfsi_sync::FailureState::Unknown);
+    assert!(error.cause().is_transport());
+    assert!(
+        matches!(error.progress(), Some(vfsi_sync::IoProgress::Read(prefix))
+        if prefix.data() == Some(b"ab") && prefix.offset() == 0)
+    );
+    assert_eq!(backend.waves[0].len(), 6);
+    assert_eq!(backend.waves[1], [(files[5].clone(), VfOffset::At(2))]);
+}
+
+#[test]
+fn whole_file_shrinking_cohorts_keep_data_and_original_positions() {
+    let mut backend = WholeReadProbe {
+        shrink: true,
+        ..Default::default()
+    };
+    let files: Vec<_> = ["/first", "/bad", "/last"]
+        .map(FileOperand::from_path)
+        .into();
+    let outcomes = vfsi_sync::backend::helpers::read_all_vectors(
+        &mut backend,
+        &files,
+        vfsi_sync::ReadAllOptions::new(),
+        |pending, _| (pending, 2),
+        false,
+    )
+    .unwrap();
+    assert_eq!(outcomes[0].as_ref().unwrap(), b"a");
+    assert_eq!(outcomes[1].as_ref().unwrap(), b"abcd");
+    assert_eq!(outcomes[2].as_ref().unwrap(), b"a");
+    assert_eq!(backend.waves.len(), 2);
+    assert_eq!(backend.waves[1], [(files[1].clone(), VfOffset::At(2))]);
+}
+
+#[test]
+fn native_whole_file_client_retains_siblings_and_error_progress() {
+    let client = FsClient::new(ReadOutcomes::default());
+    assert!(
+        client
+            .read_files_native::<&str>(&[], Default::default())
+            .unwrap()
+            .is_empty()
+    );
+    let outcomes = client
+        .read_files_native(&["/a", "/bad", "/c"], Default::default())
+        .unwrap();
+    assert_eq!(outcomes[0].as_ref().unwrap(), b"x");
+    assert_eq!(outcomes[2].as_ref().unwrap(), b"x");
+    let error = outcomes[1].as_ref().unwrap_err();
+    assert_eq!(error.cause().path(), Some(std::path::Path::new("/bad")));
+    assert_eq!(error.cause().index(), None);
+    assert!(
+        matches!(error.progress(), Some(vfsi_sync::IoProgress::Read(prefix))
+        if prefix.data() == Some(b"p"))
+    );
+    let backend = client.into_inner().unwrap();
+    assert_eq!(backend.calls, 1);
+    assert_eq!(backend.lengths, [3]);
+}
+
+#[test]
+fn public_read_vector_retains_native_outcomes_in_one_batch() {
+    let client = FsClient::new(ReadOutcomes::default());
+    let files = client
+        .open_batch(&[
+            OpenOp::new("/a", OpenFlags::READ),
+            OpenOp::new("/b", OpenFlags::READ),
+            OpenOp::new("/c", OpenFlags::READ),
+        ])
+        .unwrap();
+    let outcomes = client
+        .vread(
+            files
+                .iter()
+                .map(|file| vfsi_core::api::ReadOp::range(file, 0, 3)),
+            Default::default(),
+        )
+        .unwrap();
+    assert_eq!(outcomes[0].as_ref().unwrap().data().unwrap(), b"x");
+    assert_eq!(outcomes[2].as_ref().unwrap().data().unwrap(), b"x");
+    let error = outcomes[1].as_ref().unwrap_err();
+    assert_eq!(error.cause().index(), None);
+    assert_eq!(error.state(), vfsi_sync::FailureState::Unknown);
+    assert!(
+        matches!(error.progress(), Some(vfsi_sync::IoProgress::Read(prefix))
+        if prefix.data() == Some(b"p"))
+    );
+    client.close_files(files).unwrap();
+    let backend = client.into_inner().unwrap();
+    assert_eq!(backend.calls, 1);
+    assert_eq!(backend.lengths, [3]);
+}
+
+#[test]
+fn std_io_advances_only_confirmed_prefix_when_a_read_also_fails() {
+    let client = FsClient::new(ReadOutcomes {
+        fail_first: true,
+        ..Default::default()
+    });
+    let file = client.open("/file").unwrap();
+    let mut buffer = [99; 3];
+    let mut io = client.std_io(&file);
+    assert_eq!(io.read(&mut buffer).unwrap(), 1);
+    assert_eq!(buffer, [b'p', 99, 99]);
+    assert_eq!(io.stream_position().unwrap(), 1);
+    drop(io);
+    file.close().unwrap();
+    let backend = client.into_inner().unwrap();
+    assert_eq!(backend.calls, 1);
+    assert_eq!(backend.lengths, [1]);
+}
+
+#[test]
+fn synchronization_preserves_known_siblings_and_projects_once_in_one_batch() {
+    use vfsi_core::{FailureState, api::SyncMode};
+    for transport in [false, true] {
+        let backend = ScalarOnly {
+            sync_failure: Some(if transport {
+                VfError::transport(Some(1), "lost second flush")
+            } else {
+                VfError::errno(1, libc::EIO as u32)
+            }),
+            ..Default::default()
+        };
+        let calls = Arc::clone(&backend.sync_calls);
+        let fs = FsClient::new(backend);
+        let a = fs.open("/a").unwrap();
+        let b = fs.open("/b").unwrap();
+        let c = fs.open("/c").unwrap();
+        let projected = std::cell::Cell::new(0);
+        let outcomes = fs
+            .vfsync_projected_native(&[&a, &b, &c], SyncMode::All, |file| {
+                projected.set(projected.get() + 1);
+                fs.capabilities().unwrap();
+                *file
+            })
+            .unwrap();
+        assert_eq!(projected.get(), 3);
+        assert!(outcomes[0].is_ok() && outcomes[2].is_ok());
+        let error = outcomes[1].as_ref().unwrap_err();
+        assert_eq!(
+            error.state(),
+            if transport {
+                FailureState::Unknown
+            } else {
+                FailureState::Failed
+            }
+        );
+        assert_eq!(error.cause().index(), None);
+        assert_eq!(error.cause().path(), Some(std::path::Path::new("/b")));
+        assert!(error.progress().is_none());
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        assert_eq!(calls.lock().unwrap()[0].1.len(), 3);
+        fs.close_files(vec![a, b, c]).unwrap();
+    }
+}
+
+#[test]
+fn synchronization_shapes_keep_known_slots_and_reject_ambiguous_extras() {
+    use vfsi_core::{FailureState, api::SyncMode};
+    for count in [1, 3] {
+        let backend = ScalarOnly {
+            sync_result_count: Some(count),
+            ..Default::default()
+        };
+        let calls = Arc::clone(&backend.sync_calls);
+        let fs = FsClient::new(backend);
+        let files = fs
+            .open_batch(&[
+                OpenOp::new("/a", OpenFlags::READ),
+                OpenOp::new("/b", OpenFlags::READ),
+            ])
+            .unwrap();
+        let outcomes = fs.vfsync(&[&files[0], &files[1]], SyncMode::All).unwrap();
+        assert_eq!(outcomes.len(), 2);
+        if count == 1 {
+            assert!(outcomes[0].is_ok());
+        }
+        for outcome in &outcomes[if count == 1 { 1 } else { 0 }..] {
+            let error = outcome.as_ref().unwrap_err();
+            assert_eq!(error.state(), FailureState::Unknown);
+            assert_eq!(error.cause().index(), None);
+            assert!(error.cause().is_transport());
+            assert!(error.progress().is_none());
+        }
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        fs.close_files(files).unwrap();
+    }
+}
+
+#[derive(Default)]
+struct CloseProbe {
+    scalar: ScalarOnly,
+    response: Option<vfsi_core::VecResult<()>>,
+    batches: Arc<Mutex<Vec<Vec<FileOperand>>>>,
+}
+handle_contract!(
+    CloseProbe,
+    fn vclose_impl(&mut self, files: &[FileOperand]) -> vfsi_core::VecResult<()> {
+        self.batches.lock().unwrap().push(files.to_vec());
+        let outcomes = self
+            .response
+            .take()
+            .unwrap_or_else(|| Ok(files.iter().map(|_| Ok(())).collect()))?;
+        for (file, result) in files.iter().zip(&outcomes) {
+            if result.is_ok() {
+                self.scalar.close_impl(file)?;
+            }
+        }
+        Ok(outcomes)
+    }
+);
+impl VectorBackend for CloseProbe {
+    fn vopen_raw_impl(
+        &mut self,
+        paths: &[&std::path::Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> vfsi_sync::VecResult<vfsi_sync::FileOperand> {
+        self.scalar.vopen_raw_impl(paths, flags, modes)
+    }
+
+    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_core::VecResult<ReadResult> {
+        self.scalar.vread_impl(reads)
+    }
+}
+
+#[test]
+fn close_outcomes_retire_successes_and_keep_each_failure_owner_without_replay() {
+    use vfsi_core::{FailureState, OpError};
+    let batches = Arc::new(Mutex::new(Vec::new()));
+    let client = FsClient::new(CloseProbe {
+        response: Some(Ok(vec![
+            Ok(()),
+            Err(OpError::failed(
+                VfError::errno(99, libc::EACCES as u32),
+                None,
+            )),
+            Ok(()),
+            Err(OpError::unknown(
+                VfError::transport(None, "lost CLOSE reply"),
+                None,
+            )),
+        ])),
+        batches: batches.clone(),
+        ..Default::default()
+    });
+    let mut files: Vec<_> = (0..4)
+        .map(|index| client.open(format!("/close-{index}")).unwrap())
+        .collect();
+    let outcomes = client.vclose(&mut files).unwrap();
+    assert_eq!(outcomes.len(), 4);
+    assert!(outcomes[0].is_ok() && outcomes[2].is_ok());
+    assert_eq!(
+        outcomes[1].as_ref().unwrap_err().state(),
+        FailureState::Failed
+    );
+    assert_eq!(
+        outcomes[3].as_ref().unwrap_err().state(),
+        FailureState::Unknown
+    );
+    assert_eq!(outcomes[1].as_ref().unwrap_err().cause().index(), None);
+    assert_eq!(
+        outcomes[1].as_ref().unwrap_err().cause().path(),
+        Some(std::path::Path::new("/close-1"))
+    );
+    assert_eq!(
+        files
+            .iter()
+            .map(|file| file.is_closed())
+            .collect::<Vec<_>>(),
+        [true, false, true, false]
+    );
+    assert_eq!(batches.lock().unwrap().len(), 1);
+    // Already closed siblings are not resubmitted by the strict helper.
+    client.close_batch(&mut files).unwrap();
+    assert_eq!(
+        batches
+            .lock()
+            .unwrap()
+            .iter()
+            .map(Vec::len)
+            .collect::<Vec<_>>(),
+        [4, 2]
+    );
+    drop(files);
+    assert_eq!(client.into_inner().unwrap().scalar.close_calls, 4);
+}
+
+#[test]
+fn close_isolates_foreign_and_closed_handles_and_still_batches_valid_siblings() {
+    use vfsi_core::FailureState;
+    let batches = Arc::new(Mutex::new(Vec::new()));
+    let client = FsClient::new(CloseProbe {
+        batches: batches.clone(),
+        ..Default::default()
+    });
+    let other = FsClient::new(CloseProbe::default());
+    let mut closed = client.open("/already-closed").unwrap();
+    closed.try_close().unwrap();
+    batches.lock().unwrap().clear();
+    let mut files = [
+        client.open("/first").unwrap(),
+        other.open("/foreign").unwrap(),
+        closed,
+        client.open("/last").unwrap(),
+    ];
+    let outcomes = client.vclose(&mut files).unwrap();
+    assert_eq!(outcomes.len(), 4);
+    assert!(outcomes[0].is_ok() && outcomes[2].is_ok() && outcomes[3].is_ok());
+    assert_eq!(
+        outcomes[1].as_ref().unwrap_err().state(),
+        FailureState::NotAttempted
+    );
+    assert!(!files[1].is_closed());
+    assert_eq!(
+        batches
+            .lock()
+            .unwrap()
+            .iter()
+            .map(Vec::len)
+            .collect::<Vec<_>>(),
+        [2]
+    );
+    assert!(client.vclose(std::iter::empty()).unwrap().is_empty());
+    // Foreign handle retains its original owner.
+    files[1].try_close().unwrap();
+    drop(files);
+    assert_eq!(client.into_inner().unwrap().scalar.close_calls, 3);
+    assert_eq!(other.into_inner().unwrap().scalar.close_calls, 1);
+}
+
+#[test]
+fn close_validates_missing_extra_and_impossible_progress_without_losing_owners() {
+    use vfsi_core::{FailureState, IoProgress, OpError};
+    for response in [
+        vec![Ok(())],
+        vec![Ok(()), Ok(()), Ok(())],
+        vec![
+            Ok(()),
+            Err(OpError::unknown(
+                VfError::transport(None, "bad progress"),
+                Some(IoProgress::Write { bytes_written: 1 }),
+            )),
+        ],
+    ] {
+        let excess = response.len() > 2;
+        let client = FsClient::new(CloseProbe {
+            response: Some(Ok(response)),
+            ..Default::default()
+        });
+        let mut files = [
+            client.open("/first").unwrap(),
+            client.open("/last").unwrap(),
+        ];
+        let outcomes = client.vclose(&mut files).unwrap();
+        assert_eq!(outcomes.len(), 2);
+        if excess {
+            assert!(
+                outcomes
+                    .iter()
+                    .all(|result| result.as_ref().unwrap_err().state() == FailureState::Unknown)
+            );
+            assert!(files.iter().all(|file| !file.is_closed()));
+        } else {
+            assert!(outcomes[0].is_ok() && files[0].is_closed());
+            assert_eq!(
+                outcomes[1].as_ref().unwrap_err().state(),
+                FailureState::Unknown
+            );
+            assert!(!files[1].is_closed());
+        }
+        drop(files);
+        client.drain_cleanup().unwrap();
+    }
+}
+
+#[derive(Default)]
+struct OwnedOpenProbe {
+    scalar: ScalarOnly,
+    response: Option<vfsi_core::VecResult<FileOperand>>,
+    opens: Arc<Mutex<Vec<usize>>>,
+    closes: Arc<Mutex<Vec<usize>>>,
+}
+handle_contract!(
+    OwnedOpenProbe,
+    fn vclose_impl(&mut self, files: &[FileOperand]) -> vfsi_core::VecResult<()> {
+        self.closes.lock().unwrap().push(files.len());
+        self.scalar.vclose_impl(files)
+    }
+);
+impl VectorBackend for OwnedOpenProbe {
+    fn vopen_raw_impl(
+        &mut self,
+        paths: &[&std::path::Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> vfsi_core::VecResult<FileOperand> {
+        self.scalar.vopen_raw_impl(paths, flags, modes)
+    }
+    fn vopen_impl(&mut self, requests: &[OpenOp]) -> vfsi_core::VecResult<FileOperand> {
+        self.opens.lock().unwrap().push(requests.len());
+        self.response
+            .take()
+            .unwrap_or_else(|| self.scalar.vopen_impl(requests))
+    }
+    fn vread_impl(&mut self, requests: &[ReadOp]) -> vfsi_core::VecResult<ReadResult> {
+        self.scalar.vread_impl(requests)
+    }
+}
+fn owned_open_requests() -> [OpenOp<'static>; 3] {
+    ["/first", "/missing", "/last"].map(|path| OpenOp::new(path, OpenFlags::READ))
+}
+#[test]
+fn owned_open_keeps_successful_handles_and_original_error_identity_in_one_batch() {
+    use vfsi_core::{FailureState, OpError};
+    let backend = OwnedOpenProbe {
+        response: Some(Ok(vec![
+            Ok(FileOperand::from_fd(1)),
+            Err(OpError::failed(
+                VfError::errno(77, libc::ENOENT as u32),
+                None,
+            )),
+            Ok(FileOperand::from_fd(3)),
+        ])),
+        ..Default::default()
+    };
+    let opens = backend.opens.clone();
+    let closes = backend.closes.clone();
+    let client = FsClient::new(backend);
+    let outcomes = client.vopen(&owned_open_requests()).unwrap();
+    assert_eq!(outcomes.len(), 3);
+    assert_eq!(
+        outcomes[0].as_ref().unwrap().path(),
+        std::path::Path::new("/first")
+    );
+    assert_eq!(
+        outcomes[2].as_ref().unwrap().path(),
+        std::path::Path::new("/last")
+    );
+    let error = outcomes[1].as_ref().unwrap_err();
+    assert_eq!(error.state(), FailureState::Failed);
+    assert_eq!(error.cause().index(), None);
+    assert_eq!(error.cause().path(), Some(std::path::Path::new("/missing")));
+    assert_eq!(*opens.lock().unwrap(), [3]);
+    assert!(
+        closes.lock().unwrap().is_empty(),
+        "core OPEN does not close successful siblings"
+    );
+    client
+        .close_files(outcomes.into_iter().filter_map(Result::ok).collect())
+        .unwrap();
+    assert_eq!(*closes.lock().unwrap(), [2]);
+    assert_eq!(client.into_inner().unwrap().scalar.close_calls, 2);
+}
+#[test]
+fn strict_open_cleanup_batches_successes_and_retains_only_failed_close_owners() {
+    use vfsi_core::OpError;
+    let backend = OwnedOpenProbe {
+        scalar: ScalarOnly {
+            close_failures_remaining: 1,
+            ..Default::default()
+        },
+        response: Some(Ok(vec![
+            Ok(FileOperand::from_fd(1)),
+            Err(OpError::unknown(
+                VfError::transport(None, "lost OPEN reply"),
+                None,
+            )),
+            Ok(FileOperand::from_fd(3)),
+        ])),
+        ..Default::default()
+    };
+    let opens = backend.opens.clone();
+    let closes = backend.closes.clone();
+    let observed = backend.scalar.close_observed.clone();
+    let client = FsClient::new(backend);
+    let error = client.open_batch(&owned_open_requests()).unwrap_err();
+    assert!(error.is_transport());
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(*opens.lock().unwrap(), [3]);
+    assert_eq!(*closes.lock().unwrap(), [2]);
+    assert_eq!(observed.load(Ordering::SeqCst), 2);
+    client.drain_cleanup().unwrap();
+    assert_eq!(
+        client.into_inner().unwrap().scalar.close_calls,
+        3,
+        "known successful close is not replayed"
+    );
+}
+#[test]
+fn owned_open_validates_shapes_and_never_creates_duplicate_cleanup_owners() {
+    use vfsi_core::{FailureState, IoProgress, OpError};
+    let fd = FileOperand::from_fd;
+    let cases = [
+        (vec![Ok(fd(1))], vec![true, false, false], 1),
+        (
+            vec![Ok(fd(1)), Ok(fd(2)), Ok(fd(3)), Ok(fd(4))],
+            vec![false; 3],
+            4,
+        ),
+        (
+            vec![Ok(fd(7)), Ok(fd(7)), Ok(fd(9))],
+            vec![false, false, true],
+            2,
+        ),
+        (vec![Ok(fd(7)), Ok(fd(7)), Ok(fd(7))], vec![false; 3], 1),
+        (
+            vec![Ok(fd(7)), Ok(fd(7)), Ok(fd(8)), Ok(fd(9))],
+            vec![false; 3],
+            3,
+        ),
+        (
+            vec![Ok(FileOperand::from_path("/not-fd")), Ok(fd(-1)), Ok(fd(7))],
+            vec![false, false, true],
+            1,
+        ),
+        (
+            vec![
+                Err(OpError::failed(
+                    VfError::errno(None, libc::EIO as u32),
+                    Some(IoProgress::Write { bytes_written: 1 }),
+                )),
+                Ok(fd(1)),
+                Ok(fd(2)),
+            ],
+            vec![false, true, true],
+            2,
+        ),
+        (vec![Ok(fd(3)), Ok(fd(1)), Ok(fd(2))], vec![true; 3], 3),
+    ];
+    for (response, valid, cleanup_count) in cases {
+        let client = FsClient::new(OwnedOpenProbe {
+            response: Some(Ok(response)),
+            ..Default::default()
+        });
+        let outcomes = client.vopen(&owned_open_requests()).unwrap();
+        assert_eq!(outcomes.len(), 3);
+        for (outcome, valid) in outcomes.iter().zip(valid) {
+            assert_eq!(outcome.is_ok(), valid);
+            if let Err(error) = outcome {
+                assert_eq!(error.state(), FailureState::Unknown);
+                assert!(error.progress().is_none());
+            }
+        }
+        drop(outcomes);
+        client.drain_cleanup().unwrap();
+        assert_eq!(
+            client.into_inner().unwrap().scalar.close_calls,
+            cleanup_count
+        );
+    }
+}
+#[test]
+fn singular_and_builder_opens_delegate_to_the_same_vector_hook() {
+    let backend = OwnedOpenProbe::default();
+    let opens = backend.opens.clone();
+    let client = FsClient::new(backend);
+    client.open("/one").unwrap().close().unwrap();
+    client
+        .open_with(OpenOp::new("/two", OpenFlags::READ))
+        .unwrap()
+        .close()
+        .unwrap();
+    let files = client
+        .open_options()
+        .read(true)
+        .vopen(&["/three", "/four"])
+        .unwrap();
+    client.close_files(files).unwrap();
+    assert_eq!(*opens.lock().unwrap(), [1, 1, 2]);
+}
+
+#[test]
+fn native_write_outcomes_isolate_rejected_handles_without_copying_or_reprojection() {
+    use vfsi_sync::FailureState;
+    let backend = WriteBoundaryProbe::default();
+    let calls = backend.calls.clone();
+    let fs = FsClient::new(backend);
+    let other = FsClient::new(WriteBoundaryProbe::default());
+    let first = fs.open("/first").unwrap();
+    let last = fs.open("/last").unwrap();
+    let mut closed = fs.open("/closed").unwrap();
+    closed.try_close().unwrap();
+    let foreign = other.open("/foreign").unwrap();
+    let requests = [
+        first.write_request_at(0, b"ab"),
+        foreign.write_request_at(0, b"foreign"),
+        closed.write_request_at(0, b"closed"),
+        last.write_request_at(u64::MAX, b"overflow"),
+        last.write_request_at(2, b"yz"),
+    ];
+    let projections = std::cell::Cell::new(0);
+    let outcomes = fs
+        .vwrite_mapped_native(&requests, |request| {
+            projections.set(projections.get() + 1);
+            fs.capabilities().unwrap(); // projection must run outside the lock
+            *request
+        })
+        .unwrap();
+    assert_eq!(projections.get(), requests.len());
+    assert_eq!(outcomes.len(), requests.len());
+    for index in [0, 4] {
+        assert_eq!(outcomes[index].as_ref().unwrap().bytes_written, 2);
+    }
+    for (index, path) in [(1, "/foreign"), (2, "/closed"), (3, "/last")] {
+        let error = outcomes[index].as_ref().unwrap_err();
+        assert_eq!(error.state(), FailureState::NotAttempted);
+        assert_eq!(error.cause().index(), None);
+        assert_eq!(error.cause().path(), Some(std::path::Path::new(path)));
+        assert!(error.progress().is_none());
+    }
+    let observed = calls.lock().unwrap();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].len(), 2);
+    for (actual, index) in observed[0].iter().zip([0, 4]) {
+        assert_eq!(actual.pointer, requests[index].data().as_ptr() as usize);
+        assert_eq!(actual.length, requests[index].data().len());
+    }
+    drop(observed);
+    assert!(fs.vwrite_native(&[]).unwrap().is_empty());
+    let rejected = fs.vwrite_native(&requests[1..4]).unwrap();
+    assert!(rejected.iter().all(Result::is_err));
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        1,
+        "empty/rejected vectors must not dispatch"
+    );
+}
+
+#[test]
+fn native_write_outcomes_keep_confirmed_prefixes_and_independent_successes() {
+    use vfsi_sync::{FailureState, IoProgress, OpError};
+    for state in [FailureState::Failed, FailureState::Unknown] {
+        let cause = VfError::errno(7, libc::ENOSPC as u32);
+        let progress = Some(IoProgress::Write { bytes_written: 2 });
+        let error = if state == FailureState::Failed {
+            OpError::failed(cause, progress)
+        } else {
+            OpError::unknown(cause, progress)
+        };
+        let backend = WriteBoundaryProbe {
+            write_outcomes: Some(vec![Ok(1), Err(error), Ok(1)]),
+            ..Default::default()
+        };
+        let calls = backend.calls.clone();
+        let fs = FsClient::new(backend);
+        let file = fs.open("/file").unwrap();
+        let results = fs
+            .vwrite_native(&[
+                file.write_request_at(0, b"a"),
+                file.write_request_at(10, b"four"),
+                file.write_request_at(20, b"z"),
+            ])
+            .unwrap();
+        assert_eq!(results[0].as_ref().unwrap().bytes_written, 1);
+        assert_eq!(results[2].as_ref().unwrap().bytes_written, 1);
+        let error = results[1].as_ref().unwrap_err();
+        assert_eq!(error.state(), state);
+        assert_eq!(error.cause().raw_code(), libc::ENOSPC as u32);
+        assert_eq!(error.cause().index(), None);
+        assert_eq!(error.cause().operation(), Some("vwrite_native"));
+        assert_eq!(
+            error.progress(),
+            Some(&IoProgress::Write { bytes_written: 2 })
+        );
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            1,
+            "errors never replay siblings"
+        );
+    }
+}
+
+#[test]
+fn native_write_outcomes_quarantine_only_invalid_progress_or_missing_slots() {
+    use vfsi_sync::{FailureState, IoProgress, OpError};
+    for malformed in [
+        IoProgress::Write { bytes_written: 5 },
+        IoProgress::Read(vfsi_core::api::ReadResult::owned(10, b"x".to_vec(), false)),
+    ] {
+        let fs = FsClient::new(WriteBoundaryProbe {
+            write_outcomes: Some(vec![
+                Ok(1),
+                Err(OpError::failed(
+                    VfError::errno(None, libc::EIO as u32),
+                    Some(malformed),
+                )),
+                Ok(1),
+            ]),
+            ..Default::default()
+        });
+        let file = fs.open("/file").unwrap();
+        let results = fs
+            .vwrite_native(&[
+                file.write_request_at(0, b"a"),
+                file.write_request_at(10, b"four"),
+                file.write_request_at(20, b"z"),
+            ])
+            .unwrap();
+        assert!(results[0].is_ok());
+        assert!(results[2].is_ok());
+        let error = results[1].as_ref().unwrap_err();
+        assert_eq!(error.state(), FailureState::Unknown);
+        assert_eq!(
+            error.cause().transport_kind(),
+            Some(vfsi_sync::TransportKind::InvalidReply)
+        );
+        assert!(error.progress().is_none());
+    }
+    for count in [1, 4] {
+        let fs = FsClient::new(WriteBoundaryProbe {
+            write_outcomes: Some((0..count).map(|_| Ok(1)).collect()),
+            ..Default::default()
+        });
+        let file = fs.open("/file").unwrap();
+        let results = fs
+            .vwrite_native(&[
+                file.write_request_at(0, b"a"),
+                file.write_request_at(10, b"b"),
+                file.write_request_at(20, b"z"),
+            ])
+            .unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].is_ok(), count == 1);
+        for result in results.iter().skip(usize::from(count == 1)) {
+            assert_eq!(result.as_ref().unwrap_err().state(), FailureState::Unknown);
+        }
+    }
+}
+
+#[test]
+fn complete_write_outcomes_keep_independent_waves_and_resolve_only_safe_dependencies() {
+    use vfsi_sync::{FailureState, IoProgress, OpError};
+    for uncertain in [false, true] {
+        let cause = VfError::errno(None, libc::ENOSPC as u32);
+        let prefix = Some(IoProgress::Write { bytes_written: 1 });
+        let error = if uncertain {
+            OpError::unknown(cause, prefix)
+        } else {
+            OpError::failed(cause, prefix)
+        };
+        let backend = WriteBoundaryProbe {
+            write_outcomes: Some(vec![Err(error), Ok(2), Ok(2)]),
+            ..Default::default()
+        };
+        let calls = backend.calls.clone();
+        let fs = FsClient::new(backend);
+        let a = fs.open("/a").unwrap();
+        let b = fs.open("/b").unwrap();
+        let c = fs.open("/c").unwrap();
+        let data = [b"AAAA".as_slice(), b"zz", b"BBBBB", b"", b"CC"];
+        let results = fs
+            .vwrite_all_native(&[
+                a.write_request_at(0, data[0]),
+                a.write_request_at(0, data[1]),
+                b.write_request_at(10, data[2]),
+                b.write_request_at(20, data[3]),
+                c.write_request_at(0, data[4]),
+            ])
+            .unwrap();
+        assert_eq!(results.len(), 5);
+        let error = results[0].as_ref().unwrap_err();
+        assert_eq!(
+            error.state(),
+            if uncertain {
+                FailureState::Unknown
+            } else {
+                FailureState::Failed
+            }
+        );
+        assert_eq!(
+            error.progress(),
+            Some(&IoProgress::Write { bytes_written: 1 })
+        );
+        assert_eq!(error.cause().index(), None);
+        assert_eq!(results[2].as_ref().unwrap().bytes_written, 5);
+        assert_eq!(results[3].as_ref().unwrap().bytes_written, 0);
+        assert_eq!(results[4].as_ref().unwrap().bytes_written, 2);
+        if uncertain {
+            let blocked = results[1].as_ref().unwrap_err();
+            assert_eq!(blocked.state(), FailureState::NotAttempted);
+            assert!(blocked.progress().is_none());
+        } else {
+            assert_eq!(results[1].as_ref().unwrap().bytes_written, 2);
+        }
+        let calls = calls.lock().unwrap();
+        let widths: Vec<_> = calls.iter().map(Vec::len).collect();
+        assert_eq!(
+            widths,
+            if uncertain {
+                vec![3, 1, 1]
+            } else {
+                vec![3, 2, 1]
+            }
+        );
+        let rejected = data[0].as_ptr() as usize..data[0].as_ptr() as usize + data[0].len();
+        assert!(
+            calls
+                .iter()
+                .skip(1)
+                .flatten()
+                .all(|op| !rejected.contains(&op.pointer)),
+            "never replay a failed/uncertain payload suffix"
+        );
+    }
+}
+
+#[test]
+fn complete_write_outcomes_accumulate_prior_acknowledgments_on_failure_and_malformed_replies() {
+    use vfsi_sync::{FailureState, IoProgress, OpError};
+    for case in [
+        "failed",
+        "unknown",
+        "not-attempted",
+        "missing",
+        "excess",
+        "zero",
+    ] {
+        let cause = VfError::errno(None, libc::ENOSPC as u32);
+        let second = match case {
+            "failed" => vec![
+                Err(OpError::failed(
+                    cause,
+                    Some(IoProgress::Write { bytes_written: 1 }),
+                )),
+                Ok(2),
+            ],
+            "unknown" => vec![
+                Err(OpError::unknown(
+                    cause,
+                    Some(IoProgress::Write { bytes_written: 1 }),
+                )),
+                Ok(2),
+            ],
+            "not-attempted" => vec![Err(OpError::not_attempted(cause)), Ok(2)],
+            "missing" => vec![Ok(2)],
+            "excess" => vec![Ok(2), Ok(2), Ok(1)],
+            "zero" => vec![Ok(0), Ok(2)],
+            _ => unreachable!(),
+        };
+        let backend = WriteBoundaryProbe {
+            write_waves: std::collections::VecDeque::from([vec![Ok(2), Ok(2)], second]),
+            ..Default::default()
+        };
+        let calls = backend.calls.clone();
+        let fs = FsClient::new(backend);
+        let a = fs.open("/a").unwrap();
+        let b = fs.open("/b").unwrap();
+        let results = fs
+            .vwrite_all_native(&[
+                a.write_request_at(0, b"AAAA"),
+                b.write_request_at(10, b"BBBB"),
+            ])
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        if case == "missing" {
+            assert_eq!(results[0].as_ref().unwrap().bytes_written, 4);
+        } else {
+            let error = results[0].as_ref().unwrap_err();
+            assert_eq!(
+                error.state(),
+                if matches!(case, "unknown" | "excess") {
+                    FailureState::Unknown
+                } else {
+                    FailureState::Failed
+                },
+                "{case}"
+            );
+            assert_eq!(
+                error.progress(),
+                Some(&IoProgress::Write {
+                    bytes_written: if matches!(case, "failed" | "unknown") {
+                        3
+                    } else {
+                        2
+                    }
+                }),
+                "{case}"
+            );
+        }
+        if matches!(case, "missing" | "excess") {
+            let error = results[1].as_ref().unwrap_err();
+            assert_eq!(error.state(), FailureState::Unknown);
+            assert_eq!(
+                error.progress(),
+                Some(&IoProgress::Write { bytes_written: 2 })
+            );
+        } else {
+            assert_eq!(results[1].as_ref().unwrap().bytes_written, 4);
+        }
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            2,
+            "no error or omitted slot may be retried"
+        );
+    }
+}
+
+#[test]
+fn complete_write_outcomes_isolate_preflight_rejection_and_validate_empty_inputs() {
+    use vfsi_sync::FailureState;
+    let backend = WriteBoundaryProbe::default();
+    let calls = backend.calls.clone();
+    let fs = FsClient::new(backend);
+    let other = FsClient::new(WriteBoundaryProbe::default());
+    let local = fs.open("/local").unwrap();
+    let foreign = other.open("/foreign").unwrap();
+    let mut closed = fs.open("/closed").unwrap();
+    closed.try_close().unwrap();
+    let results = fs
+        .vwrite_all_native(&[
+            local.write_request_at(0, b"abcde"),
+            foreign.write_request_at(0, b""),
+            closed.write_request_at(0, b""),
+            local.write_request_at(u64::MAX, b"bad"),
+            local.write_request_at(10, b"xy"),
+            local.write_request_at(u64::MAX, b""),
+        ])
+        .unwrap();
+    assert_eq!(results[0].as_ref().unwrap().bytes_written, 5);
+    assert_eq!(results[4].as_ref().unwrap().bytes_written, 2);
+    let empty = results[5].as_ref().unwrap();
+    assert_eq!((empty.offset, empty.bytes_written), (u64::MAX, 0));
+    for index in [1, 2, 3] {
+        let error = results[index].as_ref().unwrap_err();
+        assert_eq!(error.state(), FailureState::NotAttempted);
+        assert_eq!(error.cause().index(), None);
+        assert!(error.progress().is_none());
+    }
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(Vec::len)
+            .collect::<Vec<_>>(),
+        [2, 1, 1]
+    );
+    assert!(fs.vwrite_all_native(&[]).unwrap().is_empty());
+    assert!(
+        fs.vwrite_all_native(&[local.write_request_at(0, b"")])
+            .unwrap()[0]
+            .is_ok()
+    );
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        3,
+        "validated empty requests need no I/O"
+    );
+}
+
+#[test]
+fn standard_write_errors_preserve_progress_and_never_retry_uncertain_interruption() {
+    use vfsi_sync::{FailureState, IoProgress, OpError};
+    for (state, count) in [
+        (FailureState::Unknown, 0),
+        (FailureState::Unknown, 2),
+        (FailureState::Failed, 2),
+    ] {
+        let cause = VfError::errno(None, libc::EINTR as u32);
+        let progress = (count != 0).then_some(IoProgress::Write {
+            bytes_written: count,
+        });
+        let error = if state == FailureState::Unknown {
+            OpError::unknown(cause, progress)
+        } else {
+            OpError::failed(cause, progress)
+        };
+        let backend = WriteBoundaryProbe {
+            write_outcomes: Some(vec![Err(error)]),
+            ..Default::default()
+        };
+        let calls = backend.calls.clone();
+        let fs = FsClient::new(backend);
+        let file = fs.open("/file").unwrap();
+        let mut io = fs.std_io(&file);
+        let error = io.write_all(b"data").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        let outcome = error.get_ref().unwrap().downcast_ref::<OpError>().unwrap();
+        assert_eq!(outcome.state(), state);
+        assert_eq!(
+            outcome.progress(),
+            (count != 0)
+                .then_some(IoProgress::Write {
+                    bytes_written: count
+                })
+                .as_ref()
+        );
+        if count == 0 {
+            assert_eq!(io.stream_position().unwrap(), 0);
+        } else {
+            assert!(
+                io.stream_position().is_err(),
+                "a partial failed append has no resolved cursor"
+            );
+            io.seek(SeekFrom::Start(2)).unwrap();
+            assert_eq!(io.stream_position().unwrap(), 2);
+        }
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            1,
+            "standard write_all must not replay this input"
+        );
+    }
+    let backend = WriteBoundaryProbe {
+        write_outcomes: Some(vec![Err(OpError::failed(
+            VfError::errno(None, libc::EINTR as u32),
+            None,
+        ))]),
+        ..Default::default()
+    };
+    let calls = backend.calls.clone();
+    let fs = FsClient::new(backend);
+    let file = fs.open("/file").unwrap();
+    let mut io = fs.std_io(&file);
+    io.write_all(b"data").unwrap();
+    assert_eq!(io.stream_position().unwrap(), 4);
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        3,
+        "only a zero-progress definite interruption is retryable"
+    );
+}
+
+#[test]
+fn complete_writes_keep_conservative_alias_order_when_identity_discovery_fails() {
+    for prefetch in [false, true] {
+        let fs = FsClient::new(ScalarOnly {
+            identity_preflight_failure: prefetch,
+            identity_ref_failure: !prefetch,
+            max_write_once: Some(2),
+            ..Default::default()
+        });
+        let first = fs.open("/first").unwrap();
+        let second = fs.open("/second").unwrap();
+        let results = fs
+            .vwrite_all_native(&[
+                first.write_request_at(0, b"AAAA"),
+                second.write_request_at(2, b"BBBB"),
+            ])
+            .unwrap();
+        assert!(results.iter().all(Result::is_ok));
+        first.close().unwrap();
+        second.close().unwrap();
+        assert_eq!(
+            fs.into_inner().unwrap().data,
+            b"AABBBB",
+            "unavailable identities must not be treated as proof of disjoint objects"
+        );
+    }
+}
+
+#[derive(Default)]
+struct NamespaceProbe {
+    scalar: ScalarOnly,
+    calls: Arc<AtomicUsize>,
+    shape: u8,
+}
+handle_contract!(
+    NamespaceProbe;
+    fn vsetattrs_impl(
+        &mut self,
+        updates: &[SetAttrsOp<Target<'_, FileOperand>>],
+    ) -> vfsi_sync::VecResult<()> {
+        self.respond(updates.len(), || ())
+    }
+);
+impl VectorBackend for NamespaceProbe {
+    fn remove_paths_with_options_impl(
+        &mut self,
+        paths: &[&std::path::Path],
+        _: vfsi_core::api::RemoveMode,
+        _: vfsi_sync::RemoveOptions,
+    ) -> vfsi_sync::VecResult<()> {
+        self.respond(paths.len(), || ())
+    }
+
+    fn vcopy_impl(
+        &mut self,
+        pairs: &[vfsi_sync::ExtentPair],
+        _: vfsi_core::CopyOptions,
+    ) -> vfsi_sync::VecResult<()> {
+        self.respond(pairs.len(), || ())
+    }
+
+    fn vrename_with_options_impl(
+        &mut self,
+        pairs: &[(FileOperand, FileOperand)],
+        _: vfsi_core::api::RenameMode,
+    ) -> vfsi_sync::VecResult<()> {
+        self.respond(pairs.len(), || ())
+    }
+
+    fn vopen_raw_impl(
+        &mut self,
+        paths: &[&std::path::Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> vfsi_sync::VecResult<FileOperand> {
+        self.scalar.vopen_raw_impl(paths, flags, modes)
+    }
+    fn vread_impl(&mut self, requests: &[ReadOp]) -> vfsi_sync::VecResult<ReadResult> {
+        self.scalar.vread_impl(requests)
+    }
+    fn vreadlink_impl(&mut self, paths: &[&std::path::Path]) -> vfsi_sync::VecResult<Vec<u8>> {
+        self.respond(paths.len(), || b"../raw-\xff".to_vec())
+    }
+    fn vmkdir_impl(&mut self, dirs: &[VfAttrs]) -> vfsi_sync::VecResult<()> {
+        self.respond(dirs.len(), || ())
+    }
+    fn vsymlink_impl(
+        &mut self,
+        targets: &[&std::path::Path],
+        paths: &[&std::path::Path],
+    ) -> vfsi_sync::VecResult<()> {
+        if targets.len() != paths.len() {
+            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+        }
+        self.respond(paths.len(), || ())
+    }
+    fn vhardlink_impl(
+        &mut self,
+        sources: &[&std::path::Path],
+        paths: &[&std::path::Path],
+    ) -> vfsi_sync::VecResult<()> {
+        if sources.len() != paths.len() {
+            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+        }
+        self.respond(paths.len(), || ())
+    }
+}
+
+impl NamespaceProbe {
+    fn respond<T>(
+        &mut self,
+        count: usize,
+        mut success: impl FnMut() -> T,
+    ) -> vfsi_sync::VecResult<T> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.shape == 4 {
+            return Err(VfError::unsupported(None));
+        }
+        let mut results: Vec<_> = (0..count)
+            .map(|index| {
+                if index == 1 {
+                    Err(vfsi_sync::OpError::failed(
+                        VfError::errno(99, libc::EACCES as u32),
+                        (self.shape == 3)
+                            .then_some(vfsi_sync::IoProgress::Write { bytes_written: 1 }),
+                    ))
+                } else {
+                    Ok(success())
+                }
+            })
+            .collect();
+        if self.shape == 1 {
+            results.truncate(1);
+        }
+        if self.shape == 2 {
+            results.push(Ok(success()));
+        }
+        Ok(results)
+    }
+}
+
+#[test]
+fn readlink_results_preserve_siblings_validate_shape_and_never_replay() {
+    use std::os::unix::ffi::OsStrExt;
+    use vfsi_sync::FailureState;
+    for shape in 0..5 {
+        let backend = NamespaceProbe {
+            shape,
+            ..Default::default()
+        };
+        let calls = backend.calls.clone();
+        let fs = FsClient::new(backend);
+        assert!(fs.vreadlink::<&str>(&[]).unwrap().is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let result = fs.vreadlink(&["/first", "/bad", "/last"]);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        if shape == 4 {
+            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Unsupported);
+            continue;
+        }
+        let results = result.unwrap();
+        assert_eq!(results.len(), 3);
+        if shape != 2 {
+            assert_eq!(
+                results[0].as_ref().unwrap().as_os_str().as_bytes(),
+                b"../raw-\xff"
+            );
+        }
+        if shape == 0 || shape == 3 {
+            assert!(results[2].is_ok());
+            let error = results[1].as_ref().unwrap_err();
+            assert_eq!(
+                error.state(),
+                if shape == 0 {
+                    FailureState::Failed
+                } else {
+                    FailureState::Unknown
+                }
+            );
+            assert_eq!(error.cause().index(), None);
+            assert_eq!(error.cause().path(), Some(std::path::Path::new("/bad")));
+            assert!(error.progress().is_none());
+        } else {
+            let start = usize::from(shape == 1);
+            assert!(
+                results[start..]
+                    .iter()
+                    .all(|result| result.as_ref().unwrap_err().state() == FailureState::Unknown)
+            );
+        }
+    }
+    let backend = NamespaceProbe::default();
+    let calls = backend.calls.clone();
+    let fs = FsClient::new(backend);
+    let error = fs.readlinks_all(&["/first", "/bad", "/last"]).unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(error.raw_code(), libc::EACCES as u32);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fs.read_link("/single").unwrap().as_os_str().as_bytes(),
+        b"../raw-\xff"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn link_results_keep_siblings_and_strict_helpers_dispatch_once() {
+    use vfsi_sync::FailureState;
+    let pairs = [
+        ("/source", "/first"),
+        ("/source", "/bad"),
+        ("/source", "/last"),
+    ];
+    for hard in [false, true] {
+        for shape in 0..5 {
+            let backend = NamespaceProbe {
+                shape,
+                ..Default::default()
+            };
+            let calls = backend.calls.clone();
+            let fs = FsClient::new(backend);
+            let empty = if hard {
+                fs.vhardlink::<&str, &str>(&[])
+            } else {
+                fs.vsymlink::<&str, &str>(&[])
+            };
+            assert!(empty.unwrap().is_empty());
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            let results = if hard {
+                fs.vhardlink(&pairs)
+            } else {
+                fs.vsymlink(&pairs)
+            };
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            if shape == 4 {
+                assert_eq!(results.unwrap_err().kind(), std::io::ErrorKind::Unsupported);
+                continue;
+            }
+            let results = results.unwrap();
+            assert_eq!(results.len(), 3);
+            if shape != 2 {
+                assert!(results[0].is_ok());
+            }
+            if shape == 0 || shape == 3 {
+                assert!(results[2].is_ok());
+                let error = results[1].as_ref().unwrap_err();
+                assert_eq!(
+                    error.state(),
+                    if shape == 0 {
+                        FailureState::Failed
+                    } else {
+                        FailureState::Unknown
+                    }
+                );
+                assert_eq!(error.cause().path(), Some(std::path::Path::new("/bad")));
+                assert_eq!(error.cause().index(), None);
+                assert!(error.progress().is_none());
+            } else {
+                let start = usize::from(shape == 1);
+                assert!(results[start..].iter().all(|result| result.as_ref().unwrap_err().state() == FailureState::Unknown));
+            }
+        }
+    }
+    let backend = NamespaceProbe::default();
+    let calls = backend.calls.clone();
+    let fs = FsClient::new(backend);
+    for error in [
+        fs.symlinks_all(&pairs).unwrap_err(),
+        fs.hardlinks_all(&pairs).unwrap_err(),
+    ] {
+        assert_eq!(error.index(), Some(1));
+        assert_eq!(error.raw_code(), libc::EACCES as u32);
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    fs.symlink("/source", "/single").unwrap();
+    fs.hard_link("/source", "/single-hard").unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+}
+
+#[test]
+fn directory_results_isolate_duplicates_and_preserve_shape_and_context() {
+    use vfsi_sync::{FailureState, MkDirOp};
+    let inputs = [
+        MkDirOp::new("/first", 0o700),
+        MkDirOp::new("/bad", 0o750),
+        MkDirOp::new("/last", 0o777),
+    ];
+    for shape in 0..5 {
+        let backend = NamespaceProbe {
+            shape,
+            ..Default::default()
+        };
+        let calls = backend.calls.clone();
+        let fs = FsClient::new(backend);
+        assert!(fs.vmkdir::<&str>(&[]).unwrap().is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let results = fs.vmkdir(&inputs);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        if shape == 4 {
+            assert_eq!(results.unwrap_err().kind(), std::io::ErrorKind::Unsupported);
+            continue;
+        }
+        let results = results.unwrap();
+        assert_eq!(results.len(), 3);
+        if shape != 2 {
+            assert!(results[0].is_ok());
+        }
+        if shape == 0 || shape == 3 {
+            assert!(results[2].is_ok());
+            let error = results[1].as_ref().unwrap_err();
+            assert_eq!(
+                error.state(),
+                if shape == 0 {
+                    FailureState::Failed
+                } else {
+                    FailureState::Unknown
+                }
+            );
+            assert_eq!(error.cause().path(), Some(std::path::Path::new("/bad")));
+            assert_eq!(error.cause().index(), None);
+            assert!(error.progress().is_none());
+        } else {
+            assert!(
+                results[usize::from(shape == 1)..]
+                    .iter()
+                    .all(|result| result.as_ref().unwrap_err().state() == FailureState::Unknown)
+            );
+        }
+    }
+    for shape in [0, 4] {
+        let backend = NamespaceProbe {
+            shape,
+            ..Default::default()
+        };
+        let calls = backend.calls.clone();
+        let fs = FsClient::new(backend);
+        let inputs = [
+            MkDirOp::new("/first", 0o700),
+            MkDirOp::new("/first", 0o750),
+            MkDirOp::new("/bad", 0o777),
+            MkDirOp::new("/last", 0o755),
+        ];
+        let results = fs.vmkdir(&inputs).unwrap();
+        assert_eq!(results.len(), 4);
+        let duplicate = results[1].as_ref().unwrap_err();
+        assert_eq!(duplicate.state(), FailureState::NotAttempted);
+        assert_eq!(duplicate.cause().kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            duplicate.cause().path(),
+            Some(std::path::Path::new("/first"))
+        );
+        if shape == 0 {
+            assert!(results[0].is_ok() && results[3].is_ok());
+            assert_eq!(
+                results[2].as_ref().unwrap_err().state(),
+                FailureState::Failed
+            );
+            assert_eq!(
+                results[2].as_ref().unwrap_err().cause().path(),
+                Some(std::path::Path::new("/bad"))
+            );
+        } else {
+            for index in [0, 2, 3] {
+                let error = results[index].as_ref().unwrap_err();
+                assert_eq!(error.state(), FailureState::NotAttempted);
+                assert_eq!(error.cause().kind(), std::io::ErrorKind::Unsupported);
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+    let backend = NamespaceProbe::default();
+    let calls = backend.calls.clone();
+    let fs = FsClient::new(backend);
+    assert_eq!(fs.mkdirs_all(&inputs).unwrap_err().index(), Some(1));
+    fs.create_dir("/single").unwrap();
+    fs.create_dir_with_mode("/mode", 0o700).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn setattrs_results_validate_shapes_project_once_and_preserve_nonprefix_successes() {
+    use vfsi_core::FailureState;
+    for shape in 0..5 {
+        let backend = NamespaceProbe {
+            shape,
+            ..Default::default()
+        };
+        let calls = backend.calls.clone();
+        let fs = FsClient::new(backend);
+        assert!(fs.vsetattrs::<&str>(&[]).unwrap().is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let updates = [
+            SetAttrsOp::new("/first").len(1),
+            SetAttrsOp::new("/bad").len(2),
+            SetAttrsOp::new("/last").len(3),
+        ];
+        let projected = std::cell::Cell::new(0);
+        let outcomes = fs
+            .vsetattrs_projected_native(&updates, |path| {
+                projected.set(projected.get() + 1);
+                fs.capabilities().unwrap(); // Projection must run outside the backend lock.
+                Target::Path(std::path::Path::new(*path))
+            })
+            .unwrap();
+        assert_eq!(projected.get(), 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(outcomes.len(), 3);
+        for (index, outcome) in outcomes.iter().enumerate() {
+            let expected = match shape {
+                0 if index == 1 => Some(FailureState::Failed),
+                0 => None,
+                1 if index == 0 => None,
+                1 | 2 => Some(FailureState::Unknown),
+                3 if index == 1 => Some(FailureState::Unknown),
+                3 => None,
+                4 => Some(FailureState::NotAttempted),
+                _ => unreachable!(),
+            };
+            if let Some(state) = expected {
+                let error = outcome.as_ref().unwrap_err();
+                assert_eq!(error.state(), state);
+                assert_eq!(error.cause().index(), None);
+                assert_eq!(
+                    error.cause().path(),
+                    Some(std::path::Path::new(*updates[index].target()))
+                );
+                assert!(error.progress().is_none());
+            } else {
+                assert!(outcome.is_ok());
+            }
+        }
+    }
+    let backend = NamespaceProbe::default();
+    let calls = backend.calls.clone();
+    let fs = FsClient::new(backend);
+    let results = fs
+        .vsetattrs(&[
+            SetAttrsOp::new("/first").len(1),
+            SetAttrsOp::new("/invalid").uid(u32::MAX),
+            SetAttrsOp::new("/bad").len(2),
+            SetAttrsOp::new("/last").len(3),
+        ])
+        .unwrap();
+    assert!(results[0].is_ok() && results[3].is_ok());
+    assert_eq!(
+        results[1].as_ref().unwrap_err().state(),
+        FailureState::NotAttempted
+    );
+    assert_eq!(
+        results[2].as_ref().unwrap_err().state(),
+        FailureState::Failed
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let error = fs
+        .setattrs_all(&[
+            SetAttrsOp::new("/first").len(1),
+            SetAttrsOp::new("/bad").len(2),
+            SetAttrsOp::new("/last").len(3),
+        ])
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    fs.truncate("/singular", 1).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn rename_results_preserve_siblings_validate_shape_and_dispatch_once() {
+    use vfsi_core::{FailureState, api::RenameMode};
+    for shape in 0..5 {
+        let backend = NamespaceProbe {
+            shape,
+            ..Default::default()
+        };
+        let calls = backend.calls.clone();
+        let fs = FsClient::new(backend);
+        assert!(
+            fs.vrename::<&str, &str>(&[], RenameMode::Replace)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let result = fs.vrename(
+            &[("/first", "/one"), ("/bad", "/two"), ("/last", "/three")],
+            RenameMode::Replace,
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        if shape == 4 {
+            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Unsupported);
+            continue;
+        }
+        let results = result.unwrap();
+        assert_eq!(results.len(), 3);
+        if shape == 0 || shape == 3 {
+            assert!(results[0].is_ok() && results[2].is_ok());
+            let error = results[1].as_ref().unwrap_err();
+            assert_eq!(
+                error.state(),
+                if shape == 0 {
+                    FailureState::Failed
+                } else {
+                    FailureState::Unknown
+                }
+            );
+            assert_eq!(error.cause().index(), None);
+            assert_eq!(error.cause().path(), Some(std::path::Path::new("/bad")));
+            assert!(error.progress().is_none());
+        } else {
+            if shape == 1 {
+                assert!(results[0].is_ok());
+            }
+            assert!(
+                results[usize::from(shape == 1)..]
+                    .iter()
+                    .all(|result| result.as_ref().unwrap_err().state() == FailureState::Unknown)
+            );
+        }
+    }
+    let backend = NamespaceProbe::default();
+    let calls = backend.calls.clone();
+    let fs = FsClient::new(backend);
+    let error = fs
+        .renames_all(
+            &[("/first", "/one"), ("/bad", "/two"), ("/last", "/three")],
+            RenameMode::Replace,
+        )
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    fs.rename("/single", "/moved").unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn rename_projects_each_path_once_before_backend_locking() {
+    use std::cell::Cell;
+    use vfsi_core::api::RenameMode;
+    struct CountedPath<'a> {
+        calls: &'a Cell<usize>,
+        client: &'a FsClient<NamespaceProbe>,
+        name: &'static str,
+    }
+    impl AsRef<std::path::Path> for CountedPath<'_> {
+        fn as_ref(&self) -> &std::path::Path {
+            self.calls.set(self.calls.get() + 1);
+            self.client.capabilities().unwrap();
+            std::path::Path::new(self.name)
+        }
+    }
+    let backend = NamespaceProbe::default();
+    let batches = backend.calls.clone();
+    let fs = FsClient::new(backend);
+    let calls = Cell::new(0);
+    let path = |name| CountedPath {
+        calls: &calls,
+        client: &fs,
+        name,
+    };
+    let pairs = [
+        (path("/first"), path("/one")),
+        (path("/bad"), path("/two")),
+        (path("/last"), path("/three")),
+    ];
+    let results = fs.vrename(&pairs, RenameMode::Replace).unwrap();
+    assert!(results[0].is_ok() && results[2].is_ok());
+    assert!(results[1].is_err());
+    assert_eq!(calls.get(), 6);
+    assert_eq!(batches.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn copy_results_preserve_siblings_validate_shape_and_dispatch_once() {
+    use vfsi_core::{FailureState, api::CopyOptions};
+    for shape in 0..5 {
+        let backend = NamespaceProbe {
+            shape,
+            ..Default::default()
+        };
+        let calls = backend.calls.clone();
+        let fs = FsClient::new(backend);
+        assert!(
+            fs.vcopy::<&str, &str>(&[], CopyOptions::new())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let result = fs.vcopy(
+            &[("/first", "/one"), ("/bad", "/two"), ("/last", "/three")],
+            CopyOptions::new(),
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        if shape == 4 {
+            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Unsupported);
+            continue;
+        }
+        let results = result.unwrap();
+        assert_eq!(results.len(), 3);
+        if shape == 0 || shape == 3 {
+            assert!(results[0].is_ok() && results[2].is_ok());
+            let error = results[1].as_ref().unwrap_err();
+            assert_eq!(
+                error.state(),
+                if shape == 0 {
+                    FailureState::Failed
+                } else {
+                    FailureState::Unknown
+                }
+            );
+            assert_eq!(error.cause().index(), None);
+            assert_eq!(error.cause().path(), Some(std::path::Path::new("/two")));
+            assert!(error.progress().is_none());
+        } else {
+            if shape == 1 {
+                assert!(results[0].is_ok());
+            }
+            assert!(
+                results[usize::from(shape == 1)..]
+                    .iter()
+                    .all(|result| result.as_ref().unwrap_err().state() == FailureState::Unknown)
+            );
+        }
+    }
+    let backend = NamespaceProbe::default();
+    let calls = backend.calls.clone();
+    let fs = FsClient::new(backend);
+    let error = fs
+        .copies_all(
+            &[("/first", "/one"), ("/bad", "/two"), ("/last", "/three")],
+            CopyOptions::new(),
+        )
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    fs.copy("/single", "/moved").unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn copy_projects_each_path_once_before_backend_locking() {
+    use std::cell::Cell;
+    use vfsi_core::api::CopyOptions;
+    struct CountedPath<'a> {
+        calls: &'a Cell<usize>,
+        client: &'a FsClient<NamespaceProbe>,
+        name: &'static str,
+    }
+    impl AsRef<std::path::Path> for CountedPath<'_> {
+        fn as_ref(&self) -> &std::path::Path {
+            self.calls.set(self.calls.get() + 1);
+            self.client.capabilities().unwrap();
+            std::path::Path::new(self.name)
+        }
+    }
+    let backend = NamespaceProbe::default();
+    let batches = backend.calls.clone();
+    let fs = FsClient::new(backend);
+    let calls = Cell::new(0);
+    let path = |name| CountedPath {
+        calls: &calls,
+        client: &fs,
+        name,
+    };
+    let pairs = [
+        (path("/first"), path("/one")),
+        (path("/bad"), path("/two")),
+        (path("/last"), path("/three")),
+    ];
+    let results = fs.vcopy(&pairs, CopyOptions::new()).unwrap();
+    assert!(results[0].is_ok() && results[2].is_ok());
+    assert!(results[1].is_err());
+    assert_eq!(calls.get(), 6);
+    assert_eq!(batches.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn recursive_removal_requires_successful_root_metadata_before_mutation() {
+    let mut backend = AttrsBackend {
+        metadata_failure: Some(0),
+        ..Default::default()
+    };
+    let error = vfsi_core::internal::collect_vec_result(
+        vfsi_sync::backend::helpers::remove_paths_impl_default(
+            &mut backend,
+            &[std::path::Path::new("/protected")],
+            true,
+        ),
+        1,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(error.index(), Some(0));
+    assert_eq!(
+        backend.removals, 0,
+        "failed metadata must never fall through to REMOVE"
+    );
+}
+
+#[test]
+fn removal_results_validate_shapes_and_preserve_siblings_in_one_dispatch() {
+    use vfsi_core::{
+        FailureState,
+        api::{RemoveMode, RemoveOptions},
+    };
+    for mode in [RemoveMode::Entry, RemoveMode::Tree, RemoveMode::Contents] {
+        for shape in 0..5 {
+            let backend = NamespaceProbe {
+                shape,
+                ..Default::default()
+            };
+            let calls = backend.calls.clone();
+            let fs = FsClient::new(backend);
+            assert!(
+                fs.vremove::<&str>(&[], mode, RemoveOptions::default())
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            let results = fs.vremove(&["/first", "/bad", "/last"], mode, RemoveOptions::default());
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            if shape == 4 {
+                assert_eq!(results.unwrap_err().kind(), std::io::ErrorKind::Unsupported);
+                continue;
+            }
+            let results = results.unwrap();
+            assert_eq!(results.len(), 3);
+            if shape != 2 {
+                assert!(results[0].is_ok());
+            }
+            if shape == 0 || shape == 3 {
+                assert!(results[2].is_ok());
+                let error = results[1].as_ref().unwrap_err();
+                assert_eq!(
+                    error.state(),
+                    if shape == 0 {
+                        FailureState::Failed
+                    } else {
+                        FailureState::Unknown
+                    }
+                );
+                assert_eq!(error.cause().index(), None);
+                assert_eq!(error.cause().path(), Some(std::path::Path::new("/bad")));
+                assert!(error.progress().is_none());
+            } else {
+                let start = usize::from(shape == 1);
+                assert!(
+                    results[start..]
+                        .iter()
+                        .all(|r| r.as_ref().unwrap_err().state() == FailureState::Unknown)
+                );
+            }
+        }
+        let backend = NamespaceProbe::default();
+        let calls = backend.calls.clone();
+        let fs = FsClient::new(backend);
+        let error = fs
+            .removes_all(&["/first", "/bad", "/last"], mode, RemoveOptions::default())
+            .unwrap_err();
+        assert_eq!(error.index(), Some(1));
+        assert_eq!(error.raw_code(), libc::EACCES as u32);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn removal_projects_each_path_once_before_backend_locking() {
+    use std::cell::Cell;
+    use vfsi_core::api::{RemoveMode, RemoveOptions};
+    struct CountedPath<'a> {
+        calls: &'a Cell<usize>,
+        client: &'a FsClient<NamespaceProbe>,
+        name: &'static str,
+    }
+    impl AsRef<std::path::Path> for CountedPath<'_> {
+        fn as_ref(&self) -> &std::path::Path {
+            self.calls.set(self.calls.get() + 1);
+            self.client.capabilities().unwrap();
+            std::path::Path::new(self.name)
+        }
+    }
+    let backend = NamespaceProbe::default();
+    let batches = backend.calls.clone();
+    let fs = FsClient::new(backend);
+    let calls = Cell::new(0);
+    let path = |name| CountedPath {
+        calls: &calls,
+        client: &fs,
+        name,
+    };
+    let paths = [path("/first"), path("/bad"), path("/last")];
+    let results = fs
+        .vremove(&paths, RemoveMode::Tree, RemoveOptions::default())
+        .unwrap();
+    assert!(results[0].is_ok() && results[2].is_ok());
+    assert!(results[1].is_err());
+    assert_eq!(calls.get(), 3);
+    assert_eq!(batches.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn directory_open_results_validate_owned_resources_and_preserve_known_siblings() {
+    use vfsi_sync::FailureState;
+    for shape in 0..7 {
+        let backend = DirectoryProbe {
+            open_shape: shape,
+            ..Default::default()
+        };
+        let opens = backend.opens.clone();
+        let closed = backend.closed.clone();
+        let fs = FsClient::new(backend);
+        assert!(fs.vopen_dirs::<&str>(&[]).unwrap().is_empty());
+        assert_eq!(opens.load(Ordering::SeqCst), 0);
+        let results = fs.vopen_dirs(&["/0", "/1", "/2"]);
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+        if shape == 4 {
+            assert_eq!(results.unwrap_err().kind(), std::io::ErrorKind::Unsupported);
+            assert!(closed.lock().unwrap().is_empty());
+            continue;
+        }
+        let results = results.unwrap();
+        assert_eq!(results.len(), 3);
+        match shape {
+            0 => assert!(results.iter().all(Result::is_ok)),
+            1 => {
+                assert!(results[0].is_ok());
+                assert!(
+                    results[1..]
+                        .iter()
+                        .all(|r| r.as_ref().unwrap_err().state() == FailureState::Unknown)
+                );
+            }
+            2 => assert!(
+                results
+                    .iter()
+                    .all(|r| r.as_ref().unwrap_err().state() == FailureState::Unknown)
+            ),
+            3 => {
+                assert!(results[0].is_ok() && results[2].is_ok());
+                let error = results[1].as_ref().unwrap_err();
+                assert_eq!(error.state(), FailureState::Unknown);
+                assert!(error.progress().is_none());
+                assert_eq!(error.cause().path(), Some(std::path::Path::new("/1")));
+            }
+            5 => {
+                assert_eq!(
+                    results[0].as_ref().unwrap_err().state(),
+                    FailureState::Unknown
+                );
+                assert!(results[1].is_ok());
+                assert_eq!(
+                    results[2].as_ref().unwrap_err().state(),
+                    FailureState::Unknown
+                );
+            }
+            6 => {
+                assert!(results[0].is_ok() && results[1].is_ok());
+                assert_eq!(
+                    results[2].as_ref().unwrap_err().state(),
+                    FailureState::Unknown
+                );
+            }
+            _ => unreachable!(),
+        }
+        drop(results);
+        fs.drain_cleanup().unwrap();
+        let mut closed = closed.lock().unwrap().clone();
+        closed.sort_unstable();
+        assert_eq!(
+            closed,
+            match shape {
+                0 => vec![0, 1, 2],
+                1 => vec![0],
+                2 => vec![0, 1, 2, 3],
+                3 => vec![0, 2],
+                5 | 6 => vec![0, 1],
+                _ => unreachable!(),
+            },
+            "every distinct valid owner closes exactly once: shape {shape}"
+        );
+        assert_eq!(opens.load(Ordering::SeqCst), 1, "no replay");
+    }
+
+    let backend = DirectoryProbe::default();
+    let opens = backend.opens.clone();
+    let closed = backend.closed.clone();
+    let fs = FsClient::new(backend);
+    let results = fs.vopen_dirs(&["/0", "/missing", "/2"]).unwrap();
+    assert!(results[0].is_ok() && results[2].is_ok());
+    let error = results[1].as_ref().unwrap_err();
+    assert_eq!(error.cause().index(), None);
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
+    drop(results);
+    fs.drain_cleanup().unwrap();
+    let mut actual = closed.lock().unwrap().clone();
+    actual.sort_unstable();
+    assert_eq!(actual, [0, 2]);
+    assert_eq!(opens.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn directory_open_projects_each_path_once_before_backend_locking() {
+    use std::cell::Cell;
+    struct CountedPath<'a> {
+        calls: &'a Cell<usize>,
+        client: &'a FsClient<DirectoryProbe>,
+        name: &'static str,
+    }
+    impl AsRef<std::path::Path> for CountedPath<'_> {
+        fn as_ref(&self) -> &std::path::Path {
+            self.calls.set(self.calls.get() + 1);
+            self.client.capabilities().unwrap();
+            std::path::Path::new(self.name)
+        }
+    }
+    let backend = DirectoryProbe::default();
+    let batches = backend.opens.clone();
+    let fs = FsClient::new(backend);
+    let calls = Cell::new(0);
+    let path = |name| CountedPath {
+        calls: &calls,
+        client: &fs,
+        name,
+    };
+    let paths = [path("/0"), path("/missing"), path("/2")];
+    let results = fs.vopen_dirs(&paths).unwrap();
+    assert!(results[0].is_ok() && results[2].is_ok());
+    assert!(results[1].is_err());
+    assert_eq!(calls.get(), 3);
+    assert_eq!(batches.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn stream_read_error_prefixes_are_delivered_once_without_replaying_siblings() {
+    for stop in [false, true] {
+        let client = FsClient::new(StreamBackend {
+            scalar: ScalarOnly {
+                data: b"abcde".to_vec(),
+                ..Default::default()
+            },
+            read_error: Some(VfError::transport(1, "lost read suffix")),
+            read_error_prefix: true,
+            ..Default::default()
+        });
+        let mut received = [Vec::new(), Vec::new(), Vec::new()];
+        let outcomes = client
+            .vstream(
+                &["/first", "/partial", "/last"],
+                vfsi_sync::StreamOptions::new()
+                    .with_chunk_size(std::num::NonZeroUsize::new(2).unwrap()),
+                |index, offset, bytes| {
+                    assert_eq!(offset, received[index].len() as u64);
+                    received[index].extend_from_slice(bytes);
+                    Ok(if stop && index == 1 {
+                        std::ops::ControlFlow::Break(())
+                    } else {
+                        std::ops::ControlFlow::Continue(())
+                    })
+                },
+            )
+            .unwrap();
+        assert_eq!(outcomes.len(), 3);
+        assert_eq!(
+            outcomes[0].as_ref().unwrap(),
+            &vfsi_sync::StreamCompletion::Complete
+        );
+        let error = outcomes[1].as_ref().unwrap_err();
+        assert_eq!(error.state(), vfsi_core::FailureState::Unknown);
+        assert!(error.cause().is_transport());
+        assert_eq!(error.cause().index(), None);
+        assert_eq!(
+            error.progress(),
+            Some(&vfsi_core::IoProgress::Stream { next_offset: 1 })
+        );
+        assert_eq!(received[0], b"abcde");
+        assert_eq!(received[1], b"a");
+        if stop {
+            assert_eq!(
+                outcomes[2].as_ref().unwrap(),
+                &vfsi_sync::StreamCompletion::Stopped { next_offset: 0 }
+            );
+            assert!(received[2].is_empty());
+        } else {
+            assert_eq!(
+                outcomes[2].as_ref().unwrap(),
+                &vfsi_sync::StreamCompletion::Complete
+            );
+            assert_eq!(received[2], b"abcde");
+        }
+        let backend = client.into_inner().unwrap();
+        assert_eq!(backend.scalar.close_calls, 3);
+        assert_eq!(
+            backend
+                .batches
+                .iter()
+                .filter(|(kind, _)| *kind == "open")
+                .count(),
+            1
+        );
+        assert_eq!(
+            backend
+                .batches
+                .iter()
+                .filter(|(kind, width)| *kind == "read" && *width == 3)
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn stream_budget_rejection_is_before_io_and_oversized_hints_stay_bounded() {
+    let client = FsClient::new(StreamBackend::default())
+        .with_limits(vfsi_sync::ResourceLimits::new().with_max_read_bytes(0));
+    assert!(
+        client
+            .vstream::<&str>(&[], vfsi_sync::StreamOptions::new(), |_, _, _| panic!(
+                "empty"
+            ))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        client
+            .vstream(&["/a"], vfsi_sync::StreamOptions::new(), |_, _, _| panic!(
+                "rejected before callbacks"
+            ))
+            .unwrap_err()
+            .raw_code(),
+        libc::EFBIG as u32
+    );
+    assert!(client.into_inner().unwrap().batches.is_empty());
+    let client = FsClient::new(StreamBackend {
+        scalar: ScalarOnly {
+            data: b"abcdef".to_vec(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .with_limits(vfsi_sync::ResourceLimits::new().with_max_read_bytes(2));
+    let mut received = Vec::new();
+    let result = client
+        .streams_all(
+            &["/a"],
+            vfsi_sync::StreamOptions::new(),
+            |_, offset, bytes| {
+                assert_eq!(offset, received.len() as u64);
+                assert!(bytes.len() <= 2);
+                received.extend_from_slice(bytes);
+                Ok(std::ops::ControlFlow::Continue(()))
+            },
+        )
+        .unwrap();
+    assert_eq!(result, [vfsi_sync::StreamCompletion::Complete]);
+    assert_eq!(received, b"abcdef");
+    let backend = client.into_inner().unwrap();
+    assert_eq!(backend.scalar.close_calls, 1);
+    assert_eq!(
+        backend.batches,
+        [
+            ("open", 1),
+            ("read", 1),
+            ("read", 1),
+            ("read", 1),
+            ("close", 1)
+        ]
+    );
+}
+
+#[test]
+fn standard_single_write_acknowledges_prefix_and_defers_original_error() {
+    use vfsi_sync::{FailureState, IoProgress, OpError};
+    for append in [false, true] {
+        for unknown in [false, true] {
+            let cause = VfError::errno(None, libc::EINTR as u32);
+            let progress = Some(IoProgress::Write { bytes_written: 2 });
+            let error = if unknown {
+                OpError::unknown(cause, progress)
+            } else {
+                OpError::failed(cause, progress)
+            };
+            let backend = WriteBoundaryProbe {
+                write_outcomes: Some(vec![Err(error)]),
+                ..Default::default()
+            };
+            let calls = backend.calls.clone();
+            let fs = FsClient::new(backend);
+            let file = fs
+                .open_options()
+                .write(true)
+                .append(append)
+                .open("/file")
+                .unwrap();
+            let mut io = fs.std_io(&file);
+            assert_eq!(io.write(b"data").unwrap(), 2);
+            let error = io.write(b"ta").unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::Other);
+            let original = error.get_ref().unwrap().downcast_ref::<OpError>().unwrap();
+            assert_eq!(
+                original.state(),
+                if unknown {
+                    FailureState::Unknown
+                } else {
+                    FailureState::Failed
+                }
+            );
+            assert_eq!(
+                original.progress(),
+                Some(&IoProgress::Write { bytes_written: 2 })
+            );
+            assert!(io.stream_position().is_err());
+            assert!(io.read(&mut [0; 1]).is_err());
+            assert!(io.write(b"ta").is_err());
+            assert_eq!(
+                calls.lock().unwrap().len(),
+                1,
+                "no suffix replay before reconciliation"
+            );
+            io.seek(SeekFrom::Start(19)).unwrap();
+            assert_eq!(io.stream_position().unwrap(), 19);
+            assert_eq!(
+                calls.lock().unwrap().len(),
+                1,
+                "explicit cursor recovery performs no write"
+            );
+        }
+    }
+}
+
+#[test]
+fn standard_full_prefix_write_reports_deferred_error_on_flush_read_or_seek() {
+    use vfsi_sync::{IoProgress, OpError};
+    for operation in 0..3 {
+        let backend = WriteBoundaryProbe {
+            write_outcomes: Some(vec![Err(OpError::unknown(
+                VfError::transport(None, "reply lost after acknowledged payload"),
+                Some(IoProgress::Write { bytes_written: 4 }),
+            ))]),
+            ..Default::default()
+        };
+        let calls = backend.calls.clone();
+        let fs = FsClient::new(backend);
+        let file = fs.open("/file").unwrap();
+        let mut io = fs.std_io(&file);
+        assert_eq!(io.write(b"data").unwrap(), 4);
+        let error = match operation {
+            0 => io.flush().unwrap_err(),
+            1 => io.read(&mut [0; 1]).unwrap_err(),
+            _ => io.seek(SeekFrom::Start(0)).unwrap_err(),
+        };
+        let original = error.get_ref().unwrap().downcast_ref::<OpError>().unwrap();
+        assert_eq!(
+            original.progress(),
+            Some(&IoProgress::Write { bytes_written: 4 })
+        );
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        assert!(io.stream_position().is_err());
+        io.seek(SeekFrom::Start(0)).unwrap();
+        assert_eq!(io.stream_position().unwrap(), 0);
+    }
+}
+
+#[test]
+fn standard_write_all_reports_failure_after_full_acknowledgement_without_retry() {
+    use vfsi_sync::{IoProgress, OpError};
+    let backend = WriteBoundaryProbe {
+        write_outcomes: Some(vec![Err(OpError::unknown(
+            VfError::transport(None, "reply lost after acknowledged payload"),
+            Some(IoProgress::Write { bytes_written: 4 }),
+        ))]),
+        ..Default::default()
+    };
+    let calls = backend.calls.clone();
+    let fs = FsClient::new(backend);
+    let file = fs.open("/file").unwrap();
+    let mut io = fs.std_io(&file);
+    let error = io.write_all(b"data").unwrap_err();
+    let original = error.get_ref().unwrap().downcast_ref::<OpError>().unwrap();
+    assert_eq!(
+        original.progress(),
+        Some(&IoProgress::Write { bytes_written: 4 })
+    );
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert!(io.stream_position().is_err());
+    io.write_all(b"").unwrap();
+    assert_eq!(calls.lock().unwrap().len(), 1);
 }

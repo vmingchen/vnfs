@@ -273,7 +273,7 @@ pub unsafe extern "C" fn vfsi_get_object_idv(
             } else {
                 backend.vgetattrs_impl(&mut attrs[start..end])
             };
-            if let Err(error) = result {
+            if let Err(error) = vfsi_sync::internal::collect_vec_result(result, end - start) {
                 fail_batch!(
                     results,
                     vfsi_result::from_error(error.map_index(|index| start + index)),

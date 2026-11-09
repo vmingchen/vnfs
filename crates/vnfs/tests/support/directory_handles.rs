@@ -2,8 +2,8 @@ use vnfs::files::{Vfsi, VfsiExt};
 
 pub fn check<C: Vfsi>(fs: &C, other: &C, namespace: &impl Vfsi, verify: &impl Vfsi) {
     use vnfs::directory::{DirHandle, RemoveOptions};
-    assert!(fs.vopen_dirs::<&str>(&[]).unwrap().is_empty());
-    fs.vremove_dir_contents(&[], RemoveOptions::default())
+    assert!(fs.open_dirs::<&str>(&[]).unwrap().is_empty());
+    fs.remove_contents_all(&[], RemoveOptions::default())
         .unwrap();
     namespace
         .vmkdir(&[
@@ -11,39 +11,66 @@ pub fn check<C: Vfsi>(fs: &C, other: &C, namespace: &impl Vfsi, verify: &impl Vf
             vnfs::directory::MkDirOp::new("/b", 0o755),
             vnfs::directory::MkDirOp::new("/outside", 0o755),
         ])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+        })
         .unwrap();
     namespace.write("/a/file", b"original").unwrap();
     namespace.write("/b/file", b"second").unwrap();
     namespace.write("/outside/keep", b"outside").unwrap();
     namespace.symlink("../outside", "/a/link").unwrap();
     namespace.symlink("/b", "/dir_link").unwrap();
-    assert!(fs.vopen_dirs(&["/dir_link"]).is_err());
-    let mut dirs = fs.vopen_dirs(&["/a", "/b"]).unwrap();
+    assert!(fs.open_dirs(&["/dir_link"]).is_err());
+    let outcomes = fs
+        .vopen_dirs(&["/a", "/missing", "/b", "/dir_link", "/a/file"])
+        .unwrap();
+    assert_eq!(outcomes.len(), 5);
+    assert!(outcomes[0].is_ok() && outcomes[2].is_ok());
+    for index in [1, 3, 4] {
+        let error = outcomes[index].as_ref().err().expect("failed input");
+        assert_eq!(error.cause().index(), None);
+        assert!(error.progress().is_none());
+    }
+    let mut dirs: Vec<_> = outcomes.into_iter().filter_map(Result::ok).collect();
     namespace.rename("/a", "/moved").unwrap();
     namespace.create_dir("/a").unwrap();
     namespace.write("/a/keep", b"replacement").unwrap();
     assert_eq!(dirs[0].path(), std::path::Path::new("/a"));
-    let foreign = other.vopen_dirs(&["/b"]).unwrap().remove(0);
+    let foreign = other.open_dirs(&["/b"]).unwrap().remove(0);
     for options in [
         RemoveOptions::default(),
         RemoveOptions::new().with_continue_on_error(true),
     ] {
-        let error = fs
+        namespace.write("/moved/file", b"original").unwrap();
+        let outcomes = fs
             .vremove_dir_contents(&[&dirs[0], &foreign], options)
-            .unwrap_err();
-        assert_eq!(error.index(), Some(1));
-        assert_eq!(verify.read("/moved/file").unwrap(), b"original");
+            .unwrap();
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes[0].is_ok());
+        assert_eq!(
+            outcomes[1].as_ref().unwrap_err().cause().raw_code(),
+            libc::EBADF as u32
+        );
+        assert!(verify.read_dir("/moved").unwrap().is_empty());
+        assert_eq!(verify.read("/a/keep").unwrap(), b"replacement");
     }
+    namespace.write("/moved/file", b"original").unwrap();
     dirs[1].try_close().unwrap();
     dirs[1].try_close().unwrap();
-    let error = fs
-        .vremove_dir_contents(&[&dirs[0], &dirs[1]], RemoveOptions::default())
-        .unwrap_err();
-    assert_eq!(error.index(), Some(1));
-    assert_eq!(error.raw_code(), libc::EBADF as u32);
-    assert_eq!(verify.read("/moved/file").unwrap(), b"original");
-    let second = fs.vopen_dirs(&["/b"]).unwrap().remove(0);
-    fs.vremove_dir_contents(
+    let outcomes = fs
+        .vremove_dir_contents(&[&dirs[1], &dirs[0]], RemoveOptions::default())
+        .unwrap();
+    assert_eq!(outcomes.len(), 2);
+    let error = outcomes[0].as_ref().unwrap_err();
+    assert_eq!(error.state(), vfsi_core::FailureState::NotAttempted);
+    assert_eq!(error.cause().raw_code(), libc::EBADF as u32);
+    assert!(outcomes[1].is_ok());
+    assert!(verify.read_dir("/moved").unwrap().is_empty());
+    // Successful borrowed owners stay live and can empty the renamed directory again.
+    namespace.write("/moved/again", b"second pass").unwrap();
+    let second = fs.open_dirs(&["/b"]).unwrap().remove(0);
+    fs.remove_contents_all(
         &[&dirs[0], &second],
         RemoveOptions::new().with_batch_size(std::num::NonZeroUsize::new(1)),
     )

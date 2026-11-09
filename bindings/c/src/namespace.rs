@@ -87,10 +87,7 @@ pub unsafe extern "C" fn vfsi_rename(
         let result: Result<(), VfError> = (|| {
             let old = vpath_for(fs, &old)?;
             let new = vpath_for(fs, &new)?;
-            lock_or_io(&fs.fs)?.vrename_impl(&[(
-                FileOperand::from_os_path(&old),
-                FileOperand::from_os_path(&new),
-            )])
+            lock_or_io(&fs.fs)?.rename_impl(&old, &new)
         })();
         match result {
             Ok(()) => 0,
@@ -137,9 +134,13 @@ pub unsafe extern "C" fn vfsi_copy(
             dst_offset,
             (!to_eof).then_some(length),
         );
-        match lock_or_io(&fs.fs)
-            .and_then(|mut backend| backend.vcopy_impl(&[pair], vfsi_sync::CopyOptions::new()))
-        {
+        match lock_or_io(&fs.fs).and_then(|mut backend| {
+            vfsi_sync::internal::collect_vec_result(
+                backend.vcopy_impl(&[pair], vfsi_sync::CopyOptions::new()),
+                1,
+            )
+            .map(|_| ())
+        }) {
             Ok(()) => 0,
             Err(error) => vf_code(&error),
         }
@@ -209,17 +210,7 @@ pub unsafe extern "C" fn vfsi_mkdirv(
             Ok(backend) => backend,
             Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
         };
-        match backend.vmkdir_impl(&dirs) {
-            Ok(()) => {
-                complete_results(results);
-                vfsi_result::success(count)
-            }
-            Err(error) => {
-                let failure = vfsi_result::from_error(error);
-                fail_results(results, failure, true);
-                failure
-            }
-        }
+        unit_results("mkdir", results, backend.vmkdir_impl(&dirs), |_| {})
     })
 }
 
@@ -277,17 +268,7 @@ pub unsafe extern "C" fn vfsi_removev(
             Ok(backend) => backend,
             Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
         };
-        match backend.vremove_impl(&files) {
-            Ok(()) => {
-                complete_results(results);
-                vfsi_result::success(count)
-            }
-            Err(error) => {
-                let failure = vfsi_result::from_error(error);
-                fail_results(results, failure, true);
-                failure
-            }
-        }
+        unit_results("remove", results, backend.vremove_impl(&files), |_| {})
     })
 }
 
@@ -356,17 +337,7 @@ pub unsafe extern "C" fn vfsi_renamev(
             Ok(backend) => backend,
             Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
         };
-        match backend.vrename_impl(&pairs) {
-            Ok(()) => {
-                complete_results(results);
-                vfsi_result::success(count)
-            }
-            Err(error) => {
-                let failure = vfsi_result::from_error(error);
-                fail_results(results, failure, true);
-                failure
-            }
-        }
+        unit_results("rename", results, backend.vrename_impl(&pairs), |_| {})
     })
 }
 
@@ -442,16 +413,11 @@ pub unsafe extern "C" fn vfsi_copyv(
             Ok(backend) => backend,
             Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
         };
-        match backend.vcopy_impl(&pairs, vfsi_sync::CopyOptions::new()) {
-            Ok(()) => {
-                complete_results(results);
-                vfsi_result::success(count)
-            }
-            Err(error) => {
-                let failure = vfsi_result::from_error(error);
-                fail_results(results, failure, true);
-                failure
-            }
-        }
+        unit_results(
+            "copy",
+            results,
+            backend.vcopy_impl(&pairs, vfsi_sync::CopyOptions::new()),
+            |_| {},
+        )
     })
 }

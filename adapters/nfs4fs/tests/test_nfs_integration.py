@@ -103,21 +103,29 @@ def test_round_trip_bounds(nfs_fs):
         fs.mkdir(f"nfs4:///tree/sub{i}", create_parents=True)
     paths = [_unique(nfs_fs, f"rt/{i}.txt") for i in range(n)]
 
-    # pipe: one merged write compound with in-compound truncation.
+    # OPEN-adjacent GETFH retains cleanup identity even if WRITE/CLOSE fails.
+    # Twenty files need >100 wire operations (five per file plus path/SEQUENCE),
+    # so the managed server cannot execute them in one wave. Its adaptive
+    # backoff may use three successful waves plus a pre-mutation limit rejection.
     _, pipe_count = _measured(
         fs, lambda: fs.pipe({p: f"data-{i}".encode() for i, p in enumerate(paths)})
     )
-    assert pipe_count == 1, pipe_count
+    assert pipe_count <= 4, pipe_count
+    # A warmed adaptive window still batches independently of file count.
+    _, warm_pipe_count = _measured(
+        fs, lambda: fs.pipe({p: f"data-{i}".encode() for i, p in enumerate(paths)})
+    )
+    assert warm_pipe_count <= 3, warm_pipe_count
 
     # cat: one metadata compound to enforce the aggregate byte cap, followed
-    # by one merged read_allv compound.
+    # by at most two identity-retaining merged READ waves.
     out, cat_count = _measured(fs, lambda: fs.cat(paths))
     assert len(out) == n
-    assert cat_count == 2, cat_count
+    assert cat_count <= 3, cat_count
 
-    # cat_ranges: one merged read compound (no stat).
+    # cat_ranges: at most two merged READ waves, without a stat.
     _, ranges_count = _measured(fs, lambda: fs.cat_ranges(paths, [0] * n, [6] * n))
-    assert ranges_count == 1, ranges_count
+    assert ranges_count <= 2, ranges_count
 
     # OpenFiles: one merged openv compound on enter, one closev on exit.
     open_files = fsspec.open_files(
@@ -150,14 +158,15 @@ def test_round_trip_bounds(nfs_fs):
     _, mv_count = _measured(fs, lambda: fs.mv(srcs, dsts))
     assert mv_count == 1, mv_count
 
-    # cp: one batched source-type safety probe, then the six-compound native
-    # read/write + bounded destination-parent listing path. The probe rejects
-    # FIFOs before COPY can block; neither phase may add per-file round trips.
+    # cp: one batched source-type safety probe plus native read/write and
+    # bounded destination-parent listing. Retained GETFH identity adds one
+    # read wave and up to three cold write/discovery RPCs over the old seven-
+    # RPC path; none of these phases may fall back to a per-file RPC loop.
     _, cp_count = _measured(
         fs,
         lambda: fs.cp(dsts, [_unique(nfs_fs, f"cp/{i}.txt") for i in range(n)]),
     )
-    assert cp_count <= 7, cp_count
+    assert cp_count <= 11, cp_count
 
     # Walk batches the 30-node tree: root resolution/type and READDIR/EOF (4),
     # then parent resolution/type, sibling LOOKUPs, and sibling READDIR (4).
@@ -199,9 +208,29 @@ def test_round_trips_do_not_scale_with_file_count(nfs_fs):
         return pipe_c, cat_c, rm_c
 
     small = counts(5)
+    cold_large = counts(20)
     large = counts(20)
-    for small_c, large_c in zip(small, large):
+    # Separate bounded, pre-mutation limit discovery from steady-state work.
+    # GETFH crosses the server's op ceiling for 20 writes. Conservative
+    # adaptive growth can need three write waves; five writes still need one.
+    for cold_c, large_c in zip(cold_large, large):
+        assert cold_c <= large_c + 2, (cold_large, large)
+    assert small[0] == 1, small
+    assert large[0] <= small[0] + 2, (small, large)
+    for small_c, large_c in zip(small[1:], large[1:]):
         assert large_c <= small_c + 1, (small, large)
+
+
+def test_small_identity_retaining_write_batch_still_uses_one_compound(nfs_fs):
+    """Cleanup identity must not turn a fitting cohort into singleton writes."""
+    fs = nfs_fs
+    fs.mkdir("/one-wave", create_parents=True)
+    payloads = {
+        f"/one-wave/{index}.txt": f"value-{index}".encode() for index in range(16)
+    }
+    _, count = _measured(fs, lambda: fs.pipe(payloads))
+    assert count == 1, count
+    assert fs.cat(list(payloads)) == payloads
 
 
 def test_large_write_batch_shrinks_after_resource_rejection(nfs_fs):

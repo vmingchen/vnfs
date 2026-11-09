@@ -4,7 +4,7 @@ use vnfs::files::{OpenFlags, OpenOp, Vfsi, VfsiExt, WriteOp};
 
 fn writes<C: Vfsi>(fs: &C) {
     let files = fs
-        .vopen(&[
+        .open_batch(&[
             OpenOp::new("/a", OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE),
             OpenOp::new("/b", OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE),
         ])
@@ -15,7 +15,7 @@ fn writes<C: Vfsi>(fs: &C) {
     assert_eq!(op.data().as_ptr(), payload.as_ptr());
     assert_eq!(op.offset(), 3);
     let results = fs
-        .vwrite(&[op, WriteOp::at(&files[1], 0, b"abc")], Default::default())
+        .write_batch(&[op, WriteOp::at(&files[1], 0, b"abc")], Default::default())
         .unwrap();
     assert_eq!(
         results
@@ -28,7 +28,7 @@ fn writes<C: Vfsi>(fs: &C) {
         std::io::Seek::stream_position(&mut fs.std_io(&files[0])).unwrap(),
         0
     );
-    fs.vwrite(
+    fs.write_batch(
         &[
             WriteOp::at(&files[1], 0, b"first"),
             WriteOp::at(&files[1], 2, b"XX"),
@@ -37,7 +37,7 @@ fn writes<C: Vfsi>(fs: &C) {
     )
     .unwrap();
     assert_eq!(fs.read_files(&["/b"]).unwrap(), [b"fiXXt".to_vec()]);
-    fs.vwrite(
+    fs.write_batch(
         &[WriteOp::at(&files[0], 0, b"")],
         vnfs::files::WriteOptions::new().with_write_all(true),
     )
@@ -58,19 +58,19 @@ fn portable_writes_on_mounted_and_auto() {
 }
 
 #[test]
-fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
+fn strict_complete_writes_preserve_healthy_effects_around_rejected_inputs() {
     let root = tempfile::tempdir().unwrap();
     let fs = vnfs::posix::Posix::new(root.path()).unwrap();
     let other = vnfs::posix::Posix::new(root.path()).unwrap();
     let file = fs.create("/a").unwrap();
-    fs.vwrite(
+    fs.write_batch(
         &[WriteOp::at(&file, 0, b"keep")],
         vnfs::files::WriteOptions::new().with_write_all(true),
     )
     .unwrap();
     let foreign = other.create("/b").unwrap();
     let error = fs
-        .vwrite(
+        .write_batch(
             &[
                 WriteOp::at(&file, 0, b"bad!"),
                 WriteOp::at(&foreign, 0, b""),
@@ -80,7 +80,7 @@ fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     let error = fs
-        .vwrite(
+        .write_batch(
             &[
                 WriteOp::at(&file, 0, b"bad!"),
                 WriteOp::at(&file, u64::MAX, b"xx"),
@@ -89,14 +89,14 @@ fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
         )
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(fs.read_files(&["/a"]).unwrap(), [b"keep".to_vec()]);
+    assert_eq!(fs.read_files(&["/a"]).unwrap(), [b"bad!".to_vec()]);
     assert_eq!(error.operation(), Some("vwrite_native"));
     assert_eq!(error.path(), Some(std::path::Path::new("/a")));
     assert_eq!(error.raw_code(), libc::EOVERFLOW as u32);
     let mut closed = fs.create("/closed").unwrap();
     closed.try_close().unwrap();
     assert_eq!(
-        fs.vwrite(
+        fs.write_batch(
             &[WriteOp::at(&file, 0, b"bad!"), WriteOp::at(&closed, 0, b"")],
             vnfs::files::WriteOptions::new().with_write_all(true)
         )
@@ -104,7 +104,7 @@ fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
         .index(),
         Some(1)
     );
-    assert_eq!(fs.read_files(&["/a"]).unwrap(), [b"keep".to_vec()]);
+    assert_eq!(fs.read_files(&["/a"]).unwrap(), [b"bad!".to_vec()]);
 }
 
 fn attrs_query<C: Vfsi>(fs: &C) {
@@ -127,11 +127,11 @@ fn attrs_query<C: Vfsi>(fs: &C) {
     assert!(scalar.file_id().is_some());
     assert_eq!(scalar.len(), None);
     let follow = fs
-        .vgetattrs(&["/link", "/a"], vnfs::directory::AttrsOptions::new())
+        .getattrs_all(&["/link", "/a"], vnfs::directory::AttrsOptions::new())
         .unwrap();
     assert!(follow.iter().all(|m| m.is_file() && m.len() == Some(3)));
     let links = fs
-        .vgetattrs(
+        .getattrs_all(
             &["/a", "/link", "/dangling"],
             AttrsOptions::new().with_follow_final_symlink(false),
         )
@@ -143,7 +143,7 @@ fn attrs_query<C: Vfsi>(fs: &C) {
     assert!(fs.symlink_attrs("/link").unwrap().is_symlink());
     assert!(fs.attrs("/dangling").is_err());
     let partial = fs
-        .vgetattrs(&["/a"], AttrsOptions::new().with_fields(Attributes::FILEID))
+        .getattrs_all(&["/a"], AttrsOptions::new().with_fields(Attributes::FILEID))
         .unwrap();
     assert!(partial[0].file_id().is_some());
     assert_eq!(
@@ -152,19 +152,19 @@ fn attrs_query<C: Vfsi>(fs: &C) {
         "unrequested size must remain absent/default"
     );
     assert_eq!(
-        fs.vgetattrs(&["/a", "/missing"], vnfs::directory::AttrsOptions::new())
+        fs.getattrs_all(&["/a", "/missing"], vnfs::directory::AttrsOptions::new())
             .unwrap_err()
             .index(),
         Some(1)
     );
     assert_eq!(
-        fs.vgetattrs(&["/a", "/dangling"], vnfs::directory::AttrsOptions::new())
+        fs.getattrs_all(&["/a", "/dangling"], vnfs::directory::AttrsOptions::new())
             .unwrap_err()
             .index(),
         Some(1)
     );
     assert!(
-        fs.vgetattrs::<&str>(&[], AttrsOptions::default())
+        fs.getattrs_all::<&str>(&[], AttrsOptions::default())
             .unwrap()
             .is_empty()
     );
@@ -220,7 +220,7 @@ fn stable_targets<C: Vfsi>(fs: &C, other: &C) {
     use vnfs::directory::SetAttrsOp;
     use vnfs::files::{FileHandle, Target};
     let file = fs.create("/original").unwrap();
-    fs.vwrite(&[WriteOp::at(&file, 0, b"original")], Default::default())
+    fs.write_batch(&[WriteOp::at(&file, 0, b"original")], Default::default())
         .unwrap();
     let foreign = other.create("/foreign").unwrap();
     let targets = [ChangingTarget::new(
@@ -228,19 +228,19 @@ fn stable_targets<C: Vfsi>(fs: &C, other: &C) {
         Target::File(&foreign),
     )];
     assert_eq!(
-        fs.vgetattrs(&targets, AttrsOptions::new()).unwrap()[0].len(),
+        fs.getattrs_all(&targets, AttrsOptions::new()).unwrap()[0].len(),
         Some(8)
     );
     assert_eq!(targets[0].calls.get(), 1);
     targets[0].calls.set(0);
-    assert_eq!(fs.vstatfs(&targets).unwrap().len(), 1);
+    assert_eq!(fs.statfs_all(&targets).unwrap().len(), 1);
     assert_eq!(targets[0].calls.get(), 1);
     let updates = [SetAttrsOp::new(ChangingTarget::new(
         Target::File(&file),
         Target::File(&foreign),
     ))
     .len(2)];
-    fs.vsetattrs(&updates).unwrap();
+    fs.setattrs_all(&updates).unwrap();
     assert_eq!(updates[0].target().calls.get(), 1);
     assert_eq!(fs.attrs("/original").unwrap().len(), Some(2));
     assert_eq!(other.attrs("/foreign").unwrap().len(), Some(0));
@@ -251,11 +251,11 @@ fn stable_targets<C: Vfsi>(fs: &C, other: &C) {
         Target::Path(missing),
         Target::File(&file),
     )];
-    let error = fs.vgetattrs(&targets, AttrsOptions::new()).unwrap_err();
+    let error = fs.getattrs_all(&targets, AttrsOptions::new()).unwrap_err();
     assert_eq!(error.path(), Some(missing));
     assert_eq!(targets[0].calls.get(), 1);
     targets[0].calls.set(0);
-    let error = fs.vstatfs(&targets).unwrap_err();
+    let error = fs.statfs_all(&targets).unwrap_err();
     assert_eq!(error.path(), Some(missing));
     assert_eq!(targets[0].calls.get(), 1);
     let updates = [SetAttrsOp::new(ChangingTarget::new(
@@ -263,7 +263,7 @@ fn stable_targets<C: Vfsi>(fs: &C, other: &C) {
         Target::File(&file),
     ))
     .len(0)];
-    let error = fs.vsetattrs(&updates).unwrap_err();
+    let error = fs.setattrs_all(&updates).unwrap_err();
     assert_eq!(error.path(), Some(missing));
     assert_eq!(updates[0].target().calls.get(), 1);
     assert_eq!(fs.attrs("/original").unwrap().len(), Some(2));
@@ -295,12 +295,12 @@ fn path_contents_removal_works_without_retained_directory_handles() {
         use vnfs::directory::RemoveOptions;
         fs.create_dir("/dir").unwrap();
         fs.write("/dir/keep", b"keep").unwrap();
-        assert!(fs.vopen_dirs::<&str>(&[]).unwrap().is_empty());
+        assert!(fs.open_dirs::<&str>(&[]).unwrap().is_empty());
         assert_eq!(
-            fs.vopen_dirs(&["/dir"]).err().unwrap().kind(),
+            fs.open_dirs(&["/dir"]).err().unwrap().kind(),
             vnfs::error::ErrorKind::Unsupported
         );
-        fs.vremove_dir_contents(&[], Default::default()).unwrap();
+        fs.remove_contents_all(&[], Default::default()).unwrap();
         assert_eq!(fs.read("/dir/keep").unwrap(), b"keep");
 
         fs.create_dir_all("/dir/sub").unwrap();
@@ -340,6 +340,96 @@ fn path_contents_removal_works_without_retained_directory_handles() {
             check(&vnfs::mounted::Auto::new(root.path()).unwrap());
         } else {
             check(&vnfs::posix::Posix::new(root.path()).unwrap());
+        }
+    }
+}
+
+#[path = "support/metadata_results.rs"]
+mod metadata_results;
+
+#[test]
+fn metadata_outcomes_on_posix_and_mounted_routing() {
+    for auto in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("metadata")).unwrap();
+        if auto {
+            metadata_results::check(
+                &vnfs::mounted::Auto::new(root.path()).unwrap(),
+                &vnfs::mounted::Auto::new(root.path()).unwrap(),
+                "/metadata",
+            );
+        } else {
+            metadata_results::check(
+                &vnfs::posix::Posix::new(root.path()).unwrap(),
+                &vnfs::posix::Posix::new(root.path()).unwrap(),
+                "/metadata",
+            );
+        }
+    }
+}
+
+#[path = "support/read_results.rs"]
+mod read_results;
+
+#[test]
+fn mixed_read_outcomes_on_posix_and_mounted_routing() {
+    for auto in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("reads")).unwrap();
+        if auto {
+            read_results::check(
+                &vnfs::mounted::Auto::new(root.path()).unwrap(),
+                &vnfs::mounted::Auto::new(root.path()).unwrap(),
+                "/reads",
+            );
+        } else {
+            read_results::check(
+                &vnfs::posix::Posix::new(root.path()).unwrap(),
+                &vnfs::posix::Posix::new(root.path()).unwrap(),
+                "/reads",
+            );
+        }
+    }
+}
+
+#[test]
+fn sync_outcomes_on_posix_and_mounted_routing() {
+    for auto in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("syncs")).unwrap();
+        if auto {
+            vfsi_sync::test_support::public_sync_outcomes(
+                &vnfs::mounted::Auto::new(root.path()).unwrap(),
+                &vnfs::mounted::Auto::new(root.path()).unwrap(),
+                "/syncs",
+            );
+        } else {
+            vfsi_sync::test_support::public_sync_outcomes(
+                &vnfs::posix::Posix::new(root.path()).unwrap(),
+                &vnfs::posix::Posix::new(root.path()).unwrap(),
+                "/syncs",
+            );
+        }
+    }
+}
+
+#[test]
+fn close_outcomes_on_posix_and_mounted_routing() {
+    for auto in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("closes")).unwrap();
+        if auto {
+            vfsi_sync::test_support::public_close_outcomes(
+                &vnfs::mounted::Auto::new(root.path()).unwrap(),
+                &vnfs::mounted::Auto::new(root.path()).unwrap(),
+                "/closes",
+            );
+        } else {
+            vfsi_sync::test_support::public_close_outcomes(
+                &vnfs::posix::Posix::new(root.path()).unwrap(),
+                &vnfs::posix::Posix::new(root.path()).unwrap(),
+                "/closes",
+            );
         }
     }
 }

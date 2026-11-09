@@ -73,6 +73,190 @@ mod tests {
     }
 
     #[test]
+    fn page_results_keep_valid_siblings_and_retained_directory_identity() {
+        let (root, mut backend) = fs("page-results");
+        for name in ["first", "last"] {
+            std::fs::create_dir(root.0.join(name)).unwrap();
+            for index in 0..3 {
+                std::fs::write(root.0.join(name).join(format!("f{index}")), b"data").unwrap();
+            }
+        }
+        let dirs = [
+            Path::new("/first"),
+            Path::new("/missing"),
+            Path::new("/last"),
+        ];
+        let pages = backend
+            .vlistdir_pages_impl(&dirs, AttrMask::MODE, vec![None, None, None], 1, 10, true)
+            .unwrap();
+        assert_eq!(pages.len(), 3);
+        let mut pages = pages.into_iter();
+        let (_, first, _) = pages.next().unwrap().unwrap();
+        let error = pages.next().unwrap().err().expect("missing page");
+        assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(error.cause().index(), None);
+        let (_, last, _) = pages.next().unwrap().unwrap();
+        std::fs::rename(root.0.join("first"), root.0.join("moved")).unwrap();
+        std::fs::create_dir(root.0.join("first")).unwrap();
+        std::fs::write(root.0.join("first/keep"), b"replacement").unwrap();
+        let pages = backend
+            .vlistdir_pages_impl(
+                &dirs,
+                AttrMask::MODE,
+                vec![first, Some(DirPageCursor::new(())), last],
+                1,
+                10,
+                false,
+            )
+            .unwrap();
+        assert_eq!(pages.len(), 3);
+        for index in [0, 2] {
+            let (entries, _, _) = pages[index].as_ref().unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_ne!(entries[0].file.path().unwrap().file_name().unwrap(), "keep");
+        }
+        assert_eq!(
+            pages[1]
+                .as_ref()
+                .err()
+                .expect("invalid cursor")
+                .cause()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            std::fs::read(root.0.join("first/keep")).unwrap(),
+            b"replacement"
+        );
+        let calls = backend.directory_page_sizes.len();
+        assert!(
+            backend
+                .vlistdir_pages_impl(&[], AttrMask::MODE, vec![], 1, 0, false)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            backend
+                .vlistdir_pages_impl(&dirs, AttrMask::MODE, vec![None, None, None], 0, 10, true)
+                .is_err()
+        );
+        assert_eq!(
+            backend.directory_page_sizes.len(),
+            calls,
+            "preflight and empty calls do no directory I/O"
+        );
+    }
+
+    #[test]
+    fn metadata_outcomes_keep_siblings_after_missing_paths_and_bad_handles() {
+        let (root, mut backend) = fs("metadata-outcomes");
+        std::fs::write(root.0.join("one"), b"one").unwrap();
+        std::fs::write(root.0.join("two"), b"second").unwrap();
+        for follow in [true, false] {
+            let mut attrs: Vec<_> = [
+                FileOperand::from_os_path(Path::new("/one")),
+                FileOperand::from_os_path(Path::new("/missing")),
+                FileOperand::Fd(-1),
+                FileOperand::from_os_path(Path::new("/two")),
+            ]
+            .into_iter()
+            .map(|file| VfAttrs {
+                file,
+                masks: AttrMask::MODE | AttrMask::SIZE,
+                ..Default::default()
+            })
+            .collect();
+            let outcomes: Vec<_> = backend.getattr_results(&mut attrs, follow).collect();
+            assert_eq!(outcomes.len(), 4);
+            assert!(outcomes[0].is_ok());
+            assert!(outcomes[3].is_ok());
+            assert_eq!(attrs[0].size, 3);
+            assert_eq!(attrs[3].size, 6);
+            for (i, errno) in [(1, libc::ENOENT), (2, libc::EBADF)] {
+                let error = outcomes[i].as_ref().unwrap_err();
+                assert_eq!(error.state(), FailureState::Failed);
+                assert_eq!(error.cause().index(), None);
+                assert_eq!(error.cause().raw_code(), errno as u32);
+            }
+        }
+    }
+
+    #[test]
+    fn metadata_outcomes_preserve_final_symlink_policy() {
+        let (root, mut backend) = fs("metadata-outcomes-links");
+        std::fs::write(root.0.join("file"), b"hello").unwrap();
+        std::os::unix::fs::symlink("missing", root.0.join("link")).unwrap();
+        for follow in [true, false] {
+            let mut attrs = [VfAttrs {
+                file: FileOperand::from_os_path(Path::new("/link")),
+                masks: AttrMask::MODE,
+                ..Default::default()
+            }];
+            let results: Vec<_> = backend.getattr_results(&mut attrs, follow).collect();
+            assert_eq!(results[0].is_err(), follow);
+        }
+    }
+
+    #[test]
+    fn statfs_outcomes_keep_successes_after_multiple_failures() {
+        let (_root, backend) = fs("statfs-outcomes");
+        let files = [
+            FileOperand::from_os_path(Path::new("/")),
+            FileOperand::from_os_path(Path::new("/missing")),
+            FileOperand::Fd(-1),
+            FileOperand::from_os_path(Path::new("/")),
+        ];
+        let outcomes: Vec<_> = backend.statfs_results(&files).collect();
+        assert_eq!(outcomes.len(), files.len());
+        assert!(outcomes[0].is_ok());
+        assert!(outcomes[3].is_ok());
+        assert_eq!(
+            outcomes[1].as_ref().unwrap_err().cause().raw_code(),
+            libc::ENOENT as u32
+        );
+        assert_eq!(
+            outcomes[2].as_ref().unwrap_err().cause().raw_code(),
+            libc::EBADF as u32
+        );
+        assert!(backend.statfs_results(&[]).next().is_none());
+        let mut backend = backend;
+        assert!(backend.getattr_results(&mut [], true).next().is_none());
+    }
+
+    #[test]
+    fn metadata_all_success_collection_still_attributes_the_first_failure() {
+        let (root, mut backend) = fs("metadata-legacy-outcomes");
+        std::fs::write(root.0.join("file"), b"content").unwrap();
+        let mut attrs: Vec<_> = ["/file", "/missing", "/file"]
+            .into_iter()
+            .map(|path| VfAttrs {
+                file: FileOperand::from_os_path(Path::new(path)),
+                masks: AttrMask::SIZE,
+                ..Default::default()
+            })
+            .collect();
+        let requested = attrs.len();
+        let error =
+            vfsi_core::internal::collect_vec_result(backend.vgetattrs_impl(&mut attrs), requested)
+                .unwrap_err();
+        assert_eq!(error.index(), Some(1));
+        assert_eq!(attrs[0].size, 7);
+        assert!(attrs[2].returned.contains(AttrMask::SIZE));
+        let files = [
+            FileOperand::from_os_path(Path::new("/missing")),
+            FileOperand::Fd(-1),
+        ];
+        assert_eq!(
+            backend.vstatfs_impl(&files).unwrap()[0]
+                .as_ref()
+                .unwrap_err()
+                .cause()
+                .index(),
+            None
+        );
+    }
+
+    #[test]
     fn file_review_ensure_dir_rejects_existing_non_directories() {
         let (root, mut backend) = fs("ensure-dir-types");
         std::fs::write(root.0.join("file"), b"preserved").unwrap();
@@ -112,14 +296,14 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn file_review_exchange_self_still_checks_existence_and_stops_the_batch() {
+    fn file_review_exchange_self_still_checks_existence_and_preserves_later_exchange() {
         let (root, backend) = fs("exchange-self-missing");
         let client = FsClient::new(backend);
         std::fs::write(root.0.join("existing"), b"first").unwrap();
         std::fs::write(root.0.join("left"), b"left").unwrap();
         std::fs::write(root.0.join("right"), b"right").unwrap();
         let error = client
-            .vrename(
+            .renames_all(
                 &[
                     ("/existing", "/existing"),
                     ("/missing", "/missing"),
@@ -131,8 +315,8 @@ mod tests {
         assert_eq!(error.index(), Some(1));
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
         assert_eq!(std::fs::read(root.0.join("existing")).unwrap(), b"first");
-        assert_eq!(std::fs::read(root.0.join("left")).unwrap(), b"left");
-        assert_eq!(std::fs::read(root.0.join("right")).unwrap(), b"right");
+        assert_eq!(std::fs::read(root.0.join("left")).unwrap(), b"right");
+        assert_eq!(std::fs::read(root.0.join("right")).unwrap(), b"left");
     }
 
     #[cfg(feature = "test-faults")]
@@ -155,7 +339,7 @@ mod tests {
         let client = FsClient::new(backend);
         for follow in [true, false] {
             let error = client
-                .vsetattrs(&[
+                .setattrs_all(&[
                     vfsi_core::SetAttrsOp::new("/fifo")
                         .len(0)
                         .with_follow_final_symlink(follow),
@@ -171,7 +355,7 @@ mod tests {
                     .file_type()
                     .is_fifo()
             );
-            assert_eq!(std::fs::read(root.0.join("later")).unwrap(), b"unchanged");
+            assert_eq!(std::fs::read(root.0.join("later")).unwrap(), b"");
         }
     }
 
@@ -238,7 +422,7 @@ mod tests {
         std::fs::write(root.0.join("file"), b"replacement").unwrap();
         let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_001);
         client
-            .vsetattrs(&[vfsi_core::SetAttrsOp::new(vfsi_core::Target::File(&file))
+            .setattrs_all(&[vfsi_core::SetAttrsOp::new(vfsi_core::Target::File(&file))
                 .len(3)
                 .permissions(Permissions::from_mode(0o640))
                 .modified(modified)
@@ -354,6 +538,10 @@ mod tests {
             data.to_vec(),
         )
         .with_creation()]))
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .expect("write");
     }
 
@@ -375,7 +563,7 @@ mod tests {
         fn read_owned(
             &mut self,
             operations: Vec<crate::io::OwnedRead>,
-        ) -> Vec<std::io::Result<Vec<u8>>> {
+        ) -> Vec<vfsi_core::OpResult<Vec<u8>>> {
             let results = crate::io::read_owned_via_borrowed(self, operations);
             if let Some(pointer) = &self.owned_pointer {
                 for data in results
@@ -396,7 +584,10 @@ mod tests {
         fn path_read_batch_size(&self) -> Option<std::num::NonZeroUsize> {
             std::num::NonZeroUsize::new(2)
         }
-        fn read(&mut self, operations: &mut [crate::io::Read<'_>]) -> Vec<std::io::Result<usize>> {
+        fn read(
+            &mut self,
+            operations: &mut [crate::io::Read<'_>],
+        ) -> Vec<vfsi_core::OpResult<usize>> {
             use std::os::unix::fs::FileExt;
             let mut calls = self.calls.lock().unwrap();
             let call = calls.len();
@@ -420,16 +611,21 @@ mod tests {
                     let length = op.buffer.len().min(self.max_read);
                     op.file.read_at(&mut op.buffer[..length], op.offset)
                 })
+                .map(|result| {
+                    result.map_err(|error| {
+                        vfsi_core::OpError::failed(VfError::from_io(None, error), None)
+                    })
+                })
                 .collect()
         }
-        fn write(&mut self, _: &[crate::io::Write<'_>]) -> Vec<std::io::Result<usize>> {
+        fn write(&mut self, _: &[crate::io::Write<'_>]) -> Vec<vfsi_core::OpResult<usize>> {
             unreachable!()
         }
         fn sync(
             &mut self,
             _: &[&std::sync::Arc<std::fs::File>],
             _: bool,
-        ) -> Vec<std::io::Result<usize>> {
+        ) -> Vec<vfsi_core::OpResult<()>> {
             unreachable!()
         }
     }
@@ -480,14 +676,22 @@ mod tests {
             } else {
                 ReadAllOptions::new()
             };
-            let result = fs.vread_all_with_options_impl(
-                &[
-                    FileOperand::from_path("/a"),
-                    FileOperand::from_path("/b"),
-                    FileOperand::from_path("/c"),
-                ],
-                options,
-            );
+            let outcomes = fs
+                .vread_all_with_options_impl(
+                    &[
+                        FileOperand::from_path("/a"),
+                        FileOperand::from_path("/b"),
+                        FileOperand::from_path("/c"),
+                    ],
+                    options,
+                )
+                .unwrap();
+            if scenario == "open-error" {
+                assert_eq!(outcomes[0].as_ref().unwrap(), b"abc");
+                assert_eq!(outcomes[2].as_ref().unwrap(), b"ghi");
+                assert!(outcomes[1].is_err());
+            }
+            let result = vfsi_sync::internal::collect_vec_result(Ok(outcomes), 3);
             match scenario {
                 "success" | "replace" => assert_eq!(
                     result.unwrap(),
@@ -529,9 +733,10 @@ mod tests {
             assert_eq!(fs.seek_raw_impl(&retained, 0, SeekFrom::Cur).unwrap(), 0);
             fs.close_impl(&retained).unwrap();
             let calls = calls.lock().unwrap();
-            if scenario != "open-error" {
-                assert!(!calls.is_empty(), "path reads bypassed the executor");
-            }
+            assert!(
+                !calls.is_empty(),
+                "valid siblings must still use the executor"
+            );
             assert!(calls.iter().all(|wave| wave.len() <= 2));
             assert!(calls.iter().flatten().all(|file| file.upgrade().is_none()));
             if scenario == "success" {
@@ -540,8 +745,8 @@ mod tests {
             if scenario == "read-error" {
                 assert_eq!(
                     calls.len(),
-                    1,
-                    "never replay failures or start the next cohort"
+                    2,
+                    "execute each independent cohort once without replay"
                 );
             }
         }
@@ -580,6 +785,10 @@ mod tests {
                         ReadAllOptions::new()
                     },
                 )
+                .and_then(|outcomes| {
+                    let count = outcomes.len();
+                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                })
                 .unwrap();
             assert_eq!(results.len(), 1);
             let data = results.pop().unwrap();
@@ -621,7 +830,12 @@ mod tests {
         // typed offset it is an absolute offset: the platform may reject it
         // (pread beyond i64::MAX) or return an empty read, but never data
         // from the current position.
-        match fs.vread_impl(&[ReadOp::new(fd.clone(), VfOffset::At(u64::MAX - 1), 8)]) {
+        match fs
+            .vread_impl(&[ReadOp::new(fd.clone(), VfOffset::At(u64::MAX - 1), 8)])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            }) {
             Err(e) => assert!([ERR_INVAL, libc::EOVERFLOW as u32].contains(&e.raw_code())),
             Ok(r) => {
                 assert!(r[0].data.is_empty());
@@ -644,6 +858,10 @@ mod tests {
                 VfOffset::Cur,
                 b"XY".to_vec(),
             )]))
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         assert_eq!(w[0].offset, 11); // resolved current position
         let w = fs
@@ -652,11 +870,19 @@ mod tests {
                 VfOffset::Cur,
                 b"Z".to_vec(),
             )]))
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         assert_eq!(w[0].offset, 13);
 
         let r = fs
             .vread_impl(&[ReadOp::new(fd.clone(), VfOffset::Cur, 100)])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         assert_eq!(r[0].offset, 14); // resolved, not the Cur sentinel
         assert!(r[0].data.is_empty());
@@ -670,7 +896,13 @@ mod tests {
         let file = FileOperand::from_path("/f");
         let write: WriteOp<&FileOperand, &[u8]> =
             WriteOp::new(&file, VfOffset::At(0), &b"hello"[..]).with_creation();
-        let written = fs.vwrite_impl(&[write]).unwrap();
+        let written = fs
+            .vwrite_impl(&[write])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
+            .unwrap();
         assert_eq!(written[0].bytes_written, 5);
         assert!(!written[0].stable, "path writes are buffered, not durable");
 
@@ -679,6 +911,10 @@ mod tests {
         let mut second = [0u8; 5];
         let results = fs
             .vread_into_impl(&reads, &mut [&mut first, &mut second])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         assert_eq!(
             (results[0].offset, results[0].bytes_read, results[0].eof),
@@ -704,6 +940,10 @@ mod tests {
                 VfOffset::End,
                 b"!".to_vec(),
             )]))
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         assert_eq!(w[0].offset, 11);
         fs.close_impl(&fd).unwrap();
@@ -711,6 +951,10 @@ mod tests {
         // A read positioned at End starts at the file size, so it is at EOF.
         let r = fs
             .vread_impl(&[ReadOp::new(FileOperand::from_path("/f"), VfOffset::End, 5)])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         assert_eq!(r[0].offset, 12); // the resolved start is the file size
         assert!(r[0].data.is_empty());
@@ -722,6 +966,10 @@ mod tests {
                 VfOffset::End,
                 100,
             )])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         assert!(r[0].eof);
         assert_eq!(fs.stat_impl(Path::new("/f")).unwrap().size, 12);
@@ -737,6 +985,10 @@ mod tests {
             b"hi".to_vec(),
         )
         .with_truncate()]))
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         // O_TRUNC semantics: the stale tail is gone.
         assert_eq!(
@@ -752,6 +1004,10 @@ mod tests {
             0,
             b"xy".to_vec(),
         )]))
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
         assert_eq!(
             fs.read_raw_impl(&FileOperand::from_path("/g"), 0, 100)
@@ -767,18 +1023,30 @@ mod tests {
 
         let r = fs
             .vread_impl(&[ReadOp::at(FileOperand::from_path("/f"), 0, 3)])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         assert_eq!(r[0].data, b"abc");
         assert!(!r[0].eof);
 
         let r = fs
             .vread_impl(&[ReadOp::at(FileOperand::from_path("/f"), 0, 4)])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         assert_eq!(r[0].data, b"abc");
         assert!(!r[0].eof, "short progress alone does not establish EOF");
 
         let r = fs
             .vread_impl(&[ReadOp::at(FileOperand::from_path("/f"), 3, 1)])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         assert!(r[0].data.is_empty());
         assert!(r[0].eof);
@@ -787,6 +1055,10 @@ mod tests {
         for offset in [0, 3, 4] {
             let r = fs
                 .vread_impl(&[ReadOp::at(FileOperand::from_path("/f"), offset, 0)])
+                .and_then(|outcomes| {
+                    let count = outcomes.len();
+                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                })
                 .unwrap();
             assert!(r[0].data.is_empty());
             assert!(!r[0].eof);
@@ -802,6 +1074,10 @@ mod tests {
         assert_eq!(fs.seek_raw_impl(&fd, 6, SeekFrom::Set).unwrap(), 6);
         let r = fs
             .vread_impl(&[ReadOp::new(fd.clone(), VfOffset::Cur, 5)])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         assert_eq!(r[0].data, b"world");
 
@@ -829,6 +1105,10 @@ mod tests {
                 u64::MAX,
                 b"xx".to_vec(),
             )]))
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap_err();
         assert_eq!(error.raw_code(), libc::EOVERFLOW as u32);
         assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur).unwrap(), 1);
@@ -894,7 +1174,15 @@ mod tests {
             base: VfPathBase::Abs,
             path: PathBuf::from("dst"),
         };
-        fs.vrename_impl(&[(abs_src, abs_dst)]).unwrap();
+        {
+            let rename_pairs = &[(abs_src, abs_dst)];
+            vfsi_core::internal::collect_vec_result(
+                fs.vrename_impl(rename_pairs),
+                rename_pairs.len(),
+            )
+            .map(|_| ())
+        }
+        .unwrap();
         assert!(!fs.exists_impl(Path::new("/src")).unwrap());
         assert!(fs.exists_impl(Path::new("/dst")).unwrap());
 
@@ -907,7 +1195,15 @@ mod tests {
             base: VfPathBase::Cwd,
             path: PathBuf::from("dst2"),
         };
-        fs.vrename_impl(&[(cwd_src, cwd_dst)]).unwrap();
+        {
+            let rename_pairs = &[(cwd_src, cwd_dst)];
+            vfsi_core::internal::collect_vec_result(
+                fs.vrename_impl(rename_pairs),
+                rename_pairs.len(),
+            )
+            .map(|_| ())
+        }
+        .unwrap();
         assert!(!fs.exists_impl(Path::new("/sub/src2")).unwrap());
         assert!(fs.exists_impl(Path::new("/sub/dst2")).unwrap());
     }
@@ -917,8 +1213,18 @@ mod tests {
     fn no_replace_empty_vector_is_a_noop() {
         let (_root, mut fs) = fs("rename-noreplace-empty");
         assert!(
-            fs.vrename_with_options_impl(&[], vfsi_core::api::RenameMode::NoReplace)
-                .is_ok()
+            {
+                let rename_pairs = &[];
+                vfsi_core::internal::collect_vec_result(
+                    fs.vrename_with_options_impl(
+                        rename_pairs,
+                        vfsi_core::api::RenameMode::NoReplace,
+                    ),
+                    rename_pairs.len(),
+                )
+                .map(|_| ())
+            }
+            .is_ok()
         );
     }
 
@@ -1006,15 +1312,18 @@ mod tests {
         fs.mkdir_raw_impl(Path::new("/source"), 0o755).unwrap();
         fs.mkdir_raw_impl(Path::new("/source/child"), 0o755)
             .unwrap();
-        let error = fs
-            .vrename_with_options_impl(
-                &[(
-                    FileOperand::from_path("/source"),
-                    FileOperand::from_path("/source/child/moved"),
-                )],
-                vfsi_core::api::RenameMode::NoReplace,
+        let error = {
+            let rename_pairs = &[(
+                FileOperand::from_path("/source"),
+                FileOperand::from_path("/source/child/moved"),
+            )];
+            vfsi_core::internal::collect_vec_result(
+                fs.vrename_with_options_impl(rename_pairs, vfsi_core::api::RenameMode::NoReplace),
+                rename_pairs.len(),
             )
-            .unwrap_err();
+            .map(|_| ())
+        }
+        .unwrap_err();
         assert_eq!(error.raw_code(), libc::EINVAL as u32);
     }
 
@@ -1023,8 +1332,18 @@ mod tests {
     fn no_replace_empty_vector_is_a_noop() {
         let (_root, mut fs) = fs("rename-noreplace-empty");
         assert!(
-            fs.vrename_with_options_impl(&[], vfsi_core::api::RenameMode::NoReplace)
-                .is_ok()
+            {
+                let rename_pairs = &[];
+                vfsi_core::internal::collect_vec_result(
+                    fs.vrename_with_options_impl(
+                        rename_pairs,
+                        vfsi_core::api::RenameMode::NoReplace,
+                    ),
+                    rename_pairs.len(),
+                )
+                .map(|_| ())
+            }
+            .is_ok()
         );
     }
 
@@ -1066,6 +1385,10 @@ mod tests {
         assert_eq!(a.ftype, VfType::Directory);
         assert_eq!(
             fs.vread_impl(&[ReadOp::new(FileOperand::cwd(), VfOffset::At(0), 1)])
+                .and_then(|outcomes| {
+                    let count = outcomes.len();
+                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                })
                 .unwrap_err()
                 .raw_code(),
             ERR_ISDIR
@@ -1087,6 +1410,10 @@ mod tests {
             b"x".to_vec(),
         )
         .with_creation()]))
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         assert!(fs.exists_impl(Path::new("/escape")).unwrap());
         assert!(!root.0.parent().unwrap().join("escape").exists());
@@ -1100,16 +1427,27 @@ mod tests {
             b"y".to_vec(),
         )
         .with_creation()]))
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         assert!(fs.exists_impl(Path::new("/sub2")).unwrap());
         assert!(!root.0.parent().unwrap().join("sub2").exists());
 
         // A lexical "a/../b" path resolves to b.
         write(&mut fs, "/a", b"");
-        fs.vrename_impl(&[(
-            FileOperand::from_path("/a"),
-            FileOperand::from_path("/x/../b"),
-        )])
+        {
+            let rename_pairs = &[(
+                FileOperand::from_path("/a"),
+                FileOperand::from_path("/x/../b"),
+            )];
+            vfsi_core::internal::collect_vec_result(
+                fs.vrename_impl(rename_pairs),
+                rename_pairs.len(),
+            )
+            .map(|_| ())
+        }
         .unwrap();
         assert!(fs.exists_impl(Path::new("/b")).unwrap());
         assert!(!fs.exists_impl(Path::new("/x")).unwrap());
@@ -1153,6 +1491,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             fs.vread_impl(&[ReadOp::at(FileOperand::from_path("/evil"), 0, 8)])
+                .and_then(|outcomes| {
+                    let count = outcomes.len();
+                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                })
                 .unwrap_err()
                 .raw_code(),
             ERR_NOENT,
@@ -1171,6 +1513,10 @@ mod tests {
             b"x".to_vec(),
         )
         .with_creation()]))
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         assert_eq!(
             fs.read_raw_impl(&FileOperand::from_path("/subdir/created-inside"), 0, 1)
@@ -1198,6 +1544,10 @@ mod tests {
                 b"x".to_vec()
             )
             .with_creation()]))
+                .and_then(|outcomes| {
+                    let count = outcomes.len();
+                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                })
                 .unwrap_err()
                 .raw_code(),
             ERR_NOENT,
@@ -1217,6 +1567,10 @@ mod tests {
             b"z".to_vec(),
         )
         .with_creation()]))
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         assert_eq!(
             fs.read_raw_impl(&FileOperand::from_path("/internal-target"), 0, 1)
@@ -1235,17 +1589,39 @@ mod tests {
         std::os::unix::fs::symlink(&outside.0, root.0.join("pivot")).unwrap();
 
         for error in [
-            fs.vremove_impl(&[FileOperand::from_path("/pivot/victim")])
-                .unwrap_err(),
-            fs.vrename_impl(&[(
-                FileOperand::from_path("/pivot/victim"),
-                FileOperand::from_path("/renamed"),
-            )])
+            {
+                let remove_files = &[FileOperand::from_path("/pivot/victim")];
+                vfsi_core::internal::collect_vec_result(
+                    fs.vremove_impl(remove_files),
+                    remove_files.len(),
+                )
+                .map(|_| ())
+            }
+            .unwrap_err(),
+            {
+                let rename_pairs = &[(
+                    FileOperand::from_path("/pivot/victim"),
+                    FileOperand::from_path("/renamed"),
+                )];
+                vfsi_core::internal::collect_vec_result(
+                    fs.vrename_impl(rename_pairs),
+                    rename_pairs.len(),
+                )
+                .map(|_| ())
+            }
             .unwrap_err(),
             fs.listdir_impl(Path::new("/pivot"), AttrMask::stat(), 0, false)
                 .unwrap_err(),
-            fs.vreadlink_impl(&[Path::new("/pivot/link")]).unwrap_err(),
+            fs.vreadlink_impl(&[Path::new("/pivot/link")])
+                .unwrap()
+                .remove(0)
+                .unwrap_err()
+                .into_cause(),
             fs.vhardlink_impl(&[Path::new("/pivot/victim")], &[Path::new("/hard")])
+                .and_then(|outcomes| {
+                    let count = outcomes.len();
+                    vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+                })
                 .unwrap_err(),
             fs.lstat_impl(Path::new("/pivot/victim")).unwrap_err(),
         ] {
@@ -1429,6 +1805,10 @@ mod tests {
             VfOffset::At(0),
             b"x".to_vec(),
         )]))
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
         fs.close_impl(&fd).unwrap();
         assert!(fs.exists_impl(Path::new("/rel")).unwrap());
@@ -1495,6 +1875,10 @@ mod tests {
             .unwrap();
         let r = fs
             .vread_impl(&[ReadOp::new(fd.clone(), VfOffset::At(0), 10)])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         assert_eq!(r[0].data, b"012", "descriptor sees the new size");
         fs.close_impl(&fd).unwrap();
@@ -1512,6 +1896,10 @@ mod tests {
             b"1".to_vec(),
         )
         .with_creation()]))
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
             FileOperand::from_path("a/../y"),
@@ -1519,6 +1907,10 @@ mod tests {
             b"2".to_vec(),
         )
         .with_creation()]))
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         assert!(fs.exists_impl(Path::new("/x")).unwrap());
         // From cwd /a, "a/../y" resolves to /a/y (the ".." cancels the "a").
@@ -1535,6 +1927,10 @@ mod tests {
             b"3".to_vec(),
         )
         .with_creation()]))
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         assert!(fs.exists_impl(Path::new("/z")).unwrap());
         assert!(!root.0.parent().unwrap().join("z").exists());
@@ -1556,12 +1952,15 @@ mod tests {
                 rlim_max: 8 * 1024,
             };
             assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &limit) }, 0);
-            let error = fs
-                .vcopy_impl(
-                    &[ExtentPair::new("/source", 0, "/alias", 1, None)],
-                    CopyOptions::new(),
+            let error = {
+                let copy_pairs = &[ExtentPair::new("/source", 0, "/alias", 1, None)];
+                vfsi_core::internal::collect_vec_result(
+                    fs.vcopy_impl(copy_pairs, CopyOptions::new()),
+                    copy_pairs.len(),
                 )
-                .unwrap_err();
+                .map(|_| ())
+            }
+            .unwrap_err();
             assert_eq!(error.raw_code(), ERR_INVAL);
             assert_eq!(
                 std::fs::read(root.0.join("source")).unwrap(),
@@ -1604,15 +2003,21 @@ mod tests {
         std::fs::write(root.0.join("source"), &original).unwrap();
         std::fs::hard_link(root.0.join("source"), root.0.join("alias")).unwrap();
 
-        let error = fs
-            .vcopy_data_impl(&[ExtentPair::new(
+        let error = {
+            let copy_pairs = &[ExtentPair::new(
                 "/source",
                 0,
                 "/alias",
                 1,
                 Some((CHUNK + 16) as u64),
-            )])
-            .unwrap_err();
+            )];
+            vfsi_core::internal::collect_vec_result(
+                fs.vcopy_data_impl(copy_pairs),
+                copy_pairs.len(),
+            )
+            .map(|_| ())
+        }
+        .unwrap_err();
         assert_eq!(error.index(), Some(0));
         assert_eq!(error.raw_code(), ERR_INVAL);
         assert_eq!(std::fs::read(root.0.join("source")).unwrap(), original);
@@ -1673,11 +2078,11 @@ mod tests {
                 ..VfAttrs::default()
             };
             crate::XATTR_QUERY_ERROR.with(|error| error.set(Some(libc::EACCES)));
-            let error = fs
-                .vgetattrs_impl(std::slice::from_mut(&mut attrs))
-                .unwrap_err();
-            assert_eq!(error.raw_code(), libc::EACCES as u32);
-            assert_eq!(error.index(), Some(0));
+            let outcomes = fs.vgetattrs_impl(std::slice::from_mut(&mut attrs)).unwrap();
+            let error = outcomes[0].as_ref().unwrap_err();
+            assert_eq!(error.cause().raw_code(), libc::EACCES as u32);
+            assert_eq!(error.cause().index(), None);
+            assert_eq!(error.state(), FailureState::Failed);
             assert!(!attrs.returned.contains(AttrMask::NAMED_ATTR));
         }
 
@@ -1800,9 +2205,16 @@ mod tests {
         ] {
             a.masks = masks;
             assert_eq!(
-                fs.vsetattrs_raw_impl(std::slice::from_ref(&a))
-                    .unwrap_err()
-                    .raw_code(),
+                {
+                    let batch_updates = std::slice::from_ref(&a);
+                    vfsi_core::internal::collect_vec_result(
+                        fs.vsetattrs_raw_impl(batch_updates),
+                        batch_updates.len(),
+                    )
+                    .map(|_| ())
+                }
+                .unwrap_err()
+                .raw_code(),
                 VF_ERR_UNSUPPORTED
             );
             let metadata = std::fs::metadata(&path).unwrap();
@@ -1814,7 +2226,15 @@ mod tests {
         // MODE-only still works.
         a.masks = AttrMask::MODE;
         a.mode = 0o640;
-        fs.vsetattrs_raw_impl(std::slice::from_ref(&a)).unwrap();
+        {
+            let batch_updates = std::slice::from_ref(&a);
+            vfsi_core::internal::collect_vec_result(
+                fs.vsetattrs_raw_impl(batch_updates),
+                batch_updates.len(),
+            )
+            .map(|_| ())
+        }
+        .unwrap();
         assert_eq!(fs.lstat_impl(Path::new("/f")).unwrap().mode & 0o7777, 0o640);
     }
 
@@ -1832,8 +2252,15 @@ mod tests {
             mtime_nsec: 987_654_321,
             ..VfAttrs::default()
         };
-        fs.vsetattrs_raw_impl(std::slice::from_ref(&update))
-            .unwrap();
+        {
+            let batch_updates = std::slice::from_ref(&update);
+            vfsi_core::internal::collect_vec_result(
+                fs.vsetattrs_raw_impl(batch_updates),
+                batch_updates.len(),
+            )
+            .map(|_| ())
+        }
+        .unwrap();
 
         let mut actual = VfAttrs {
             file: FileOperand::from_path("/f"),
@@ -1882,9 +2309,23 @@ mod tests {
                         ..VfAttrs::default()
                     };
                     if follow {
-                        backend.vsetattrs_raw_impl(std::slice::from_ref(&attrs))
+                        {
+                            let batch_updates = std::slice::from_ref(&attrs);
+                            vfsi_core::internal::collect_vec_result(
+                                backend.vsetattrs_raw_impl(batch_updates),
+                                batch_updates.len(),
+                            )
+                            .map(|_| ())
+                        }
                     } else {
-                        backend.vsetattrs_raw_nofollow_impl(std::slice::from_ref(&attrs))
+                        {
+                            let batch_updates = std::slice::from_ref(&attrs);
+                            vfsi_core::internal::collect_vec_result(
+                                backend.vsetattrs_raw_nofollow_impl(batch_updates),
+                                batch_updates.len(),
+                            )
+                            .map(|_| ())
+                        }
                     }
                     .unwrap();
                     let actual = std::fs::metadata(&path).unwrap();
@@ -1988,9 +2429,23 @@ mod tests {
                 ..VfAttrs::default()
             };
             if follow {
-                backend.vsetattrs_raw_impl(std::slice::from_ref(&attrs))
+                {
+                    let batch_updates = std::slice::from_ref(&attrs);
+                    vfsi_core::internal::collect_vec_result(
+                        backend.vsetattrs_raw_impl(batch_updates),
+                        batch_updates.len(),
+                    )
+                    .map(|_| ())
+                }
             } else {
-                backend.vsetattrs_raw_nofollow_impl(std::slice::from_ref(&attrs))
+                {
+                    let batch_updates = std::slice::from_ref(&attrs);
+                    vfsi_core::internal::collect_vec_result(
+                        backend.vsetattrs_raw_nofollow_impl(batch_updates),
+                        batch_updates.len(),
+                    )
+                    .map(|_| ())
+                }
             }
             .unwrap();
             let metadata = std::fs::symlink_metadata(&path).unwrap();
@@ -2025,9 +2480,16 @@ mod tests {
             ..VfAttrs::default()
         };
         assert_eq!(
-            fs.vsetattrs_raw_nofollow_impl(std::slice::from_ref(&a))
-                .unwrap_err()
-                .raw_code(),
+            {
+                let batch_updates = std::slice::from_ref(&a);
+                vfsi_core::internal::collect_vec_result(
+                    fs.vsetattrs_raw_nofollow_impl(batch_updates),
+                    batch_updates.len(),
+                )
+                .map(|_| ())
+            }
+            .unwrap_err()
+            .raw_code(),
             VF_ERR_UNSUPPORTED
         );
         let metadata = std::fs::metadata(&target).unwrap();
@@ -2051,8 +2513,15 @@ mod tests {
             mode: 0o600,
             ..VfAttrs::default()
         };
-        fs.vsetattrs_raw_nofollow_impl(std::slice::from_ref(&a))
-            .unwrap();
+        {
+            let batch_updates = std::slice::from_ref(&a);
+            vfsi_core::internal::collect_vec_result(
+                fs.vsetattrs_raw_nofollow_impl(batch_updates),
+                batch_updates.len(),
+            )
+            .map(|_| ())
+        }
+        .unwrap();
         assert_eq!(
             fs.lstat_impl(Path::new("/target")).unwrap().mode & 0o7777,
             0o600
@@ -2086,14 +2555,21 @@ mod tests {
     fn openv_rejects_mismatched_lengths() {
         let (_root, mut fs) = fs("openv");
         use libc::O_CREAT;
-        let e = VectorBackend::vopen_raw_impl(
+        let e = vfsi_sync::backend::helpers::open_raw_batch(
             &mut fs,
             &[Path::new("/a"), Path::new("/b")],
             &[O_CREAT],
             &[0o644],
         )
         .unwrap_err();
-        assert_eq!((e.index(), e.raw_code()), (Some(0), ERR_INVAL));
+        assert_eq!((e.index(), e.raw_code()), (None, ERR_INVAL));
+        let e = fs
+            .vopen_raw_impl(&[Path::new("/a"), Path::new("/b")], &[O_CREAT; 2], &[0o644])
+            .unwrap_err();
+        assert_eq!((e.index(), e.raw_code()), (None, ERR_INVAL));
+        assert!(fs.open_files.is_empty());
+        assert!(!fs.exists_impl(Path::new("/a")).unwrap());
+        assert!(!fs.exists_impl(Path::new("/b")).unwrap());
     }
 
     #[test]
@@ -2141,10 +2617,17 @@ mod tests {
             .unwrap();
 
         let pair = ExtentPair::new("/link", 0, "/link-copy", 0, None);
-        fs.vcopy_impl(
-            std::slice::from_ref(&pair),
-            vfsi_core::CopyOptions::new().with_follow_source_symlinks(false),
-        )
+        {
+            let copy_pairs = std::slice::from_ref(&pair);
+            vfsi_core::internal::collect_vec_result(
+                fs.vcopy_impl(
+                    copy_pairs,
+                    vfsi_core::CopyOptions::new().with_follow_source_symlinks(false),
+                ),
+                copy_pairs.len(),
+            )
+            .map(|_| ())
+        }
         .unwrap();
         assert_eq!(
             fs.file_type_impl(Path::new("/link-copy")).unwrap(),
@@ -2157,8 +2640,15 @@ mod tests {
 
         // The default option on the same entry point copies the target's data.
         let pair = ExtentPair::new("/link", 0, "/link-dup", 0, None);
-        fs.vcopy_impl(std::slice::from_ref(&pair), CopyOptions::new())
-            .unwrap();
+        {
+            let copy_pairs = std::slice::from_ref(&pair);
+            vfsi_core::internal::collect_vec_result(
+                fs.vcopy_impl(copy_pairs, CopyOptions::new()),
+                copy_pairs.len(),
+            )
+            .map(|_| ())
+        }
+        .unwrap();
         assert_eq!(
             fs.file_type_impl(Path::new("/link-dup")).unwrap(),
             VfType::Regular
@@ -2181,7 +2671,15 @@ mod tests {
             ExtentPair::new("/source", 2, "/data-copy", 0, Some(4)),
             ExtentPair::new("/dangling", 99, "/dangling-copy", 100, Some(0)),
         ];
-        fs.vcopy_impl(&pairs, options).unwrap();
+        {
+            let copy_pairs = &pairs;
+            vfsi_core::internal::collect_vec_result(
+                fs.vcopy_impl(copy_pairs, options),
+                copy_pairs.len(),
+            )
+            .map(|_| ())
+        }
+        .unwrap();
         assert_eq!(
             fs.read_raw_impl(&FileOperand::from_path("/data-copy"), 0, 4)
                 .unwrap(),
@@ -2191,26 +2689,40 @@ mod tests {
             fs.readlink_raw_impl(Path::new("/dangling-copy")).unwrap(),
             b"missing-target"
         );
-        let error = fs
-            .vcopy_impl(
-                &[
-                    ExtentPair::new("/source", 0, "/prefix", 0, None),
-                    pairs[1].clone(),
-                ],
-                options,
+        let error = {
+            let copy_pairs = &[
+                ExtentPair::new("/source", 0, "/prefix", 0, None),
+                pairs[1].clone(),
+            ];
+            vfsi_core::internal::collect_vec_result(
+                fs.vcopy_impl(copy_pairs, options),
+                copy_pairs.len(),
             )
-            .unwrap_err();
+            .map(|_| ())
+        }
+        .unwrap_err();
         assert_eq!(error.index(), Some(1));
         assert_eq!(error.raw_code(), libc::EEXIST as u32);
         // Following a dangling link fails, while preserving it succeeds above.
-        let error = fs
-            .vcopy_impl(
-                &[ExtentPair::new("/dangling", 0, "/followed", 0, None)],
-                CopyOptions::new(),
+        let error = {
+            let copy_pairs = &[ExtentPair::new("/dangling", 0, "/followed", 0, None)];
+            vfsi_core::internal::collect_vec_result(
+                fs.vcopy_impl(copy_pairs, CopyOptions::new()),
+                copy_pairs.len(),
             )
-            .unwrap_err();
+            .map(|_| ())
+        }
+        .unwrap_err();
         assert_eq!(error.raw_code(), libc::ENOENT as u32);
-        fs.vcopy_impl(&[], options).unwrap();
+        {
+            let copy_pairs = &[];
+            vfsi_core::internal::collect_vec_result(
+                fs.vcopy_impl(copy_pairs, options),
+                copy_pairs.len(),
+            )
+            .map(|_| ())
+        }
+        .unwrap();
     }
 
     #[test]
@@ -2339,7 +2851,14 @@ mod tests {
             AttrMask::MODE | AttrMask::SIZE,
             |backend, pairs| {
                 sizes.push(pairs.len());
-                backend.vcopy_data_impl(pairs)
+                {
+                    let copy_pairs = pairs;
+                    vfsi_core::internal::collect_vec_result(
+                        backend.vcopy_data_impl(copy_pairs),
+                        copy_pairs.len(),
+                    )
+                    .map(|_| ())
+                }
             },
             std::convert::identity,
         )
@@ -2395,7 +2914,14 @@ mod tests {
             AttrMask::MODE | AttrMask::SIZE,
             |backend, pair| {
                 copied.push(pair.src_path.clone());
-                backend.vcopy_data_impl(std::slice::from_ref(pair))
+                {
+                    let copy_pairs = std::slice::from_ref(pair);
+                    vfsi_core::internal::collect_vec_result(
+                        backend.vcopy_data_impl(copy_pairs),
+                        copy_pairs.len(),
+                    )
+                    .map(|_| ())
+                }
             },
             std::convert::identity,
         )
@@ -2461,6 +2987,10 @@ mod tests {
             b"deep".to_vec(),
         )
         .with_creation()]))
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
 
         let listed = fs
@@ -2478,8 +3008,15 @@ mod tests {
                 .unwrap(),
             b"deep"
         );
-        fs.remove_paths_impl(&[Path::new("/source"), Path::new("/copy")], true)
-            .unwrap();
+        {
+            let remove_roots: &[&std::path::Path] = &[Path::new("/source"), Path::new("/copy")];
+            vfsi_core::internal::collect_vec_result(
+                fs.remove_paths_impl(remove_roots, true),
+                remove_roots.len(),
+            )
+            .map(|_| ())
+        }
+        .unwrap();
         assert!(!fs.exists_impl(Path::new("/source")).unwrap());
         assert!(!fs.exists_impl(Path::new("/copy")).unwrap());
     }
@@ -2587,9 +3124,15 @@ mod tests {
                 ..VfAttrs::default()
             };
             assert!(
-                backend
-                    .vsetattrs_raw_nofollow_impl(std::slice::from_ref(&attrs))
-                    .is_err(),
+                {
+                    let batch_updates = std::slice::from_ref(&attrs);
+                    vfsi_core::internal::collect_vec_result(
+                        backend.vsetattrs_raw_nofollow_impl(batch_updates),
+                        batch_updates.len(),
+                    )
+                    .map(|_| ())
+                }
+                .is_err(),
                 "nofollow update {mask:?} should reject the replaced symlink"
             );
             assert_eq!(std::fs::read(&target).unwrap(), b"protected");
@@ -2628,7 +3171,15 @@ mod tests {
             mode: 0o700,
             ..VfAttrs::default()
         };
-        assert!(backend.vmkdir_impl(std::slice::from_ref(&attrs)).is_err());
+        assert!(
+            backend
+                .vmkdir_impl(std::slice::from_ref(&attrs))
+                .and_then(|outcomes| {
+                    let count = outcomes.len();
+                    vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+                })
+                .is_err()
+        );
         assert_eq!(
             std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777,
             0o640
@@ -2665,9 +3216,15 @@ mod tests {
             ..VfAttrs::default()
         };
         assert!(
-            backend
-                .vsetattrs_raw_impl(std::slice::from_ref(&attrs))
-                .is_err()
+            {
+                let batch_updates = std::slice::from_ref(&attrs);
+                vfsi_core::internal::collect_vec_result(
+                    backend.vsetattrs_raw_impl(batch_updates),
+                    batch_updates.len(),
+                )
+                .map(|_| ())
+            }
+            .is_err()
         );
         assert_eq!(
             std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777,
@@ -2794,7 +3351,12 @@ mod tests {
             mode: 0o700,
             ..VfAttrs::default()
         };
-        let result = backend.vmkdir_impl(std::slice::from_ref(&attrs));
+        let result = backend
+            .vmkdir_impl(std::slice::from_ref(&attrs))
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+            });
         unsafe { libc::umask(previous) };
         result.unwrap();
         assert_eq!(
@@ -2860,9 +3422,15 @@ mod tests {
             mode: 0o600,
             ..VfAttrs::default()
         };
-        backend
-            .vsetattrs_raw_impl(std::slice::from_ref(&attrs))
-            .unwrap();
+        {
+            let batch_updates = std::slice::from_ref(&attrs);
+            vfsi_core::internal::collect_vec_result(
+                backend.vsetattrs_raw_impl(batch_updates),
+                batch_updates.len(),
+            )
+            .map(|_| ())
+        }
+        .unwrap();
         assert!(
             std::fs::symlink_metadata(leaf)
                 .unwrap()
@@ -2946,15 +3514,21 @@ mod tests {
         ] {
             let destination = root.0.join("destination");
             std::fs::write(&destination, vec![0xff; data.len() + 100]).unwrap();
-            backend
-                .vcopy_data_impl(&[ExtentPair::new(
+            {
+                let copy_pairs = &[ExtentPair::new(
                     "/source",
                     offset,
                     "/destination",
                     5,
                     length,
-                )])
-                .unwrap();
+                )];
+                vfsi_core::internal::collect_vec_result(
+                    backend.vcopy_data_impl(copy_pairs),
+                    copy_pairs.len(),
+                )
+                .map(|_| ())
+            }
+            .unwrap();
             let start = (offset as usize).min(data.len());
             let wanted =
                 length.map_or(data.len() - start, |n| (n as usize).min(data.len() - start));
@@ -2963,6 +3537,83 @@ mod tests {
             assert_eq!(&copied[..5], &[0xff; 5]);
             assert_eq!(&copied[5..], &data[start..start + wanted]);
             assert_eq!(std::fs::read(root.0.join("source")).unwrap(), data);
+        }
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[test]
+    fn mkdir_mode_adjustment_failure_keeps_later_independent_directories() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Arc;
+        use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+        let (root, mut backend) = fs("mkdir-mode-siblings");
+        let fault = Arc::new(FaultScript::one(
+            OpenFaultPoint::BeforeSetPermissions { index: 1 },
+            VfError::errno(None, libc::EACCES as u32),
+        ));
+        backend.set_fault_injector(fault.clone());
+        let dirs: Vec<_> = [0o700, 0o750, 0o710]
+            .iter()
+            .enumerate()
+            .map(|(index, mode)| VfAttrs {
+                file: FileOperand::from_path(&format!("/dir-{index}")),
+                masks: AttrMask::MODE,
+                mode: *mode,
+                ..Default::default()
+            })
+            .collect();
+        let results = backend.vmkdir_impl(&dirs).unwrap();
+        assert!(fault.is_consumed());
+        assert!(results[0].is_ok() && results[2].is_ok());
+        let error = results[1].as_ref().unwrap_err();
+        assert_eq!(error.state(), vfsi_core::FailureState::Failed);
+        assert_eq!(error.cause().raw_code(), libc::EACCES as u32);
+        assert_eq!(error.cause().index(), None);
+        assert!(
+            root.0.join("dir-1").is_dir(),
+            "CREATE ran before mode adjustment failed"
+        );
+        assert_eq!(
+            std::fs::metadata(root.0.join("dir-2"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o710
+        );
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[test]
+    fn setattr_unsupported_after_truncate_is_failed_in_both_follow_modes() {
+        use std::sync::Arc;
+        use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+        for follow in [false, true] {
+            let (root, mut backend) = fs("setattr-partial-unsupported");
+            std::fs::write(root.0.join("file"), b"original").unwrap();
+            let fault = Arc::new(FaultScript::one(
+                OpenFaultPoint::BeforeSetPermissions { index: 0 },
+                VfError::unsupported(None),
+            ));
+            backend.set_fault_injector(fault.clone());
+            let attrs = [VfAttrs {
+                file: FileOperand::from_path("/file"),
+                masks: AttrMask::SIZE | AttrMask::MODE,
+                size: 2,
+                mode: 0o600,
+                ..VfAttrs::default()
+            }];
+            let outcomes = if follow {
+                backend.vsetattrs_raw_impl(&attrs)
+            } else {
+                backend.vsetattrs_raw_nofollow_impl(&attrs)
+            }
+            .unwrap();
+            assert!(fault.is_consumed());
+            assert_eq!(std::fs::read(root.0.join("file")).unwrap(), b"or");
+            let error = outcomes[0].as_ref().unwrap_err();
+            assert_eq!(error.state(), vfsi_core::FailureState::Failed);
+            assert_eq!(error.cause().kind(), std::io::ErrorKind::Unsupported);
         }
     }
 
@@ -2997,7 +3648,10 @@ mod tests {
             // SAFETY: this isolated child runs only this test; restore its
             // process-wide umask immediately after the mkdir operation.
             let previous = unsafe { libc::umask(0) };
-            let result = backend.vmkdir_impl(&[attrs]);
+            let result = backend.vmkdir_impl(&[attrs]).and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+            });
             unsafe { libc::umask(previous) };
             assert_eq!(result.unwrap_err().raw_code(), libc::EIO as u32);
             assert!(script.is_consumed());
@@ -3066,6 +3720,10 @@ mod tests {
         assert_eq!(backend.read_raw_impl(&file, 0, 9).unwrap(), b"preserved");
         let error = backend
             .vwrite_impl(&[WriteOp::new(&file, VfOffset::Cur, b"bad".as_slice())])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap_err();
         assert_eq!(error.raw_code(), libc::EBADF as u32);
         backend.close_impl(&file).unwrap();
@@ -3084,6 +3742,10 @@ mod tests {
             for (offset, data) in [(0, b"new".as_slice()), (3, b" tail".as_slice())] {
                 let result = backend
                     .vwrite_impl(&[WriteOp::new(&file, VfOffset::Cur, data)])
+                    .and_then(|outcomes| {
+                        let count = outcomes.len();
+                        vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    })
                     .unwrap();
                 assert_eq!(result[0].offset, offset);
                 assert_eq!(result[0].bytes_written, data.len());
@@ -3128,6 +3790,574 @@ mod tests {
                     .permissions()
                     .mode(),
                 mode
+            );
+        }
+    }
+    #[test]
+    fn syscall_reads_keep_successes_after_bad_descriptor_access() {
+        use crate::io::{Read, read_ordered};
+        use std::{fs::File, sync::Arc};
+        let root = TempRoot::new("independent-descriptor-read");
+        std::fs::create_dir(&root.0).unwrap();
+        let path = root.0.join("file");
+        std::fs::write(&path, b"abc").unwrap();
+        let good = Arc::new(File::open(&path).unwrap());
+        let bad = Arc::new(File::options().write(true).open(&path).unwrap());
+        let mut first = [99; 3];
+        let mut invalid = [99; 3];
+        let mut last = [99; 3];
+        let result = read_ordered(&mut [
+            Read {
+                file: &good,
+                offset: 0,
+                buffer: &mut first,
+            },
+            Read {
+                file: &bad,
+                offset: 0,
+                buffer: &mut invalid,
+            },
+            Read {
+                file: &good,
+                offset: 0,
+                buffer: &mut last,
+            },
+        ]);
+        assert_eq!(result[0], Ok(3));
+        assert_eq!(result[2], Ok(3));
+        assert_eq!(
+            result[1].as_ref().unwrap_err().state(),
+            FailureState::Failed
+        );
+        assert_eq!((first, invalid, last), (*b"abc", [99; 3], *b"abc"));
+    }
+    struct OutcomeReadExecutor {
+        owned: bool,
+        calls: std::sync::Arc<AtomicUsize>,
+        prefix_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        malformed_progress: bool,
+    }
+    impl crate::io::DescriptorIo for OutcomeReadExecutor {
+        fn owned_read_window(&self) -> Option<usize> {
+            self.owned.then_some(1024)
+        }
+        fn read(&mut self, operations: &mut [crate::io::Read<'_>]) -> Vec<OpResult<usize>> {
+            use std::os::unix::fs::FileExt;
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if self.prefix_failure.swap(false, Ordering::Relaxed) {
+                assert_eq!(operations.len(), 1);
+                let op = &mut operations[0];
+                let count = op.file.read_at(&mut op.buffer[..2], op.offset).unwrap();
+                return vec![Err(OpError::unknown(
+                    VfError::errno(None, libc::EIO as u32),
+                    Some(IoProgress::Read(vfsi_core::api::ReadResult::buffered(
+                        if self.malformed_progress {
+                            999
+                        } else {
+                            op.offset
+                        },
+                        count,
+                        false,
+                    ))),
+                ))];
+            }
+            crate::io::read_ordered(operations)
+        }
+        fn write(&mut self, _: &[crate::io::Write<'_>]) -> Vec<vfsi_core::OpResult<usize>> {
+            unreachable!()
+        }
+        fn sync(
+            &mut self,
+            _: &[&std::sync::Arc<std::fs::File>],
+            _: bool,
+        ) -> Vec<vfsi_core::OpResult<()>> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn native_read_outcomes_isolate_invalid_handles_and_keep_one_valid_batch() {
+        for owned in [false, true] {
+            let root = TempRoot::new("read-outcome-handles");
+            std::fs::create_dir(&root.0).unwrap();
+            std::fs::write(root.0.join("file"), b"abcd").unwrap();
+            let calls = std::sync::Arc::new(AtomicUsize::new(0));
+            let mut fs = LocalBackend::new(
+                root.0.clone(),
+                OutcomeReadExecutor {
+                    owned,
+                    calls: calls.clone(),
+                    prefix_failure: Default::default(),
+                    malformed_progress: false,
+                },
+            )
+            .unwrap();
+            let good = fs
+                .open_raw_impl(Path::new("/file"), libc::O_RDONLY, 0)
+                .unwrap();
+            let bad = fs
+                .open_raw_impl(Path::new("/file"), libc::O_WRONLY, 0)
+                .unwrap();
+            let reads = [
+                ReadOp::at(good.clone(), 0, 2),
+                ReadOp::at(FileOperand::from_fd(i32::MAX), 0, 2),
+                ReadOp::at(bad.clone(), 0, 2),
+                ReadOp::at(good.clone(), 2, 2),
+            ];
+            let outcomes = fs.read_results(&reads).unwrap();
+            assert_eq!(outcomes[0].as_ref().unwrap().data, b"ab");
+            assert_eq!(outcomes[3].as_ref().unwrap().data, b"cd");
+            assert_eq!(
+                outcomes[1].as_ref().unwrap_err().state(),
+                FailureState::NotAttempted
+            );
+            assert_eq!(
+                outcomes[2].as_ref().unwrap_err().state(),
+                FailureState::Failed
+            );
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+            let mut storage = [[99; 2]; 4];
+            let mut buffers: Vec<_> = storage.iter_mut().map(|buffer| &mut buffer[..]).collect();
+            let outcomes = fs.read_into_results(&reads, &mut buffers).unwrap();
+            assert_eq!(outcomes[0].as_ref().unwrap().bytes_read, 2);
+            assert_eq!(outcomes[3].as_ref().unwrap().bytes_read, 2);
+            assert_eq!(storage, [*b"ab", [99; 2], [99; 2], *b"cd"]);
+            assert_eq!(calls.load(Ordering::Relaxed), 2);
+            assert!(fs.read_results(&[]).unwrap().is_empty());
+            assert!(fs.read_into_results(&[], &mut []).unwrap().is_empty());
+            let invalid = [ReadOp::at(FileOperand::from_fd(i32::MAX), 0, 2)];
+            assert_eq!(
+                fs.read_results(&invalid).unwrap()[0]
+                    .as_ref()
+                    .unwrap_err()
+                    .state(),
+                FailureState::NotAttempted
+            );
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                2,
+                "empty/invalid batches must not reach the executor"
+            );
+            fs.close_impl(&good).unwrap();
+            fs.close_impl(&bad).unwrap();
+        }
+    }
+
+    #[test]
+    fn native_read_error_prefix_updates_cursor_only_after_progress_validation() {
+        for owned in [false, true] {
+            for malformed_progress in [false, true] {
+                let root = TempRoot::new("read-outcome-prefix");
+                std::fs::create_dir(&root.0).unwrap();
+                std::fs::write(root.0.join("file"), b"abcd").unwrap();
+                let mut fs = LocalBackend::new(
+                    root.0.clone(),
+                    OutcomeReadExecutor {
+                        owned,
+                        calls: Default::default(),
+                        prefix_failure: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                            true,
+                        )),
+                        malformed_progress,
+                    },
+                )
+                .unwrap();
+                let file = fs
+                    .open_raw_impl(Path::new("/file"), libc::O_RDONLY, 0)
+                    .unwrap();
+                let mut results = fs
+                    .read_results(&[ReadOp::new(file.clone(), VfOffset::Cur, 4)])
+                    .unwrap();
+                let error = results.pop().unwrap().unwrap_err();
+                assert_eq!(error.state(), FailureState::Unknown);
+                if malformed_progress {
+                    assert!(error.progress().is_none());
+                    assert!(error.cause().is_transport());
+                } else {
+                    let Some(IoProgress::Read(prefix)) = error.progress() else {
+                        panic!("missing prefix")
+                    };
+                    assert_eq!(prefix.offset(), 0);
+                    assert_eq!(prefix.data().unwrap(), b"ab");
+                }
+                let result = fs
+                    .read_results(&[ReadOp::new(file.clone(), VfOffset::Cur, 2)])
+                    .unwrap()
+                    .pop()
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(result.offset, if malformed_progress { 0 } else { 2 });
+                assert_eq!(result.data, if malformed_progress { b"ab" } else { b"cd" });
+                fs.close_impl(&file).unwrap();
+            }
+        }
+    }
+    #[test]
+    fn native_read_hook_preserves_per_input_outcomes() {
+        let (_root, mut backend) = fs("native-read-outcomes");
+        vfsi_sync::test_support::read_vector_outcomes(&mut backend, Path::new("/read-outcomes"));
+    }
+    #[test]
+    fn native_write_hook_preserves_per_input_outcomes() {
+        let (_root, mut backend) = fs("native-write-outcomes");
+        vfsi_sync::test_support::write_vector_outcomes(
+            &mut backend,
+            Path::new("/write-outcomes"),
+            vfsi_sync::FailureState::Failed,
+        );
+    }
+    type WriteBatch = Vec<(u64, usize, usize)>;
+
+    struct WriteOutcomeExecutor {
+        results: Vec<OpResult<usize>>,
+        ordered: bool,
+        batches: std::sync::Arc<std::sync::Mutex<Vec<WriteBatch>>>,
+    }
+    impl crate::io::DescriptorIo for WriteOutcomeExecutor {
+        fn ordered(&self) -> bool {
+            self.ordered
+        }
+        fn read(&mut self, reads: &mut [crate::io::Read<'_>]) -> Vec<OpResult<usize>> {
+            crate::io::read_ordered(reads)
+        }
+        fn write(&mut self, writes: &[crate::io::Write<'_>]) -> Vec<OpResult<usize>> {
+            self.batches.lock().unwrap().push(
+                writes
+                    .iter()
+                    .map(|write| (write.offset, write.data.as_ptr() as usize, write.data.len()))
+                    .collect(),
+            );
+            std::mem::take(&mut self.results)
+        }
+        fn sync(
+            &mut self,
+            files: &[&std::sync::Arc<std::fs::File>],
+            data_only: bool,
+        ) -> Vec<OpResult<()>> {
+            crate::io::sync_ordered(files, data_only)
+        }
+    }
+
+    #[test]
+    fn write_outcomes_keep_sparse_input_mapping_and_validate_executor_completions() {
+        for ordered in [false, true] {
+            for case in 0..6 {
+                let results = match case {
+                    0 => vec![
+                        Ok(3),
+                        Err(OpError::failed(
+                            VfError::errno(99, libc::EIO as u32),
+                            Some(IoProgress::Write { bytes_written: 1 }),
+                        )),
+                        Ok(3),
+                    ],
+                    1 => vec![Ok(3)],
+                    2 => vec![Ok(3); 4],
+                    3 => vec![Ok(4), Ok(3), Ok(3)],
+                    4 => vec![
+                        Ok(3),
+                        Err(OpError::failed(
+                            VfError::errno(99, libc::EIO as u32),
+                            Some(IoProgress::Write { bytes_written: 4 }),
+                        )),
+                        Ok(3),
+                    ],
+                    _ => vec![
+                        Ok(3),
+                        Err(OpError::failed(
+                            VfError::errno(99, libc::EIO as u32),
+                            Some(IoProgress::Read(vfsi_core::api::ReadResult::buffered(
+                                0, 1, false,
+                            ))),
+                        )),
+                        Ok(3),
+                    ],
+                };
+                let root = TempRoot::new("write-outcome-mapping");
+                std::fs::create_dir(&root.0).unwrap();
+                let batches = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let mut backend = LocalBackend::new(
+                    root.0.clone(),
+                    WriteOutcomeExecutor {
+                        results,
+                        ordered,
+                        batches: batches.clone(),
+                    },
+                )
+                .unwrap();
+                let files: Vec<_> = (0..3)
+                    .map(|index| {
+                        backend
+                            .open_raw_impl(
+                                Path::new(&format!("/file-{index}")),
+                                libc::O_CREAT | libc::O_RDWR,
+                                0o600,
+                            )
+                            .unwrap()
+                    })
+                    .collect();
+                let invalid = FileOperand::from_fd(i32::MAX);
+                let writes = [
+                    WriteOp::at(&files[0], 0, b"abc".as_slice()),
+                    WriteOp::at(&invalid, 0, b"bad".as_slice()),
+                    WriteOp::at(&files[1], 0, b"def".as_slice()),
+                    WriteOp::at(&files[1], u64::MAX, b"bad".as_slice()),
+                    WriteOp::at(&files[2], 0, b"ghi".as_slice()),
+                ];
+                let outcomes = backend.write_results(&writes).unwrap();
+                assert_eq!(outcomes.len(), writes.len());
+                assert_eq!(
+                    *batches.lock().unwrap(),
+                    [vec![
+                        (0, writes[0].data().as_ptr() as usize, 3),
+                        (0, writes[2].data().as_ptr() as usize, 3),
+                        (0, writes[4].data().as_ptr() as usize, 3),
+                    ]],
+                    "valid siblings share one borrowed batch"
+                );
+                assert!(
+                    backend
+                        .open_files
+                        .values()
+                        .all(|open| open.identity.get().is_some() != ordered)
+                );
+                for (index, code) in [(1, libc::EBADF), (3, libc::EOVERFLOW)] {
+                    let error = outcomes[index].as_ref().unwrap_err();
+                    assert_eq!(error.state(), FailureState::NotAttempted);
+                    assert_eq!(error.cause().raw_code(), code as u32);
+                    assert_eq!(error.cause().index(), None);
+                }
+                for index in [0, 2, 4] {
+                    let failed = case == 2
+                        || case == 1 && index != 0
+                        || case == 3 && index == 0
+                        || [0, 4, 5].contains(&case) && index == 2;
+                    if failed {
+                        let error = outcomes[index].as_ref().unwrap_err();
+                        assert_eq!(error.cause().index(), None);
+                        if case == 0 {
+                            assert_eq!(error.state(), FailureState::Failed);
+                            assert_eq!(
+                                error.progress(),
+                                Some(&IoProgress::Write { bytes_written: 1 })
+                            );
+                        } else {
+                            assert_eq!(error.state(), FailureState::Unknown);
+                            assert!(error.cause().is_transport());
+                            assert!(error.progress().is_none());
+                        }
+                    } else {
+                        let result = outcomes[index].as_ref().unwrap();
+                        assert_eq!(result.file, *writes[index].file());
+                        assert_eq!(
+                            (result.offset, result.bytes_written, result.stable),
+                            (0, 3, false)
+                        );
+                    }
+                }
+                assert!(
+                    backend
+                        .vclose_impl(&files)
+                        .unwrap()
+                        .iter()
+                        .all(Result::is_ok)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn alias_write_failure_does_not_suppress_later_syscalls_or_race_the_executor() {
+        let root = TempRoot::new("write-alias-outcomes");
+        std::fs::create_dir(&root.0).unwrap();
+        std::fs::write(root.0.join("file"), b"old").unwrap();
+        std::fs::hard_link(root.0.join("file"), root.0.join("alias")).unwrap();
+        let batches = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut backend = LocalBackend::new(
+            root.0.clone(),
+            WriteOutcomeExecutor {
+                results: Vec::new(),
+                ordered: false,
+                batches: batches.clone(),
+            },
+        )
+        .unwrap();
+        let first = backend
+            .open_raw_impl(Path::new("/file"), libc::O_RDONLY, 0)
+            .unwrap();
+        let last = backend
+            .open_raw_impl(Path::new("/alias"), libc::O_RDWR, 0)
+            .unwrap();
+        let results = backend
+            .write_results(&[
+                WriteOp::at(&first, 0, b"bad".as_slice()),
+                WriteOp::at(&last, 0, b"new".as_slice()),
+            ])
+            .unwrap();
+        let error = results[0].as_ref().unwrap_err();
+        assert_eq!(error.state(), FailureState::Failed);
+        assert_eq!(error.cause().raw_code(), libc::EBADF as u32);
+        assert!(error.progress().is_none());
+        assert_eq!(results[1].as_ref().unwrap().bytes_written, 3);
+        assert_eq!(std::fs::read(root.0.join("file")).unwrap(), b"new");
+        assert!(
+            batches.lock().unwrap().is_empty(),
+            "overlapping aliases use ordered syscalls"
+        );
+        assert!(
+            backend
+                .vclose_impl(&[first, last])
+                .unwrap()
+                .iter()
+                .all(Result::is_ok)
+        );
+    }
+
+    #[test]
+    fn path_write_preflight_preserves_targets_and_continues_valid_siblings() {
+        let (root, mut backend) = fs("write-preflight-outcomes");
+        std::fs::write(root.0.join("existing"), b"preserved").unwrap();
+        let existing = FileOperand::from_path("/existing");
+        let missing = FileOperand::from_path("/missing");
+        let saved = FileOperand::Saved;
+        let last = FileOperand::from_path("/last");
+        let writes = [
+            WriteOp::at(&existing, u64::MAX, b"bad".as_slice())
+                .with_creation()
+                .with_truncate(),
+            WriteOp::at(&missing, u64::MAX, b"bad".as_slice())
+                .with_creation()
+                .with_truncate(),
+            WriteOp::new(&existing, VfOffset::Cur, b"bad".as_slice()).with_truncate(),
+            WriteOp::at(&saved, 0, b"bad".as_slice()),
+            WriteOp::at(&last, 0, b"new".as_slice()).with_creation(),
+        ];
+        let results = backend.write_results(&writes).unwrap();
+        assert_eq!(results.len(), writes.len());
+        for (index, code) in [
+            (0, libc::EOVERFLOW),
+            (1, libc::EOVERFLOW),
+            (2, libc::EINVAL),
+        ] {
+            let error = results[index].as_ref().unwrap_err();
+            assert_eq!(error.state(), FailureState::NotAttempted);
+            assert_eq!(error.cause().raw_code(), code as u32);
+            assert_eq!(error.cause().index(), None);
+            assert!(error.progress().is_none());
+        }
+        assert_eq!(
+            results[3].as_ref().unwrap_err().state(),
+            FailureState::NotAttempted
+        );
+        assert_eq!(results[4].as_ref().unwrap().bytes_written, 3);
+        assert_eq!(
+            std::fs::read(root.0.join("existing")).unwrap(),
+            b"preserved"
+        );
+        assert!(!root.0.join("missing").exists());
+        assert_eq!(std::fs::read(root.0.join("last")).unwrap(), b"new");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn short_write_errors_keep_real_kernel_prefixes_and_advance_only_confirmed_cursors() {
+        const CHILD: &str = "VFSI_LOCAL_WRITE_PREFIX_LIMIT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg(std::thread::current().name().unwrap())
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+            assert!(
+                output.status.success(),
+                "isolated write-limit test failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        // Only this dedicated child process changes its signal/file-size policy.
+        // A real pwrite acknowledges three bytes, then the next pwrite fails.
+        let limit = libc::rlimit {
+            rlim_cur: 3,
+            rlim_max: 3,
+        };
+        // SAFETY: signal disposition and limits affect only this test subprocess.
+        assert_ne!(
+            unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) },
+            libc::SIG_ERR
+        );
+        // SAFETY: limit points to an initialized rlimit; no parent/test state changes.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &limit) }, 0);
+        for mode in 0..5 {
+            let (root, mut backend) = fs("write-prefix-child");
+            let first = backend
+                .open_raw_impl(
+                    Path::new("/first"),
+                    libc::O_CREAT | libc::O_RDWR | if mode == 3 { libc::O_APPEND } else { 0 },
+                    0o600,
+                )
+                .unwrap();
+            let last = backend
+                .open_raw_impl(Path::new("/last"), libc::O_CREAT | libc::O_RDWR, 0o600)
+                .unwrap();
+            let path = FileOperand::from_path("/first");
+            let offset = match mode {
+                1 | 3 => VfOffset::Cur,
+                2 => VfOffset::End,
+                _ => VfOffset::At(0),
+            };
+            let first_write = WriteOp::new(
+                if mode == 4 { &path } else { &first },
+                offset,
+                b"abcdef".as_slice(),
+            );
+            let first_write = if mode == 4 {
+                first_write.with_creation().with_truncate()
+            } else {
+                first_write
+            };
+            let results = backend
+                .write_results(&[
+                    first_write,
+                    WriteOp::new(
+                        &last,
+                        if mode == 0 {
+                            VfOffset::At(0)
+                        } else {
+                            VfOffset::Cur
+                        },
+                        b"z".as_slice(),
+                    ),
+                ])
+                .unwrap();
+            let error = results[0].as_ref().unwrap_err();
+            assert_eq!(error.state(), FailureState::Failed);
+            assert_eq!(error.cause().raw_code(), libc::EFBIG as u32);
+            assert_eq!(error.cause().index(), None);
+            assert_eq!(
+                error.progress(),
+                Some(&IoProgress::Write { bytes_written: 3 })
+            );
+            assert_eq!(results[1].as_ref().unwrap().bytes_written, 1);
+            assert_eq!(std::fs::read(root.0.join("first")).unwrap(), b"abc");
+            assert_eq!(std::fs::read(root.0.join("last")).unwrap(), b"z");
+            assert_eq!(
+                backend.seek_raw_impl(&first, 0, SeekFrom::Cur).unwrap(),
+                if [1, 2, 3].contains(&mode) { 3 } else { 0 }
+            );
+            assert_eq!(
+                backend.seek_raw_impl(&last, 0, SeekFrom::Cur).unwrap(),
+                if mode == 0 { 0 } else { 1 }
+            );
+            assert!(
+                backend
+                    .vclose_impl(&[first, last])
+                    .unwrap()
+                    .iter()
+                    .all(Result::is_ok)
             );
         }
     }

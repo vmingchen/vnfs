@@ -99,9 +99,16 @@ fn file_review_path_owner_sequences_wrap_for_scalar_batched_and_merged_io() {
             .collect();
         client.session.path_owner.seqid = u32::MAX - 1;
         let result = client.writev_path_compound(&writes, true).unwrap();
-        assert!(result.failed.is_none());
+        assert!(result.results.iter().all(Result::is_ok));
         assert!(result.close_failed.is_none());
-        assert_eq!(result.counts, [Some(4); 3]);
+        assert_eq!(
+            result
+                .results
+                .iter()
+                .map(|result| result.as_ref().unwrap().0)
+                .collect::<Vec<_>>(),
+            [4; 3]
+        );
         assert_eq!(client.session.path_owner.seqid, 1);
 
         let reads: Vec<_> = names
@@ -115,9 +122,16 @@ fn file_review_path_owner_sequences_wrap_for_scalar_batched_and_merged_io() {
             .collect();
         client.session.path_owner.seqid = u32::MAX - 1;
         let result = client.readv_path_compound(&reads, true).unwrap();
-        assert!(result.failed.is_none());
+        assert!(result.results.iter().all(Result::is_ok));
         assert!(result.close_failed.is_none());
-        assert_eq!(result.data, vec![Some(b"edit".to_vec()); 3]);
+        assert_eq!(
+            result
+                .results
+                .iter()
+                .map(|result| &result.as_ref().unwrap().0)
+                .collect::<Vec<_>>(),
+            vec![&b"edit".to_vec(); 3]
+        );
         assert_eq!(client.session.path_owner.seqid, 1);
     }));
     for name in names {

@@ -315,7 +315,7 @@ fn application_metadata_and_batch_mutations() {
     assert_eq!(metadata.device_id(), None);
 
     client
-        .vcopy(
+        .copies_all(
             &[("/source-1", "/copy-1"), ("/source-2", "/copy-2")],
             vnfs::files::CopyOptions::default(),
         )
@@ -335,7 +335,7 @@ fn application_metadata_and_batch_mutations() {
     );
     assert!(client.symlink_attrs("/link-copy").unwrap().is_symlink());
     client
-        .vremove(
+        .removes_all(
             &["/copy-1", "/copy-2"],
             vnfs::directory::RemoveMode::Entry,
             Default::default(),
@@ -470,9 +470,19 @@ fn read_allv_default_rejects_more_than_sixteen_mibibytes() {
         vec![0; DEFAULT_READ_ALLV_MAX_TOTAL_BYTES + 1],
     )
     .with_creation()]))
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
 
-    let error = fs.vread_all_impl(&[path]).unwrap_err();
+    let error = fs
+        .vread_all_impl(&[path])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
+        .unwrap_err();
     assert_eq!(error.index(), Some(0));
     assert_eq!(error.raw_code(), libc::EFBIG as u32);
 
@@ -489,7 +499,12 @@ fn dummy_errors_on_missing_file() {
 
     let (_root, mut fs) = dummy();
     fs.ensure_dir_impl(Path::new("/data"), 0o755).unwrap();
-    let res = fs.vread_impl(&[ReadOp::from_path("/data/missing", VfOffset::At(0), 8)]);
+    let res = fs
+        .vread_impl(&[ReadOp::from_path("/data/missing", VfOffset::At(0), 8)])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        });
     match res {
         Err(e) => {
             assert_eq!(e.index(), Some(0));
@@ -537,6 +552,10 @@ fn non_utf8_filenames_roundtrip() {
         b"data".to_vec(),
     )
     .with_creation()]))
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     let listed = fs
         .listdir_impl(Path::new("/"), vfsi_sync::AttrMask::stat(), 0, false)
@@ -552,6 +571,10 @@ fn non_utf8_filenames_roundtrip() {
     assert_eq!(got.into_vec(), raw);
     let r = &fs
         .vread_impl(&[ReadOp::from_os_path(&path, VfOffset::At(0), 4)])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap()[0];
     assert_eq!(r.data, b"data");
 }
@@ -585,6 +608,10 @@ fn rm_contents_keeps_the_directory() {
             b"x".to_vec(),
         )
         .with_creation()]))
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
     }
     fs.remove_dir_contents_path_impl(Path::new("/keep"))
@@ -613,6 +640,10 @@ fn rm_contents_rejects_a_symlink_to_a_directory() {
         b"k".to_vec(),
     )
     .with_creation()]))
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     fs.symlink_raw_impl(Path::new("target"), Path::new("link"))
         .unwrap();
@@ -634,11 +665,23 @@ fn recursive_rm_removes_a_symlink_not_its_target() {
         b"k".to_vec(),
     )
     .with_creation()]))
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     fs.symlink_raw_impl(Path::new("target"), Path::new("link"))
         .unwrap();
 
-    fs.remove_paths_impl(&[Path::new("/link")], true).unwrap();
+    {
+        let remove_roots: &[&std::path::Path] = &[Path::new("/link")];
+        vfsi_core::internal::collect_vec_result(
+            fs.remove_paths_impl(remove_roots, true),
+            remove_roots.len(),
+        )
+        .map(|_| ())
+    }
+    .unwrap();
     assert!(!fs.exists_impl(Path::new("/link")).unwrap());
     assert!(fs.exists_impl(Path::new("/target/keep")).unwrap());
 }
@@ -661,6 +704,10 @@ fn ensure_empty_dir_creates_empties_and_rejects_files() {
         b"x".to_vec(),
     )
     .with_creation()]))
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     fs.ensure_empty_dir_impl(Path::new("/full")).unwrap();
     assert!(
@@ -675,6 +722,10 @@ fn ensure_empty_dir_creates_empties_and_rejects_files() {
         b"f".to_vec(),
     )
     .with_creation()]))
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     assert!(fs.ensure_empty_dir_impl(Path::new("/afile")).is_err());
     assert!(fs.exists_impl(Path::new("/afile")).unwrap());
@@ -691,6 +742,10 @@ fn open_dir_handle_empties_contents() {
         b"a".to_vec(),
     )
     .with_creation()]))
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     fs.vwrite_impl(&borrow_writes(&[vfsi_sync::WriteOp::from_path(
         "/d/sub/b",
@@ -698,6 +753,10 @@ fn open_dir_handle_empties_contents() {
         b"b".to_vec(),
     )
     .with_creation()]))
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
 
     let handle = fs.open_dir_impl(Path::new("/d")).unwrap();
@@ -721,14 +780,24 @@ fn owned_directory_handle_refuses_path_only_backend() {
     let client = FsClient::new(backend);
     client.create_dir("/d").unwrap();
     client.write("/d/keep", b"x").unwrap();
-    let error = client.vopen_dirs(&["/d"]).unwrap_err();
+    let error = client.open_dirs(&["/d"]).unwrap_err();
     assert_eq!(error.raw_code(), vfsi_sync::VF_ERR_UNSUPPORTED);
     assert_eq!(client.read("/d/keep").unwrap(), b"x");
 
     let options = RemoveOptions::new().with_continue_on_error(true);
     assert!(VfsiExt::remove_dir_contents_with_options(&client, "/d", options).is_err());
     assert!(VfsiExt::remove_dir_all_with_options(&client, "/d", options).is_err());
-    assert!(client.vremove_impl(&["/d/keep"], false, options).is_err());
+    assert!(
+        {
+            let remove_roots: &[&std::path::Path] = &[std::path::Path::new("/d/keep")];
+            vfsi_core::internal::collect_vec_result(
+                client.vremove_impl(remove_roots, vfsi_core::api::RemoveMode::Entry, options),
+                remove_roots.len(),
+            )
+            .map(|_| ())
+        }
+        .is_err()
+    );
     assert_eq!(client.read("/d/keep").unwrap(), b"x");
     VfsiExt::remove_dir_all_with_options(&client, "/d", RemoveOptions::default()).unwrap();
 }
@@ -743,6 +812,10 @@ fn generic_remover_rejects_options_it_cannot_honor() {
         b"x".to_vec(),
     )
     .with_creation()]))
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     let handle = fs.open_dir_impl(Path::new("/d")).unwrap();
     for options in [
@@ -751,8 +824,19 @@ fn generic_remover_rejects_options_it_cannot_honor() {
         vfsi_sync::RemoveOptions::new().with_retries(0),
     ] {
         assert!(
-            fs.remove_paths_with_options_impl(&[Path::new("/d/keep")], false, options)
-                .is_err()
+            {
+                let remove_roots: &[&std::path::Path] = &[Path::new("/d/keep")];
+                vfsi_core::internal::collect_vec_result(
+                    fs.remove_paths_with_options_impl(
+                        remove_roots,
+                        vfsi_core::api::RemoveMode::Entry,
+                        options,
+                    ),
+                    remove_roots.len(),
+                )
+                .map(|_| ())
+            }
+            .is_err()
         );
         assert!(
             fs.remove_dir_contents_path_with_options_impl(Path::new("/d"), options)
@@ -818,15 +902,16 @@ fn closed_handle_rejects_standard_io() {
         client.std_io(&file).read(&mut [0u8; 1]).unwrap_err(),
         client.std_io(&file).write(b"x").unwrap_err(),
     ] {
-        assert_eq!(
-            error
-                .get_ref()
-                .unwrap()
-                .downcast_ref::<VfError>()
-                .unwrap()
-                .raw_code(),
-            libc::EBADF as u32
-        );
+        let source = error.get_ref().unwrap();
+        let cause = source
+            .downcast_ref::<VfError>()
+            .or_else(|| {
+                source
+                    .downcast_ref::<vfsi_sync::OpError>()
+                    .map(vfsi_sync::OpError::cause)
+            })
+            .unwrap();
+        assert_eq!(cause.raw_code(), libc::EBADF as u32);
     }
 }
 
@@ -876,9 +961,17 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
             first.write_request_at(0, b"one"),
             second.write_request_at(0, b"two"),
         ])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     let read_results = client
         .vread_native(&[first.read_request_at(0, 3), second.read_request_at(0, 3)])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     assert_eq!(read_results[0].data, b"one");
     assert_eq!(read_results[1].data, b"two");
@@ -889,6 +982,10 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
             first.read_request_at_into(0, &mut one_buffer),
             second.read_request_at_into(0, &mut two_buffer),
         ])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     assert_eq!(
         lengths
@@ -904,6 +1001,10 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
     assert_eq!(
         other_client
             .vread_native(&[first.read_request_at(0, 1)])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap_err()
             .raw_code(),
         vfsi_sync::ERR_INVAL
@@ -958,7 +1059,7 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
         .unwrap();
     assert_eq!(
         client
-            .vwrite(
+            .write_batch(
                 &[vnfs::files::WriteOp::at(&file, 1, b"a")],
                 Default::default()
             )
@@ -969,7 +1070,7 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
     let mut bytes = [0; 5];
     assert_eq!(
         client
-            .vread(
+            .read_batch(
                 [vnfs::files::ReadOp::into(&file, 0, &mut bytes)],
                 Default::default()
             )
@@ -998,7 +1099,7 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
     assert_eq!(metadata.permissions().unwrap().mode(), 0o600);
     file.close().unwrap();
     client
-        .vsetattrs(&[vnfs::directory::SetAttrsOp::new("/tree/nested/file")
+        .setattrs_all(&[vnfs::directory::SetAttrsOp::new("/tree/nested/file")
             .permissions(vnfs::directory::Permissions::from_mode(0o400))
             .len(4)])
         .unwrap();
@@ -1063,6 +1164,10 @@ fn native_vector_operations_are_composable() {
             files[0].write_request_at(0, b"one"),
             files[1].write_request_at(0, b"two"),
         ])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     assert_eq!(writes.len(), 2);
 
@@ -1071,6 +1176,10 @@ fn native_vector_operations_are_composable() {
             files[0].read_request_at(0, 3),
             files[1].read_request_at(0, 3),
         ])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     let values = reads;
     assert_eq!(values[0].data, b"one");
@@ -1095,7 +1204,7 @@ fn openv_fault_before_dispatch_has_no_effects_or_handles() {
         vnfs::Error::transport(None, "injected pre-dispatch failure"),
     ));
     fs.set_fault_injector(script.clone());
-    let error = VectorBackend::vopen_raw_impl(
+    let error = vfsi_sync::backend::helpers::open_raw_batch(
         &mut fs,
         &[Path::new("/f0"), Path::new("/f1")],
         &[libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 2],
@@ -1123,7 +1232,7 @@ fn openv_fault_injection_closes_the_successful_prefix() {
         vnfs::Error::transport(None, "injected registration failure"),
     ));
     fs.set_fault_injector(script.clone());
-    let error = VectorBackend::vopen_raw_impl(
+    let error = vfsi_sync::backend::helpers::open_raw_batch(
         &mut fs,
         &[Path::new("/f0"), Path::new("/f1"), Path::new("/f2")],
         &[libc::O_CREAT | libc::O_RDWR; 3],
@@ -1148,7 +1257,7 @@ fn openv_fault_after_registration_closes_the_injected_handle() {
         vnfs::Error::transport(None, "injected post-registration failure"),
     ));
     fs.set_fault_injector(script.clone());
-    let error = VectorBackend::vopen_raw_impl(
+    let error = vfsi_sync::backend::helpers::open_raw_batch(
         &mut fs,
         &[Path::new("/f0"), Path::new("/f1"), Path::new("/f2")],
         &[libc::O_CREAT | libc::O_RDWR; 3],
@@ -1174,13 +1283,17 @@ fn openv_cleanup_fault_does_not_mask_primary_error_or_leak_handles() {
         b"existing".to_vec(),
     )
     .with_creation()]))
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeCleanup { index: 0 },
         vnfs::Error::transport(None, "injected cleanup failure"),
     ));
     fs.set_fault_injector(script.clone());
-    let error = VectorBackend::vopen_raw_impl(
+    let error = vfsi_sync::backend::helpers::open_raw_batch(
         &mut fs,
         &[Path::new("/created"), Path::new("/exists")],
         &[libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 2],
@@ -1207,15 +1320,25 @@ fn recursive_remove_propagates_type_lookup_failure_without_unlinking() {
         b"data".to_vec(),
     )
     .with_creation()]))
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeRemoveType { index: 0 },
         vnfs::Error::transport(None, "injected type lookup failure"),
     ));
     fs.set_fault_injector(script.clone());
-    let error = fs
-        .remove_paths_impl(&[Path::new("/kept")], true)
-        .unwrap_err();
+    let error = {
+        let remove_roots: &[&std::path::Path] = &[Path::new("/kept")];
+        vfsi_core::internal::collect_vec_result(
+            fs.remove_paths_impl(remove_roots, true),
+            remove_roots.len(),
+        )
+        .map(|_| ())
+    }
+    .unwrap_err();
     assert!(error.is_transport());
     assert!(script.is_consumed());
     assert!(fs.exists_impl(Path::new("/kept")).unwrap());
@@ -1255,7 +1378,7 @@ fn mkdir_mode_failure_is_reported_instead_of_ignored() {
 }
 
 #[test]
-fn strict_vectors_report_failure_index_without_rollback() {
+fn strict_collection_selects_failure_without_rollback_or_prefix_guarantee() {
     use vfsi_sync::FileOperand;
 
     let (_root, mut fs) = dummy();
@@ -1263,17 +1386,27 @@ fn strict_vectors_report_failure_index_without_rollback() {
         vfsi_sync::WriteOp::from_path("/first", VfOffset::At(0), Vec::new()).with_creation(),
         vfsi_sync::WriteOp::from_path("/third", VfOffset::At(0), Vec::new()).with_creation(),
     ]))
+    .and_then(|outcomes| {
+        let count = outcomes.len();
+        vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+    })
     .unwrap();
-    let error = fs
-        .vremove_impl(&[
+    let error = {
+        let remove_files = &[
             FileOperand::from_path("/first"),
             FileOperand::from_path("/missing"),
             FileOperand::from_path("/third"),
-        ])
-        .unwrap_err();
+        ];
+        vfsi_core::internal::collect_vec_result(fs.vremove_impl(remove_files), remove_files.len())
+            .map(|_| ())
+    }
+    .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert!(!fs.exists_impl(Path::new("/first")).unwrap());
-    assert!(fs.exists_impl(Path::new("/third")).unwrap());
+    assert!(
+        !fs.exists_impl(Path::new("/third")).unwrap(),
+        "strict collection does not restore ordered execution"
+    );
 }
 
 #[test]
@@ -1320,6 +1453,10 @@ fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
         WriteOp::from_path("/tree/one", VfOffset::At(0), Vec::new()).with_creation(),
         WriteOp::from_path("/tree/two", VfOffset::At(0), Vec::new()).with_creation(),
     ]))
+    .and_then(|outcomes| {
+        let count = outcomes.len();
+        vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+    })
     .unwrap();
 
     let error = fs

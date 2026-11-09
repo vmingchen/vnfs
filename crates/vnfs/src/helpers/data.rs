@@ -144,7 +144,7 @@ fn copy_to_writers_ordered<P: AsRef<Path>, W: Write>(
 ) -> Result<Vec<u64>> {
     let mut written = vec![0u64; paths.len()];
     let mut write_error = None;
-    let completion = source.vstream(paths, options, |index, offset, data| {
+    let completion = source.streams_all(paths, options, |index, offset, data| {
         let Some(position) = written.get_mut(index) else {
             return Err(Error::invalid_reply(None, "invalid writer stream index"));
         };
@@ -207,7 +207,7 @@ fn copy_to_writers_round_robin<P: AsRef<Path>, W: Write>(
             .iter()
             .map(|path| OpenOp::new(path.as_ref(), OpenFlags::READ))
             .collect();
-        let mut files = source.vopen(&requests).map_err(|error| {
+        let mut files = source.open_batch(&requests).map_err(|error| {
             writer_stream_error(error, base, |i| (i < paths.len()).then_some(i))
         })?;
         let operation = (|| {
@@ -223,7 +223,7 @@ fn copy_to_writers_round_robin<P: AsRef<Path>, W: Write>(
                     .iter()
                     .map(|&i| ReadOp::range(&files[i], written[base + i], chunk))
                     .collect();
-                let results = source.vread(requests, reads).map_err(|error| {
+                let results = source.read_batch(requests, reads).map_err(|error| {
                     writer_stream_error(error, base, |i| active.get(i).copied())
                 })?;
                 if results.len() != active.len() {
@@ -269,7 +269,7 @@ fn copy_to_writers_round_robin<P: AsRef<Path>, W: Write>(
         // failures. Preserve the operation error when cleanup also fails.
         let count = files.len();
         let close = source
-            .vclose(&mut files)
+            .close_batch(&mut files)
             .map_err(|error| writer_stream_error(error, base, |i| (i < count).then_some(i)));
         operation?;
         close?;

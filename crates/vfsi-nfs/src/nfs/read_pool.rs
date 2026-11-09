@@ -8,7 +8,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vfsi_core::{VfError, VfResult};
-use vfsi_sync::{FsClient, OpenFile, StreamCompletion, Vfsi, VfsiExt};
+use vfsi_sync::{FsClient, OpenFile, StreamCompletion, VfsiExt};
 
 use super::{NfsClientBuilder, NfsVecFs};
 
@@ -820,7 +820,7 @@ fn read_range(
         let current_offset = offset
             .checked_add(filled as u64)
             .ok_or_else(|| VfError::errno(0, libc::EOVERFLOW as u32))?;
-        let results = client.vread(
+        let results = client.read_batch(
             [vfsi_core::api::ReadOp::into(
                 file,
                 current_offset,

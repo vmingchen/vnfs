@@ -1,9 +1,9 @@
-use vnfs::files::{StreamOptions, Vfsi};
+use vnfs::files::{StreamOptions, Vfsi, VfsiExt};
 use vnfs::nfs::Nfs;
 
 pub fn run(fs: &impl Vfsi, path: &str) -> vnfs::Result<u64> {
     let mut bytes = 0_u64;
-    fs.vstream(
+    fs.streams_all(
         &[path],
         StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(1024 * 1024).unwrap()),
         |index, offset, chunk| {

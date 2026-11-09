@@ -1,6 +1,9 @@
 //! Contiguous completion of acknowledged short NFS wire operations.
 use super::{RpcError, RpcResult, checked_offset};
 use nfsv41_sys::{nfsstat4_NFS4ERR_IO, stable_how4_FILE_SYNC4};
+#[cfg(test)]
+use vfsi_core::{FailureState, IoProgress};
+use vfsi_core::{OpError, OpResult, VfError};
 
 pub(super) fn complete_read_suffix<C>(
     client: &mut C,
@@ -27,26 +30,46 @@ pub(super) fn complete_read_suffix<C>(
     Ok(eof)
 }
 
+pub(super) fn write_rpc_error(error: RpcError) -> OpError {
+    let cause = vfsi_core::error_from_rpc(error, None);
+    if cause.is_transport() {
+        OpError::unknown(cause, None)
+    } else {
+        OpError::failed(cause, None)
+    }
+}
+
+pub(super) use vfsi_core::internal::add_write_prefix;
+
 pub(super) fn complete_write_suffix<C>(
     client: &mut C,
-    caller: usize,
     offset: u64,
     data: &[u8],
-    mut write: impl FnMut(&mut C, u64, &[u8]) -> RpcResult<(u32, u32)>,
-) -> RpcResult<u32> {
-    checked_offset(offset, data.len(), caller)?;
+    mut write: impl FnMut(&mut C, u64, &[u8]) -> OpResult<(u32, u32)>,
+) -> OpResult<u32> {
+    checked_offset(offset, data.len(), 0)
+        .map_err(|error| OpError::not_attempted(vfsi_core::error_from_rpc(error, None)))?;
     let mut written = 0;
     let mut committed = stable_how4_FILE_SYNC4;
     while written < data.len() {
-        let (count, stable) = write(
-            client,
-            checked_offset(offset, written, caller)?,
-            &data[written..],
-        )
-        .map_err(|error| error.with_op_index(caller))?;
+        let (count, stable) = write(client, offset + written as u64, &data[written..])
+            .map_err(|error| add_write_prefix(error, written, data.len()))?;
         let count = count as usize;
-        if count == 0 || count > data.len() - written {
-            return Err(RpcError::op(caller, nfsstat4_NFS4ERR_IO));
+        let error = if count > data.len() - written || stable > stable_how4_FILE_SYNC4 {
+            Some(OpError::unknown(
+                VfError::invalid_reply(None, "invalid WRITE repair completion"),
+                None,
+            ))
+        } else if count == 0 {
+            Some(OpError::failed(
+                VfError::nfs(None, nfsstat4_NFS4ERR_IO),
+                None,
+            ))
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            return Err(add_write_prefix(error, written, data.len()));
         }
         written += count;
         committed = committed.min(stable);
@@ -150,7 +173,7 @@ mod tests {
     #[test]
     fn write_repairs_only_missing_suffix_and_combines_stability() {
         let mut calls = Vec::new();
-        let stable = complete_write_suffix(&mut calls, 3, 7, b"abcdefg", |calls, offset, data| {
+        let stable = complete_write_suffix(&mut calls, 7, b"abcdefg", |calls, offset, data| {
             calls.push((offset, data.to_vec()));
             Ok((
                 data.len().min(3) as u32,
@@ -175,35 +198,49 @@ mod tests {
     #[test]
     fn write_rejects_zero_progress_and_oversized_counts() {
         for count in [0, 4] {
-            let error = complete_write_suffix(&mut (), 6, 0, b"abc", |_, _, _| {
+            let error = complete_write_suffix(&mut (), 0, b"abc", |_, _, _| {
                 Ok((count, stable_how4_FILE_SYNC4))
             })
             .unwrap_err();
-            assert_eq!(error.status, nfsstat4_NFS4ERR_IO);
-            assert_eq!(error.op_index, 6);
+            assert_eq!(error.cause().index(), None);
+            assert!(error.progress().is_none());
+            if count == 0 {
+                assert_eq!(error.state(), FailureState::Failed);
+                assert_eq!(error.cause().raw_code(), nfsstat4_NFS4ERR_IO);
+            } else {
+                assert_eq!(error.state(), FailureState::Unknown);
+                assert_eq!(
+                    error.cause().transport_kind(),
+                    Some(vfsi_core::TransportKind::InvalidReply)
+                );
+            }
         }
     }
     #[test]
     fn write_does_not_replay_after_repair_failure() {
         let mut calls = Vec::new();
-        let error = complete_write_suffix(&mut calls, 8, 5, b"abcd", |calls, offset, _| {
+        let error = complete_write_suffix(&mut calls, 5, b"abcd", |calls, offset, _| {
             calls.push(offset);
             if calls.len() == 1 {
                 Ok((2, stable_how4_FILE_SYNC4))
             } else {
-                Err(RpcError::transport("lost write repair"))
+                Err(write_rpc_error(RpcError::transport("lost write repair")))
             }
         })
         .unwrap_err();
-        assert!(error.is_transport());
-        assert_eq!(error.op_index, 8);
+        assert!(error.cause().is_transport());
+        assert_eq!(error.cause().index(), None);
+        assert_eq!(error.state(), FailureState::Unknown);
+        assert_eq!(
+            error.progress(),
+            Some(&IoProgress::Write { bytes_written: 2 })
+        );
         assert_eq!(calls, [5, 7]);
     }
     #[test]
     fn overflow_fails_before_repair_dispatch() {
         assert!(
-            complete_write_suffix(&mut (), 1, u64::MAX, b"a", |_, _, _| panic!("overflow"))
-                .is_err()
+            complete_write_suffix(&mut (), u64::MAX, b"a", |_, _, _| panic!("overflow")).is_err()
         );
         assert!(
             complete_read_suffix(
@@ -216,5 +253,85 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn write_repair_failures_keep_prefixes_and_never_replay_after_rejection() {
+        for state in [
+            FailureState::Failed,
+            FailureState::Unknown,
+            FailureState::NotAttempted,
+        ] {
+            let mut calls = Vec::new();
+            let error = complete_write_suffix(&mut calls, 11, b"abcdef", |calls, offset, data| {
+                calls.push((offset, data.to_vec()));
+                if calls.len() == 1 {
+                    return Ok((2, stable_how4_FILE_SYNC4));
+                }
+                let cause = VfError::errno(99, libc::ENOSPC as u32);
+                Err(match state {
+                    FailureState::Failed => {
+                        OpError::failed(cause, Some(IoProgress::Write { bytes_written: 1 }))
+                    }
+                    FailureState::Unknown => {
+                        OpError::unknown(cause, Some(IoProgress::Write { bytes_written: 1 }))
+                    }
+                    FailureState::NotAttempted => OpError::not_attempted(cause),
+                })
+            })
+            .unwrap_err();
+            assert_eq!(calls, [(11, b"abcdef".to_vec()), (13, b"cdef".to_vec())]);
+            assert_eq!(error.cause().index(), None);
+            assert_eq!(error.cause().raw_code(), libc::ENOSPC as u32);
+            assert_eq!(
+                error.state(),
+                if state == FailureState::Unknown {
+                    state
+                } else {
+                    FailureState::Failed
+                }
+            );
+            assert_eq!(
+                error.progress(),
+                Some(&IoProgress::Write {
+                    bytes_written: if state == FailureState::NotAttempted {
+                        2
+                    } else {
+                        3
+                    },
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn write_repair_malformed_progress_keeps_only_previously_validated_bytes() {
+        for read_progress in [false, true] {
+            let mut calls = 0;
+            let error = complete_write_suffix(&mut calls, 0, b"abcde", |calls, _, _| {
+                *calls += 1;
+                if *calls == 1 {
+                    return Ok((2, stable_how4_FILE_SYNC4));
+                }
+                Err(OpError::failed(
+                    VfError::errno(None, libc::EIO as u32),
+                    Some(if read_progress {
+                        IoProgress::Read(vfsi_core::api::ReadResult::buffered(0, 1, false))
+                    } else {
+                        IoProgress::Write { bytes_written: 4 }
+                    }),
+                ))
+            })
+            .unwrap_err();
+            assert_eq!(calls, 2);
+            assert_eq!(error.state(), FailureState::Unknown);
+            assert_eq!(
+                error.cause().transport_kind(),
+                Some(vfsi_core::TransportKind::InvalidReply)
+            );
+            assert_eq!(
+                error.progress(),
+                Some(&IoProgress::Write { bytes_written: 2 })
+            );
+        }
     }
 }

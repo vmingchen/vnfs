@@ -104,6 +104,7 @@ impl SmbVecFs {
             })?
             .map_err(|e| smb_error(e, 0))?;
         check_share_routing(tree.is_dfs || tree.dfs_origin.is_some(), share)?;
+        let tree = Arc::new(ShareSession::new(tree, client.connection().clone()));
         Ok(Self {
             runtime,
             client,
@@ -133,32 +134,41 @@ impl SmbVecFs {
         if self.disconnected {
             return Ok(());
         }
-        let file_ids: Vec<FileId> = self
-            .open_files
-            .drain()
-            .map(|(_, open)| open.file_id)
-            .chain(self.deferred_closes.drain(..))
-            .collect();
-        let close_result = if file_ids.is_empty() {
-            Ok(())
-        } else {
-            let connection = self.client.connection_mut().clone();
-            let tree_id = self.tree.tree_id;
-            let jobs = file_ids.into_iter().map(|file_id| {
-                let connection = connection.clone();
-                async move { close_on_connection_result(&connection, tree_id, file_id).await }
-            });
-            self.runtime
-                .block_on(join_all(jobs))
-                .into_iter()
-                .enumerate()
-                .find_map(|(index, result)| result.err().map(|error| error.with_index(index)))
-                .map_or(Ok(()), Err)
-        };
+        let mut owners = std::mem::take(&mut self.deferred_closes);
+        owners.extend(
+            self.open_files
+                .drain()
+                .map(|(_, open)| DeferredClose::new(open.tree, CloseState::Ready(open.file_id))),
+        );
+        let mut trees = vec![self.tree.clone()];
+        for owner in &owners {
+            if owner.tree.is_current() && !trees.iter().any(|tree| tree.same_tree(&owner.tree)) {
+                trees.push(owner.tree.clone());
+            }
+        }
+        let jobs = owners
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, owner)| owner.can_attempt())
+            .map(|(index, owner)| async move { (index, owner.attempt().await) });
+        let close_result = self
+            .runtime
+            .block_on(join_all(jobs))
+            .into_iter()
+            .find_map(|(index, result)| {
+                result
+                    .err()
+                    .map(|error| error.into_cause().with_index(index))
+            })
+            .map_or(Ok(()), Err);
+        // Already attempted CLOSEs are never submitted again. Disconnecting
+        // each original live tree releases its remaining session-owned state.
         let disconnect_result = self
             .runtime
-            .block_on(self.client.disconnect_share(&self.tree))
-            .map_err(|error| smb_error(error, 0));
+            .block_on(join_all(trees.iter().map(|tree| tree.disconnect())))
+            .into_iter()
+            .find_map(Result::err)
+            .map_or(Ok(()), Err);
         self.disconnected = true;
         close_result.and(disconnect_result)
     }
@@ -208,6 +218,21 @@ impl SmbVecFs {
             .map_err(|_| VfError::errno(0, libc::EILSEQ as u32))
     }
 
+    pub(super) fn live_file(&self, fd: Fd) -> VfResult<&SmbOpen> {
+        let open = self
+            .open_files
+            .get(&fd)
+            .ok_or_else(|| VfError::errno(None, ERR_EBADF))?;
+        if !self.tree.owns_live_file(&open.tree) {
+            return Err(VfError::transport_with_kind(
+                None,
+                vfsi_core::TransportKind::Connection,
+                "SMB file handle belongs to an invalidated session or tree",
+            ));
+        }
+        Ok(open)
+    }
+
     pub(super) fn file_path(&self, file: &FileOperand) -> VfResult<PathBuf> {
         match file {
             FileOperand::Fd(fd) => self
@@ -230,13 +255,21 @@ impl SmbVecFs {
 
     pub(super) fn drain_deferred_closes(&mut self) -> VfResult<()> {
         let pending = std::mem::take(&mut self.deferred_closes);
-        for (index, file_id) in pending.iter().copied().enumerate() {
-            if let Err(error) = self.raw_close(file_id) {
-                self.deferred_closes.extend(pending.into_iter().skip(index));
-                return Err(error);
+        let mut first = None;
+        for mut owner in pending {
+            if !owner.tree.is_current() {
+                continue;
+            }
+            if !owner.can_attempt() {
+                self.deferred_closes.push(owner);
+                continue;
+            }
+            if let Err(error) = self.runtime.block_on(owner.attempt()) {
+                first.get_or_insert_with(|| error.into_cause());
+                self.deferred_closes.push(owner);
             }
         }
-        Ok(())
+        first.map_or(Ok(()), Err)
     }
 
     pub(super) fn wire_path(&self, path: &str) -> String {
@@ -311,48 +344,26 @@ impl SmbVecFs {
         Ok((response.file_id, response.end_of_file))
     }
 
+    #[cfg(all(test, feature = "test-faults"))]
     pub(super) fn raw_close(&mut self, file_id: FileId) -> VfResult<()> {
-        let request = CloseRequest { flags: 0, file_id };
-        let tree_id = self.tree.tree_id;
-        let frame = self
-            .runtime
-            .block_on(
-                self.client
-                    .connection_mut()
-                    .execute(Command::Close, &request, Some(tree_id)),
-            )
-            .map_err(|e| smb_error(e, 0))?;
-        require_status(&frame, Command::Close, 0)
+        self.runtime
+            .block_on(self.tree.close_file(file_id))
+            .map_err(vfsi_core::OpError::into_cause)
     }
 
     pub(super) fn close_temporary_handle(&mut self, file_id: FileId) -> VfResult<()> {
-        let result = self.raw_close(file_id);
-        retain_failed_close(&mut self.deferred_closes, file_id, result)
-    }
-
-    pub(super) fn close_compound_temporary_handle(
-        &mut self,
-        file_id: FileId,
-        compound_close_succeeded: bool,
-    ) -> VfResult<()> {
-        if compound_close_succeeded {
-            Ok(())
-        } else {
-            self.close_temporary_handle(file_id)
+        let mut owner = DeferredClose::new(self.tree.clone(), CloseState::Ready(file_id));
+        let result = self.runtime.block_on(owner.attempt());
+        if result.is_err() {
+            self.deferred_closes.push(owner);
         }
+        result.map_err(vfsi_core::OpError::into_cause)
     }
 
     pub(super) fn raw_flush(&mut self, file_id: FileId) -> VfResult<()> {
-        let request = FlushRequest { file_id };
-        let tree_id = self.tree.tree_id;
-        let frame = self
-            .runtime
-            .block_on(
-                self.client
-                    .connection_mut()
-                    .execute(Command::Flush, &request, Some(tree_id)),
-            )
-            .map_err(|e| smb_error(e, 0))?;
-        require_status(&frame, Command::Flush, 0)
+        let connection = self.client.connection_mut().clone();
+        self.runtime
+            .block_on(flush_file(connection, self.tree.tree_id, file_id))
+            .map_err(|error| error.into_cause().with_index(0))
     }
 }

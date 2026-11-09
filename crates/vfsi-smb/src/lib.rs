@@ -26,7 +26,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-#[cfg(feature = "test-faults")]
 use std::sync::Arc;
 use std::time::Duration;
 use vfsi_sync::backend::{HandleBackend, VectorBackend};
@@ -49,7 +48,6 @@ use smb2::types::status::NtStatus;
 use smb2::types::{Command, CreditCharge, Dialect, FileId, OplockLevel, TreeId};
 use smb2::{Error as SmbError, ErrorKind as SmbErrorKind};
 use tokio::runtime::{Builder, Runtime};
-use vfsi_core::internal::ManyResults;
 #[cfg(feature = "test-faults")]
 use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 
@@ -131,6 +129,7 @@ fn checked_offset(base: u64, delta: u64, index: usize) -> VfResult<u64> {
 #[derive(Debug, Clone)]
 struct SmbOpen {
     file_id: FileId,
+    tree: Arc<ShareSession>,
     path: PathBuf,
     cur_offset: u64,
     append: bool,
@@ -145,11 +144,11 @@ struct SmbOpen {
 pub struct SmbVecFs {
     runtime: Runtime,
     client: SmbClient,
-    tree: Tree,
+    tree: Arc<ShareSession>,
     cwd: PathBuf,
     next_fd: Fd,
     open_files: HashMap<Fd, SmbOpen>,
-    deferred_closes: Vec<FileId>,
+    deferred_closes: Vec<DeferredClose>,
     server_copy_enabled: bool,
     disconnected: bool,
     #[cfg(feature = "test-faults")]
@@ -174,6 +173,9 @@ impl Drop for SmbVecFs {
         let _ = self.shutdown_inner();
     }
 }
+
+mod ownership;
+use ownership::{CloseState, DeferredClose, ShareSession};
 
 mod connection;
 mod copy;

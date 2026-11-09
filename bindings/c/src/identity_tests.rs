@@ -69,12 +69,35 @@ struct IdentityBackend {
     failure: bool,
 }
 impl HandleBackend for IdentityBackend {
+    fn vfsync_impl(
+        &mut self,
+        files: &[FileOperand],
+        _mode: vfsi_sync::api::SyncMode,
+    ) -> vfsi_sync::VecResult<()> {
+        Ok(files
+            .iter()
+            .map(|file| {
+                self.sync_data(file)
+                    .map_err(|cause| vfsi_sync::OpError::unknown(cause, None))
+            })
+            .collect())
+    }
     fn sync_data(&mut self, _: &FileOperand) -> Result<(), VfError> {
         unreachable!()
     }
     fn open_impl(&mut self, _: &vfsi_sync::OpenOp) -> Result<FileOperand, VfError> {
         unreachable!()
     }
+    fn vclose_impl(&mut self, files: &[vfsi_sync::FileOperand]) -> vfsi_sync::VecResult<()> {
+        Ok(files
+            .iter()
+            .map(|file| {
+                self.close_impl(file)
+                    .map_err(|error| vfsi_sync::OpError::unknown(error, None))
+            })
+            .collect())
+    }
+
     fn close_impl(&mut self, _: &FileOperand) -> Result<(), VfError> {
         Ok(())
     }
@@ -105,10 +128,39 @@ impl HandleBackend for IdentityBackend {
     }
 }
 impl VectorBackend for IdentityBackend {
-    fn vread_impl(&mut self, _: &[ReadOp]) -> Result<Vec<vfsi_sync::ReadResult>, VfError> {
+    fn vopen_raw_impl(
+        &mut self,
+        paths: &[&std::path::Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> vfsi_sync::VecResult<vfsi_sync::FileOperand> {
+        if paths.len() != flags.len() || paths.len() != modes.len() {
+            return Err(vfsi_sync::VfError::from_kind(
+                None,
+                std::io::ErrorKind::InvalidInput,
+            ));
+        }
+        Ok(paths
+            .iter()
+            .zip(flags)
+            .zip(modes)
+            .map(|((path, flags), mode)| {
+                self.open_raw_impl(path, *flags, *mode).map_err(|cause| {
+                    if cause.is_transport() {
+                        vfsi_sync::OpError::unknown(cause, None)
+                    } else {
+                        vfsi_sync::OpError::failed(cause, None)
+                    }
+                })
+            })
+            .collect())
+    }
+
+    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
         unreachable!()
     }
-    fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> Result<(), VfError> {
+    fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_sync::VecResult<()> {
+        let requested = attrs.len();
         self.calls.fetch_add(1, Ordering::Relaxed);
         if self.failure {
             return Err(VfError::transport_with_kind(
@@ -127,7 +179,7 @@ impl VectorBackend for IdentityBackend {
                 attrs.file = FileOperand::from_path("/wrong");
             }
         }
-        Ok(())
+        Ok(vec![Ok(()); requested])
     }
     fn listdir_impl(
         &mut self,
@@ -167,7 +219,7 @@ impl VectorBackend for IdentityBackend {
         }
         Ok(())
     }
-    fn vgetattrs_nofollow_impl(&mut self, attrs: &mut [VfAttrs]) -> Result<(), VfError> {
+    fn vgetattrs_nofollow_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_sync::VecResult<()> {
         self.vgetattrs_impl(attrs)
     }
 }

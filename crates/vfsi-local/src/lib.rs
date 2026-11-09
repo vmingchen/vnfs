@@ -31,7 +31,6 @@ use std::time::{Duration, UNIX_EPOCH};
 use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::*;
 
-use vfsi_core::internal::ManyResults;
 #[cfg(feature = "test-faults")]
 use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 use vfsi_core::path::{cstring_from_bytes, normalize_bytes, path_bytes, path_from_bytes};
@@ -263,38 +262,85 @@ impl LocalBackend {
             .ok_or_else(|| VfError::from_kind(index, std::io::ErrorKind::InvalidInput))
     }
 
-    fn getattrsv_impl(&mut self, attrs: &mut [VfAttrs], follow: bool) -> VfRes {
-        for (i, a) in attrs.iter_mut().enumerate() {
-            if let FileOperand::Fd(fd) = &a.file {
-                let open = self
-                    .open_files
-                    .get(fd)
-                    .ok_or_else(|| VfError::errno(i, ERR_EBADF))?;
-                let md = open.file.metadata().map_err(|e| VfError::from_io(i, e))?;
-                self.fill_attrs(a, None, &md)
+    fn getattr_one_impl(&mut self, a: &mut VfAttrs, i: usize, follow: bool) -> VfRes {
+        if let FileOperand::Fd(fd) = &a.file {
+            let open = self
+                .open_files
+                .get(fd)
+                .ok_or_else(|| VfError::errno(i, ERR_EBADF))?;
+            let md = open.file.metadata().map_err(|e| VfError::from_io(i, e))?;
+            self.fill_attrs(a, None, &md)
+                .map_err(|error| error.with_index(i))?;
+            if a.masks.contains(AttrMask::NAMED_ATTR) {
+                use std::os::fd::AsRawFd;
+                a.has_named_attr = Self::has_xattr_fd(open.file.as_raw_fd())
                     .map_err(|error| error.with_index(i))?;
-                if a.masks.contains(AttrMask::NAMED_ATTR) {
-                    use std::os::fd::AsRawFd;
-                    a.has_named_attr = Self::has_xattr_fd(open.file.as_raw_fd())
-                        .map_err(|error| error.with_index(i))?;
-                    a.returned.insert(AttrMask::NAMED_ATTR);
-                }
-                continue;
+                a.returned.insert(AttrMask::NAMED_ATTR);
             }
-            let lexical = self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?;
-            if follow {
-                let p = self.real_path(&lexical).map_err(|e| e.with_index(i))?;
-                let md = std::fs::metadata(&p).map_err(|e| VfError::from_io(i, e))?;
-                self.fill_attrs(a, Some(&p), &md)
-                    .map_err(|error| error.with_index(i))?;
-            } else {
-                let p = self.no_follow_path(&lexical).map_err(|e| e.with_index(i))?;
-                let md = std::fs::symlink_metadata(&p).map_err(|e| VfError::from_io(i, e))?;
-                self.fill_attrs(a, Some(&p), &md)
-                    .map_err(|error| error.with_index(i))?;
-            }
+            return Ok(());
+        }
+        let lexical = self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?;
+        if follow {
+            let p = self.real_path(&lexical).map_err(|e| e.with_index(i))?;
+            let md = std::fs::metadata(&p).map_err(|e| VfError::from_io(i, e))?;
+            self.fill_attrs(a, Some(&p), &md)
+                .map_err(|error| error.with_index(i))?;
+        } else {
+            let p = self.no_follow_path(&lexical).map_err(|e| e.with_index(i))?;
+            let md = std::fs::symlink_metadata(&p).map_err(|e| VfError::from_io(i, e))?;
+            self.fill_attrs(a, Some(&p), &md)
+                .map_err(|error| error.with_index(i))?;
         }
         Ok(())
+    }
+
+    // Shared native outcome iterators. New vector dispatch must collect all
+    // slots; the legacy collector below deliberately retains its stop-on-error
+    // contract. No singleton frontend calls or additional outcome allocation.
+    fn getattr_results<'a>(
+        &'a mut self,
+        attrs: &'a mut [VfAttrs],
+        follow: bool,
+    ) -> impl Iterator<Item = vfsi_core::OpResult<()>> + 'a {
+        attrs.iter_mut().enumerate().map(move |(index, attr)| {
+            self.getattr_one_impl(attr, index, follow)
+                .map_err(|error| vfsi_core::OpError::failed(error, None))
+        })
+    }
+
+    fn statfs_results<'a>(
+        &'a self,
+        files: &'a [FileOperand],
+    ) -> impl Iterator<Item = vfsi_core::OpResult<FilesystemStats>> + 'a {
+        files.iter().enumerate().map(move |(index, file)| {
+            self.statfs_one_impl(file, index)
+                .map_err(|error| vfsi_core::OpError::failed(error, None))
+        })
+    }
+
+    fn statfs_one_impl(&self, file: &FileOperand, index: usize) -> VfResult<FilesystemStats> {
+        use std::os::fd::AsRawFd;
+        let anchored;
+        let fd = if let FileOperand::Fd(fd) = file {
+            self.open_files
+                .get(fd)
+                .ok_or_else(|| VfError::errno(index, ERR_EBADF))?
+                .file
+                .as_raw_fd()
+        } else {
+            anchored = self
+                .real_path(&self.tcfile_path(file).map_err(|e| e.with_index(index))?)
+                .map_err(|e| e.with_index(index))?;
+            if anchored.nofollow_on_open {
+                return Err(VfError::errno(index, ERR_NOENT));
+            }
+            anchored
+                .anchor
+                .as_ref()
+                .ok_or_else(|| VfError::unsupported(index))?
+                .as_raw_fd()
+        };
+        local_filesystem_stats(fd, index)
     }
 
     /// Open an existing directory with an explicit synchronous executor.
@@ -1268,6 +1314,305 @@ impl LocalBackend {
         })
     }
 
+    fn preflight_mixed_read(&self, op: &ReadOp) -> vfsi_core::OpResult<()> {
+        if let Some(fd) = op.file.fd()
+            && !self.open_files.contains_key(&fd)
+        {
+            return Err(vfsi_core::OpError::not_attempted(VfError::errno(
+                None, ERR_EBADF,
+            )));
+        }
+        if let VfOffset::At(offset) = op.offset {
+            checked_offset(offset, op.length as u64, 0)
+                .map_err(vfsi_core::OpError::not_attempted)?;
+        }
+        Ok(())
+    }
+
+    /// Lossless local read engine. The native trait retains an explicit strict
+    /// bridge until the coordinated operation-family signature migration.
+    fn read_results(&mut self, reads: &[ReadOp]) -> vfsi_core::VecResult<ReadResult> {
+        use vfsi_core::{OpError, OpResult};
+        if reads.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(index) = reads.iter().position(|op| op.length > isize::MAX as usize) {
+            return Err(VfError::errno(index, libc::EFBIG as u32));
+        }
+        let owned = self.io.owned_read_window().is_some_and(|limit| {
+            reads
+                .iter()
+                .try_fold(0usize, |total, op| total.checked_add(op.length))
+                .is_some_and(|total| total <= limit)
+        });
+        if owned && Self::independent_reads(reads) {
+            let mut out: Vec<Option<OpResult<ReadResult>>> =
+                (0..reads.len()).map(|_| None).collect();
+            let mut operations = Vec::with_capacity(reads.len());
+            let mut indices = Vec::with_capacity(reads.len());
+            let mut offsets = if reads.iter().all(|op| matches!(op.offset, VfOffset::At(_))) {
+                Vec::new()
+            } else {
+                vec![0; reads.len()]
+            };
+            for (index, op) in reads.iter().enumerate() {
+                match Self::prepare_read(&self.open_files, op, index) {
+                    Ok((file, offset)) => {
+                        if !offsets.is_empty() {
+                            offsets[index] = offset;
+                        }
+                        operations.push(io::OwnedRead {
+                            file: Arc::clone(file),
+                            offset,
+                            buffer: Vec::new(),
+                        });
+                        indices.push(index);
+                    }
+                    Err(error) => out[index] = Some(Err(OpError::not_attempted(error))),
+                }
+            }
+            // Validate descriptors before allocating payloads. A malformed
+            // sibling does not prevent valid requests sharing one executor call.
+            for (operation, &index) in operations.iter_mut().zip(&indices) {
+                operation.buffer = vec![0; reads[index].length];
+            }
+            let results = if operations.is_empty() {
+                Vec::new()
+            } else {
+                self.io.read_owned(operations)
+            };
+            if results.len() != indices.len() {
+                let cause = VfError::invalid_reply(None, "owned read returned wrong result count");
+                for index in indices {
+                    out[index] = Some(Err(OpError::unknown(cause.clone(), None)));
+                }
+            } else {
+                for (index, result) in indices.into_iter().zip(results) {
+                    let op = &reads[index];
+                    let offset = match op.offset {
+                        VfOffset::At(offset) => offset,
+                        _ => offsets[index],
+                    };
+                    let result = result
+                        .map_err(|error| Self::check_read_error(error, offset, op.length, true))
+                        .and_then(|data| {
+                            if data.len() > op.length {
+                                return Err(OpError::unknown(
+                                    VfError::invalid_reply(
+                                        None,
+                                        "owned read exceeds requested length",
+                                    ),
+                                    None,
+                                ));
+                            }
+                            Ok(ReadResult {
+                                file: op.file.clone(),
+                                offset,
+                                eof: data.is_empty() && op.length != 0,
+                                data,
+                            })
+                        });
+                    self.advance_read_progress(
+                        op,
+                        offset,
+                        result.as_ref().map(|read| read.data.len()),
+                    );
+                    out[index] = Some(result);
+                }
+            }
+            return Ok(out
+                .into_iter()
+                .map(|slot| slot.expect("every read resolved"))
+                .collect());
+        }
+        if reads.iter().all(|op| op.file.is_fd()) {
+            let mut storage: Vec<_> = reads.iter().map(|op| vec![0; op.length]).collect();
+            let mut buffers: Vec<_> = storage.iter_mut().map(Vec::as_mut_slice).collect();
+            let results = self.read_into_results(reads, &mut buffers)?;
+            return Ok(results
+                .into_iter()
+                .zip(storage)
+                .map(|(result, mut data)| match result {
+                    Ok(result) => {
+                        data.truncate(result.bytes_read);
+                        Ok(ReadResult {
+                            file: result.file,
+                            offset: result.offset,
+                            data,
+                            eof: result.eof,
+                        })
+                    }
+                    Err(error) => {
+                        let offset = error
+                            .progress()
+                            .and_then(|progress| match progress {
+                                vfsi_core::IoProgress::Read(read) => Some(read.offset()),
+                                _ => None,
+                            })
+                            .unwrap_or(0);
+                        Err(vfsi_core::internal::own_read_error(error, offset, data))
+                    }
+                })
+                .collect());
+        }
+        Ok(reads
+            .iter()
+            .map(|op| {
+                self.preflight_mixed_read(op)?;
+                self.readv_one(op)
+                    .map_err(|error| OpError::failed(error, None))
+            })
+            .collect())
+    }
+
+    fn check_read_error(
+        error: vfsi_core::OpError,
+        offset: u64,
+        length: usize,
+        owned: bool,
+    ) -> vfsi_core::OpError {
+        match error.progress() {
+            None => error,
+            Some(vfsi_core::IoProgress::Read(read))
+                if read.offset() == offset
+                    && read.bytes_read() <= length
+                    && read.is_buffered() != owned =>
+            {
+                error
+            }
+            _ => vfsi_core::OpError::unknown(
+                VfError::invalid_reply(None, "invalid descriptor read progress"),
+                None,
+            ),
+        }
+    }
+
+    /// Publish only confirmed contiguous cursor progress, including failed reads.
+    fn advance_read_progress(
+        &mut self,
+        op: &ReadOp,
+        offset: u64,
+        result: Result<usize, &vfsi_core::OpError>,
+    ) {
+        if !matches!(op.offset, VfOffset::Cur) {
+            return;
+        }
+        let count = match result {
+            Ok(count) => count,
+            Err(error) => match error.progress() {
+                Some(vfsi_core::IoProgress::Read(read)) => read.bytes_read(),
+                _ => 0,
+            },
+        };
+        if count <= op.length {
+            // prepare_read preflights offset + requested length.
+            self.advance_offset(&op.file, offset + count as u64);
+        }
+    }
+
+    fn read_into_results(
+        &mut self,
+        reads: &[ReadOp],
+        buffers: &mut [&mut [u8]],
+    ) -> vfsi_core::VecResult<ReadIntoResult> {
+        use vfsi_core::{OpError, OpResult};
+        if reads.len() != buffers.len() {
+            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+        }
+        if reads.is_empty() {
+            return Ok(Vec::new());
+        }
+        for (index, (op, buffer)) in reads.iter().zip(buffers.iter()).enumerate() {
+            if op.length != buffer.len() {
+                return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput));
+            }
+        }
+        if Self::independent_reads(reads) {
+            let mut out: Vec<Option<OpResult<ReadIntoResult>>> =
+                (0..reads.len()).map(|_| None).collect();
+            let mut operations = Vec::with_capacity(reads.len());
+            let mut indices = Vec::with_capacity(reads.len());
+            let mut offsets = if reads.iter().all(|op| matches!(op.offset, VfOffset::At(_))) {
+                Vec::new()
+            } else {
+                vec![0; reads.len()]
+            };
+            for (index, (op, buffer)) in reads.iter().zip(buffers.iter_mut()).enumerate() {
+                match Self::prepare_read(&self.open_files, op, index) {
+                    Ok((file, offset)) => {
+                        if !offsets.is_empty() {
+                            offsets[index] = offset;
+                        }
+                        operations.push(io::Read {
+                            file,
+                            offset,
+                            buffer,
+                        });
+                        indices.push(index);
+                    }
+                    Err(error) => out[index] = Some(Err(OpError::not_attempted(error))),
+                }
+            }
+            let results = if operations.is_empty() {
+                Vec::new()
+            } else {
+                self.io.read(&mut operations)
+            };
+            drop(operations);
+            if results.len() != indices.len() {
+                let cause = VfError::invalid_reply(None, "read returned wrong result count");
+                for index in indices {
+                    out[index] = Some(Err(OpError::unknown(cause.clone(), None)));
+                }
+            } else {
+                for (index, result) in indices.into_iter().zip(results) {
+                    let op = &reads[index];
+                    let offset = match op.offset {
+                        VfOffset::At(offset) => offset,
+                        _ => offsets[index],
+                    };
+                    let result = result
+                        .map_err(|error| Self::check_read_error(error, offset, op.length, false))
+                        .and_then(|read| {
+                            if read > op.length {
+                                return Err(OpError::unknown(
+                                    VfError::invalid_reply(None, "read exceeds destination length"),
+                                    None,
+                                ));
+                            }
+                            Ok(ReadIntoResult {
+                                file: op.file.clone(),
+                                offset,
+                                bytes_read: read,
+                                eof: read == 0 && op.length != 0,
+                            })
+                        });
+                    self.advance_read_progress(
+                        op,
+                        offset,
+                        result.as_ref().map(|read| read.bytes_read),
+                    );
+                    out[index] = Some(result);
+                }
+            }
+            return Ok(out
+                .into_iter()
+                .map(|slot| slot.expect("every read resolved"))
+                .collect());
+        }
+        // Shared cursors retain sequential offset resolution, but a failed
+        // logical input does not suppress later independent operations.
+        Ok(reads
+            .iter()
+            .zip(buffers.iter_mut())
+            .map(|(op, buffer)| {
+                self.preflight_mixed_read(op)?;
+                self.readv_one_into(op, buffer)
+                    .map_err(|error| OpError::failed(error, None))
+            })
+            .collect())
+    }
+
     // Duplicate cursor requests need sequential offset resolution. Independent
     // borrowed and owned reads share the same descriptor/offset preflight.
     fn independent_reads(reads: &[ReadOp]) -> bool {
@@ -1346,59 +1691,212 @@ impl LocalBackend {
         })
     }
 
-    fn writev_one(&mut self, op: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult> {
-        let (file, off, descriptor) = match op.file() {
+    fn writev_one(&mut self, op: WriteOp<&FileOperand, &[u8]>) -> vfsi_core::OpResult<WriteResult> {
+        use vfsi_core::{FailureState, IoProgress, OpError};
+        let (off, descriptor, result) = match op.file() {
             FileOperand::Fd(fd) => {
-                let o = self
+                let open = self
                     .open_files
                     .get(fd)
-                    .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
-                let len = o.file.metadata().map_err(|e| VfError::from_io(0, e))?.len();
-                // O_APPEND writes always land at EOF regardless of the
-                // requested offset; report and track the real position.
-                let off = if o.append {
+                    .ok_or_else(|| OpError::not_attempted(VfError::errno(None, ERR_EBADF)))?;
+                let len = if open.append || op.offset() == VfOffset::End {
+                    open.file
+                        .metadata()
+                        .map_err(|error| OpError::not_attempted(VfError::from_io(None, error)))?
+                        .len()
+                } else {
+                    0
+                };
+                let off = if open.append {
                     len
                 } else {
-                    self.resolve_offset(op.file(), op.offset(), len)?
+                    self.resolve_offset(op.file(), op.offset(), len)
+                        .map_err(OpError::not_attempted)?
                 };
-                let f = o.file.try_clone().map_err(|e| VfError::from_io(0, e))?;
-                (f, off, true)
+                let result = io::write_complete(off, op.data(), |data, offset| {
+                    open.file.write_at(data, offset)
+                });
+                (off, true, result)
             }
             FileOperand::Path { .. } | FileOperand::Cwd | FileOperand::CwdPath(_) => {
-                let p = self.real_path(&self.tcfile_path(op.file())?)?;
-                let mut opts = OpenOptions::new();
-                opts.write(true);
-                if op.creates() {
-                    opts.create(true);
+                // Validate positional arithmetic and reject cursor-only modes
+                // before CREATE/TRUNCATE can mutate the target.
+                match op.offset() {
+                    VfOffset::At(offset) => {
+                        checked_offset(offset, op.data().len() as u64, 0)
+                            .map_err(OpError::not_attempted)?;
+                    }
+                    VfOffset::End => {}
+                    _ => {
+                        return Err(OpError::not_attempted(VfError::from_kind(
+                            None,
+                            std::io::ErrorKind::InvalidInput,
+                        )));
+                    }
                 }
-                if op.truncates() {
-                    opts.truncate(true);
-                }
-                Self::protect_create_open(&p, &mut opts);
-                let f = opts.open(&p).map_err(|e| VfError::from_io(0, e))?;
-                let len = f.metadata().map_err(|e| VfError::from_io(0, e))?.len();
-                let off = self.resolve_offset(op.file(), op.offset(), len)?;
-                (f, off, false)
+                let path = self
+                    .tcfile_path(op.file())
+                    .and_then(|path| self.real_path(&path))
+                    .map_err(OpError::not_attempted)?;
+                let mut options = OpenOptions::new();
+                options
+                    .write(true)
+                    .create(op.creates())
+                    .truncate(op.truncates());
+                Self::protect_create_open(&path, &mut options);
+                let file = options
+                    .open(&path)
+                    .map_err(|error| OpError::failed(VfError::from_io(None, error), None))?;
+                let off = match op.offset() {
+                    VfOffset::At(offset) => offset,
+                    VfOffset::End => file
+                        .metadata()
+                        .map_err(|error| OpError::failed(VfError::from_io(None, error), None))?
+                        .len(),
+                    _ => unreachable!("path offset preflight completed"),
+                };
+                let result =
+                    io::write_complete(off, op.data(), |data, offset| file.write_at(data, offset))
+                        .map_err(|error| {
+                            // The path OPEN has already executed; a later local
+                            // rejection cannot claim the whole input was untouched.
+                            let (cause, state, progress) = error.into_parts();
+                            if state == FailureState::Unknown {
+                                OpError::unknown(cause, progress)
+                            } else {
+                                OpError::failed(cause, progress)
+                            }
+                        });
+                (off, false, result)
             }
-            FileOperand::Saved => {
-                return Err(VfError::unsupported(0));
-            }
-            _ => return Err(VfError::unsupported(0)),
+            _ => return Err(OpError::not_attempted(VfError::unsupported(None))),
         };
-        let requested = u64::try_from(op.data().len()).map_err(|_| Self::overflow(0))?;
-        checked_offset(off, requested, 0)?;
-        file.write_all_at(op.data(), off)
-            .map_err(|e| VfError::from_io(0, e))?;
-        if descriptor && !matches!(op.offset(), VfOffset::At(_)) {
-            let next = checked_offset(off, op.data().len() as u64, 0)?;
-            self.advance_offset(op.file(), next);
+        let confirmed = match &result {
+            Ok(count) => *count,
+            Err(error) => match error.progress() {
+                Some(IoProgress::Write { bytes_written }) => *bytes_written,
+                _ => 0,
+            },
+        };
+        if descriptor
+            && !matches!(op.offset(), VfOffset::At(_))
+            && (result.is_ok() || confirmed != 0)
+        {
+            self.advance_offset(op.file(), off + confirmed as u64);
         }
-        Ok(WriteResult {
+        result.map(|bytes_written| WriteResult {
             file: op.file().clone(),
             offset: off,
-            bytes_written: op.data().len(),
+            bytes_written,
             stable: false,
         })
+    }
+
+    fn write_results(
+        &mut self,
+        writes: &[WriteOp<&FileOperand, &[u8]>],
+    ) -> vfsi_core::VecResult<WriteResult> {
+        use vfsi_core::{IoProgress, OpError, OpResult};
+        if writes.is_empty() {
+            return Ok(Vec::new());
+        }
+        if writes
+            .iter()
+            .all(|op| op.file().is_fd() && matches!(op.offset(), VfOffset::At(_)))
+        {
+            let ordered = self.io.ordered();
+            let mut operations = Vec::with_capacity(writes.len());
+            let mut ranges = Vec::with_capacity(if ordered { 0 } else { writes.len() });
+            let mut output: Vec<Option<OpResult<WriteResult>>> = vec![None; writes.len()];
+            let mut independent = true;
+            for (index, op) in writes.iter().enumerate() {
+                let fd = op.file().fd().expect("descriptor eligibility checked");
+                let Some(open) = self.open_files.get(&fd) else {
+                    output[index] =
+                        Some(Err(OpError::not_attempted(VfError::errno(None, ERR_EBADF))));
+                    continue;
+                };
+                if open.append {
+                    independent = false;
+                    break;
+                }
+                let VfOffset::At(offset) = op.offset() else {
+                    unreachable!()
+                };
+                let end = match checked_offset(offset, op.data().len() as u64, index) {
+                    Ok(end) => end,
+                    Err(cause) => {
+                        output[index] = Some(Err(OpError::not_attempted(cause)));
+                        continue;
+                    }
+                };
+                if !ordered {
+                    match open.identity() {
+                        Ok(identity) => ranges.push((identity, offset, end)),
+                        Err(error) => {
+                            output[index] =
+                                Some(Err(OpError::not_attempted(VfError::from_io(None, error))));
+                            continue;
+                        }
+                    }
+                }
+                operations.push(io::Write {
+                    file: &open.file,
+                    offset,
+                    data: op.data(),
+                });
+            }
+            if independent && (ordered || !writes_overlap(&mut ranges)) {
+                let expected = operations.len();
+                let results = if expected == 0 {
+                    Vec::new()
+                } else {
+                    self.io.write(&operations)
+                };
+                let extra = results.len() > expected;
+                let mut results = results.into_iter();
+                for (index, slot) in output.iter_mut().enumerate() {
+                    if slot.is_some() {
+                        continue;
+                    }
+                    let invalid = || {
+                        OpError::unknown(
+                            VfError::invalid_reply(None, "invalid descriptor WRITE completion"),
+                            None,
+                        )
+                    };
+                    let result = if extra {
+                        Err(invalid())
+                    } else {
+                        results.next().unwrap_or_else(|| Err(invalid()))
+                    };
+                    let request = &writes[index];
+                    let result = match result {
+                        Ok(count) if count > request.data().len() => Err(invalid()),
+                        Err(error) if error.progress().is_some_and(|progress| {
+                            !matches!(progress, IoProgress::Write { bytes_written } if *bytes_written <= request.data().len())
+                        }) => Err(invalid()),
+                        result => result,
+                    };
+                    let VfOffset::At(offset) = request.offset() else {
+                        unreachable!()
+                    };
+                    *slot = Some(result.map(|bytes_written| WriteResult {
+                        file: request.file().clone(),
+                        offset,
+                        bytes_written,
+                        stable: false,
+                    }));
+                }
+                return Ok(output
+                    .into_iter()
+                    .map(|slot| slot.expect("every WRITE assigned"))
+                    .collect());
+            }
+        }
+        // Aliases, append/cursor modes and path mutations retain syscall order.
+        // An ordinary input failure does not suppress independent later inputs.
+        Ok(writes.iter().map(|write| self.writev_one(*write)).collect())
     }
 
     fn listdir_rec(
@@ -1537,62 +2035,94 @@ impl HandleBackend for LocalBackend {
         ))))
     }
 
-    fn vfsync_impl(&mut self, files: &[FileOperand], mode: vfsi_core::api::SyncMode) -> VfRes {
-        {
-            let files: Vec<_> = files
-                .iter()
-                .enumerate()
-                .map(|(index, file)| {
-                    let fd = file.fd().ok_or_else(|| {
-                        VfError::from_kind(index, std::io::ErrorKind::InvalidInput)
-                    })?;
+    fn vfsync_impl(
+        &mut self,
+        files: &[FileOperand],
+        mode: vfsi_core::api::SyncMode,
+    ) -> vfsi_core::VecResult<()> {
+        use vfsi_core::OpError;
+        let mut prepared = Vec::with_capacity(files.len());
+        let mut indices = Vec::new();
+        let mut rejected = Vec::new();
+        for (index, file) in files.iter().enumerate() {
+            let open = file
+                .fd()
+                .ok_or_else(|| VfError::from_kind(None, std::io::ErrorKind::InvalidInput))
+                .and_then(|fd| {
                     self.open_files
                         .get(&fd)
-                        .map(|open| &open.file)
-                        .ok_or_else(|| VfError::errno(index, ERR_EBADF))
-                })
-                .collect::<VfResult<_>>()?;
-            let results = self
-                .io
-                .sync(&files, matches!(mode, vfsi_core::api::SyncMode::Data));
-            if results.len() != files.len() {
-                return Err(VfError::from_kind(0, std::io::ErrorKind::Other));
+                        .ok_or_else(|| VfError::errno(None, ERR_EBADF))
+                });
+            match open {
+                Ok(open) => {
+                    if !rejected.is_empty() {
+                        indices.push(index);
+                    }
+                    prepared.push(&open.file);
+                }
+                Err(error) => {
+                    if rejected.is_empty() {
+                        indices.extend(0..index);
+                    }
+                    rejected.push((index, OpError::not_attempted(error)));
+                }
             }
-            for (index, result) in results.into_iter().enumerate() {
-                result.map_err(|error| VfError::from_io(index, error))?;
-            }
-            Ok(())
         }
+        let mut results = if prepared.is_empty() {
+            Vec::new()
+        } else {
+            self.io
+                .sync(&prepared, matches!(mode, vfsi_core::api::SyncMode::Data))
+        };
+        if results.len() > prepared.len() {
+            results = prepared
+                .iter()
+                .map(|_| {
+                    Err(OpError::unknown(
+                        VfError::invalid_reply(None, "too many synchronization outcomes"),
+                        None,
+                    ))
+                })
+                .collect();
+        } else {
+            results.resize_with(prepared.len(), || {
+                Err(OpError::unknown(
+                    VfError::invalid_reply(None, "missing synchronization outcome"),
+                    None,
+                ))
+            });
+        }
+        for result in &mut results {
+            if result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.progress().is_some())
+            {
+                *result = Err(OpError::unknown(
+                    VfError::invalid_reply(None, "synchronization cannot report I/O byte progress"),
+                    None,
+                ));
+            }
+        }
+        if rejected.is_empty() {
+            return Ok(results);
+        }
+        let mut output: Vec<_> = (0..files.len()).map(|_| None).collect();
+        for (index, result) in indices.into_iter().zip(results) {
+            output[index] = Some(result);
+        }
+        for (index, error) in rejected {
+            output[index] = Some(Err(error));
+        }
+        Ok(output
+            .into_iter()
+            .map(|slot| slot.expect("every sync input assigned"))
+            .collect())
     }
 
     #[cfg(target_os = "linux")]
-    fn vstatfs_impl(&mut self, files: &[FileOperand]) -> VfResult<Vec<FilesystemStats>> {
-        use std::os::fd::AsRawFd;
-        let mut results = Vec::with_capacity(files.len());
-        for (index, file) in files.iter().enumerate() {
-            let anchored;
-            let fd = if let FileOperand::Fd(fd) = file {
-                self.open_files
-                    .get(fd)
-                    .ok_or_else(|| VfError::errno(index, ERR_EBADF))?
-                    .file
-                    .as_raw_fd()
-            } else {
-                anchored = self
-                    .real_path(&self.tcfile_path(file).map_err(|e| e.with_index(index))?)
-                    .map_err(|e| e.with_index(index))?;
-                if anchored.nofollow_on_open {
-                    return Err(VfError::errno(index, ERR_NOENT));
-                }
-                anchored
-                    .anchor
-                    .as_ref()
-                    .ok_or_else(|| VfError::unsupported(index))?
-                    .as_raw_fd()
-            };
-            results.push(local_filesystem_stats(fd, index)?);
-        }
-        Ok(results)
+    fn vstatfs_impl(&mut self, files: &[FileOperand]) -> vfsi_core::VecResult<FilesystemStats> {
+        Ok(self.statfs_results(files).collect())
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -1683,6 +2213,16 @@ impl HandleBackend for LocalBackend {
         Ok(FileOperand::from_fd(fd))
     }
 
+    fn vclose_impl(&mut self, files: &[FileOperand]) -> vfsi_core::VecResult<()> {
+        Ok(files
+            .iter()
+            .map(|file| {
+                self.close_impl(file)
+                    .map_err(vfsi_core::OpError::not_attempted)
+            })
+            .collect())
+    }
+
     fn close_impl(&mut self, tcf: &FileOperand) -> VfResult<()> {
         if !tcf.is_fd() {
             return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
@@ -1691,30 +2231,6 @@ impl HandleBackend for LocalBackend {
             .remove(&tcf.fd().unwrap())
             .map(|_| ())
             .ok_or_else(|| VfError::errno(0, ERR_EBADF))
-    }
-
-    fn sync_data(&mut self, tcf: &FileOperand) -> VfResult<()> {
-        let fd = tcf
-            .fd()
-            .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
-        self.open_files
-            .get(&fd)
-            .ok_or_else(|| VfError::errno(0, ERR_EBADF))?
-            .file
-            .sync_data()
-            .map_err(|error| VfError::from_io(0, error))
-    }
-
-    fn sync_all(&mut self, tcf: &FileOperand) -> VfResult<()> {
-        let fd = tcf
-            .fd()
-            .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
-        self.open_files
-            .get(&fd)
-            .ok_or_else(|| VfError::errno(0, ERR_EBADF))?
-            .file
-            .sync_all()
-            .map_err(|error| VfError::from_io(0, error))
     }
 
     fn chdir(&mut self, path: &Path) -> VfResult<()> {
@@ -1794,7 +2310,10 @@ impl HandleBackend for LocalBackend {
     ) -> VfResult<()> {
         vfsi_sync::backend::helpers::native_set_attributes_impl_default(self, update)
     }
-    fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, FileOperand>>]) -> VfResult<()> {
+    fn vsetattrs_impl(
+        &mut self,
+        updates: &[SetAttrsOp<Target<'_, FileOperand>>],
+    ) -> vfsi_core::VecResult<()> {
         vfsi_sync::backend::helpers::vsetattrs_typed_default(self, updates)
     }
 }
@@ -1806,45 +2325,41 @@ impl VectorBackend for LocalBackend {
         Ok(())
     }
 
-    fn vopen_outcomes_impl(
+    fn vopen_raw_impl(
         &mut self,
         paths: &[&Path],
         flags: &[i32],
         modes: &[u32],
-    ) -> VfResult<ManyResults<FileOperand>> {
+    ) -> vfsi_core::VecResult<FileOperand> {
+        use vfsi_core::OpError;
         if paths.len() != flags.len() || paths.len() != modes.len() {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
         }
         #[cfg(feature = "test-faults")]
         self.inject_open_fault(OpenFaultPoint::BeforeDispatch { chunk: 0 })?;
-        let mut results = Vec::with_capacity(paths.len());
-        for ((path, flags), mode) in paths.iter().zip(flags).zip(modes) {
-            #[cfg(feature = "test-faults")]
-            let index = results.len();
-            #[cfg(feature = "test-faults")]
-            if let Err(error) = self.inject_open_fault(OpenFaultPoint::BeforeRegister { index }) {
-                results.push(Err(error));
-                break;
-            }
-            match self.open_raw_impl(path, *flags, *mode) {
-                Ok(file) => {
-                    #[cfg(feature = "test-faults")]
-                    if let Err(error) =
-                        self.inject_open_fault(OpenFaultPoint::AfterRegister { index })
-                    {
-                        let _ = self.close_impl(&file);
-                        results.push(Err(error));
-                        break;
-                    }
-                    results.push(Ok(file));
+        Ok(paths
+            .iter()
+            .zip(flags)
+            .zip(modes)
+            .enumerate()
+            .map(|(index, ((path, flags), mode))| {
+                #[cfg(not(feature = "test-faults"))]
+                let _ = index;
+                #[cfg(feature = "test-faults")]
+                self.inject_open_fault(OpenFaultPoint::BeforeRegister { index })
+                    .map_err(OpError::not_attempted)?;
+                let file = self
+                    .open_raw_impl(path, *flags, *mode)
+                    .map_err(|cause| OpError::failed(cause, None))?;
+                #[cfg(feature = "test-faults")]
+                if let Err(error) = self.inject_open_fault(OpenFaultPoint::AfterRegister { index })
+                {
+                    let _ = self.close_impl(&file);
+                    return Err(OpError::failed(error, None));
                 }
-                Err(error) => {
-                    results.push(Err(error));
-                    break;
-                }
-            }
-        }
-        Ok(ManyResults::new(paths.len(), results))
+                Ok(file)
+            })
+            .collect())
     }
 
     fn vstream_impl(
@@ -1878,7 +2393,8 @@ impl VectorBackend for LocalBackend {
         &mut self,
         files: &[FileOperand],
         options: ReadAllOptions,
-    ) -> VfResult<Vec<Vec<u8>>> {
+    ) -> vfsi_core::VecResult<Vec<u8>> {
+        use vfsi_core::{FailureState, IoProgress, OpError};
         let batch_size = self.io.path_read_batch_size();
         if batch_size.is_none()
             || !files.iter().all(|file| {
@@ -1892,344 +2408,188 @@ impl VectorBackend for LocalBackend {
                 self, files, options,
             );
         }
-        // Pin each bounded path cohort once, then reuse descriptor vector reads.
-        // Never reopen paths between chunks: a replacement must not redirect
-        // the suffix to another object. POSIX keeps its serial syscall path.
-        let batch_size = batch_size.unwrap().get();
+        // Retain each path's identity through every chunk; an invalid sibling
+        // does not prevent the rest of this bounded cohort from being opened.
+        let batch_size = batch_size.expect("configured path cohort");
         let mut output = Vec::with_capacity(files.len());
         let mut remaining = options.max_total_bytes();
-        for (cohort, paths) in files.chunks(batch_size).enumerate() {
+        for paths in files.chunks(batch_size.get()) {
             let mut opened = Vec::with_capacity(paths.len());
-            let result = (|| {
-                for (index, path) in paths.iter().enumerate() {
-                    let path = self
-                        .vf_path(path)
-                        .map_err(|error| error.with_index(index))?;
-                    opened.push(
-                        self.open_path_impl(VfPathBase::Abs, &path, libc::O_RDONLY, 0)
-                            .map_err(|error| error.with_index(index))?,
-                    );
-                }
-                vfsi_sync::backend::helpers::vread_all_owned_impl_default(
-                    self,
-                    &opened,
-                    options.with_max_total_bytes(remaining),
-                    std::num::NonZeroUsize::new(batch_size).unwrap(),
-                )
-            })();
-            // All engine operations have drained on ordinary errors; even
-            // partial OPEN failure must close the cohort's successful prefix.
-            let mut result = result;
-            for (index, file) in opened.iter().enumerate() {
-                if let Err(error) = self.close_impl(file)
-                    && result.is_ok()
-                {
-                    result = Err(error.with_index(index));
+            let mut indices = Vec::with_capacity(paths.len());
+            let mut outcomes: Vec<_> = (0..paths.len()).map(|_| None).collect();
+            for (index, path) in paths.iter().enumerate() {
+                let path = match self.vf_path(path) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        outcomes[index] = Some(Err(OpError::not_attempted(error)));
+                        continue;
+                    }
+                };
+                match self.open_path_impl(VfPathBase::Abs, &path, libc::O_RDONLY, 0) {
+                    Ok(file) => {
+                        opened.push(file);
+                        indices.push(index);
+                    }
+                    Err(error) => outcomes[index] = Some(Err(OpError::failed(error, None))),
                 }
             }
-            let results =
-                result.map_err(|error| error.map_index(|index| cohort * batch_size + index))?;
-            for data in results {
-                remaining -= data.len(); // validated against the remaining aggregate budget
-                output.push(data);
+            let reads = vfsi_sync::backend::helpers::vread_all_owned_impl_default(
+                self,
+                &opened,
+                options.with_max_total_bytes(remaining),
+                batch_size,
+            );
+            let reads = match reads {
+                Ok(reads) => reads,
+                Err(error) => opened
+                    .iter()
+                    .map(|_| Err(OpError::failed(error.clone(), None)))
+                    .collect(),
+            };
+            // Each successful OPEN keeps exactly one close owner, even when
+            // another OPEN or READ failed. The local close removes its owner.
+            for ((file, index), result) in opened.iter().zip(indices).zip(reads) {
+                let result = match result {
+                    Err(error) if error.state() == FailureState::NotAttempted => {
+                        Err(OpError::failed(error.into_cause(), None))
+                    }
+                    result => result,
+                };
+                let result = match (result, self.close_impl(file)) {
+                    (Ok(data), Err(error)) => Err(OpError::failed(
+                        error,
+                        Some(IoProgress::Read(vfsi_core::api::ReadResult::owned(
+                            0, data, true,
+                        ))),
+                    )),
+                    (result, _) => result,
+                };
+                let bytes = match &result {
+                    Ok(data) => data.len(),
+                    Err(error) => match error.progress() {
+                        Some(IoProgress::Read(prefix)) => prefix.bytes_read(),
+                        _ => 0,
+                    },
+                };
+                remaining -= bytes;
+                outcomes[index] = Some(result);
             }
+            output.extend(
+                outcomes
+                    .into_iter()
+                    .map(|slot| slot.expect("every retained input assigned")),
+            );
         }
         Ok(output)
     }
 
-    fn vread_impl(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
-        let owned = self.io.owned_read_window().is_some_and(|limit| {
-            reads
-                .iter()
-                .try_fold(0usize, |total, op| total.checked_add(op.length))
-                .is_some_and(|total| total <= limit)
-        });
-        if owned && Self::independent_reads(reads) {
-            let mut operations: Vec<_> = reads
-                .iter()
-                .enumerate()
-                .map(|(index, op)| {
-                    let (file, offset) = Self::prepare_read(&self.open_files, op, index)?;
-                    Ok(io::OwnedRead {
-                        file: Arc::clone(file),
-                        offset,
-                        buffer: Vec::new(),
-                    })
-                })
-                .collect::<VfResult<_>>()?;
-            // Preserve whole-batch preflight before allocating any payload.
-            // Reuse this operation vector instead of a separate prepared list.
-            for (operation, request) in operations.iter_mut().zip(reads) {
-                operation.buffer = vec![0; request.length];
-            }
-            // Absolute requests already carry their resolved offsets. Keep an
-            // offset sidecar only when cursor/EOF-relative requests need it.
-            let offsets: Vec<_> = if reads.iter().all(|op| matches!(op.offset, VfOffset::At(_))) {
-                Vec::new()
-            } else {
-                operations.iter().map(|op| op.offset).collect()
-            };
-            let results = self.io.read_owned(operations);
-            if results.len() != reads.len() {
-                return Err(VfError::from_kind(0, std::io::ErrorKind::Other));
-            }
-            let mut out = Vec::with_capacity(reads.len());
-            let mut failure = None;
-            for (index, (op, result)) in reads.iter().zip(results).enumerate() {
-                let offset = match op.offset {
-                    VfOffset::At(offset) => offset,
-                    _ => offsets[index],
-                };
-                match result {
-                    Ok(data) if data.len() <= op.length => {
-                        if matches!(op.offset, VfOffset::Cur) {
-                            self.advance_offset(&op.file, offset + data.len() as u64);
-                        }
-                        out.push(ReadResult {
-                            file: op.file.clone(),
-                            offset,
-                            eof: data.is_empty() && op.length != 0,
-                            data,
-                        });
-                    }
-                    Ok(_) => {
-                        failure.get_or_insert(VfError::from_kind(index, std::io::ErrorKind::Other));
-                    }
-                    Err(error) => {
-                        failure.get_or_insert(if error.kind() == std::io::ErrorKind::InvalidData {
-                            VfError::from_kind(index, std::io::ErrorKind::Other)
-                        } else {
-                            VfError::from_io(index, error)
-                        });
-                    }
-                }
-            }
-            return failure.map_or(Ok(out), Err);
-        }
-        if reads.iter().all(|op| op.file.is_fd()) {
-            let mut storage: Vec<_> = reads.iter().map(|op| vec![0; op.length]).collect();
-            let mut buffers: Vec<_> = storage.iter_mut().map(Vec::as_mut_slice).collect();
-            let results = self.vread_into_impl(reads, &mut buffers)?;
-            return Ok(results
-                .into_iter()
-                .zip(storage)
-                .map(|(result, mut data)| {
-                    data.truncate(result.bytes_read);
-                    ReadResult {
-                        file: result.file,
-                        offset: result.offset,
-                        data,
-                        eof: result.eof,
-                    }
-                })
-                .collect());
-        }
-        let mut out = Vec::with_capacity(reads.len());
-        for (i, op) in reads.iter().enumerate() {
-            out.push(self.readv_one(op).map_err(|e| e.with_index(i))?);
-        }
-        Ok(out)
+    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_core::VecResult<ReadResult> {
+        self.read_results(reads)
     }
 
     fn vread_into_impl(
         &mut self,
         reads: &[ReadOp],
         buffers: &mut [&mut [u8]],
-    ) -> VfResult<Vec<ReadIntoResult>> {
-        if reads.len() != buffers.len() {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
-        }
-        for (index, (op, buffer)) in reads.iter().zip(buffers.iter()).enumerate() {
-            if op.length != buffer.len() {
-                return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput));
-            }
-        }
-        if Self::independent_reads(reads) {
-            let mut operations = Vec::with_capacity(reads.len());
-            for (index, (op, buffer)) in reads.iter().zip(buffers.iter_mut()).enumerate() {
-                let (file, offset) = Self::prepare_read(&self.open_files, op, index)?;
-                operations.push(io::Read {
-                    file,
-                    offset,
-                    buffer,
-                });
-            }
-            let offsets: Vec<_> = if reads.iter().all(|op| matches!(op.offset, VfOffset::At(_))) {
-                Vec::new()
-            } else {
-                operations.iter().map(|op| op.offset).collect()
-            };
-            let results = self.io.read(&mut operations);
-            drop(operations);
-            if results.len() != reads.len() {
-                return Err(VfError::from_kind(0, std::io::ErrorKind::Other));
-            }
-            let mut out = Vec::with_capacity(reads.len());
-            let mut failure = None;
-            for (index, (op, result)) in reads.iter().zip(results).enumerate() {
-                let offset = match op.offset {
-                    VfOffset::At(offset) => offset,
-                    _ => offsets[index],
-                };
-                match result {
-                    Ok(read) if read <= op.length => {
-                        if matches!(op.offset, VfOffset::Cur) {
-                            self.advance_offset(&op.file, offset + read as u64);
-                        }
-                        out.push(ReadIntoResult {
-                            file: op.file.clone(),
-                            offset,
-                            bytes_read: read,
-                            eof: read == 0 && op.length != 0,
-                        });
-                    }
-                    Ok(_) => {
-                        failure.get_or_insert(VfError::from_kind(index, std::io::ErrorKind::Other));
-                    }
-                    Err(error) => {
-                        failure.get_or_insert(VfError::from_io(index, error));
-                    }
-                }
-            }
-            return failure.map_or(Ok(out), Err);
-        }
-        let mut out = Vec::with_capacity(reads.len());
-        for (index, (request, buffer)) in reads.iter().zip(buffers.iter_mut()).enumerate() {
-            out.push(
-                self.readv_one_into(request, buffer)
-                    .map_err(|e| e.with_index(index))?,
-            );
-        }
-        Ok(out)
+    ) -> vfsi_core::VecResult<ReadIntoResult> {
+        self.read_into_results(reads, buffers)
     }
 
     fn vwrite_impl(
         &mut self,
         writes: &[WriteOp<&FileOperand, &[u8]>],
-    ) -> VfResult<Vec<WriteResult>> {
-        if writes
+    ) -> vfsi_core::VecResult<WriteResult> {
+        self.write_results(writes)
+    }
+
+    fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_core::VecResult<()> {
+        Ok(self.getattr_results(attrs, true).collect())
+    }
+
+    fn vgetattrs_nofollow_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_core::VecResult<()> {
+        Ok(self.getattr_results(attrs, false).collect())
+    }
+
+    fn vsetattrs_raw_impl(&mut self, attrs: &[VfAttrs]) -> vfsi_core::VecResult<()> {
+        const SETTABLE: AttrMask = AttrMask::MODE
+            .union(AttrMask::SIZE)
+            .union(AttrMask::ATIME)
+            .union(AttrMask::MTIME)
+            .union(AttrMask::UID)
+            .union(AttrMask::GID);
+        Ok(attrs
             .iter()
-            .all(|op| op.file().is_fd() && matches!(op.offset(), VfOffset::At(_)))
-        {
-            let mut operations = Vec::with_capacity(writes.len());
-            let ordered = self.io.ordered();
-            // Ordered executors never need an alias/overlap scan.
-            let mut ranges = Vec::with_capacity(if ordered { 0 } else { writes.len() });
-            let mut independent = true;
-            for (index, op) in writes.iter().enumerate() {
-                let fd = op.file().fd().unwrap();
-                let open = self
-                    .open_files
-                    .get(&fd)
-                    .ok_or_else(|| VfError::errno(index, ERR_EBADF))?;
-                if open.append {
-                    independent = false;
-                    break;
+            .enumerate()
+            .map(|(i, a)| {
+                if !a.masks.difference(SETTABLE).is_empty() {
+                    return Err(vfsi_core::OpError::not_attempted(VfError::unsupported(
+                        None,
+                    )));
                 }
-                let VfOffset::At(offset) = op.offset() else {
-                    unreachable!()
-                };
-                let end = checked_offset(offset, op.data().len() as u64, index)?;
-                if !ordered {
-                    let identity = open.identity().map_err(|e| VfError::from_io(index, e))?;
-                    ranges.push((identity, offset, end));
-                }
-                operations.push(io::Write {
-                    file: &open.file,
-                    offset,
-                    data: op.data(),
-                });
-            }
-            if independent && (ordered || !writes_overlap(&mut ranges)) {
-                let results = self.io.write(&operations);
-                if results.len() != writes.len() {
-                    return Err(VfError::from_kind(0, std::io::ErrorKind::Other));
-                }
-                return writes
-                    .iter()
-                    .zip(operations)
-                    .zip(results)
-                    .enumerate()
-                    .map(|(index, ((op, request), result))| {
-                        let written = result.map_err(|e| VfError::from_io(index, e))?;
-                        if written > op.data().len() {
-                            return Err(VfError::from_kind(index, std::io::ErrorKind::Other));
-                        }
-                        Ok(WriteResult {
-                            file: op.file().clone(),
-                            offset: request.offset,
-                            bytes_written: written,
-                            stable: false,
-                        })
-                    })
-                    .collect();
-            }
-        }
-        let mut out = Vec::with_capacity(writes.len());
-        for (i, op) in writes.iter().enumerate() {
-            out.push(self.writev_one(*op).map_err(|e| e.with_index(i))?);
-        }
-        Ok(out)
+                (|| {
+                    self.setattr_one(a, i)?;
+                    Ok(())
+                })()
+                .map_err(|cause: VfError| vfsi_core::OpError::failed(cause, None))
+            })
+            .collect())
     }
 
-    fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
-        self.getattrsv_impl(attrs, true)
-    }
-
-    fn vgetattrs_nofollow_impl(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
-        self.getattrsv_impl(attrs, false)
-    }
-
-    fn vsetattrs_raw_impl(&mut self, attrs: &[VfAttrs]) -> VfRes {
+    fn vsetattrs_raw_nofollow_impl(&mut self, attrs: &[VfAttrs]) -> vfsi_core::VecResult<()> {
         const SETTABLE: AttrMask = AttrMask::MODE
             .union(AttrMask::SIZE)
             .union(AttrMask::ATIME)
             .union(AttrMask::MTIME)
             .union(AttrMask::UID)
             .union(AttrMask::GID);
-        for (i, a) in attrs.iter().enumerate() {
-            if !a.masks.difference(SETTABLE).is_empty() {
-                return Err(VfError::unsupported(i));
-            }
-            self.setattr_one(a, i)?;
-        }
-        Ok(())
-    }
-
-    fn vsetattrs_raw_nofollow_impl(&mut self, attrs: &[VfAttrs]) -> VfRes {
-        const SETTABLE: AttrMask = AttrMask::MODE
-            .union(AttrMask::SIZE)
-            .union(AttrMask::ATIME)
-            .union(AttrMask::MTIME)
-            .union(AttrMask::UID)
-            .union(AttrMask::GID);
-        for (i, a) in attrs.iter().enumerate() {
-            if !a.masks.difference(SETTABLE).is_empty() {
-                return Err(VfError::unsupported(i));
-            }
-            if a.file.is_fd() {
-                self.setattr_one(a, i)?;
-                continue;
-            }
-            let p = self
-                .no_follow_path(&self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?)
-                .map_err(|e| e.with_index(i))?;
-            if a.masks.intersects(AttrMask::UID | AttrMask::GID)
-                && a.masks.difference(AttrMask::UID | AttrMask::GID).is_empty()
-            {
-                Self::chown_path(a, &p, false, i)?;
-                continue;
-            }
-            let md = std::fs::symlink_metadata(&p).map_err(|e| VfError::from_io(i, e))?;
-            if md.file_type().is_symlink() {
-                // No portable lchmod/ltruncate: refuse rather than follow.
-                return Err(VfError::unsupported(i));
-            }
-            #[cfg(feature = "test-faults")]
-            self.inject_open_fault(OpenFaultPoint::AfterNoFollowSetattrTypeCheck { index: i })?;
-            self.setattr_path(a, i, &p, false)?;
-        }
-        Ok(())
+        Ok(attrs
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                if !a.masks.difference(SETTABLE).is_empty() {
+                    return Err(vfsi_core::OpError::not_attempted(VfError::unsupported(
+                        None,
+                    )));
+                }
+                let mut applying = false;
+                (|| {
+                    if a.file.is_fd() {
+                        applying = true;
+                        self.setattr_one(a, i)?;
+                        return Ok(());
+                    }
+                    let p = self
+                        .no_follow_path(&self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?)
+                        .map_err(|e| e.with_index(i))?;
+                    if a.masks.intersects(AttrMask::UID | AttrMask::GID)
+                        && a.masks.difference(AttrMask::UID | AttrMask::GID).is_empty()
+                    {
+                        applying = true;
+                        Self::chown_path(a, &p, false, i)?;
+                        return Ok(());
+                    }
+                    let md = std::fs::symlink_metadata(&p).map_err(|e| VfError::from_io(i, e))?;
+                    if md.file_type().is_symlink() {
+                        // No portable lchmod/ltruncate: refuse rather than follow.
+                        return Err(VfError::unsupported(i));
+                    }
+                    #[cfg(feature = "test-faults")]
+                    self.inject_open_fault(OpenFaultPoint::AfterNoFollowSetattrTypeCheck {
+                        index: i,
+                    })?;
+                    applying = true;
+                    self.setattr_path(a, i, &p, false)?;
+                    Ok(())
+                })()
+                .map_err(|cause: VfError| {
+                    if !applying && cause.kind() == std::io::ErrorKind::Unsupported {
+                        vfsi_core::OpError::not_attempted(cause)
+                    } else {
+                        vfsi_core::OpError::failed(cause, None)
+                    }
+                })
+            })
+            .collect())
     }
 
     fn listdir_impl(
@@ -2316,207 +2676,253 @@ impl VectorBackend for LocalBackend {
         Ok(())
     }
 
-    fn vrename_impl(&mut self, pairs: &[(FileOperand, FileOperand)]) -> VfRes {
-        for (i, (src, dst)) in pairs.iter().enumerate() {
-            let sp = self.vf_path(src).map_err(|e| e.with_index(i))?;
-            let sp = self
-                .no_follow_path(&self.root.join(sp))
-                .map_err(|e| e.with_index(i))?;
-            let dp = self.vf_path(dst).map_err(|e| e.with_index(i))?;
-            let dp = self
-                .no_follow_path(&self.root.join(dp))
-                .map_err(|e| e.with_index(i))?;
-            std::fs::rename(sp, dp).map_err(|e| VfError::from_io(i, e))?;
-        }
-        Ok(())
+    fn vrename_impl(&mut self, pairs: &[(FileOperand, FileOperand)]) -> vfsi_core::VecResult<()> {
+        self.vrename_with_options_impl(pairs, vfsi_core::api::RenameMode::Replace)
     }
 
     fn vrename_with_options_impl(
         &mut self,
         pairs: &[(FileOperand, FileOperand)],
         options: vfsi_core::api::RenameMode,
-    ) -> VfRes {
-        if pairs.is_empty() {
-            return Ok(());
-        }
-        if options == vfsi_core::api::RenameMode::Replace {
-            return self.vrename_impl(pairs);
-        }
-        #[cfg(target_os = "linux")]
-        {
-            for (index, (src, dst)) in pairs.iter().enumerate() {
-                let source_path = self.vf_path(src).map_err(|e| e.with_index(index))?;
-                let destination_path = self.vf_path(dst).map_err(|e| e.with_index(index))?;
-                let source = self
-                    .no_follow_path(&self.root.join(&source_path))
-                    .map_err(|e| e.with_index(index))?;
-                let destination = self
-                    .no_follow_path(&self.root.join(&destination_path))
-                    .map_err(|e| e.with_index(index))?;
-                let source_name = cstring_from_bytes(path_bytes(&source))
-                    .ok_or_else(|| VfError::from_kind(index, std::io::ErrorKind::InvalidInput))?;
-                let destination_name = cstring_from_bytes(path_bytes(&destination))
-                    .ok_or_else(|| VfError::from_kind(index, std::io::ErrorKind::InvalidInput))?;
-                let flags = match options {
-                    vfsi_core::api::RenameMode::NoReplace => libc::RENAME_NOREPLACE,
-                    vfsi_core::api::RenameMode::Exchange => libc::RENAME_EXCHANGE,
-                    vfsi_core::api::RenameMode::Replace => unreachable!(),
-                };
-                // SAFETY: both NUL-terminated path buffers and their directory anchors
-                // stay live; flags are supported renameat2 constants.
-                let result = unsafe {
-                    libc::syscall(
-                        libc::SYS_renameat2,
-                        libc::AT_FDCWD,
-                        source_name.as_ptr(),
-                        libc::AT_FDCWD,
-                        destination_name.as_ptr(),
-                        flags,
-                    )
-                };
-                if result < 0 {
-                    let error = std::io::Error::last_os_error();
-                    let source_is_directory = std::fs::symlink_metadata(&source)
-                        .map(|metadata| metadata.is_dir())
-                        .unwrap_or(false);
-                    let destination_is_directory = std::fs::symlink_metadata(&destination)
-                        .map(|metadata| metadata.is_dir())
-                        .unwrap_or(false);
-                    return Err(rename_error(
-                        error,
-                        index,
-                        source_is_directory,
-                        options == vfsi_core::api::RenameMode::Exchange && destination_is_directory,
-                        &source_path,
-                        &destination_path,
-                    ));
-                }
-            }
-            Ok(())
-        }
+    ) -> vfsi_core::VecResult<()> {
+        use vfsi_core::OpError;
         #[cfg(not(target_os = "linux"))]
-        {
-            let _ = pairs;
-            Err(VfError::unsupported(0))
+        if options != vfsi_core::api::RenameMode::Replace && !pairs.is_empty() {
+            return Err(VfError::unsupported(None));
         }
+        Ok(pairs
+            .iter()
+            .enumerate()
+            .map(|(index, (src, dst))| {
+                let paths = (|| {
+                    let source_path = self.vf_path(src)?;
+                    let destination_path = self.vf_path(dst)?;
+                    let source = self.no_follow_path(&self.root.join(&source_path))?;
+                    let destination = self.no_follow_path(&self.root.join(&destination_path))?;
+                    Ok((source_path, destination_path, source, destination))
+                })()
+                .map_err(OpError::not_attempted)?;
+                let (source_path, destination_path, source, destination) = paths;
+                if options == vfsi_core::api::RenameMode::Replace {
+                    return std::fs::rename(source, destination)
+                        .map_err(|error| OpError::failed(VfError::from_io(None, error), None));
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    let source_name = cstring_from_bytes(path_bytes(&source)).ok_or_else(|| {
+                        OpError::not_attempted(VfError::from_kind(
+                            None,
+                            std::io::ErrorKind::InvalidInput,
+                        ))
+                    })?;
+                    let destination_name = cstring_from_bytes(path_bytes(&destination))
+                        .ok_or_else(|| {
+                            OpError::not_attempted(VfError::from_kind(
+                                None,
+                                std::io::ErrorKind::InvalidInput,
+                            ))
+                        })?;
+                    (|| {
+                        let flags = match options {
+                            vfsi_core::api::RenameMode::NoReplace => libc::RENAME_NOREPLACE,
+                            vfsi_core::api::RenameMode::Exchange => libc::RENAME_EXCHANGE,
+                            vfsi_core::api::RenameMode::Replace => unreachable!(),
+                        };
+                        // SAFETY: both NUL-terminated path buffers and their directory anchors
+                        // stay live; flags are supported renameat2 constants.
+                        let result = unsafe {
+                            libc::syscall(
+                                libc::SYS_renameat2,
+                                libc::AT_FDCWD,
+                                source_name.as_ptr(),
+                                libc::AT_FDCWD,
+                                destination_name.as_ptr(),
+                                flags,
+                            )
+                        };
+                        if result < 0 {
+                            let error = std::io::Error::last_os_error();
+                            let source_is_directory = std::fs::symlink_metadata(&source)
+                                .map(|metadata| metadata.is_dir())
+                                .unwrap_or(false);
+                            let destination_is_directory = std::fs::symlink_metadata(&destination)
+                                .map(|metadata| metadata.is_dir())
+                                .unwrap_or(false);
+                            return Err(rename_error(
+                                error,
+                                index,
+                                source_is_directory,
+                                options == vfsi_core::api::RenameMode::Exchange
+                                    && destination_is_directory,
+                                &source_path,
+                                &destination_path,
+                            ));
+                        }
+                        Ok(())
+                    })()
+                    .map_err(|cause| OpError::failed(cause, None))
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = (index, source_path, destination_path);
+                    unreachable!("unsupported atomic policy rejected before dispatch")
+                }
+            })
+            .collect())
     }
 
-    fn vremove_impl(&mut self, files: &[FileOperand]) -> VfRes {
-        for (i, f) in files.iter().enumerate() {
-            let p = self
-                .no_follow_path(
-                    &self
-                        .root
-                        .join(self.vf_path(f).map_err(|e| e.with_index(i))?),
-                )
-                .map_err(|e| e.with_index(i))?;
-            let md = std::fs::symlink_metadata(&p).map_err(|e| VfError::from_io(i, e))?;
-            if md.is_dir() && !md.file_type().is_symlink() {
-                std::fs::remove_dir(&p).map_err(|e| VfError::from_io(i, e))?;
-            } else {
-                std::fs::remove_file(&p).map_err(|e| VfError::from_io(i, e))?;
-            }
-        }
-        Ok(())
+    fn vremove_impl(&mut self, files: &[FileOperand]) -> vfsi_core::VecResult<()> {
+        use vfsi_core::OpError;
+        Ok(files
+            .iter()
+            .map(|file| {
+                let path = self
+                    .vf_path(file)
+                    .and_then(|path| self.no_follow_path(&self.root.join(path)))
+                    .map_err(OpError::not_attempted)?;
+                let metadata = std::fs::symlink_metadata(&path)
+                    .map_err(|error| OpError::failed(VfError::from_io(None, error), None))?;
+                let result = if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                    std::fs::remove_dir(path)
+                } else {
+                    std::fs::remove_file(path)
+                };
+                result.map_err(|error| OpError::failed(VfError::from_io(None, error), None))
+            })
+            .collect())
     }
 
-    fn vmkdir_impl(&mut self, dirs: &[VfAttrs]) -> VfRes {
-        for (i, a) in dirs.iter().enumerate() {
-            let p = self
-                .no_follow_path(
-                    &self
-                        .root
-                        .join(self.vf_path(&a.file).map_err(|e| e.with_index(i))?),
-                )
-                .map_err(|e| e.with_index(i))?;
-            // Restrict the directory at creation, including if the later
-            // exact-mode adjustment fails or another process observes it.
-            let mode = if a.masks.contains(AttrMask::MODE) {
-                a.mode & 0o7777
-            } else {
-                0o777
-            };
-            std::fs::DirBuilder::new()
-                .mode(mode)
-                .create(&p)
-                .map_err(|e| VfError::from_io(i, e))?;
-            if a.masks.contains(AttrMask::MODE) {
-                #[cfg(feature = "test-faults")]
-                self.inject_open_fault(OpenFaultPoint::BeforeSetPermissions { index: i })?;
-                Self::set_permissions_no_follow(&p, a.mode, true, i)?;
-            }
-        }
-        Ok(())
+    fn vmkdir_impl(&mut self, dirs: &[VfAttrs]) -> vfsi_core::VecResult<()> {
+        use vfsi_core::OpError;
+        Ok(dirs
+            .iter()
+            .enumerate()
+            .map(|(index, attrs)| {
+                let path = self
+                    .vf_path(&attrs.file)
+                    .and_then(|path| self.no_follow_path(&self.root.join(path)))
+                    .map_err(OpError::not_attempted)?;
+                let mode = if attrs.masks.contains(AttrMask::MODE) {
+                    attrs.mode & 0o7777
+                } else {
+                    0o777
+                };
+                std::fs::DirBuilder::new()
+                    .mode(mode)
+                    .create(&path)
+                    .map_err(|error| OpError::failed(VfError::from_io(None, error), None))?;
+                if attrs.masks.contains(AttrMask::MODE) {
+                    #[cfg(feature = "test-faults")]
+                    self.inject_open_fault(OpenFaultPoint::BeforeSetPermissions { index })
+                        .map_err(|error| OpError::failed(error, None))?;
+                    Self::set_permissions_no_follow(&path, attrs.mode, true, index)
+                        .map_err(|error| OpError::failed(error, None))?;
+                }
+                Ok(())
+            })
+            .collect())
     }
 
-    fn vsymlink_impl(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
+    fn vsymlink_impl(
+        &mut self,
+        oldpaths: &[&Path],
+        newpaths: &[&Path],
+    ) -> vfsi_core::VecResult<()> {
         if oldpaths.len() != newpaths.len() {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
         }
-        for (i, (old, new)) in oldpaths.iter().zip(newpaths).enumerate() {
-            let new = self
-                .no_follow_path(&self.resolve(new))
-                .map_err(|e| e.with_index(i))?;
-            symlink(old, new).map_err(|e| VfError::from_io(i, e))?;
-        }
-        Ok(())
+        Ok(oldpaths
+            .iter()
+            .zip(newpaths)
+            .map(|(old, new)| {
+                let new = self
+                    .no_follow_path(&self.resolve(new))
+                    .map_err(vfsi_core::OpError::not_attempted)?;
+                symlink(old, new).map_err(|error| {
+                    vfsi_core::OpError::failed(VfError::from_io(None, error), None)
+                })
+            })
+            .collect())
     }
 
-    fn vreadlink_impl(&mut self, paths: &[&Path]) -> VfResult<Vec<Vec<u8>>> {
-        let mut out = Vec::with_capacity(paths.len());
-        for (i, p) in paths.iter().enumerate() {
-            let path = self
-                .no_follow_path(&self.resolve(p))
-                .map_err(|e| e.with_index(i))?;
-            let target = std::fs::read_link(path).map_err(|e| VfError::from_io(i, e))?;
-            out.push(path_bytes(&target).to_vec());
-        }
-        Ok(out)
+    fn vreadlink_impl(&mut self, paths: &[&Path]) -> vfsi_core::VecResult<Vec<u8>> {
+        Ok(paths
+            .iter()
+            .map(|path| {
+                let path = self
+                    .no_follow_path(&self.resolve(path))
+                    .map_err(vfsi_core::OpError::not_attempted)?;
+                std::fs::read_link(path)
+                    .map(|target| path_bytes(&target).to_vec())
+                    .map_err(|error| {
+                        vfsi_core::OpError::failed(VfError::from_io(None, error), None)
+                    })
+            })
+            .collect())
     }
 
-    fn vhardlink_impl(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
+    fn vhardlink_impl(
+        &mut self,
+        oldpaths: &[&Path],
+        newpaths: &[&Path],
+    ) -> vfsi_core::VecResult<()> {
         if oldpaths.len() != newpaths.len() {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
         }
-        for (i, (old, new)) in oldpaths.iter().zip(newpaths).enumerate() {
-            let new = self
-                .no_follow_path(&self.resolve(new))
-                .map_err(|e| e.with_index(i))?;
-            let old = self
-                .no_follow_path(&self.resolve(old))
-                .map_err(|e| e.with_index(i))?;
-            std::fs::hard_link(old, new).map_err(|e| VfError::from_io(i, e))?;
-        }
-        Ok(())
+        Ok(oldpaths
+            .iter()
+            .zip(newpaths)
+            .map(|(old, new)| {
+                let new = self
+                    .no_follow_path(&self.resolve(new))
+                    .map_err(vfsi_core::OpError::not_attempted)?;
+                let old = self
+                    .no_follow_path(&self.resolve(old))
+                    .map_err(vfsi_core::OpError::not_attempted)?;
+                std::fs::hard_link(old, new).map_err(|error| {
+                    vfsi_core::OpError::failed(VfError::from_io(None, error), None)
+                })
+            })
+            .collect())
     }
 
-    fn vcopy_data_impl(&mut self, pairs: &[ExtentPair]) -> VfRes {
-        for (i, p) in pairs.iter().enumerate() {
-            self.copy_extent(p).map_err(|e| e.with_index(i))?;
-        }
-        Ok(())
+    fn vcopy_data_impl(&mut self, pairs: &[ExtentPair]) -> vfsi_core::VecResult<()> {
+        Ok(pairs
+            .iter()
+            .map(|pair| {
+                self.copy_extent(pair)
+                    .map_err(|cause| vfsi_core::OpError::failed(cause, None))
+            })
+            .collect())
     }
 
-    fn vcopy_impl(&mut self, pairs: &[ExtentPair], options: CopyOptions) -> VfRes {
+    fn vcopy_impl(
+        &mut self,
+        pairs: &[ExtentPair],
+        options: CopyOptions,
+    ) -> vfsi_core::VecResult<()> {
         if options.follow_source_symlinks() {
             return self.vcopy_data_impl(pairs);
         }
-        for (i, p) in pairs.iter().enumerate() {
-            let sp = self
-                .no_follow_path(&self.resolve(&p.src_path))
-                .map_err(|e| e.with_index(i))?;
-            let md = std::fs::symlink_metadata(&sp).map_err(|e| VfError::from_io(i, e))?;
-            if md.file_type().is_symlink() {
-                let target = std::fs::read_link(&sp).map_err(|e| VfError::from_io(i, e))?;
-                let dst = self
-                    .no_follow_path(&self.resolve(&p.dst_path))
-                    .map_err(|e| e.with_index(i))?;
-                symlink(&target, dst).map_err(|e| VfError::from_io(i, e))?;
-            } else {
-                self.copy_extent(p).map_err(|e| e.with_index(i))?;
-            }
-        }
-        Ok(())
+        Ok(pairs
+            .iter()
+            .map(|p| {
+                (|| {
+                    let source = self.no_follow_path(&self.resolve(&p.src_path))?;
+                    let metadata = std::fs::symlink_metadata(&source)
+                        .map_err(|error| VfError::from_io(None, error))?;
+                    if metadata.file_type().is_symlink() {
+                        let target = std::fs::read_link(&source)
+                            .map_err(|error| VfError::from_io(None, error))?;
+                        let destination = self.no_follow_path(&self.resolve(&p.dst_path))?;
+                        symlink(&target, destination).map_err(|error| VfError::from_io(None, error))
+                    } else {
+                        self.copy_extent(p)
+                    }
+                })()
+                .map_err(|cause| vfsi_core::OpError::failed(cause, None))
+            })
+            .collect())
     }
 
     fn copy_tree_impl(
@@ -2532,7 +2938,10 @@ impl VectorBackend for LocalBackend {
             dst,
             symlinks,
             AttrMask::MODE | AttrMask::SIZE | AttrMask::FILEID,
-            |backend, pairs| backend.vcopy_data_impl(pairs),
+            |backend, pairs| {
+                vfsi_core::internal::collect_vec_result(backend.vcopy_data_impl(pairs), pairs.len())
+                    .map(|_| ())
+            },
             |error| error.with_index(0),
         )
     }

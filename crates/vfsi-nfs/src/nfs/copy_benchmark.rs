@@ -76,7 +76,11 @@ fn compare_bounded_new_file_copy_waves() {
                         None,
                     )
                 } else {
-                    backend.vcopy_data_impl(&pairs)
+                    vfsi_core::internal::collect_vec_result(
+                        backend.vcopy_data_impl(&pairs),
+                        pairs.len(),
+                    )
+                    .map(|_| ())
                 };
                 let elapsed = start.elapsed().as_micros();
                 let after = telemetry.snapshot();

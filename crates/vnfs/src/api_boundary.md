@@ -378,7 +378,7 @@ Vector-only generic code needs no extension trait:
 
 ```no_run
 use vnfs::files::{Vfsi, ReadOp, ReadOptions};
-fn vector_only(fs: &impl Vfsi) -> vnfs::Result<Vec<vnfs::files::ReadResult>> {
+fn vector_only(fs: &impl Vfsi) -> vnfs::VecResult<vnfs::files::ReadResult> {
     fs.vread([ReadOp::whole("/file-1"), ReadOp::whole("/file-2")], ReadOptions::new())
 }
 ```

@@ -157,12 +157,35 @@ struct ListingBackend {
 }
 
 impl vfsi_sync::backend::HandleBackend for ListingBackend {
+    fn vfsync_impl(
+        &mut self,
+        files: &[FileOperand],
+        _mode: vfsi_sync::api::SyncMode,
+    ) -> vfsi_sync::VecResult<()> {
+        Ok(files
+            .iter()
+            .map(|file| {
+                self.sync_data(file)
+                    .map_err(|cause| vfsi_sync::OpError::unknown(cause, None))
+            })
+            .collect())
+    }
     fn sync_data(&mut self, _: &FileOperand) -> vfsi_sync::VfResult<()> {
         Err(VfError::unsupported(0))
     }
     fn open_impl(&mut self, _: &vfsi_sync::OpenOp) -> vfsi_sync::VfResult<FileOperand> {
         Err(VfError::unsupported(0))
     }
+    fn vclose_impl(&mut self, files: &[vfsi_sync::FileOperand]) -> vfsi_sync::VecResult<()> {
+        Ok(files
+            .iter()
+            .map(|file| {
+                self.close_impl(file)
+                    .map_err(|error| vfsi_sync::OpError::unknown(error, None))
+            })
+            .collect())
+    }
+
     fn close_impl(&mut self, file: &FileOperand) -> vfsi_sync::VfResult<()> {
         if let Some(attempts) = &self.close_attempts {
             attempts.lock().unwrap().push(file.fd().unwrap_or(-1));
@@ -204,7 +227,8 @@ impl vfsi_sync::backend::HandleBackend for ListingBackend {
 }
 
 impl vfsi_sync::backend::VectorBackend for ListingBackend {
-    fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_sync::VfRes {
+    fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_sync::VecResult<()> {
+        let requested = attrs.len();
         for (index, attrs) in attrs.iter_mut().enumerate() {
             let missing = if index >= self.missing_after {
                 self.missing
@@ -222,18 +246,18 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
             attrs.gid = 0;
             attrs.rdev = 0x1234;
         }
-        Ok(())
+        Ok(vec![Ok(()); requested])
     }
 
-    fn vgetattrs_nofollow_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_sync::VfRes {
+    fn vgetattrs_nofollow_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_sync::VecResult<()> {
         let count = attrs.len();
-        self.vgetattrs_impl(attrs)?;
+        let outcomes = self.vgetattrs_impl(attrs)?;
         for attrs in attrs.iter_mut() {
             attrs.ftype = vfsi_sync::VfType::Directory;
             attrs.mode = libc::S_IFDIR | 0o755;
         }
         self.emitted += count;
-        Ok(())
+        Ok(outcomes)
     }
 
     fn listdir_impl(
@@ -279,13 +303,13 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
         _: &[&Path],
         _: &[i32],
         _: &[u32],
-    ) -> vfsi_sync::VfResult<Vec<FileOperand>> {
+    ) -> vfsi_sync::VecResult<FileOperand> {
         let count = self
             .open_result_count
             .ok_or_else(|| VfError::unsupported(0))?;
-        match self.malformed_reply {
-            Some(MalformedReply::OpenDuplicate) => Ok(vec![FileOperand::from_fd(10_000); count]),
-            Some(MalformedReply::OpenPath) => Ok((0..count)
+        let results: Vec<FileOperand> = match self.malformed_reply {
+            Some(MalformedReply::OpenDuplicate) => vec![FileOperand::from_fd(10_000); count],
+            Some(MalformedReply::OpenPath) => (0..count)
                 .map(|index| {
                     if index + 1 == count {
                         FileOperand::from_path("/not-an-open-handle")
@@ -293,12 +317,13 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
                         FileOperand::from_fd(10_000 + index as i32)
                     }
                 })
-                .collect()),
-            Some(MalformedReply::OpenNegativeFd) => Ok(vec![FileOperand::from_fd(-1); count]),
-            _ => Ok((0..count)
+                .collect(),
+            Some(MalformedReply::OpenNegativeFd) => vec![FileOperand::from_fd(-1); count],
+            _ => (0..count)
                 .map(|index| FileOperand::from_fd(10_000 + index as i32))
-                .collect()),
-        }
+                .collect(),
+        };
+        Ok(results.into_iter().map(Ok).collect())
     }
 
     fn vopen_preflight_impl(&mut self, _: &[&Path], _: &[i32], _: &[u32]) -> vfsi_sync::VfRes {
@@ -308,43 +333,46 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
         }
     }
 
-    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_sync::VfResult<Vec<vfsi_sync::ReadResult>> {
-        let Some(size) = self.read_size else {
-            return Err(VfError::unsupported(0));
+    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
+        let result: vfsi_sync::VfResult<Vec<vfsi_sync::ReadResult>> = {
+            let Some(size) = self.read_size else {
+                return Err(VfError::unsupported(0));
+            };
+            let result_count = self.read_result_count.unwrap_or(reads.len());
+            Ok(reads
+                .iter()
+                .cycle()
+                .take(result_count)
+                .map(|read| vfsi_sync::ReadResult {
+                    file: if self.malformed_reply == Some(MalformedReply::ReadWrongFile) {
+                        FileOperand::from_fd(999)
+                    } else {
+                        read.file.clone()
+                    },
+                    offset: if self.malformed_reply == Some(MalformedReply::ReadWrongOffset) {
+                        1
+                    } else {
+                        match read.offset {
+                            vfsi_sync::VfOffset::At(offset) => offset,
+                            _ => 0,
+                        }
+                    },
+                    data: if self.malformed_reply == Some(MalformedReply::ReadNoProgress) {
+                        Vec::new()
+                    } else {
+                        vec![b'x'; size]
+                    },
+                    eof: false,
+                })
+                .collect())
         };
-        let result_count = self.read_result_count.unwrap_or(reads.len());
-        Ok(reads
-            .iter()
-            .cycle()
-            .take(result_count)
-            .map(|read| vfsi_sync::ReadResult {
-                file: if self.malformed_reply == Some(MalformedReply::ReadWrongFile) {
-                    FileOperand::from_fd(999)
-                } else {
-                    read.file.clone()
-                },
-                offset: if self.malformed_reply == Some(MalformedReply::ReadWrongOffset) {
-                    1
-                } else {
-                    match read.offset {
-                        vfsi_sync::VfOffset::At(offset) => offset,
-                        _ => 0,
-                    }
-                },
-                data: if self.malformed_reply == Some(MalformedReply::ReadNoProgress) {
-                    Vec::new()
-                } else {
-                    vec![b'x'; size]
-                },
-                eof: false,
-            })
-            .collect())
+        result.map(|results| results.into_iter().map(Ok).collect())
     }
 
     fn vwrite_impl(
         &mut self,
         writes: &[WriteOp<&FileOperand, &[u8]>],
-    ) -> vfsi_sync::VfResult<Vec<vfsi_sync::WriteResult>> {
+    ) -> vfsi_sync::VecResult<vfsi_sync::WriteResult> {
         let calls = self
             .write_calls
             .as_ref()
@@ -382,6 +410,7 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
                 },
                 stable: true,
             })
+            .map(Ok)
             .collect())
     }
 
@@ -2027,15 +2056,33 @@ fn unattributed_status_keeps_its_errno_and_category_for_c_callers() {
 }
 
 #[test]
-fn close_failure_only_releases_a_confirmed_semantic_prefix() {
-    assert_eq!(
-        confirmed_close_prefix(&VfError::errno(2, libc::EIO as u32), 4),
-        2
+fn close_failure_releases_only_confirmed_successes_including_later_siblings() {
+    use vfsi_sync::OpError;
+    let mut results = [vfsi_result::item_success(0); 4];
+    let mut retired = Vec::new();
+    let status = unit_results(
+        "close",
+        &mut results,
+        Ok(vec![
+            Ok(()),
+            Err(OpError::failed(
+                VfError::errno(None, libc::EIO as u32),
+                None,
+            )),
+            Ok(()),
+            Err(OpError::unknown(
+                VfError::transport(None, "lost reply"),
+                None,
+            )),
+        ]),
+        |index| retired.push(index),
     );
-    assert_eq!(
-        confirmed_close_prefix(&VfError::transport(None, "lost reply"), 4),
-        0
-    );
+    assert_eq!(retired, [0, 2]);
+    assert_eq!(status.index, 1);
+    assert_eq!(results[0].category, VFSI_ERROR_NONE);
+    assert_eq!(results[1].category, VFSI_ERROR_FILESYSTEM);
+    assert_eq!(results[2].category, VFSI_ERROR_NONE);
+    assert_eq!(results[3].category, VFSI_ERROR_INDETERMINATE);
 }
 
 #[test]
@@ -2965,4 +3012,205 @@ fn abi_v3_vector_io_and_bounded_streaming() {
     assert_eq!(item_results[0].category, VFSI_ERROR_FILESYSTEM);
     assert_eq!(item_results[1].category, VFSI_ERROR_INDETERMINATE);
     unsafe { vfsi_free(fs) };
+}
+
+#[test]
+fn close_missing_reply_keeps_known_success_and_legacy_transport_category() {
+    let mut results = [vfsi_result::item_success(0); 2];
+    let mut retired = Vec::new();
+    let status = unit_results("close", &mut results, Ok(vec![Ok(())]), |index| {
+        retired.push(index)
+    });
+    assert_eq!(retired, [0]);
+    assert_eq!(status.index, 1);
+    assert_eq!(status.category, VFSI_ERROR_TRANSPORT);
+    assert_eq!(results[0].category, VFSI_ERROR_NONE);
+    assert_eq!(results[1].category, VFSI_ERROR_INDETERMINATE);
+}
+
+#[test]
+fn abi_v3_mkdir_reports_independent_successes_after_a_collision() {
+    let (root_path, root) = temp_root();
+    let mut fs: *mut vfsi_fs = std::ptr::null_mut();
+    assert_eq!(unsafe { vfsi_dummy_open(root.as_ptr(), &mut fs) }, 0);
+    std::fs::create_dir(root_path.path().join("existing")).unwrap();
+    let names = [
+        CString::new("/first").unwrap(),
+        CString::new("/existing").unwrap(),
+        CString::new("/last").unwrap(),
+    ];
+    let ops: Vec<_> = names
+        .iter()
+        .map(|name| vfsi_mkdir_op {
+            path: name.as_ptr(),
+            mode: 0o700,
+        })
+        .collect();
+    let mut results = [vfsi_result::panic(); 3];
+    let status = unsafe { vfsi_mkdirv(fs, ops.as_ptr(), ops.len(), results.as_mut_ptr()) };
+    assert_eq!(status.index, 1);
+    assert_eq!(status.err_no, libc::EEXIST as u32);
+    assert_eq!(results[0].category, VFSI_ERROR_NONE);
+    assert_eq!(results[1].category, VFSI_ERROR_FILESYSTEM);
+    assert_eq!(results[2].category, VFSI_ERROR_NONE);
+    assert!(root_path.path().join("first").is_dir() && root_path.path().join("last").is_dir());
+    unsafe { vfsi_free(fs) };
+}
+
+#[test]
+fn unit_namespace_rejection_never_exports_an_out_of_range_error_index() {
+    let mut results = [
+        vfsi_result::base(0, VFSI_ERROR_NOT_ATTEMPTED, 0, "not attempted"),
+        vfsi_result::base(1, VFSI_ERROR_NOT_ATTEMPTED, 0, "not attempted"),
+    ];
+    let mut retired = Vec::new();
+    let status = unit_results(
+        "mkdir",
+        &mut results,
+        Err(VfError::errno(99, libc::EIO as u32)),
+        |index| retired.push(index),
+    );
+    assert_eq!(status.index, C_INDEX_UNKNOWN);
+    assert_eq!(status.category, VFSI_ERROR_TRANSPORT);
+    assert!(retired.is_empty());
+    assert!(results
+        .iter()
+        .all(|result| result.category == VFSI_ERROR_NOT_ATTEMPTED));
+}
+
+#[test]
+fn setattrv_reports_later_successes_without_changing_abi_v3_layouts() {
+    let (root, root_path) = temp_root();
+    for name in ["first", "last"] {
+        std::fs::write(root.path().join(name), b"original").unwrap();
+    }
+    let paths = [c"/first", c"/missing", c"/last"];
+    let ops: Vec<_> = paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| vfsi_setattr_op {
+            path: path.as_ptr(),
+            mask: VFSI_ATTR_SIZE,
+            mode: 0,
+            size: index as u64 + 1,
+            atime_sec: 0,
+            atime_nsec: 0,
+            mtime_sec: 0,
+            mtime_nsec: 0,
+        })
+        .collect();
+    let mut fs = std::ptr::null_mut();
+    assert_eq!(unsafe { vfsi_dummy_open(root_path.as_ptr(), &mut fs) }, 0);
+    let mut items = [vfsi_result::panic(); 3];
+    let status = unsafe { vfsi_setattrv(fs, ops.as_ptr(), ops.len(), items.as_mut_ptr()) };
+    unsafe { vfsi_free(fs) };
+    assert_eq!(status.index, 1);
+    assert_eq!(items[0].category, VFSI_ERROR_NONE);
+    assert_eq!(items[1].category, VFSI_ERROR_FILESYSTEM);
+    assert_eq!(items[1].err_no, libc::ENOENT as u32);
+    assert_eq!(items[2].category, VFSI_ERROR_NONE);
+    assert_eq!(
+        std::fs::metadata(root.path().join("first")).unwrap().len(),
+        1
+    );
+    assert_eq!(
+        std::fs::metadata(root.path().join("last")).unwrap().len(),
+        3
+    );
+}
+
+#[test]
+fn renamev_reports_nonprefix_successes_and_retains_abi_v3() {
+    let (root, root_path) = temp_root();
+    std::fs::write(root.path().join("first"), b"first").unwrap();
+    std::fs::write(root.path().join("last"), b"last").unwrap();
+    std::fs::write(root.path().join("one"), b"old").unwrap();
+    let pairs = [
+        (c"/first", c"/one"),
+        (c"/missing", c"/two"),
+        (c"/last", c"/three"),
+    ];
+    let ops: Vec<_> = pairs
+        .iter()
+        .map(|(source, target)| vfsi_rename_op {
+            oldpath: source.as_ptr(),
+            newpath: target.as_ptr(),
+        })
+        .collect();
+    let mut fs = std::ptr::null_mut();
+    assert_eq!(unsafe { vfsi_dummy_open(root_path.as_ptr(), &mut fs) }, 0);
+    let mut items = [vfsi_result::panic(); 3];
+    let status = unsafe { vfsi_renamev(fs, ops.as_ptr(), ops.len(), items.as_mut_ptr()) };
+    unsafe { vfsi_free(fs) };
+    assert_eq!(status.index, 1);
+    assert_eq!(items[0].category, VFSI_ERROR_NONE);
+    assert_eq!(items[1].category, VFSI_ERROR_FILESYSTEM);
+    assert_eq!(items[1].err_no, libc::ENOENT as u32);
+    assert_eq!(items[2].category, VFSI_ERROR_NONE);
+    assert_eq!(std::fs::read(root.path().join("one")).unwrap(), b"first");
+    assert_eq!(std::fs::read(root.path().join("three")).unwrap(), b"last");
+}
+
+#[test]
+fn copyv_reports_nonprefix_successes_without_changing_abi_v3() {
+    let (root, root_path) = temp_root();
+    for (name, bytes) in [
+        ("first", b"first".as_slice()),
+        ("last", b"last".as_slice()),
+        ("one", b"long stale tail".as_slice()),
+    ] {
+        std::fs::write(root.path().join(name), bytes).unwrap();
+    }
+    let pairs = [
+        (c"/first", c"/one"),
+        (c"/missing", c"/two"),
+        (c"/last", c"/three"),
+    ];
+    let ops: Vec<_> = pairs
+        .iter()
+        .map(|(source, destination)| vfsi_copy_op {
+            src: source.as_ptr(),
+            src_offset: 0,
+            dst: destination.as_ptr(),
+            dst_offset: 0,
+            length: 0,
+            to_eof: 1,
+        })
+        .collect();
+    let mut fs = std::ptr::null_mut();
+    assert_eq!(unsafe { vfsi_dummy_open(root_path.as_ptr(), &mut fs) }, 0);
+    let mut items = [vfsi_result::panic(); 3];
+    let status = unsafe { vfsi_copyv(fs, ops.as_ptr(), ops.len(), items.as_mut_ptr()) };
+    unsafe { vfsi_free(fs) };
+    assert_eq!(status.index, 1);
+    assert_eq!(items[0].category, VFSI_ERROR_NONE);
+    assert_eq!(items[1].category, VFSI_ERROR_FILESYSTEM);
+    assert_eq!(items[1].err_no, libc::ENOENT as u32);
+    assert_eq!(items[2].category, VFSI_ERROR_NONE);
+    assert_eq!(std::fs::read(root.path().join("one")).unwrap(), b"first");
+    assert_eq!(std::fs::read(root.path().join("three")).unwrap(), b"last");
+    assert!(!root.path().join("two").exists());
+}
+
+#[test]
+fn removev_exports_nonprefix_successes_with_abi_v3_item_results() {
+    let (root, root_path) = temp_root();
+    std::fs::write(root.path().join("first"), b"first").unwrap();
+    std::fs::write(root.path().join("last"), b"last").unwrap();
+    let paths = [c"/first", c"/missing", c"/last"];
+    let paths: Vec<_> = paths.iter().map(|path| path.as_ptr()).collect();
+    let mut fs = std::ptr::null_mut();
+    assert_eq!(unsafe { vfsi_dummy_open(root_path.as_ptr(), &mut fs) }, 0);
+    let mut items = [vfsi_result::panic(); 3];
+    let status = unsafe { vfsi_removev(fs, paths.as_ptr(), paths.len(), items.as_mut_ptr()) };
+    unsafe {
+        vfsi_free(fs);
+    }
+    assert_eq!(status.index, 1);
+    assert_eq!(items[0].category, VFSI_ERROR_NONE);
+    assert_eq!(items[1].category, VFSI_ERROR_FILESYSTEM);
+    assert_eq!(items[1].err_no, libc::ENOENT as u32);
+    assert_eq!(items[2].category, VFSI_ERROR_NONE);
+    assert!(!root.path().join("first").exists());
+    assert!(!root.path().join("last").exists());
 }

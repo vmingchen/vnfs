@@ -53,7 +53,10 @@ fn stat_impl(fs: &vfsi_fs, path: &std::path::Path) -> Result<VfAttrs, VfError> {
         masks: mask(),
         ..VfAttrs::default()
     };
-    lock_or_io(&fs.fs)?.vgetattrs_impl(std::slice::from_mut(&mut attrs))?;
+    vfsi_sync::internal::collect_vec_result(
+        lock_or_io(&fs.fs)?.vgetattrs_impl(std::slice::from_mut(&mut attrs)),
+        1,
+    )?;
     if !attrs.returned.contains(mask()) {
         return Err(VfError::errno(0, libc::ENOTSUP as u32));
     }
@@ -159,7 +162,9 @@ pub unsafe extern "C" fn vfsi_statv(
             Ok(backend) => backend,
             Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
         };
-        if let Err(error) = backend.vgetattrs_impl(&mut attrs) {
+        if let Err(error) =
+            vfsi_sync::internal::collect_vec_result(backend.vgetattrs_impl(&mut attrs), attrs.len())
+        {
             fail_batch!(results, vfsi_result::from_error(error), true);
         }
         let mut first_failure = None;
@@ -267,16 +272,11 @@ pub unsafe extern "C" fn vfsi_setattrv(
             Ok(backend) => backend,
             Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
         };
-        match backend.vsetattrs_raw_impl(&attrs) {
-            Ok(()) => {
-                complete_results(results);
-                vfsi_result::success(count)
-            }
-            Err(error) => {
-                let failure = vfsi_result::from_error(error);
-                fail_results(results, failure, true);
-                failure
-            }
-        }
+        unit_results(
+            "setattrs",
+            results,
+            backend.vsetattrs_raw_impl(&attrs),
+            |_| {},
+        )
     })
 }

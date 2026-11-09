@@ -75,7 +75,7 @@ use vnfs::nfs::mount::NfsMountSession;
 
 let session = NfsMountSession::from_mount("/mnt/nfs/project")?;
 let path = session.map("/mnt/nfs/project/README", ResolvePath::Follow)?;
-let attrs = session.fs().vgetattrs(&[path], AttrsOptions::new()
+let attrs = session.fs().getattrs_all(&[path], AttrsOptions::new()
     .with_fields(Attributes::MODE | Attributes::SIZE))?;
 assert!(attrs[0].contains(Attributes::MODE | Attributes::SIZE));
 println!("NFS server: {}", session.mount().host());
@@ -167,7 +167,7 @@ directory; `..`, lexical overlaps and duplicate container destinations are rejec
 
 Files default to exclusive creation (`Existing::Error`). `Existing::Skip` retains
 existing files; its destination reservations are necessarily scalar because a
-failed strict vector OPEN cannot identify which files it created. `Existing::Replace`
+failed all-success OPEN collection cannot roll back creation or truncation. `Existing::Replace`
 unlinks existing regular files before exclusive creation, protecting unrelated
 hard links from truncation. It selects native vector COPY when neither progress
 nor permission preservation is requested. Native COPY has no portable byte-count
@@ -187,7 +187,8 @@ Descriptor copies stop at the initially observed file size; growth is ignored.
 explicit CLOSE succeed, without skips or cancellation. `Container + Replace`
 without progress or depth overrides attempts an atomic rename to an absent
 destination. Cross-device, existing-destination and unsupported-rename errors
-permit copy/delete fallback after checking which roots were already renamed.
+permit copy/delete fallback for the explicitly failed inputs. Confirmed renames
+are counted directly; unknown outcomes never trigger copy/delete fallback.
 Other modes copy first, preserving exclusive conflict checks. Failure,
 cancellation, or skipped entries retain sources that have not already been
 renamed or removed; completed work is not rolled back. A failed copy can leave

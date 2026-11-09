@@ -136,8 +136,6 @@ mod namespace;
 #[cfg(test)]
 use filesystem::make_fs;
 #[cfg(test)]
-use handles::confirmed_close_prefix;
-#[cfg(test)]
 use listing::collect_bounded_entries;
 pub use listing::{
     vfsi_listdir, vfsi_listdir_with_limits, vfsi_listdirs, vfsi_listdirs_with_ids, vfsi_listdirv,
@@ -428,6 +426,71 @@ fn parse_c_bool(value: u8) -> Option<bool> {
         1 => Some(true),
         _ => None,
     }
+}
+
+fn unit_results(
+    operation: &'static str,
+    results: &mut [vfsi_result],
+    outcomes: vfsi_sync::VecResult<()>,
+    mut retire: impl FnMut(usize),
+) -> vfsi_result {
+    use vfsi_sync::{FailureState, OpError};
+    let mut outcomes = match outcomes {
+        Ok(outcomes) if outcomes.len() <= results.len() => outcomes,
+        Ok(_) => (0..results.len())
+            .map(|_| {
+                Err(OpError::unknown(
+                    invalid_backend_reply(format!("too many {operation} outcomes")),
+                    None,
+                ))
+            })
+            .collect(),
+        Err(error) => {
+            let error = if error.index().is_some_and(|index| index >= results.len()) {
+                invalid_backend_reply(format!("{operation} returned an invalid error index"))
+            } else {
+                error
+            };
+            let failure = vfsi_result::from_error(error);
+            fail_results(results, failure, false);
+            return failure;
+        }
+    };
+    outcomes.resize_with(results.len(), || {
+        Err(OpError::unknown(
+            invalid_backend_reply(format!("missing {operation} outcome")),
+            None,
+        ))
+    });
+    let mut first_error = None;
+    for (index, (slot, outcome)) in results.iter_mut().zip(outcomes).enumerate() {
+        *slot = match outcome {
+            Ok(()) => {
+                retire(index);
+                vfsi_result::item_success(index)
+            }
+            Err(error) => {
+                let error = if error.progress().is_some() {
+                    OpError::unknown(
+                        invalid_backend_reply(format!(
+                            "{operation} cannot report I/O byte progress"
+                        )),
+                        None,
+                    )
+                } else {
+                    error
+                };
+                let failure = vfsi_result::from_error(error.cause().clone().with_index(index));
+                first_error.get_or_insert(failure);
+                let mut item = failure;
+                if error.state() == FailureState::Unknown {
+                    item.category = VFSI_ERROR_INDETERMINATE;
+                }
+                item
+            }
+        };
+    }
+    first_error.unwrap_or_else(|| vfsi_result::success(results.len()))
 }
 
 fn complete_results(results: &mut [vfsi_result]) {

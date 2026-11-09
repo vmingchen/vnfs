@@ -23,7 +23,8 @@ impl WriteOptions {
         }
     }
     /// Complete successful short writes at their remaining offsets when true.
-    /// Stop on any error, including ambiguous transport failures; never replay it.
+    /// A failed input is never replayed. Independent inputs continue; uncertain
+    /// effects block only dependent mutations.
     /// This does not flush data to stable storage or make the batch atomic.
     pub const fn with_write_all(mut self, complete: bool) -> Self {
         self.flags.set_write_all(complete);

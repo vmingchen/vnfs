@@ -86,6 +86,6 @@ impl<C: Vfsi + ?Sized> OpenOptions<'_, C> {
             .iter()
             .map(|path| OpenOp::new(path.as_ref(), self.flags).mode(self.mode))
             .collect();
-        self.client.vopen(&requests)
+        self.client.open_batch(&requests)
     }
 }

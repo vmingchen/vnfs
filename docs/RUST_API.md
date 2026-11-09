@@ -307,22 +307,43 @@ portable API or ABI guarantees.
 
 ## Durability and failure rules
 
-### Strict vectors, not transactions
+### Per-operation metadata results
 
-Result-bearing vectors return values in input order on success, or one error
-without a partial value vector. Unit-returning mutations use the same strict
-error policy. Directory visitors additionally report cancellation/completion as
-described above. A strict error is not atomicity: earlier or concurrently
-dispatched operations may already have taken effect. Commit/rollback belongs
-to a future transactional facet, not VFSI.
+Vfsi::vstatfs returns VecResult<FilesystemStats> and Vfsi::vgetattrs returns
+VecResult<Attrs>: an outer rejection before input dispatch, or exactly one
+OpResult per input in input order. Execution order is
+backend-defined. A missing path or invalid handle does not suppress independent
+siblings. OpError retains its native cause and distinguishes NotAttempted,
+Failed and Unknown completion; vector position identifies the input.
 
-For example, typed OPEN has the conventional Rust result shape:
+VfsiExt::statfs_all and VfsiExt::getattrs_all collect all values or return the
+first error in input order after execution finishes. It deliberately discards other outcomes and
+completion information; it does not restore stop-on-error execution or permit
+replay. The singular statfs helper uses this all-success policy for one target.
+
+The remaining operation families are being migrated as described in the
+[vector-result migration design](vector-results-migration.md). No temporary
+_outcomes method family is exposed.
+
+### Per-input outcomes and strict conveniences
+
+Migrated `vgetattrs`, `vstatfs`, `vread`, `vopen`, `vclose` and
+`vfsync` return `VecResult<T>`: one owned value or `OpError` per input after
+dispatch. Ordinary failures do not suppress independent siblings. Remaining
+operation families still have strict aggregate signatures during migration.
+Neither form provides atomicity or rollback.
+
+`VfsiExt` conveniences deliberately select a simpler all-success policy.
+For OPEN, callers can retain partial handles or request strict collection:
 
 ```rust,no_run
-use vnfs::{files::OpenOp, Result, Vfsi};
+use vnfs::{files::OpenOp, Result, VecResult, Vfsi, VfsiExt};
 
-fn open_group<C: Vfsi>(fs: &C, requests: &[OpenOp]) -> Result<Vec<C::File>> {
+fn open_group<C: Vfsi>(fs: &C, requests: &[OpenOp]) -> VecResult<C::File> {
     fs.vopen(requests)
+}
+fn open_all<C: Vfsi>(fs: &C, requests: &[OpenOp]) -> Result<Vec<C::File>> {
+    fs.open_batch(requests)
 }
 ```
 
@@ -336,7 +357,9 @@ Borrowed read buffers can likewise contain partial progress when the call fails.
 
 ### Attribution and retry safety
 
-The input position is the authoritative vector index. `Error::index()` returns
+The input position is the authoritative vector index. Inner `OpError` causes
+keep that identity in the outcome position. Strict compatibility wrappers attach
+the selected input position to `Error::index()`, which returns
 `Some(n)` for a failure attributable to request `n`, or `None` when attribution
 is unknown. Never interpret `None` as zero. Backend wire operation numbers,
 split compounds, and chunk-local offsets must be translated to logical request
@@ -380,7 +403,10 @@ failures. Language/legacy adapters use the lossy `to_errno()` conversion, while
 native status; synthetic compatibility codes are not stored as errno values.
 
 Prefer `try_close()` and `vclose(&mut files)` when cleanup errors matter.
-They retain ownership on failure. `is_closed() == false` only means local
+The vector returns one outcome per input and retires every confirmed success,
+including siblings after a failure. `close_batch` deliberately selects the
+first error in input order; it preserves that cleanup bookkeeping.
+Unsuccessful inputs retain ownership. `is_closed() == false` only means local
 cleanup ownership remains, not that a remotely ambiguous close failed to take
 effect. Consuming `close`/`close_files` perform best-effort cleanup on error, and
 `Drop` queues cleanup while a client remains alive. Use `drain_cleanup` to
@@ -406,7 +432,7 @@ the separate `ReadAllOptions` type on `VectorBackend::vread_all_with_options_imp
 `ResourceLimits` sets client defaults through `NfsBuilder::limits`,
 `NfsClient::with_limits`, or `Auto::with_limits`. Existing clones retain their
 configured policy. Scalar and vector whole-file reads share the optimized
-backend path. `vread` with `ReadOp::into` returns byte counts, offsets and EOF,
+backend path. `vread` with `ReadOp::into` reports byte counts, offsets and EOF,
 with no owned data in those results, and also enforces the aggregate policy
 because a backend may use an owned-buffer fallback. The same `ReadOptions`
 selects an explicit per-call buffer budget. `Auto`
@@ -480,6 +506,14 @@ Directory visitors return `TraversalCompletion::Complete` on exhaustion and
 last entry. `ControlFlow::Continue(())` requests another entry; callback
 errors propagate. This replaces the previous boolean directory callbacks.
 
+Synchronization returns `VecResult<()>`. A rejected or closed handle does
+not suppress valid siblings. Known failures, uncertain replies and unattempted
+inputs remain distinct; successful synchronization of another input is retained.
+`VfsiExt::sync_batch` selects one error only after the vector finishes.
+The existing singular `sync_data` and `sync_all` conveniences delegate to
+that vector engine.
+
+
 For recursive removal, `VfsiExt::remove_dir_all` is fail-fast and
 `remove_dir_all_with_options`, `remove_dir_contents_with_options`, and
 `Vfsi::vremove(paths, mode, options)` expose `RemoveOptions` at the application layer.
@@ -491,9 +525,13 @@ ancestor paths, not a diagnostic name from an old handle.
 
 The core `Vfsi::vopen_dirs` and `vremove_dir_contents` operations remain for
 explicit retained-directory vectors. They require genuine directory descriptors;
-path-only tokens return `Unsupported` rather than imply handle safety. The NFS
-path remover uses a retained handle internally and closes it after the call;
-the scalar extension does not open or collect directory contents itself.
+path-only tokens return `Unsupported` rather than imply handle safety. Both return
+`VecResult`, preserving successful siblings and per-input failure knowledge.
+`VfsiExt::open_dirs` deliberately collects all-success results and drops acquired
+siblings on failure; their cleanup owners release or queue the resources.
+`remove_contents_all` provides strict removal collection without rollback.
+The NFS path remover holds resolved directory filehandles for the call;
+the scalar extension does not collect directory contents itself.
 The NFS remover processes
 one bounded READDIR reply at a time (32 KiB by default), advances through the
 current pass, and verifies from the beginning after a mutating pass. If a server
@@ -520,6 +558,17 @@ timeouts; this is not a cancellation mechanism.
 
 Lifecycle observers are delivered after the backend lock is released. They may
 reenter the client. Keep callbacks short and avoid strong observer/client cycles.
+
+`Vfsi::vread` returns `VecResult<ReadResult>`: an outer rejection before
+input dispatch, or one independent outcome per input. Successful siblings remain
+available when another read fails. The result slot identifies the input;
+`OpError` preserves completion state and any confirmed owned or buffered
+prefix through `IoProgress::Read`. The vector does not imply execution order.
+
+`VfsiExt::read_batch` is the explicit all-success convenience. It submits the
+vector once, then selects the first failed input in input order and discards
+other outcomes and error progress. Short reads remain short; the helper does
+not provide stop-on-error, rollback or retry safety.
 
 `ReadResult` has private fields. Use `offset()`, `bytes_read()`, `eof()`, `data()`,
 `is_buffered()`, and `into_data()`. Backend implementers construct owned results

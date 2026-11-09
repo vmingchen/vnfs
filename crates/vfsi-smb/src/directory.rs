@@ -79,12 +79,14 @@ impl SmbVecFs {
             return Ok(());
         }
         let connection = self.client.connection_mut().clone();
-        let tree_id = self.tree.tree_id;
-        let jobs = requests
-            .iter()
-            .map(|(_, create)| probe_reparse_point(connection.clone(), tree_id, create.clone()));
+        let tree = self.tree.clone();
+        let jobs = requests.iter().map(|(_, create)| {
+            open_close_on_connection(connection.clone(), tree.clone(), create.clone())
+        });
         let outcomes = self.runtime.block_on(join_all(jobs));
-        queue_deferred_closes(&outcomes, &mut self.deferred_closes);
+        queue_deferred_closes(&outcomes, &mut self.deferred_closes, |id| {
+            DeferredClose::new(self.tree.clone(), id)
+        });
         for ((index, _), outcome) in requests.iter().zip(outcomes) {
             reparse_points[*index] = outcome.result?;
         }
@@ -101,11 +103,12 @@ impl SmbVecFs {
         let connection = self.client.connection_mut().clone();
         let outcome = self.runtime.block_on(concurrent_file_identity(
             connection,
-            self.tree.tree_id,
+            self.tree.clone(),
             request,
         ));
         if let Some(file_id) = outcome.deferred_close {
-            self.deferred_closes.push(file_id);
+            self.deferred_closes
+                .push(DeferredClose::new(self.tree.clone(), file_id));
         }
         match outcome.result {
             Ok(actual) if actual == identity => Ok(()),

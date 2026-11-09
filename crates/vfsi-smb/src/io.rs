@@ -1,4 +1,5 @@
 use super::*;
+use vfsi_core::{FailureState, IoProgress, OpError, OpResult};
 
 impl SmbVecFs {
     pub(super) fn raw_read(
@@ -6,23 +7,49 @@ impl SmbVecFs {
         file_id: FileId,
         offset: u64,
         length: usize,
-    ) -> VfResult<Vec<u8>> {
+    ) -> OpResult<Vec<u8>> {
         if length == 0 {
             return Ok(Vec::new());
         }
-        let length_u64 =
-            u64::try_from(length).map_err(|_| VfError::errno(0, libc::EOVERFLOW as u32))?;
-        checked_offset(offset, length_u64, 0)?;
+        if length > isize::MAX as usize {
+            return Err(OpError::not_attempted(VfError::errno(
+                None,
+                libc::EFBIG as u32,
+            )));
+        }
+        let length_u64 = u64::try_from(length)
+            .map_err(|_| OpError::not_attempted(VfError::errno(None, libc::EOVERFLOW as u32)))?;
+        checked_offset(offset, length_u64, 0).map_err(OpError::not_attempted)?;
         let max_read = self
             .client
             .params()
-            .map(|p| p.max_read_size as usize)
+            .map(|params| params.max_read_size as usize)
             .unwrap_or(65_536)
             .max(1);
         let tree_id = self.tree.tree_id;
         let mut data = Vec::with_capacity(length);
         let mut position = offset;
+        #[cfg(feature = "test-faults")]
+        let mut chunk_index = 0;
         while data.len() < length {
+            #[cfg(feature = "test-faults")]
+            {
+                if let Err(cause) =
+                    self.inject_open_fault(OpenFaultPoint::BeforeReadChunk { chunk: chunk_index })
+                {
+                    return Err(if data.is_empty() {
+                        OpError::not_attempted(cause)
+                    } else {
+                        OpError::failed(
+                            cause,
+                            Some(vfsi_core::IoProgress::Read(
+                                vfsi_core::api::ReadResult::owned(offset, data, false),
+                            )),
+                        )
+                    });
+                }
+                chunk_index += 1;
+            }
             let chunk = (length - data.len()).min(max_read).min(u32::MAX as usize) as u32;
             let request = ReadRequest {
                 padding: 0x50,
@@ -35,26 +62,39 @@ impl SmbVecFs {
                 remaining_bytes: 0,
                 read_channel_info: Vec::new(),
             };
-            let frame = self
-                .runtime
-                .block_on(self.client.connection_mut().execute_with_credits(
-                    Command::Read,
-                    &request,
-                    Some(tree_id),
-                    CreditCharge(credit_charge(chunk as usize)),
-                ))
-                .map_err(|e| smb_error(e, 0))?;
-            if frame.header.status == NtStatus::END_OF_FILE {
-                break;
-            }
-            require_status(&frame, Command::Read, 0)?;
-            let response = ReadResponse::unpack(&mut ReadCursor::new(&frame.body))
-                .map_err(|e| smb_error(e, 0))?;
-            let response_data = checked_read_data(response.data, chunk as usize, 0)?;
-            let got = response_data.len();
-            data.extend_from_slice(&response_data);
-            position = checked_offset(position, got as u64, 0)?;
-            if got < chunk as usize {
+            let result = (|| -> VfResult<Option<Vec<u8>>> {
+                let frame = self
+                    .runtime
+                    .block_on(self.client.connection_mut().execute_with_credits(
+                        Command::Read,
+                        &request,
+                        Some(tree_id),
+                        CreditCharge(credit_charge(chunk as usize)),
+                    ))
+                    .map_err(|error| smb_error(error, 0))?;
+                if frame.header.status == NtStatus::END_OF_FILE {
+                    return Ok(None);
+                }
+                require_status(&frame, Command::Read, 0)?;
+                let response = ReadResponse::unpack(&mut ReadCursor::new(&frame.body))
+                    .map_err(|error| smb_error(error, 0))?;
+                checked_read_data(response.data, chunk as usize, 0).map(Some)
+            })();
+            let response = match result {
+                Ok(Some(response)) => response,
+                Ok(None) => break,
+                Err(cause) => {
+                    return Err(read_wire_error(
+                        cause,
+                        offset,
+                        (!data.is_empty()).then_some(data),
+                    ));
+                }
+            };
+            let count = response.len();
+            data.extend_from_slice(&response);
+            position += count as u64; // whole requested range was preflighted
+            if count < chunk as usize {
                 break;
             }
         }
@@ -66,23 +106,20 @@ impl SmbVecFs {
         file_id: FileId,
         offset: u64,
         data: &[u8],
-    ) -> VfResult<usize> {
-        self.raw_write_progress(file_id, offset, data, |_| {})
-    }
-
-    pub(super) fn raw_write_progress(
-        &mut self,
-        file_id: FileId,
-        offset: u64,
-        data: &[u8],
-        mut progress: impl FnMut(usize),
-    ) -> VfResult<usize> {
+    ) -> OpResult<usize> {
         if data.is_empty() {
             return Ok(0);
         }
-        let length =
-            u64::try_from(data.len()).map_err(|_| VfError::errno(0, libc::EOVERFLOW as u32))?;
-        checked_offset(offset, length, 0)?;
+        let length = u64::try_from(data.len())
+            .map_err(|_| OpError::not_attempted(VfError::errno(None, libc::EOVERFLOW as u32)))?;
+        checked_offset(offset, length, 0).map_err(OpError::not_attempted)?;
+        if self.client.is_disconnected() {
+            return Err(OpError::not_attempted(VfError::transport_with_kind(
+                None,
+                vfsi_core::TransportKind::Connection,
+                "SMB connection is disconnected",
+            )));
+        }
         let max_write = self
             .client
             .params()
@@ -94,11 +131,26 @@ impl SmbVecFs {
         #[cfg(feature = "test-faults")]
         let mut chunk_index = 0usize;
         while written < data.len() {
+            #[cfg(feature = "test-faults")]
+            if let Err(cause) =
+                self.inject_open_fault(OpenFaultPoint::BeforeWriteChunk { chunk: chunk_index })
+            {
+                return Err(if written == 0 {
+                    OpError::not_attempted(cause)
+                } else {
+                    OpError::failed(
+                        cause,
+                        Some(IoProgress::Write {
+                            bytes_written: written,
+                        }),
+                    )
+                });
+            }
             let end = (written + max_write).min(data.len());
             let chunk = &data[written..end];
             let request = WriteRequest {
                 data_offset: 0x70,
-                offset: checked_offset(offset, written as u64, 0)?,
+                offset: offset + written as u64,
                 file_id,
                 channel: 0,
                 remaining_bytes: (data.len() - end).min(u32::MAX as usize) as u32,
@@ -115,29 +167,40 @@ impl SmbVecFs {
                     Some(tree_id),
                     CreditCharge(credit_charge(chunk.len())),
                 ))
-                .map_err(|e| smb_error(e, 0))?;
-            require_status(&frame, Command::Write, 0)?;
+                .map_err(|e| write_wire_error(smb_error(e, 0), written))?;
+            require_status(&frame, Command::Write, 0)
+                .map_err(|cause| write_wire_error(cause, written))?;
             let response = WriteResponse::unpack(&mut ReadCursor::new(&frame.body))
-                .map_err(|e| smb_error(e, 0))?;
+                .map_err(|e| write_wire_error(smb_error(e, 0), written))?;
             let count = response.count as usize;
             if count == 0 {
-                return Err(VfError::invalid_reply(
-                    None,
-                    "SMB server reported a zero-byte successful write",
+                return Err(OpError::failed(
+                    VfError::errno(None, ERR_IO),
+                    (written != 0).then_some(IoProgress::Write {
+                        bytes_written: written,
+                    }),
                 ));
             }
             if count > chunk.len() {
-                return Err(VfError::invalid_reply(
-                    None,
-                    "SMB server reported writing more bytes than requested",
+                return Err(write_wire_error(
+                    VfError::invalid_reply(
+                        None,
+                        "SMB server reported writing more bytes than requested",
+                    ),
+                    written,
                 ));
             }
-            written = written
-                .checked_add(count)
-                .ok_or_else(|| VfError::errno(0, libc::EOVERFLOW as u32))?;
-            progress(written);
+            written += count;
             #[cfg(feature = "test-faults")]
-            self.inject_open_fault(OpenFaultPoint::AfterWriteChunk { chunk: chunk_index })?;
+            self.inject_open_fault(OpenFaultPoint::AfterWriteChunk { chunk: chunk_index })
+                .map_err(|cause| {
+                    OpError::failed(
+                        cause,
+                        Some(IoProgress::Write {
+                            bytes_written: written,
+                        }),
+                    )
+                })?;
             #[cfg(feature = "test-faults")]
             {
                 chunk_index += 1;
@@ -153,113 +216,40 @@ impl SmbVecFs {
         path: &str,
         offset: u64,
         length: usize,
-    ) -> VfResult<Vec<u8>> {
+    ) -> OpResult<Vec<u8>> {
         if length == 0 {
             return Ok(Vec::new());
         }
+        checked_offset(offset, length as u64, 0).map_err(OpError::not_attempted)?;
         let max_read = self
             .client
             .params()
-            .map(|p| p.max_read_size as usize)
+            .map(|params| params.max_read_size as usize)
             .unwrap_or(65_536);
         if length > max_read || length > u32::MAX as usize {
-            let (file_id, _) = self.raw_open(path, libc::O_RDONLY)?;
+            let (file_id, _) = self
+                .raw_open(path, libc::O_RDONLY)
+                .map_err(|cause| read_wire_error(cause, offset, None))?;
             let result = self.raw_read(file_id, offset, length);
             let close = self.close_temporary_handle(file_id);
-            return match result {
-                Ok(data) => close.map(|_| data),
-                Err(error) => {
-                    let _ = close;
-                    Err(error)
-                }
-            };
+            return finish_read_result(result, close, None, offset, length);
         }
-        let create = self.open_request(path, libc::O_RDONLY)?;
-        let read = ReadRequest {
-            padding: 0x50,
-            flags: 0,
-            length: length as u32,
+        let create = self
+            .open_request(path, libc::O_RDONLY)
+            .map_err(OpError::not_attempted)?;
+        let tree = self.tree.clone();
+        let mut deferred_close = None;
+        let result = self.runtime.block_on(concurrent_compound_read_inner(
+            self.client.connection_mut().clone(),
+            tree.clone(),
+            create,
             offset,
-            file_id: FileId::SENTINEL,
-            minimum_count: 0,
-            channel: SMB2_CHANNEL_NONE,
-            remaining_bytes: 0,
-            read_channel_info: Vec::new(),
-        };
-        let close = CloseRequest {
-            flags: 0,
-            file_id: FileId::SENTINEL,
-        };
-        let tree_id = self.tree.tree_id;
-        let operations = [
-            CompoundOp {
-                command: Command::Create,
-                body: &create,
-                tree_id: Some(tree_id),
-                credit_charge: CreditCharge(1),
-            },
-            CompoundOp {
-                command: Command::Read,
-                body: &read,
-                tree_id: Some(tree_id),
-                credit_charge: CreditCharge(credit_charge(length)),
-            },
-            CompoundOp {
-                command: Command::Close,
-                body: &close,
-                tree_id: Some(tree_id),
-                credit_charge: CreditCharge(1),
-            },
-        ];
-        let responses = self
-            .runtime
-            .block_on(self.client.connection_mut().execute_compound(&operations))
-            .map_err(|e| smb_error(e, 0))?;
-        let OpenCompoundResponseState {
-            file_id,
-            create_response,
-            operation_responses,
-            close_succeeded,
-            cardinality_error,
-        } = decode_open_compound_responses(
-            responses,
-            operations.len(),
-            |response| {
-                require_status(response, Command::Create, 0)?;
-                CreateResponse::unpack(&mut ReadCursor::new(&response.body))
-                    .map(|opened| opened.file_id)
-                    .map_err(|error| smb_error(error, 0))
-            },
-            |response| response.header.status == NtStatus::SUCCESS,
-            |error| smb_error(error, 0),
-        )?;
-        let data = if let Some(error) = cardinality_error {
-            Err(error)
-        } else {
-            match operation_responses.into_iter().next() {
-                Some(Ok(response)) if response.header.status == NtStatus::END_OF_FILE => {
-                    Ok(Vec::new())
-                }
-                Some(Ok(response)) => require_status(&response, Command::Read, 0).and_then(|()| {
-                    ReadResponse::unpack(&mut ReadCursor::new(&response.body))
-                        .map_err(|error| smb_error(error, 0))
-                        .and_then(|response| checked_read_data(response.data, length, 0))
-                }),
-                Some(Err(error)) => Err(smb_error(error, 0)),
-                None => Err(compound_cardinality_error(1, operations.len())),
-            }
-        };
-        let close = self.close_compound_temporary_handle(file_id, close_succeeded);
-        // Release the response buffers promptly; a large read can otherwise
-        // remain duplicated until this stack frame returns.
-        drop(create_response);
-        match data {
-            Ok(data) => close.map(|()| data),
-            Err(error) => {
-                let _ = close;
-                Err(error)
-            }
-        }
+            length,
+            &mut deferred_close,
+        ));
+        self.deferred_closes
+            .extend(deferred_close.map(|state| DeferredClose::new(self.tree.clone(), state)));
+        result
     }
 
     /// Write a range as CREATE + WRITE + FLUSH + CLOSE in one related
@@ -271,203 +261,215 @@ impl SmbVecFs {
         data: &[u8],
         creation: bool,
         truncate: bool,
-    ) -> VfResult<usize> {
+    ) -> OpResult<usize> {
+        checked_offset(offset, data.len() as u64, 0).map_err(OpError::not_attempted)?;
         let max_write = self
             .client
             .params()
-            .map(|p| p.max_write_size as usize)
+            .map(|params| params.max_write_size as usize)
             .unwrap_or(65_536);
-        let mut flags = libc::O_WRONLY;
-        if creation {
-            flags |= libc::O_CREAT;
-        }
-        if truncate {
-            flags |= libc::O_TRUNC;
-        }
-        if data.is_empty() {
-            let (file_id, _) = self.raw_open(path, flags)?;
-            let result = self.raw_flush(file_id);
+        let flags = libc::O_WRONLY
+            | if creation { libc::O_CREAT } else { 0 }
+            | if truncate { libc::O_TRUNC } else { 0 };
+        if data.is_empty() || data.len() > max_write || data.len() > u32::MAX as usize {
+            let (file_id, _) = self
+                .raw_open(path, flags)
+                .map_err(|cause| write_wire_error(cause, 0))?;
+            let result = self.raw_write(file_id, offset, data).and_then(|written| {
+                self.raw_flush(file_id)
+                    .map(|()| written)
+                    .map_err(|cause| write_wire_error(cause, written))
+            });
             let close = self.close_temporary_handle(file_id);
-            return result.and(close).map(|()| 0);
+            return finish_write_result(result, close, None);
         }
-        if data.len() > max_write || data.len() > u32::MAX as usize {
-            let (file_id, _) = self.raw_open(path, flags)?;
-            let result = self
-                .raw_write(file_id, offset, data)
-                .and_then(|written| self.raw_flush(file_id).map(|_| written));
-            let close = self.close_temporary_handle(file_id);
-            return match result {
-                Ok(written) => close.map(|_| written),
-                Err(error) => {
-                    let _ = close;
-                    Err(error)
-                }
-            };
-        }
-        let create = self.open_request(path, flags)?;
-        let write = WriteRequest {
-            data_offset: 0x70,
+        let create = self
+            .open_request(path, flags)
+            .map_err(OpError::not_attempted)?;
+        let tree = self.tree.clone();
+        let mut deferred_close = None;
+        let result = self.runtime.block_on(concurrent_compound_write_inner(
+            self.client.connection_mut().clone(),
+            tree.clone(),
+            create,
             offset,
-            file_id: FileId::SENTINEL,
-            channel: 0,
-            remaining_bytes: 0,
-            write_channel_info_offset: 0,
-            write_channel_info_length: 0,
-            flags: 0,
-            data: data.to_vec(),
+            data.to_vec(),
+            &mut deferred_close,
+        ));
+        self.deferred_closes
+            .extend(deferred_close.map(|state| DeferredClose::new(self.tree.clone(), state)));
+        result
+    }
+
+    /// Reconnect only before any bytes are confirmed. A pathname can identify
+    /// a replacement object after reconnect, so never append its bytes to an
+    /// earlier prefix or replay a completed read whose temporary CLOSE failed.
+    fn recover_path_read(
+        &mut self,
+        path: &str,
+        offset: u64,
+        length: usize,
+        error: OpError,
+    ) -> OpResult<Vec<u8>> {
+        if !self.client.is_disconnected()
+            || error.progress().is_some_and(|progress| {
+                matches!(progress, IoProgress::Read(read)
+                if read.eof() || read.bytes_read() > 0 || read.bytes_read() >= length)
+            })
+        {
+            return Err(error);
+        }
+        let (_, original_state, progress) = error.into_parts();
+        let mut prefix = match progress {
+            Some(IoProgress::Read(read)) => read.into_data().ok_or_else(|| {
+                OpError::unknown(
+                    VfError::invalid_reply(None, "SMB path read returned buffered progress"),
+                    None,
+                )
+            })?,
+            Some(_) => {
+                return Err(OpError::unknown(
+                    VfError::invalid_reply(None, "invalid SMB read progress"),
+                    None,
+                ));
+            }
+            None => Vec::new(),
         };
-        let flush = FlushRequest {
-            file_id: FileId::SENTINEL,
-        };
-        let close = CloseRequest {
-            flags: 0,
-            file_id: FileId::SENTINEL,
-        };
-        let tree_id = self.tree.tree_id;
-        let operations = [
-            CompoundOp {
-                command: Command::Create,
-                body: &create,
-                tree_id: Some(tree_id),
-                credit_charge: CreditCharge(1),
-            },
-            CompoundOp {
-                command: Command::Write,
-                body: &write,
-                tree_id: Some(tree_id),
-                credit_charge: CreditCharge(credit_charge(data.len())),
-            },
-            CompoundOp {
-                command: Command::Flush,
-                body: &flush,
-                tree_id: Some(tree_id),
-                credit_charge: CreditCharge(1),
-            },
-            CompoundOp {
-                command: Command::Close,
-                body: &close,
-                tree_id: Some(tree_id),
-                credit_charge: CreditCharge(1),
-            },
-        ];
-        let responses = self
-            .runtime
-            .block_on(self.client.connection_mut().execute_compound(&operations))
-            .map_err(|e| smb_error(e, 0))?;
-        let OpenCompoundResponseState {
-            file_id,
-            create_response,
-            operation_responses,
-            close_succeeded,
-            cardinality_error,
-        } = decode_open_compound_responses(
-            responses,
-            operations.len(),
-            |response| {
-                require_status(response, Command::Create, 0)?;
-                CreateResponse::unpack(&mut ReadCursor::new(&response.body))
-                    .map(|opened| opened.file_id)
-                    .map_err(|error| smb_error(error, 0))
-            },
-            |response| response.header.status == NtStatus::SUCCESS,
-            |error| smb_error(error, 0),
-        )?;
-        let write_result = if let Some(error) = cardinality_error {
-            Err(error)
-        } else {
-            (|| {
-                let mut responses = operation_responses.into_iter();
-                let write = responses
-                    .next()
-                    .expect("complete compound contains WRITE response")
-                    .map_err(|error| smb_error(error, 0))?;
-                let flush = responses
-                    .next()
-                    .expect("complete compound contains FLUSH response")
-                    .map_err(|error| smb_error(error, 0))?;
-                let written = require_status(&write, Command::Write, 0).and_then(|()| {
-                    WriteResponse::unpack(&mut ReadCursor::new(&write.body))
-                        .map(|response| response.count as usize)
-                        .map_err(|error| smb_error(error, 0))
-                        .and_then(|count| {
-                            if count > data.len() {
-                                Err(VfError::invalid_reply(
-                                    None,
-                                    "SMB server reported writing more bytes than requested",
-                                ))
-                            } else {
-                                Ok(count)
-                            }
-                        })
-                })?;
-                require_status(&flush, Command::Flush, 0)?;
-                Ok(written)
-            })()
-        };
-        let close_result = self.close_compound_temporary_handle(file_id, close_succeeded);
-        drop(create_response);
-        match write_result {
-            Ok(written) => close_result.map(|()| written),
+        if let Err(cause) = self.client_stat(path) {
+            let uncertain = cause.is_transport() || original_state == FailureState::Unknown;
+            let progress = (!prefix.is_empty()).then(|| {
+                IoProgress::Read(vfsi_core::api::ReadResult::owned(offset, prefix, false))
+            });
+            return Err(if uncertain {
+                OpError::unknown(cause, progress)
+            } else {
+                OpError::failed(cause, progress)
+            });
+        }
+        let remaining = length - prefix.len();
+        let retry = self.compound_read_path(path, offset + prefix.len() as u64, remaining);
+        match retry {
+            Ok(data) => {
+                if prefix.is_empty() {
+                    return Ok(data);
+                }
+                prefix.extend_from_slice(&data);
+                Ok(prefix)
+            }
             Err(error) => {
-                let _ = close_result;
-                Err(error)
+                let (cause, state, progress) = error.into_parts();
+                let mut eof = false;
+                let had_progress = progress.is_some();
+                if let Some(IoProgress::Read(read)) = progress {
+                    eof = read.eof();
+                    let Some(data) = read.into_data() else {
+                        return Err(OpError::unknown(
+                            VfError::invalid_reply(None, "invalid SMB retry progress"),
+                            None,
+                        ));
+                    };
+                    if prefix.is_empty() {
+                        prefix = data;
+                    } else {
+                        prefix.extend_from_slice(&data);
+                    }
+                }
+                let progress = (!prefix.is_empty() || had_progress).then(|| {
+                    IoProgress::Read(vfsi_core::api::ReadResult::owned(offset, prefix, eof))
+                });
+                Err(
+                    if state == FailureState::Unknown || original_state == FailureState::Unknown {
+                        OpError::unknown(cause, progress)
+                    } else {
+                        OpError::failed(cause, progress)
+                    },
+                )
             }
         }
     }
 
-    pub(super) fn read_one(&mut self, op: &ReadOp) -> VfResult<ReadResult> {
+    pub(super) fn read_one(&mut self, op: &ReadOp) -> OpResult<ReadResult> {
+        if op.length > isize::MAX as usize {
+            return Err(OpError::not_attempted(VfError::errno(
+                None,
+                libc::EFBIG as u32,
+            )));
+        }
+        if let VfOffset::At(offset) = op.offset {
+            checked_offset(offset, op.length as u64, 0).map_err(OpError::not_attempted)?;
+        }
         let Some(fd) = op.file.fd() else {
             if matches!(op.file, FileOperand::Saved) {
-                return Err(VfError::unsupported(0));
+                return Err(OpError::not_attempted(VfError::unsupported(None)));
             }
-            let path = self.path_string(&self.file_path(&op.file)?)?;
+            let path = self
+                .path_string(&self.file_path(&op.file).map_err(OpError::not_attempted)?)
+                .map_err(OpError::not_attempted)?;
             let offset = match op.offset {
                 VfOffset::At(offset) => offset,
-                VfOffset::End => self.client_stat(&path)?.size,
-                VfOffset::Cur => {
-                    return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+                VfOffset::End => {
+                    self.client_stat(&path)
+                        .map_err(|cause| read_wire_error(cause, 0, None))?
+                        .size
                 }
-                _ => return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
-            };
-            let data = match self.compound_read_path(&path, offset, op.length) {
-                Ok(data) => data,
-                Err(_) if self.client.is_disconnected() => {
-                    // Let the high-level stat operation recover the SMB
-                    // session/tree, then retry only the requested range.
-                    // Reading the complete file here made a tiny range read
-                    // capable of allocating an unbounded remote-controlled
-                    // amount of memory after reconnect.
-                    self.client_stat(&path)?;
-                    self.compound_read_path(&path, offset, op.length)?
+                _ => {
+                    return Err(OpError::not_attempted(VfError::from_kind(
+                        None,
+                        std::io::ErrorKind::InvalidInput,
+                    )));
                 }
-                Err(error) => return Err(error),
             };
-            let eof = op.length > 0 && data.len() < op.length;
+            let result = match self.compound_read_path(&path, offset, op.length) {
+                Ok(data) => Ok(data),
+                Err(error) => self.recover_path_read(&path, offset, op.length, error),
+            };
+            let data = result.map_err(|error| {
+                if op.offset == VfOffset::End && error.state() == FailureState::NotAttempted {
+                    OpError::failed(error.into_cause(), None)
+                } else {
+                    error
+                }
+            })?;
             return Ok(ReadResult {
                 file: op.file.clone(),
                 offset,
+                eof: op.length > 0 && data.len() < op.length,
                 data,
-                eof,
             });
         };
-        let open = self
-            .open_files
-            .get(&fd)
-            .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
+        let open = self.live_file(fd).map_err(OpError::not_attempted)?;
         if !open.readable {
-            return Err(VfError::errno(0, ERR_EBADF));
+            return Err(OpError::not_attempted(VfError::errno(None, ERR_EBADF)));
         }
         let file_id = open.file_id;
-        let size = self.query_size(file_id)?;
-        let offset = self.resolve_offset(Some(fd), op.offset, size)?;
-        let data = self.raw_read(file_id, offset, op.length)?;
-        let end = checked_offset(offset, data.len() as u64, 0)?;
-        let eof = !data.is_empty() && end >= size || op.length > 0 && data.len() < op.length;
+        let size = self
+            .query_size(file_id)
+            .map_err(|cause| read_wire_error(cause, 0, None))?;
+        let offset = self
+            .resolve_offset(Some(fd), op.offset, size)
+            .map_err(|cause| OpError::failed(cause, None))?;
+        let result = self.raw_read(file_id, offset, op.length).map_err(|error| {
+            if error.state() == FailureState::NotAttempted {
+                OpError::failed(error.into_cause(), None)
+            } else {
+                error
+            }
+        });
+        let count = match &result {
+            Ok(data) => data.len(),
+            Err(error) => match error.progress() {
+                Some(IoProgress::Read(read)) => read.bytes_read(),
+                _ => 0,
+            },
+        };
+        let end = offset + count as u64; // raw_read preflights the whole range
         if op.offset == VfOffset::Cur
             && let Some(open) = self.open_files.get_mut(&fd)
         {
             open.cur_offset = end;
         }
+        let data = result?;
+        let eof = !data.is_empty() && end >= size || op.length > 0 && data.len() < op.length;
         Ok(ReadResult {
             file: op.file.clone(),
             offset,
@@ -476,19 +478,34 @@ impl SmbVecFs {
         })
     }
 
-    pub(super) fn write_one(&mut self, op: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult> {
+    pub(super) fn write_one(&mut self, op: WriteOp<&FileOperand, &[u8]>) -> OpResult<WriteResult> {
         let Some(fd) = op.file().fd() else {
             if matches!(op.file(), FileOperand::Saved) {
-                return Err(VfError::unsupported(0));
+                return Err(OpError::not_attempted(VfError::unsupported(None)));
             }
-            let path = self.path_string(&self.file_path(op.file())?)?;
+            let path = self
+                .file_path(op.file())
+                .and_then(|path| self.path_string(&path))
+                .map_err(OpError::not_attempted)?;
             let offset = match op.offset() {
                 VfOffset::At(offset) => offset,
-                VfOffset::End => self.client_stat(&path)?.size,
-                VfOffset::Cur => {
-                    return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+                VfOffset::End => {
+                    self.client_stat(&path)
+                        .map_err(OpError::not_attempted)?
+                        .size
                 }
-                _ => return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
+                VfOffset::Cur => {
+                    return Err(OpError::not_attempted(VfError::from_kind(
+                        None,
+                        std::io::ErrorKind::InvalidInput,
+                    )));
+                }
+                _ => {
+                    return Err(OpError::not_attempted(VfError::from_kind(
+                        None,
+                        std::io::ErrorKind::InvalidInput,
+                    )));
+                }
             };
             let written =
                 self.compound_write_path(&path, offset, op.data(), op.creates(), op.truncates())?;
@@ -499,35 +516,38 @@ impl SmbVecFs {
                 stable: true,
             });
         };
-        let open = self
-            .open_files
-            .get(&fd)
-            .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
+        let open = self.live_file(fd).map_err(OpError::not_attempted)?;
         if !open.writable {
-            return Err(VfError::errno(0, ERR_EBADF));
+            return Err(OpError::not_attempted(VfError::errno(None, ERR_EBADF)));
         }
         let (file_id, append) = (open.file_id, open.append);
         let size = if append || op.offset() == VfOffset::End {
-            self.query_size(file_id)?
+            self.query_size(file_id).map_err(OpError::not_attempted)?
         } else {
             0
         };
         let offset = if append {
             size
         } else {
-            self.resolve_offset(Some(fd), op.offset(), size)?
+            self.resolve_offset(Some(fd), op.offset(), size)
+                .map_err(OpError::not_attempted)?
         };
-        let mut confirmed = 0usize;
-        let write_result = self.raw_write_progress(file_id, offset, op.data(), |written| {
-            confirmed = written;
-        });
+        let write_result = self.raw_write(file_id, offset, op.data());
+        let confirmed = match &write_result {
+            Ok(written) => *written,
+            Err(error) => match error.progress() {
+                Some(IoProgress::Write { bytes_written }) => *bytes_written,
+                _ => 0,
+            },
+        };
         if (append || !matches!(op.offset(), VfOffset::At(_)))
             && let Some(open) = self.open_files.get_mut(&fd)
         {
-            open.cur_offset = checked_offset(offset, confirmed as u64, 0)?;
+            open.cur_offset = offset + confirmed as u64;
         }
         let written = write_result?;
-        self.raw_flush(file_id)?;
+        self.raw_flush(file_id)
+            .map_err(|cause| write_wire_error(cause, written))?;
         Ok(WriteResult {
             file: op.file().clone(),
             offset,

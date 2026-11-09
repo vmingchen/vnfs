@@ -60,13 +60,25 @@ fn mixed_append(mode: &str) {
             }
             let results = fs
                 .vwrite_impl(&vfsi_sync::test_support::borrow_writes(&requests))
+                .and_then(|outcomes| {
+                    let count = outcomes.len();
+                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                })
                 .unwrap();
             let actual = fs.read_raw_impl(&file, 0, 8).unwrap();
             let other = fs
                 .read_raw_impl(&FileOperand::from_path(&second), 0, 8)
                 .unwrap();
             fs.close_impl(&file).unwrap();
-            fs.remove_paths_impl(&[Path::new(&root)], true).unwrap();
+            {
+                let remove_roots: &[&std::path::Path] = &[Path::new(&root)];
+                vfsi_core::internal::collect_vec_result(
+                    fs.remove_paths_impl(remove_roots, true),
+                    remove_roots.len(),
+                )
+                .map(|_| ())
+            }
+            .unwrap();
             assert_eq!(
                 actual, b"abcd",
                 "mode={mode}, offset={offset:?}, reverse={reverse}"
@@ -129,17 +141,30 @@ mod short_merged {
         client.close(&fh, &stateid).unwrap();
         Some((client, dir, format!("{name}/file").into_bytes(), data))
     }
+    fn close_opens(
+        client: &mut NfsClient,
+        opened: Vec<(vfsi_nfs::client::NfsFh, nfsv41_sys::stateid4)>,
+    ) {
+        // Reopening an alias advances the shared path owner's stateid.
+        // Close that owner once with its newest state, including after errors.
+        let closes: Vec<_> = opened
+            .iter()
+            .enumerate()
+            .filter(|(index, (fh, _))| !opened[index + 1..].iter().any(|(later, _)| later == fh))
+            .map(|(_, (fh, stateid))| CloseOp {
+                fh: fh.clone(),
+                stateid: *stateid,
+            })
+            .collect();
+        client.close_many_path(&closes).unwrap();
+    }
     fn cleanup(
         client: &mut NfsClient,
         dir: &vfsi_nfs::client::NfsFh,
         path: &[u8],
         opened: Vec<(vfsi_nfs::client::NfsFh, nfsv41_sys::stateid4)>,
     ) {
-        let closes: Vec<_> = opened
-            .into_iter()
-            .map(|(fh, stateid)| CloseOp { fh, stateid })
-            .collect();
-        client.close_many_path(&closes).unwrap();
+        close_opens(client, opened);
         client.remove(dir, "file").unwrap();
         let root = client.root().clone();
         client
@@ -168,7 +193,7 @@ mod short_merged {
                 )
                 .unwrap();
             assert!(!client.test_merged_short_pending(), "fault must execute");
-            let actual = outcome.data[0].clone().unwrap();
+            let actual = outcome.results[0].as_ref().unwrap().0.clone();
             cleanup(&mut client, &dir, &path, outcome.opened);
             assert!(
                 actual == data,
@@ -176,6 +201,56 @@ mod short_merged {
                 actual.len(),
                 data.len()
             );
+        }
+    }
+    #[test]
+    fn short_read_repair_failure_retains_prefix_and_other_completed_input() {
+        use std::sync::Arc;
+        use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+        for close in [false, true] {
+            let Some((mut client, dir, path, data)) = fixture("read-prefix-failure", close) else {
+                return;
+            };
+            let script = Arc::new(FaultScript::one(
+                OpenFaultPoint::BeforeReadRepair { index: 0 },
+                vfsi_core::VfError::errno(None, libc::EACCES as u32),
+            ));
+            client.set_fault_injector(script.clone());
+            client.test_short_merged_read_once(7);
+            let _ = vfsi_nfs::compound::thread_compound_stats();
+            let outcome = client
+                .readv_path_compound(
+                    &[
+                        PathReadOp {
+                            file: FileRef::Path(path.clone()),
+                            offset: 0,
+                            count: data.len(),
+                            stateid: None,
+                        },
+                        PathReadOp {
+                            file: FileRef::Path(path.clone()),
+                            offset: 17,
+                            count: 4,
+                            stateid: None,
+                        },
+                    ],
+                    close,
+                )
+                .unwrap();
+            let compounds = vfsi_nfs::compound::thread_compound_stats().0;
+            assert!(script.is_consumed());
+            assert_eq!(outcome.results.len(), 2);
+            let error = outcome.results[0].as_ref().unwrap_err();
+            assert_eq!(error.state(), vfsi_core::FailureState::Failed);
+            assert_eq!(error.cause().raw_code(), libc::EACCES as u32);
+            let Some(vfsi_core::IoProgress::Read(prefix)) = error.progress() else {
+                panic!("missing prefix")
+            };
+            assert_eq!(prefix.offset(), 0);
+            assert_eq!(prefix.data().unwrap(), &data[..7]);
+            assert_eq!(outcome.results[1].as_ref().unwrap().0, data[17..21]);
+            assert_eq!(compounds, 1, "completed sibling must not be replayed");
+            cleanup(&mut client, &dir, &path, outcome.opened);
         }
     }
     #[test]
@@ -225,13 +300,13 @@ mod short_merged {
                     true,
                 )
                 .unwrap();
-            let actual = read.data[0].clone().unwrap();
+            let actual = read.results[0].as_ref().unwrap().0.clone();
             cleanup(&mut client, &dir, &path, Vec::new());
             assert!(
                 actual == data,
                 "short WRITE left an interior range unchanged"
             );
-            assert_eq!(outcome.counts, [Some(data.len() as u32)]);
+            assert_eq!(outcome.results[0].as_ref().unwrap().0, data.len());
         }
     }
 
@@ -279,7 +354,7 @@ mod short_merged {
                             close,
                         )
                         .unwrap();
-                    assert_eq!(outcome.counts, [Some(expected.len() as u32)]);
+                    assert_eq!(outcome.results[0].as_ref().unwrap().0, expected.len());
                     assert!(outcome.opened.is_empty());
                 } else {
                     client.test_short_merged_read_once(7);
@@ -308,7 +383,7 @@ mod short_merged {
                 client.close(&replacement, &replacement_state).unwrap();
                 client.remove(&dir, "saved").unwrap();
                 cleanup(&mut client, &dir, &path, Vec::new());
-                assert_eq!(outcome.data[0].as_ref().unwrap(), &expected);
+                assert_eq!(&outcome.results[0].as_ref().unwrap().0, &expected);
             }
         }
     }
@@ -321,9 +396,10 @@ mod short_merged {
                 else {
                     return;
                 };
+                let opened;
                 let error = if write {
                     client.test_short_merged_write_once(0);
-                    client
+                    let outcome = client
                         .writev_path_compound(
                             &[PathWriteOp {
                                 file: FileRef::Path(path.clone()),
@@ -335,11 +411,16 @@ mod short_merged {
                             }],
                             close,
                         )
-                        .err()
-                        .unwrap()
+                        .unwrap();
+                    opened = outcome.opened;
+                    let error = outcome.results[0].as_ref().unwrap_err();
+                    assert_eq!(error.state(), vfsi_core::FailureState::Failed);
+                    assert_eq!(error.cause().index(), None);
+                    assert!(error.progress().is_none());
+                    (error.cause().raw_code(), 0)
                 } else {
                     client.test_short_merged_read_once(0);
-                    client
+                    let outcome = client
                         .readv_path_compound(
                             &[PathReadOp {
                                 file: FileRef::Path(path.clone()),
@@ -349,13 +430,17 @@ mod short_merged {
                             }],
                             close,
                         )
-                        .err()
-                        .unwrap()
+                        .unwrap();
+                    opened = outcome.opened;
+                    let error = outcome.results[0].as_ref().unwrap_err();
+                    assert_eq!(error.state(), vfsi_core::FailureState::Failed);
+                    assert_eq!(error.cause().index(), None);
+                    (error.cause().raw_code(), 0)
                 };
                 assert!(!client.test_merged_short_pending());
-                cleanup(&mut client, &dir, &path, Vec::new());
-                assert_eq!(error.status, nfsv41_sys::nfsstat4_NFS4ERR_IO);
-                assert_eq!(error.op_index, 0);
+                cleanup(&mut client, &dir, &path, opened);
+                assert_eq!(error.0, nfsv41_sys::nfsstat4_NFS4ERR_IO);
+                assert_eq!(error.1, 0);
             }
         }
     }
@@ -417,8 +502,15 @@ mod short_merged {
             cleanup(&mut client, &dir, &path, Vec::new());
             let mut expected = first.to_vec();
             expected[8..16].copy_from_slice(last);
-            assert_eq!(read.data[0].as_ref().unwrap(), &expected);
-            assert_eq!(outcome.counts, [Some(32), Some(8)]);
+            assert_eq!(&read.results[0].as_ref().unwrap().0, &expected);
+            assert_eq!(
+                outcome
+                    .results
+                    .iter()
+                    .map(|result| result.as_ref().unwrap().0)
+                    .collect::<Vec<_>>(),
+                [32, 8]
+            );
         }
     }
 
@@ -437,27 +529,31 @@ mod short_merged {
         let later = vec![b'Z'; client.per_op_bytes() * 2];
         client.test_short_merged_write_once(7);
         client.test_fail_merged_write_once(1, 1);
-        let outcome = client.writev_path_compound(
-            &[
-                PathWriteOp {
-                    file: FileRef::Path(path.clone()),
-                    offset: 0,
-                    data: earlier,
-                    create: false,
-                    truncate: false,
-                    stateid: None,
-                },
-                PathWriteOp {
-                    file: FileRef::Path(alias.clone()),
-                    offset: 8,
-                    data: &later,
-                    create: false,
-                    truncate: false,
-                    stateid: None,
-                },
-            ],
-            false,
-        );
+        let mut outcome = client
+            .writev_path_compound(
+                &[
+                    PathWriteOp {
+                        file: FileRef::Path(path.clone()),
+                        offset: 0,
+                        data: earlier,
+                        create: false,
+                        truncate: false,
+                        stateid: None,
+                    },
+                    PathWriteOp {
+                        file: FileRef::Path(alias.clone()),
+                        offset: 8,
+                        data: &later,
+                        create: false,
+                        truncate: false,
+                        stateid: None,
+                    },
+                ],
+                false,
+            )
+            .unwrap();
+        // Finish the WRITE path owner before a read opens/closes the same owner.
+        close_opens(&mut client, std::mem::take(&mut outcome.opened));
         let read = client
             .readv_path_compound(
                 &[PathReadOp {
@@ -470,17 +566,26 @@ mod short_merged {
             )
             .unwrap();
         client.remove(&dir, "alias").unwrap();
-        cleanup(&mut client, &dir, &path, Vec::new());
+        cleanup(
+            &mut client,
+            &dir,
+            &path,
+            std::mem::take(&mut outcome.opened),
+        );
         assert_eq!(
-            &read.data[0].as_ref().unwrap()[8..32],
+            &&read.results[0].as_ref().unwrap().0[8..32],
             &[b'Z'; 24],
             "earlier gap repair overwrote later accepted alias bytes"
         );
-        let error = outcome
-            .err()
-            .expect("a later attempted alias prevents safe earlier repair");
-        assert_eq!(error.status, nfsv41_sys::nfsstat4_NFS4ERR_IO);
-        assert_eq!(error.op_index, 0);
+        let error = outcome.results[0]
+            .as_ref()
+            .expect_err("a later attempted alias prevents safe earlier repair");
+        assert_eq!(error.cause().raw_code(), nfsv41_sys::nfsstat4_NFS4ERR_IO);
+        assert_eq!(error.cause().index(), None);
+        assert_eq!(
+            error.progress(),
+            Some(&vfsi_core::IoProgress::Write { bytes_written: 7 })
+        );
     }
     #[test]
     fn independent_merged_ranges_keep_one_compound_without_repairs() {
@@ -518,8 +623,21 @@ mod short_merged {
         cleanup(&mut client, &dir, &path, outcome.opened);
         assert_eq!(writes, 1);
         assert_eq!(reads, 1);
-        assert_eq!(outcome.counts, [Some(5), Some(6), Some(5)]);
-        assert_eq!(read.data, pieces.map(|data| Some(data.to_vec())));
+        assert_eq!(
+            outcome
+                .results
+                .iter()
+                .map(|result| result.as_ref().unwrap().0)
+                .collect::<Vec<_>>(),
+            [5, 6, 5]
+        );
+        assert_eq!(
+            read.results
+                .into_iter()
+                .map(|result| result.unwrap().0)
+                .collect::<Vec<_>>(),
+            pieces.map(<[u8]>::to_vec)
+        );
     }
 }
 
@@ -543,11 +661,23 @@ fn ordinary_mixed_vectors_keep_one_merged_compound() {
     let _ = vfsi_nfs::compound::thread_compound_stats();
     let result = fs
         .vwrite_impl(&vfsi_sync::test_support::borrow_writes(&requests))
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .unwrap();
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
     let actual = fs.read_raw_impl(&file, 0, 8).unwrap();
     fs.close_impl(&file).unwrap();
-    fs.remove_paths_impl(&[Path::new(&root)], true).unwrap();
+    {
+        let remove_roots: &[&std::path::Path] = &[Path::new(&root)];
+        vfsi_core::internal::collect_vec_result(
+            fs.remove_paths_impl(remove_roots, true),
+            remove_roots.len(),
+        )
+        .map(|_| ())
+    }
+    .unwrap();
     assert_eq!(compounds, 1);
     assert_eq!(actual, b"first");
     assert_eq!(
@@ -582,10 +712,22 @@ fn mixed_append_queries_size_only_once_per_independent_descriptor() {
         ];
         let _ = vfsi_nfs::compound::thread_compound_stats();
         fs.vwrite_impl(&vfsi_sync::test_support::borrow_writes(&requests))
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
             .unwrap();
         counts.push(vfsi_nfs::compound::thread_compound_stats().0);
         fs.close_impl(&file).unwrap();
-        fs.remove_paths_impl(&[Path::new(&root)], true).unwrap();
+        {
+            let remove_roots: &[&std::path::Path] = &[Path::new(&root)];
+            vfsi_core::internal::collect_vec_result(
+                fs.remove_paths_impl(remove_roots, true),
+                remove_roots.len(),
+            )
+            .map(|_| ())
+        }
+        .unwrap();
     }
     assert_eq!(
         counts[1],
@@ -619,6 +761,10 @@ fn mixed_append_respects_later_path_truncation_boundaries() {
                 fs.write_raw_impl(&file, 0, b"original").unwrap();
                 if alias {
                     fs.vhardlink_impl(&[Path::new(&first)], &[Path::new(&link)])
+                        .and_then(|outcomes| {
+                            let count = outcomes.len();
+                            vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+                        })
                         .unwrap();
                 }
                 let mut requests = [
@@ -634,10 +780,22 @@ fn mixed_append_respects_later_path_truncation_boundaries() {
                     requests.reverse();
                 }
                 fs.vwrite_impl(&vfsi_sync::test_support::borrow_writes(&requests))
+                    .and_then(|outcomes| {
+                        let count = outcomes.len();
+                        vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    })
                     .unwrap();
                 let actual = fs.read_raw_impl(&file, 0, 32).unwrap();
                 fs.close_impl(&file).unwrap();
-                fs.remove_paths_impl(&[Path::new(&root)], true).unwrap();
+                {
+                    let remove_roots: &[&std::path::Path] = &[Path::new(&root)];
+                    vfsi_core::internal::collect_vec_result(
+                        fs.remove_paths_impl(remove_roots, true),
+                        remove_roots.len(),
+                    )
+                    .map(|_| ())
+                }
+                .unwrap();
                 assert_eq!(
                     actual,
                     if reverse {

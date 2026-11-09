@@ -347,305 +347,450 @@ pub(super) fn nofollow_symlink_setattr_is_unsupported(
 }
 
 impl NfsVecFs {
-    /// The merged (single-compound) setattrsv: resolve each parent once,
-    /// then LOOKUP + GETATTR type + SETATTR per file. Symlinks (either to
-    /// refuse for lsetattrsv or to follow for setattrsv) are handled
-    /// per-file via the phased path.
-    pub(super) fn vsetattrs_nfs(&mut self, attrs: &[VfAttrs], follow: bool) -> VfRes {
-        const SETTABLE: AttrMask = AttrMask::MODE
-            .union(AttrMask::SIZE)
-            .union(AttrMask::ATIME)
-            .union(AttrMask::MTIME)
-            .union(AttrMask::UID)
-            .union(AttrMask::GID);
-        if attrs.is_empty() {
-            return Ok(());
-        }
-        for (i, a) in attrs.iter().enumerate() {
-            let unsupported = a.masks.difference(SETTABLE);
-            if !unsupported.is_empty() {
-                return Err(VfError::unsupported(i));
-            }
-        }
-        // Ownership updates still require name-to-id resolution before the
-        // SETATTR compound. Other path updates use an in-compound NVERIFY guard
-        // so a symlink stops before mutation, then follow it only when requested.
+    /// Preserve independent updates while ownership-dependent resolution
+    /// remains a separate phase. Ordinary updates retain their merged path.
+    pub(super) fn vsetattrs_nfs(
+        &mut self,
+        attrs: &[VfAttrs],
+        follow: bool,
+    ) -> vfsi_core::VecResult<()> {
+        self.ensure_writable(attrs.len())?;
         if attrs
             .iter()
-            .any(|a| a.masks.intersects(AttrMask::UID | AttrMask::GID))
+            .all(|attr| !attr.masks.intersects(AttrMask::UID | AttrMask::GID))
         {
-            return self.vsetattrs_phased_nfs(attrs, follow);
+            return self.vsetattrs_merged_nfs(attrs, follow);
         }
-        let mut ops = Vec::with_capacity(attrs.len());
-        let mut symlink_guards = Vec::with_capacity(attrs.len());
-        for (i, a) in attrs.iter().enumerate() {
-            symlink_guards.push(path_setattrs_require_type_resolution(
-                std::slice::from_ref(a),
-                follow,
-            ));
-            let file = if a.file.is_fd() {
-                let fd = a.file.fd().unwrap();
-                let open = self
-                    .open_files
-                    .get(&fd)
-                    .ok_or_else(|| VfError::errno(i, ERR_EBADF))?;
-                crate::client::FileRef::Handle(open.fh.clone())
-            } else {
-                crate::client::FileRef::Path(
-                    vfsi_core::path::path_bytes(
-                        &self.server_vf_path(&a.file).map_err(|e| e.with_index(i))?,
-                    )
-                    .to_vec(),
-                )
-            };
-            let mode = if a.masks.contains(AttrMask::MODE) {
-                Some(a.mode & 0o7777)
-            } else {
-                None
-            };
-            let size = if a.masks.contains(AttrMask::SIZE) {
-                Some(a.size)
-            } else {
-                None
-            };
-            let atime = a
-                .masks
-                .contains(AttrMask::ATIME)
-                .then_some((a.atime_sec, a.atime_nsec));
-            let mtime = a
-                .masks
-                .contains(AttrMask::MTIME)
-                .then_some((a.mtime_sec, a.mtime_nsec));
-            ops.push(crate::client::PathSetattrOp {
-                file,
-                mode,
-                uid: a.masks.contains(AttrMask::UID).then_some(a.uid),
-                gid: a.masks.contains(AttrMask::GID).then_some(a.gid),
-                size,
-                atime,
-                mtime,
-                check_type: false,
-            });
-        }
+        let mut output = Vec::with_capacity(attrs.len());
         let mut start = 0;
         while start < attrs.len() {
-            match self
-                .nfs
-                .setattr_path_compound_guarded(&ops[start..], &symlink_guards[start..])
-            {
-                Ok(outcome) => {
-                    if let Some((i, status)) = outcome.failed {
-                        let i = start + i;
-                        if symlink_guards[i] && status == nfsstat4_NFS4ERR_SAME {
-                            if nofollow_symlink_setattr_is_unsupported(
-                                follow,
-                                nfs_ftype4_NF4LNK,
-                                attrs[i].masks,
-                            ) {
-                                return Err(VfError::unsupported(i));
-                            }
-                            if follow {
-                                // NVERIFY failed before this path's SETATTR; follow
-                                // the final symlink and mutate only its target.
-                                self.setattr_one_following(i, &attrs[i])?;
-                                start = i + 1;
-                                continue;
-                            }
-                        }
-                        // The successful prefix is already applied. Resume at the
-                        // first failed path, preserving its index and symlink policy.
-                        if let Err(error) = self.vsetattrs_phased_nfs(&attrs[i..], follow) {
-                            return Err(error.map_index(|relative| i + relative));
-                        }
-                        return Ok(());
-                    }
-                    return Ok(());
-                }
-                Err(error) if error.is_transport() => {
-                    return Err(vfsi_core::error_from_rpc(error, None));
-                }
-                Err(_) => {
-                    return self
-                        .vsetattrs_phased_nfs(&attrs[start..], follow)
-                        .map_err(|error| error.map_index(|relative| start + relative));
-                }
+            let phased = attrs[start].masks.intersects(AttrMask::UID | AttrMask::GID);
+            let count = attrs[start..]
+                .iter()
+                .take_while(|attr| attr.masks.intersects(AttrMask::UID | AttrMask::GID) == phased)
+                .count();
+            let result = if phased {
+                self.vsetattrs_phased_nfs(&attrs[start..start + count], follow)
+            } else {
+                self.vsetattrs_merged_nfs(&attrs[start..start + count], follow)
+            };
+            match result {
+                Ok(results) => output.extend(results),
+                Err(cause) => output.extend(
+                    (0..count).map(|_| Err(vfsi_core::OpError::not_attempted(cause.clone()))),
+                ),
             }
+            start += count;
         }
-        Ok(())
+        Ok(output)
     }
 
-    /// The legacy phased setattrsv (resolve_many_tcfile + setattr_many).
-    fn vsetattrs_phased_nfs(&mut self, attrs: &[VfAttrs], follow: bool) -> VfRes {
+    fn vsetattrs_merged_nfs(
+        &mut self,
+        attrs: &[VfAttrs],
+        follow: bool,
+    ) -> vfsi_core::VecResult<()> {
+        use vfsi_core::OpError;
         const SETTABLE: AttrMask = AttrMask::MODE
             .union(AttrMask::SIZE)
             .union(AttrMask::ATIME)
             .union(AttrMask::MTIME)
             .union(AttrMask::UID)
             .union(AttrMask::GID);
-        for (i, a) in attrs.iter().enumerate() {
-            let unsupported = a.masks.difference(SETTABLE);
-            if !unsupported.is_empty() {
-                return Err(VfError::unsupported(i));
-            }
-        }
-        let files: Vec<&FileOperand> = attrs.iter().map(|a| &a.file).collect();
-        let resolved = self.resolve_files_nfs(&files, follow)?;
+        let mut slots = (0..attrs.len()).map(|_| None).collect::<Vec<_>>();
         let mut ops = Vec::with_capacity(attrs.len());
-        for (i, (a, resolution)) in attrs.iter().zip(resolved).enumerate() {
-            let (fh, ftype) = resolution.map_err(|status| VfError::nfs(i, status))?;
-            if nofollow_symlink_setattr_is_unsupported(follow, ftype, a.masks) {
-                // NFSv4 has no non-following mode/size setter for symlinks;
-                // refuse like the `std::fs` backend instead of pretending the
-                // SETATTR applied to the link.
-                return Err(VfError::unsupported(i));
+        let mut indices = Vec::with_capacity(attrs.len());
+        let mut guards = Vec::with_capacity(attrs.len());
+        for (index, attr) in attrs.iter().enumerate() {
+            let file = if !attr.masks.difference(SETTABLE).is_empty() {
+                Err(VfError::unsupported(None))
+            } else if let Some(fd) = attr.file.fd() {
+                self.open_files
+                    .get(&fd)
+                    .map(|open| crate::client::FileRef::Handle(open.fh.clone()))
+                    .ok_or_else(|| VfError::errno(None, ERR_EBADF))
+            } else {
+                self.server_vf_path(&attr.file)
+                    .map(|path| crate::client::FileRef::Path(path_bytes(&path).to_vec()))
+            };
+            match file {
+                Ok(file) => {
+                    indices.push(index);
+                    guards.push(path_setattrs_require_type_resolution(
+                        std::slice::from_ref(attr),
+                        follow,
+                    ));
+                    ops.push(crate::client::PathSetattrOp {
+                        file,
+                        mode: attr
+                            .masks
+                            .contains(AttrMask::MODE)
+                            .then_some(attr.mode & 0o7777),
+                        size: attr.masks.contains(AttrMask::SIZE).then_some(attr.size),
+                        uid: None,
+                        gid: None,
+                        atime: attr
+                            .masks
+                            .contains(AttrMask::ATIME)
+                            .then_some((attr.atime_sec, attr.atime_nsec)),
+                        mtime: attr
+                            .masks
+                            .contains(AttrMask::MTIME)
+                            .then_some((attr.mtime_sec, attr.mtime_nsec)),
+                        check_type: false,
+                    });
+                }
+                Err(cause) => slots[index] = Some(Err(OpError::not_attempted(cause))),
             }
-            let mode = if a.masks.contains(AttrMask::MODE) {
-                Some(a.mode & 0o7777)
-            } else {
-                None
-            };
-            let size = if a.masks.contains(AttrMask::SIZE) {
-                Some(a.size)
-            } else {
-                None
-            };
-            let atime = a
-                .masks
-                .contains(AttrMask::ATIME)
-                .then_some((a.atime_sec, a.atime_nsec));
-            let mtime = a
-                .masks
-                .contains(AttrMask::MTIME)
-                .then_some((a.mtime_sec, a.mtime_nsec));
-            ops.push(crate::client::SetattrOp {
-                fh,
-                mode,
-                uid: a.masks.contains(AttrMask::UID).then_some(a.uid),
-                gid: a.masks.contains(AttrMask::GID).then_some(a.gid),
-                size,
-                atime,
-                mtime,
-            });
         }
-        self.nfs
-            .setattr_many(&ops)
-            .map_err(vfsi_core::error_from_rpc_indexed)
+        let mut start = 0;
+        while start < ops.len() {
+            let (results, repair) = match self
+                .nfs
+                .setattr_path_compound_guarded(&ops[start..], &guards[start..])
+            {
+                Ok(result) => result,
+                Err(cause) => {
+                    for &index in &indices[start..] {
+                        slots[index] = Some(Err(OpError::not_attempted(cause.clone())));
+                    }
+                    break;
+                }
+            };
+            let repair = repair.map(|point| point.input);
+            let final_symlink = repair.is_some_and(|index| {
+                results
+                    .get(index)
+                    .and_then(|result| result.as_ref().err())
+                    .is_some_and(|error| {
+                        error.cause().status()
+                            == Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_SAME))
+                    })
+            });
+            let completed = repair.unwrap_or(ops.len() - start);
+            for (offset, result) in results.into_iter().take(completed).enumerate() {
+                slots[indices[start + offset]] = Some(result.map(|_| ()));
+            }
+            let Some(relative) = repair else { break };
+            let index = indices[start + relative];
+            let cause = if final_symlink
+                && nofollow_symlink_setattr_is_unsupported(
+                    follow,
+                    nfs_ftype4_NF4LNK,
+                    attrs[index].masks,
+                ) {
+                Some(OpError::not_attempted(VfError::unsupported(None)))
+            } else {
+                None
+            };
+            slots[index] = Some(match cause {
+                Some(error) => Err(error),
+                None => {
+                    match self.vsetattrs_phased_nfs(std::slice::from_ref(&attrs[index]), follow) {
+                        Ok(mut results) if results.len() == 1 => results.pop().unwrap(),
+                        Ok(_) => Err(OpError::unknown(
+                            VfError::invalid_reply(None, "invalid SETATTR repair count"),
+                            None,
+                        )),
+                        Err(cause) => Err(OpError::not_attempted(cause)),
+                    }
+                }
+            });
+            start += relative + 1;
+        }
+        Ok(slots
+            .into_iter()
+            .map(|slot| {
+                slot.unwrap_or_else(|| {
+                    Err(OpError::unknown(
+                        VfError::invalid_reply(None, "missing SETATTR outcome"),
+                        None,
+                    ))
+                })
+            })
+            .collect())
+    }
+
+    /// Resolve only valid candidates, then submit all independent SETATTRs.
+    fn vsetattrs_phased_nfs(
+        &mut self,
+        attrs: &[VfAttrs],
+        follow: bool,
+    ) -> vfsi_core::VecResult<()> {
+        use vfsi_core::OpError;
+        const SETTABLE: AttrMask = AttrMask::MODE
+            .union(AttrMask::SIZE)
+            .union(AttrMask::ATIME)
+            .union(AttrMask::MTIME)
+            .union(AttrMask::UID)
+            .union(AttrMask::GID);
+        let mut slots = (0..attrs.len()).map(|_| None).collect::<Vec<_>>();
+        let mut candidates = Vec::with_capacity(attrs.len());
+        let mut refs = Vec::with_capacity(attrs.len());
+        for (index, attr) in attrs.iter().enumerate() {
+            if !attr.masks.difference(SETTABLE).is_empty() {
+                slots[index] = Some(Err(OpError::not_attempted(VfError::unsupported(None))));
+            } else {
+                candidates.push(index);
+                refs.push(&attr.file);
+            }
+        }
+        let resolved = self.resolve_files_nfs(&refs, follow)?;
+        let mut ops = Vec::with_capacity(attrs.len());
+        let mut indices = Vec::with_capacity(attrs.len());
+        for (index, resolution) in candidates.into_iter().zip(resolved) {
+            let attr = &attrs[index];
+            match resolution {
+                Ok((_, kind))
+                    if nofollow_symlink_setattr_is_unsupported(follow, kind, attr.masks) =>
+                {
+                    slots[index] = Some(Err(OpError::not_attempted(VfError::unsupported(None))));
+                }
+                Ok((fh, _)) => {
+                    indices.push(index);
+                    ops.push(crate::client::SetattrOp {
+                        fh,
+                        mode: attr
+                            .masks
+                            .contains(AttrMask::MODE)
+                            .then_some(attr.mode & 0o7777),
+                        size: attr.masks.contains(AttrMask::SIZE).then_some(attr.size),
+                        uid: attr.masks.contains(AttrMask::UID).then_some(attr.uid),
+                        gid: attr.masks.contains(AttrMask::GID).then_some(attr.gid),
+                        atime: attr
+                            .masks
+                            .contains(AttrMask::ATIME)
+                            .then_some((attr.atime_sec, attr.atime_nsec)),
+                        mtime: attr
+                            .masks
+                            .contains(AttrMask::MTIME)
+                            .then_some((attr.mtime_sec, attr.mtime_nsec)),
+                    });
+                }
+                Err(error) => slots[index] = Some(Err(OpError::not_attempted(error.into_cause()))),
+            }
+        }
+        let results = match self.nfs.setattr_many(&ops) {
+            Ok(results) => results,
+            Err(cause) => ops
+                .iter()
+                .map(|_| Err(OpError::not_attempted(cause.clone())))
+                .collect(),
+        };
+        for (index, result) in indices.into_iter().zip(results) {
+            slots[index] = Some(result);
+        }
+        Ok(slots
+            .into_iter()
+            .map(|slot| {
+                slot.unwrap_or_else(|| {
+                    Err(OpError::unknown(
+                        VfError::invalid_reply(None, "missing phased SETATTR outcome"),
+                        None,
+                    ))
+                })
+            })
+            .collect())
     }
 
     /// The merged (single-compound) getattrsv: resolve each parent once,
     /// then LOOKUP + GETATTR per file. Final-component symlinks (follow
     /// semantics) are resolved individually afterwards.
-    pub(super) fn getattrsv_impl(&mut self, attrs: &mut [VfAttrs], follow: bool) -> VfRes {
-        if attrs.is_empty() {
-            return Ok(());
+    pub(super) fn getattr_with_recovery(
+        &mut self,
+        attrs: &mut [VfAttrs],
+        follow: bool,
+    ) -> vfsi_core::VecResult<()> {
+        if self.recovery_in_progress {
+            return self.getattrsv_impl(attrs, follow);
         }
-        let mut ops = Vec::with_capacity(attrs.len());
-        for (i, a) in attrs.iter().enumerate() {
-            let file = if a.file.is_fd() {
-                let fd = a.file.fd().unwrap();
-                let open = self
-                    .open_files
-                    .get(&fd)
-                    .ok_or_else(|| VfError::errno(i, ERR_EBADF))?;
-                crate::client::FileRef::Handle(open.fh.clone())
-            } else {
-                crate::client::FileRef::Path(
-                    vfsi_core::path::path_bytes(
-                        &self.server_vf_path(&a.file).map_err(|e| e.with_index(i))?,
-                    )
-                    .to_vec(),
-                )
-            };
-            ops.push(crate::client::PathGetattrOp {
-                file,
-                attrs: request_mask_to_attr_list(&a.masks),
-            });
-        }
-        match self.nfs.getattr_path_compound(&ops) {
-            Ok(outcome) => {
-                if let Some((i, _st)) = outcome.failed {
-                    // Prefix [0..i) succeeded; resume [i..] via the phased
-                    // path, re-attributing its error to the original index.
-                    let mut prefix_attrs = attrs[..i].to_vec();
-                    for (k, a) in prefix_attrs.iter_mut().enumerate() {
-                        let Some(list) = outcome.lists[k].as_deref() else {
-                            return self.getattrsv_phased(attrs, follow);
-                        };
-                        let Ok(v) = parse_attr_list(&ops[k].attrs, list) else {
-                            // A malformed merged result is not a valid
-                            // completed prefix. Retry the read-only GETATTR
-                            // through the independently decoded phased path.
-                            return self.getattrsv_phased(attrs, follow);
-                        };
-                        apply_attrs(a, &v);
-                        if follow && a.ftype == VfType::Symlink {
-                            self.stat_one_following(k, a)?;
+        self.vector_read_with_recovery(
+            |_, _| true,
+            |client, indices| match indices {
+                None => client.getattrsv_impl(attrs, follow),
+                Some(indices) => {
+                    let mut pending: Vec<_> =
+                        indices.iter().map(|&index| attrs[index].clone()).collect();
+                    let outcomes = client.getattrsv_impl(&mut pending, follow)?;
+                    for ((&index, attr), outcome) in indices.iter().zip(pending).zip(&outcomes) {
+                        if outcome.is_ok() {
+                            attrs[index] = attr;
                         }
                     }
-                    attrs[..i].clone_from_slice(&prefix_attrs);
-                    if let Err(e) = self.getattrsv_phased(&mut attrs[i..], follow) {
-                        return Err(e.map_index(|rel| i + rel));
-                    }
-                    return Ok(());
+                    Ok(outcomes)
                 }
-                let mut symlinks = Vec::new();
-                let mut parsed = Vec::with_capacity(attrs.len());
-                for (i, op) in ops.iter().enumerate() {
-                    let Some(list) = outcome.lists[i].as_deref() else {
-                        return self.getattrsv_phased(attrs, follow);
-                    };
-                    let Ok(v) = parse_attr_list(&op.attrs, list) else {
-                        return self.getattrsv_phased(attrs, follow);
-                    };
-                    parsed.push(v);
-                }
-                for (i, (a, v)) in attrs.iter_mut().zip(parsed).enumerate() {
-                    apply_attrs(a, &v);
-                    if follow && a.ftype == VfType::Symlink {
-                        symlinks.push(i);
-                    }
-                }
-                for i in symlinks {
-                    self.stat_one_following(i, &mut attrs[i])?;
-                }
-                Ok(())
-            }
-            Err(error) if error.is_transport() => Err(vfsi_core::error_from_rpc(error, None)),
-            Err(_) => self.getattrsv_phased(attrs, follow),
-        }
+            },
+        )
     }
 
-    /// The legacy phased getattrsv (resolve_many_tcfile + getattr_many).
-    fn getattrsv_phased(&mut self, attrs: &mut [VfAttrs], follow: bool) -> VfRes {
-        let files: Vec<&FileOperand> = attrs.iter().map(|a| &a.file).collect();
-        let resolved = self.resolve_files_nfs(&files, follow)?;
+    pub(super) fn getattrsv_impl(
+        &mut self,
+        attrs: &mut [VfAttrs],
+        follow: bool,
+    ) -> vfsi_core::VecResult<()> {
+        use vfsi_core::OpError;
+        if attrs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut slots: Vec<Option<vfsi_core::OpResult<()>>> =
+            (0..attrs.len()).map(|_| None).collect();
         let mut ops = Vec::with_capacity(attrs.len());
-        let mut first_failure: Option<VfError> = None;
-        for (i, (a, resolution)) in attrs.iter().zip(resolved).enumerate() {
-            let fh = match resolution {
-                Ok((fh, _)) => fh,
-                Err(status) => {
-                    if first_failure.is_none() {
-                        first_failure = Some(VfError::nfs(i, status));
-                    }
-                    continue;
-                }
+        let mut indices = Vec::with_capacity(attrs.len());
+        for (index, attr) in attrs.iter().enumerate() {
+            let file = match &attr.file {
+                FileOperand::Fd(fd) => self
+                    .open_files
+                    .get(fd)
+                    .map(|open| crate::client::FileRef::Handle(open.fh.clone()))
+                    .ok_or_else(|| VfError::errno(index, ERR_EBADF)),
+                _ => self.server_vf_path(&attr.file).map(|path| {
+                    crate::client::FileRef::Path(vfsi_core::path::path_bytes(&path).to_vec())
+                }),
             };
-            let ids = request_mask_to_attr_list(&a.masks);
-            ops.push(crate::client::GetattrOp { fh, attrs: ids });
+            match file {
+                Ok(file) => {
+                    indices.push(index);
+                    ops.push(crate::client::PathGetattrOp {
+                        file,
+                        attrs: request_mask_to_attr_list(&attr.masks),
+                    });
+                }
+                Err(error) => slots[index] = Some(Err(OpError::not_attempted(error))),
+            }
         }
-        if let Some(e) = first_failure {
-            return Err(e);
+        let results = match self.nfs.getattr_path_compound(&ops) {
+            Ok(results) => results,
+            Err(error) => {
+                for index in indices {
+                    slots[index] = Some(Err(OpError::not_attempted(error.clone())));
+                }
+                return Ok(slots
+                    .into_iter()
+                    .map(|slot| slot.expect("metadata input assigned"))
+                    .collect());
+            }
+        };
+
+        let mut fallback = Vec::new();
+        for ((index, op), result) in indices.into_iter().zip(ops).zip(results) {
+            let operation = result
+                .and_then(|list| {
+                    parse_attr_list(&op.attrs, &list)
+                        .map_err(|error| vfsi_core::OpError::failed(error, None))
+                })
+                .and_then(|values| {
+                    apply_attrs(&mut attrs[index], &values);
+                    if follow && attrs[index].ftype == VfType::Symlink {
+                        self.stat_one_following(index, &mut attrs[index])
+                            .map_err(|error| {
+                                if error.is_transport() {
+                                    vfsi_core::OpError::unknown(error, None)
+                                } else {
+                                    vfsi_core::OpError::failed(error, None)
+                                }
+                            })
+                    } else {
+                        Ok(())
+                    }
+                });
+            if operation.as_ref().is_err_and(|error| {
+                !error.cause().is_transport()
+                    && matches!(
+                        error.cause().status(),
+                        Some(vfsi_core::StatusCode::Nfs(
+                            nfsstat4_NFS4ERR_INVAL | nfsstat4_NFS4ERR_SYMLINK
+                        ))
+                    )
+            }) {
+                fallback.push(index);
+            }
+            slots[index] = Some(operation);
         }
-        let results = self
-            .nfs
-            .getattr_many(&ops)
-            .map_err(vfsi_core::error_from_rpc_indexed)?;
-        for ((a, op), list) in attrs.iter_mut().zip(ops).zip(results) {
-            let v = parse_attr_list(&op.attrs, &list)?;
-            apply_attrs(a, &v);
+        if !fallback.is_empty() {
+            // Root paths and ancestor symlinks share a batched phased fallback.
+            // Never repeat successful siblings or flatten this into singleton RPCs.
+            let mut pending: Vec<_> = fallback.iter().map(|&index| attrs[index].clone()).collect();
+            let results = self.getattr_phased_results(&mut pending, follow)?;
+            for ((index, attr), result) in fallback.into_iter().zip(pending).zip(results) {
+                if result.is_ok() {
+                    attrs[index] = attr;
+                }
+                slots[index] = Some(result);
+            }
         }
-        Ok(())
+        Ok(slots
+            .into_iter()
+            .map(|slot| {
+                slot.unwrap_or_else(|| {
+                    Err(OpError::unknown(
+                        VfError::invalid_reply(None, "missing merged attribute outcome"),
+                        None,
+                    ))
+                })
+            })
+            .collect())
+    }
+
+    /// Resolve failed merged inputs together and retain their individual results.
+    fn getattr_phased_results(
+        &mut self,
+        attrs: &mut [VfAttrs],
+        follow: bool,
+    ) -> vfsi_core::VecResult<()> {
+        use vfsi_core::OpError;
+        let files: Vec<_> = attrs.iter().map(|a| &a.file).collect();
+        let resolved = match self.resolve_files_nfs(&files, follow) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                return Ok(attrs
+                    .iter()
+                    .map(|_| Err(OpError::unknown(error.clone(), None)))
+                    .collect());
+            }
+        };
+        let mut outcomes: Vec<Option<vfsi_core::OpResult<()>>> =
+            (0..attrs.len()).map(|_| None).collect();
+        let mut indices = Vec::with_capacity(attrs.len());
+        let mut ops = Vec::with_capacity(attrs.len());
+        for (index, resolution) in resolved.into_iter().enumerate() {
+            match resolution {
+                Ok((fh, _)) => {
+                    indices.push(index);
+                    ops.push(crate::client::GetattrOp {
+                        fh,
+                        attrs: request_mask_to_attr_list(&attrs[index].masks),
+                    });
+                }
+                Err(error) => outcomes[index] = Some(Err(error)),
+            }
+        }
+        match self.nfs.getattr_many_with_bitmap(&ops) {
+            Ok(results) => {
+                for ((index, op), result) in indices.into_iter().zip(ops).zip(results) {
+                    outcomes[index] = Some(result.and_then(|(_, bytes)| {
+                        parse_attr_list(&op.attrs, &bytes)
+                            .map(|values| apply_attrs(&mut attrs[index], &values))
+                            .map_err(|error| OpError::failed(error, None))
+                    }));
+                }
+            }
+            Err(error) => {
+                for index in indices {
+                    outcomes[index] = Some(Err(OpError::not_attempted(error.clone())));
+                }
+            }
+        }
+        Ok(outcomes
+            .into_iter()
+            .map(|result| {
+                result.unwrap_or_else(|| {
+                    Err(OpError::unknown(
+                        VfError::invalid_reply(None, "missing phased metadata result"),
+                        None,
+                    ))
+                })
+            })
+            .collect())
     }
 
     /// stat one path following final-component symlinks (phased).
@@ -664,47 +809,6 @@ impl NfsVecFs {
         let v = parse_attr_list(&ids, &list)?;
         apply_attrs(a, &v);
         Ok(())
-    }
-
-    /// setattr one path following final-component symlinks (phased).
-    fn setattr_one_following(&mut self, index: usize, a: &VfAttrs) -> VfResult<()> {
-        let path = self
-            .server_vf_path(&a.file)
-            .map_err(|e| e.with_index(index))?;
-        let fh = self
-            .resolve_follow(&path)
-            .map_err(|e| e.with_index(index))?;
-        let mode = if a.masks.contains(AttrMask::MODE) {
-            Some(a.mode & 0o7777)
-        } else {
-            None
-        };
-        let size = if a.masks.contains(AttrMask::SIZE) {
-            Some(a.size)
-        } else {
-            None
-        };
-        let atime = a
-            .masks
-            .contains(AttrMask::ATIME)
-            .then_some((a.atime_sec, a.atime_nsec));
-        let mtime = a
-            .masks
-            .contains(AttrMask::MTIME)
-            .then_some((a.mtime_sec, a.mtime_nsec));
-        self.nfs
-            .setattr_ownership(
-                &fh,
-                mode,
-                size,
-                (
-                    a.masks.contains(AttrMask::UID).then_some(a.uid),
-                    a.masks.contains(AttrMask::GID).then_some(a.gid),
-                ),
-                atime,
-                mtime,
-            )
-            .map_err(|e| vfsi_core::error_from_rpc(e, index))
     }
 
     /// The size in bytes of `fh`.
@@ -995,7 +1099,13 @@ mod tests {
                     .with_truncate()
             })
             .collect();
-        backend.vwrite_impl(&borrow_writes(&writes)).unwrap();
+        backend
+            .vwrite_impl(&borrow_writes(&writes))
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })
+            .unwrap();
         let mut attrs: Vec<_> = [
             (2, AttrMask::SIZE),
             (1, AttrMask::MODE),
@@ -1011,7 +1121,11 @@ mod tests {
         .collect();
         #[cfg(feature = "test-faults")]
         let _ = crate::compound::thread_compound_stats();
-        backend.getattrsv_phased(&mut attrs, true).unwrap();
+        vfsi_core::internal::collect_vec_result(
+            backend.getattr_phased_results(&mut attrs, true),
+            attrs.len(),
+        )
+        .unwrap();
         #[cfg(feature = "test-faults")]
         assert_eq!(
             crate::compound::thread_compound_stats().0,
@@ -1037,7 +1151,11 @@ mod tests {
             ..Default::default()
         })
         .collect();
-        let error = backend.getattrsv_phased(&mut invalid, true).unwrap_err();
+        let error = vfsi_core::internal::collect_vec_result(
+            backend.getattr_phased_results(&mut invalid, true),
+            invalid.len(),
+        )
+        .unwrap_err();
         assert_eq!(error.index(), Some(1));
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
         backend

@@ -42,7 +42,7 @@ fn ranged_read_transport_never_becomes_semantic_recovery() {
 }
 
 #[test]
-fn ranged_read_semantic_failure_still_recovers_unaffected_paths() {
+fn ranged_read_semantic_failure_keeps_unaffected_paths_without_replay() {
     Python::initialize();
     for index in 0..3 {
         let root = TestRoot::new();
@@ -73,9 +73,8 @@ fn ranged_read_semantic_failure_still_recovers_unaffected_paths() {
                 );
             }
             let calls = calls.lock().unwrap();
-            assert_eq!(calls.len(), 2);
-            assert_eq!(calls[1].len(), 2);
-            assert!(!calls[1].contains(&PathBuf::from(format!("/{}", ["a", "b", "c"][index]))));
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].len(), 3);
         });
     }
 }

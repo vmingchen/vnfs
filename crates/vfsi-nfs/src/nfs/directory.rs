@@ -48,6 +48,8 @@ pub(super) struct RemoveDir {
     pub(super) name: Box<[u8]>,
     /// Operand index this directory belongs to, for error attribution.
     pub(super) root: usize,
+    /// This entry completes the caller's root rather than an internal child.
+    pub(super) is_root: bool,
 }
 
 /// A unit of work for the recursive remover.
@@ -102,6 +104,18 @@ fn remove_backoff(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(10u64 << attempt.min(6))
 }
 
+fn one_remove_outcome(results: vfsi_core::VecResult<()>) -> vfsi_core::OpResult<()> {
+    use vfsi_core::OpError;
+    match results {
+        Ok(mut results) if results.len() == 1 => results.pop().unwrap(),
+        Ok(_) => Err(OpError::unknown(
+            VfError::invalid_reply(None, "invalid REMOVE result count"),
+            None,
+        )),
+        Err(cause) => Err(OpError::not_attempted(cause)),
+    }
+}
+
 /// Advance through the current bounded READDIR pass. A mutation may shift
 /// later cookies, so a complete pass that changed anything is verified once
 /// more from the beginning. Failed entries are not revisited on every page.
@@ -115,26 +129,132 @@ pub(super) fn next_rm_scan(cookie: u64, pass_changed: bool) -> Option<(u64, bool
     }
 }
 
-/// Keep the first error seen while continuing best-effort removal.
-fn record_error(slot: &mut Option<VfError>, error: VfError) {
-    if slot.is_none() {
-        *slot = Some(error);
+/// Private traversal state; public outcomes remain exactly OpResult<()>.
+pub(super) enum RemoveRoot {
+    Pending,
+    Active,
+    Complete,
+    Failed(vfsi_core::OpError),
+}
+
+impl RemoveRoot {
+    fn touch(&mut self) {
+        match self {
+            Self::Pending => *self = Self::Active,
+            Self::Failed(error) if error.state() == vfsi_core::FailureState::NotAttempted => {
+                *error = vfsi_core::OpError::failed(error.cause().clone(), None);
+            }
+            _ => {}
+        }
+    }
+
+    fn complete(&mut self) {
+        self.touch();
+        if !matches!(self, Self::Failed(_)) {
+            *self = Self::Complete;
+        }
+    }
+
+    fn stopped(&self, options: RemoveOptions) -> bool {
+        !options.continue_on_error() && matches!(self, Self::Failed(_))
+    }
+
+    fn fatal_cause(&self) -> Option<&VfError> {
+        match self {
+            Self::Failed(error)
+                if error.state() == vfsi_core::FailureState::Unknown
+                    || error.cause().is_transport() =>
+            {
+                Some(error.cause())
+            }
+            _ => None,
+        }
     }
 }
 
-/// Record a per-entry error, or abort immediately when the caller asked for
-/// fail-fast removal.
-pub(super) fn note_error(
-    slot: &mut Option<VfError>,
-    error: VfError,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RemoveStop {
+    Root,
+    Fatal,
+}
+
+type RemoveRun<T> = std::result::Result<T, RemoveStop>;
+
+fn note_error(
+    roots: &mut [RemoveRoot],
+    root: usize,
+    mut error: vfsi_core::OpError,
     options: RemoveOptions,
-) -> VfResult<()> {
-    if options.continue_on_error() {
-        record_error(slot, error);
+) -> RemoveRun<()> {
+    use vfsi_core::{FailureState, OpError};
+    let fatal = error.state() == FailureState::Unknown || error.cause().is_transport();
+    if error.state() == FailureState::NotAttempted && !matches!(roots[root], RemoveRoot::Pending) {
+        error = OpError::failed(error.into_cause(), None);
+    }
+    let replace = match &roots[root] {
+        RemoveRoot::Failed(previous) => {
+            previous.state() != FailureState::Unknown
+                && (error.state() == FailureState::Unknown
+                    || (fatal && !previous.cause().is_transport()))
+        }
+        _ => true,
+    };
+    if replace {
+        roots[root] = RemoveRoot::Failed(error);
+    }
+    if fatal {
+        Err(RemoveStop::Fatal)
+    } else if options.continue_on_error() {
         Ok(())
     } else {
-        Err(error)
+        Err(RemoveStop::Root)
     }
+}
+
+fn note_read_error(
+    roots: &mut [RemoveRoot],
+    root: usize,
+    cause: VfError,
+    options: RemoveOptions,
+) -> RemoveRun<()> {
+    note_error(
+        roots,
+        root,
+        vfsi_core::OpError::failed(cause, None),
+        options,
+    )
+}
+
+impl RmTask {
+    fn root(&self) -> usize {
+        match self {
+            Self::RemoveOrEnter { root, .. } => *root,
+            Self::Enter { dir, .. } | Self::Continue { dir, .. } | Self::Finish(dir) => dir.root,
+        }
+    }
+}
+
+fn finish_remove_roots(roots: Vec<RemoveRoot>, fatal: bool) -> Vec<vfsi_core::OpResult<()>> {
+    use vfsi_core::OpError;
+    let cause = roots.iter().find_map(RemoveRoot::fatal_cause).cloned();
+    roots
+        .into_iter()
+        .map(|root| match root {
+            RemoveRoot::Complete => Ok(()),
+            RemoveRoot::Failed(error) => Err(error),
+            RemoveRoot::Pending if fatal => Err(OpError::not_attempted(
+                cause.clone().expect("fatal removal has a recorded cause"),
+            )),
+            RemoveRoot::Active if fatal => Err(OpError::failed(
+                cause.clone().expect("fatal removal has a recorded cause"),
+                None,
+            )),
+            RemoveRoot::Pending | RemoveRoot::Active => Err(OpError::unknown(
+                VfError::invalid_reply(None, "recursive removal did not finish its root"),
+                None,
+            )),
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -246,7 +366,10 @@ impl NfsVecFs {
         let full = self.server_vf_path(&FileOperand::from_os_path(path))?;
         let (dir, name) =
             split_path_bytes(path_bytes(&full)).map_err(|_| VfError::errno(0, ERR_NOENT))?;
-        let parent = self.resolve_path(&path_from_bytes(dir), true)?;
+        let (parent, kind) = self.resolve_path_and_type(&path_from_bytes(dir), true)?;
+        if kind != nfs_ftype4_NF4DIR {
+            return Err(VfError::nfs(None, nfsstat4_NFS4ERR_NOTDIR));
+        }
         Ok((parent, name.to_vec()))
     }
 
@@ -257,88 +380,112 @@ impl NfsVecFs {
     pub(super) fn run_rm_tasks(
         &mut self,
         mut stack: Vec<RmTask>,
-        first_error: &mut Option<VfError>,
+        mut roots: Vec<RemoveRoot>,
         options: RemoveOptions,
-    ) -> VfResult<()> {
+    ) -> Vec<vfsi_core::OpResult<()>> {
         let mut ready: std::collections::HashMap<NfsFh, Vec<_>> = std::collections::HashMap::new();
         let mut changed_parents = std::collections::HashSet::new();
-        while let Some(task) = stack.pop() {
-            match task {
-                RmTask::RemoveOrEnter {
-                    parent,
-                    name,
-                    root,
-                    expand,
-                } => self.remove_or_enter(
-                    &parent,
-                    &name,
-                    root,
-                    expand,
-                    &mut stack,
-                    first_error,
-                    options,
-                )?,
-                RmTask::Enter {
-                    dir,
-                    cookie,
-                    seen_cookies,
-                    pass_changed,
-                } => self.enter_directory(
-                    dir,
-                    cookie,
-                    seen_cookies,
-                    pass_changed,
-                    &mut stack,
-                    &mut changed_parents,
-                    first_error,
-                    options,
-                )?,
-                RmTask::Continue {
-                    dir,
-                    cookie,
-                    seen_cookies,
-                    files_removed,
-                    pass_changed,
-                } => {
-                    let children_removed = match ready.remove(&dir.fh) {
-                        Some(children) => {
-                            self.remove_list(&dir.fh, &children, first_error, options)?
-                        }
-                        None => false,
-                    };
-                    let child_changed = changed_parents.remove(&dir.fh);
-                    let changed =
-                        files_removed || children_removed || child_changed || pass_changed;
-                    match next_rm_scan(cookie, changed) {
-                        Some((cookie, pass_changed)) => stack.push(RmTask::Enter {
+        let mut fatal = roots.iter().any(|root| root.fatal_cause().is_some());
+        while !fatal {
+            let Some(task) = stack.pop() else {
+                break;
+            };
+            if roots[task.root()].stopped(options) {
+                continue;
+            }
+            let result = (|| -> RemoveRun<()> {
+                match task {
+                    RmTask::RemoveOrEnter {
+                        parent,
+                        name,
+                        root,
+                        expand,
+                    } => {
+                        self.remove_or_enter(
+                            &parent, &name, root, expand, &mut stack, &mut roots, options,
+                        )?;
+                    }
+                    RmTask::Enter {
+                        dir,
+                        cookie,
+                        seen_cookies,
+                        pass_changed,
+                    } => {
+                        self.enter_directory(
                             dir,
                             cookie,
-                            seen_cookies: if cookie == 0 && !pass_changed {
-                                HashSet::new()
-                            } else {
-                                seen_cookies
-                            },
+                            seen_cookies,
                             pass_changed,
-                        }),
-                        None => stack.push(RmTask::Finish(dir)),
+                            &mut stack,
+                            &mut changed_parents,
+                            &mut roots,
+                            options,
+                        )?;
+                    }
+                    RmTask::Continue {
+                        dir,
+                        cookie,
+                        seen_cookies,
+                        files_removed,
+                        pass_changed,
+                    } => {
+                        let children_removed = match ready.remove(&dir.fh) {
+                            Some(children) => {
+                                self.remove_list(&dir.fh, &children, &mut roots, options)?
+                            }
+                            None => false,
+                        };
+                        let child_changed = changed_parents.remove(&dir.fh);
+                        let changed =
+                            files_removed || children_removed || child_changed || pass_changed;
+                        match next_rm_scan(cookie, changed) {
+                            Some((cookie, pass_changed)) => stack.push(RmTask::Enter {
+                                dir,
+                                cookie,
+                                seen_cookies: if cookie == 0 && !pass_changed {
+                                    HashSet::new()
+                                } else {
+                                    seen_cookies
+                                },
+                                pass_changed,
+                            }),
+                            None => stack.push(RmTask::Finish(dir)),
+                        }
+                    }
+                    RmTask::Finish(dir) => {
+                        if let Some(children) = ready.remove(&dir.fh) {
+                            self.remove_list(&dir.fh, &children, &mut roots, options)?;
+                        }
+                        if roots[dir.root].stopped(options) {
+                            return Ok(());
+                        }
+                        if let Some(parent) = dir.parent {
+                            ready.entry(parent).or_default().push((
+                                dir.name,
+                                dir.root,
+                                dir.is_root,
+                            ));
+                        } else if dir.is_root {
+                            roots[dir.root].complete();
+                        }
                     }
                 }
-                RmTask::Finish(dir) => {
-                    if let Some(children) = ready.remove(&dir.fh) {
-                        let _ = self.remove_list(&dir.fh, &children, first_error, options)?;
-                    }
-                    if let Some(parent) = dir.parent {
-                        ready.entry(parent).or_default().push((dir.name, dir.root));
-                    }
+                Ok(())
+            })();
+            fatal = matches!(result, Err(RemoveStop::Fatal));
+        }
+        if !fatal {
+            for (parent, children) in ready {
+                if matches!(
+                    self.remove_list(&parent, &children, &mut roots, options),
+                    Err(RemoveStop::Fatal)
+                ) {
+                    fatal = true;
+                    break;
                 }
             }
         }
-        // The operands themselves (and any directories still ready) are removed
-        // from their parents, batched per parent.
-        for (parent, children) in ready {
-            self.remove_list(&parent, &children, first_error, options)?;
-        }
-        Ok(())
+        finish_remove_roots(roots, fatal)
     }
 
     /// REMOVE one entry. A non-empty directory (NFS4ERR_NOTEMPTY) is expanded
@@ -352,84 +499,76 @@ impl NfsVecFs {
         root: usize,
         expand: bool,
         stack: &mut Vec<RmTask>,
-        first_error: &mut Option<VfError>,
+        roots: &mut [RemoveRoot],
         options: RemoveOptions,
-    ) -> VfResult<()> {
+    ) -> RemoveRun<()> {
         let owned = name.to_vec();
         let mut attempts = 0u32;
         loop {
-            match self.nfs.remove_many(parent, std::slice::from_ref(&owned)) {
-                Ok(()) => return Ok(()),
-                Err(error) if error.is_transport() => {
-                    return Err(vfsi_core::error_from_rpc(error, root));
+            let error = match one_remove_outcome(
+                self.nfs.remove_many(parent, std::slice::from_ref(&owned)),
+            ) {
+                Ok(()) => {
+                    roots[root].complete();
+                    return Ok(());
                 }
-                Err(error) if error.status == nfsstat4_NFS4ERR_NOENT => return Ok(()),
-                Err(error) if error.status == nfsstat4_NFS4ERR_NOTEMPTY => {
-                    if expand {
-                        match self.nfs.lookup(parent, name) {
-                            Ok(fh) => stack.push(RmTask::Enter {
-                                dir: RemoveDir {
-                                    fh,
-                                    parent: Some(parent.clone()),
-                                    name: owned.into_boxed_slice(),
-                                    root,
-                                },
-                                cookie: 0,
-                                seen_cookies: HashSet::new(),
-                                pass_changed: false,
-                            }),
-                            Err(lookup) if lookup.is_transport() => {
-                                return Err(vfsi_core::error_from_rpc(lookup, root));
-                            }
-                            Err(lookup) => {
-                                note_error(
-                                    first_error,
-                                    vfsi_core::error_from_rpc(lookup, root),
-                                    options,
-                                )?;
-                            }
+                Err(error) => error,
+            };
+            if error.state() == vfsi_core::FailureState::Unknown || error.cause().is_transport() {
+                return note_error(roots, root, error, options);
+            }
+            let status = error.cause().status();
+            match status {
+                Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_NOTEMPTY)) if expand => {
+                    roots[root].touch();
+                    match self.nfs.lookup(parent, name) {
+                        Ok(fh) => stack.push(RmTask::Enter {
+                            dir: RemoveDir {
+                                fh,
+                                parent: Some(parent.clone()),
+                                name: owned.into_boxed_slice(),
+                                root,
+                                is_root: true,
+                            },
+                            cookie: 0,
+                            seen_cookies: HashSet::new(),
+                            pass_changed: false,
+                        }),
+                        Err(error) => {
+                            return note_read_error(
+                                roots,
+                                root,
+                                vfsi_core::error_from_rpc(error, None),
+                                options,
+                            );
                         }
-                    } else {
-                        note_error(first_error, VfError::errno(root, ERR_ISDIR), options)?;
                     }
                     return Ok(());
                 }
-                Err(error)
-                    if remove_status_is_retryable(error.status) && attempts < options.retries() =>
+                Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_NOTEMPTY)) => {
+                    return note_error(roots, root, error, options);
+                }
+                Some(vfsi_core::StatusCode::Nfs(status))
+                    if remove_status_is_retryable(status) && attempts < options.retries() =>
                 {
+                    roots[root].touch();
                     attempts += 1;
                     std::thread::sleep(remove_backoff(attempts));
                 }
-                Err(error) => {
-                    note_error(first_error, vfsi_core::error_from_rpc(error, root), options)?;
-                    return Ok(());
-                }
+                _ => return note_error(roots, root, error, options),
             }
         }
     }
 
     /// Enumerate a directory with `FATTR4_TYPE`, so directories can be
     /// descended into without an extra lookup while files are removed directly.
-    fn readdir_typed(
-        &mut self,
-        fh: &NfsFh,
-        cookie: u64,
-    ) -> Result<Vec<crate::client::DirEntry>, RpcError> {
+    fn readdir_typed(&mut self, fh: &NfsFh, cookie: u64) -> VfResult<Vec<crate::client::DirEntry>> {
         const REMOVE_READDIR_MAX_BYTES: usize = 32 * 1024;
         #[cfg(feature = "test-faults")]
-        if let Some(injector) = &self.fault_injector {
-            injector
-                .check(&OpenFaultPoint::BeforeRemovePage { cookie })
-                .map_err(|error| {
-                    if error.is_transport() {
-                        RpcError::transport(error.to_string())
-                    } else {
-                        RpcError::op(0, error.raw_code())
-                    }
-                })?;
-        }
+        self.inject_open_fault(OpenFaultPoint::BeforeRemovePage { cookie })?;
         self.nfs
             .readdir_bounded(fh, cookie, &[FATTR4_TYPE], REMOVE_READDIR_MAX_BYTES)
+            .map_err(|error| vfsi_core::error_from_rpc(error, None))
     }
 
     /// List a directory, optimistically remove its non-directory children, and
@@ -443,15 +582,19 @@ impl NfsVecFs {
         pass_changed: bool,
         stack: &mut Vec<RmTask>,
         changed_parents: &mut std::collections::HashSet<NfsFh>,
-        first_error: &mut Option<VfError>,
+        roots: &mut [RemoveRoot],
         options: RemoveOptions,
-    ) -> VfResult<()> {
+    ) -> RemoveRun<()> {
+        roots[dir.root].touch();
         let entries = match self.readdir_typed(&dir.fh, cookie) {
             Ok(entries) => entries,
             Err(error)
                 if cookie != 0
                     && pass_changed
-                    && error.status == nfsv41_sys::nfsstat4_NFS4ERR_BAD_COOKIE =>
+                    && error.status()
+                        == Some(vfsi_core::StatusCode::Nfs(
+                            nfsv41_sys::nfsstat4_NFS4ERR_BAD_COOKIE,
+                        )) =>
             {
                 // A server may invalidate a READDIR continuation when this
                 // pass removed entries. Start a fresh pass rather than
@@ -464,18 +607,26 @@ impl NfsVecFs {
                 });
                 return Ok(());
             }
-            Err(error) if error.status == nfsstat4_NFS4ERR_NOTDIR => {
+            Err(error)
+                if error.status() == Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_NOTDIR)) =>
+            {
                 // Race: it is no longer a directory. Remove the entry instead.
                 if let Some(parent) = &dir.parent {
-                    let removed =
-                        self.remove_list(parent, &[(dir.name, dir.root)], first_error, options)?;
+                    let removed = self.remove_list(
+                        parent,
+                        &[(dir.name, dir.root, dir.is_root)],
+                        roots,
+                        options,
+                    )?;
                     if removed {
                         changed_parents.insert(parent.clone());
                     }
+                } else {
+                    return note_read_error(roots, dir.root, error, options);
                 }
                 return Ok(());
             }
-            Err(error) => return Err(vfsi_core::error_from_rpc(error, dir.root)),
+            Err(error) => return note_read_error(roots, dir.root, error, options),
         };
 
         if entries.is_empty() {
@@ -491,13 +642,22 @@ impl NfsVecFs {
             return Ok(());
         }
         let next_cookie = entries.last().map(|entry| entry.cookie).unwrap_or(0);
-        validate_readdir_progress(cookie, next_cookie, &mut seen_cookies, Some(dir.root))?;
+        validate_readdir_progress(cookie, next_cookie, &mut seen_cookies, None).map_err(
+            |cause| {
+                note_read_error(roots, dir.root, cause, options)
+                    .err()
+                    .unwrap_or(RemoveStop::Root)
+            },
+        )?;
 
         let mut file_names = Vec::new();
         let mut dir_names = Vec::new();
         for entry in entries {
-            let values = parse_attr_list(&[FATTR4_TYPE], &entry.attrs)
-                .map_err(|error| error.with_index(dir.root))?;
+            let values = parse_attr_list(&[FATTR4_TYPE], &entry.attrs).map_err(|cause| {
+                note_read_error(roots, dir.root, cause, options)
+                    .err()
+                    .unwrap_or(RemoveStop::Root)
+            })?;
             if values.ftype == Some(nfs_ftype4_NF4DIR) {
                 dir_names.push(entry.name);
             } else {
@@ -507,10 +667,10 @@ impl NfsVecFs {
         // Files (and symlinks, and empty directories) go in one batched pass.
         // A name that turned out to be a non-empty directory is promoted.
         let (promoted, files_removed) =
-            self.remove_names(&dir.fh, &file_names, dir.root, first_error, options)?;
+            self.remove_names(&dir.fh, &file_names, dir.root, roots, options)?;
         dir_names.extend(promoted);
 
-        let children = self.lookup_children(&dir.fh, &dir_names, dir.root, first_error, options)?;
+        let children = self.lookup_children(&dir.fh, &dir_names, dir.root, roots, options)?;
         let parent = dir.fh.clone();
         let root = dir.root;
         stack.push(RmTask::Continue {
@@ -527,6 +687,7 @@ impl NfsVecFs {
                     parent: Some(parent.clone()),
                     name,
                     root,
+                    is_root: false,
                 },
                 cookie: 0,
                 seen_cookies: HashSet::new(),
@@ -544,9 +705,9 @@ impl NfsVecFs {
         dir: &NfsFh,
         names: &[Vec<u8>],
         root: usize,
-        first_error: &mut Option<VfError>,
+        roots: &mut [RemoveRoot],
         options: RemoveOptions,
-    ) -> VfResult<(Vec<Vec<u8>>, bool)> {
+    ) -> RemoveRun<(Vec<Vec<u8>>, bool)> {
         let mut subdirs = Vec::new();
         let mut removed = false;
         let mut start = 0;
@@ -556,40 +717,76 @@ impl NfsVecFs {
                 self.nfs.remove_batch_capacity(),
                 options.batch_size().map_or(0, std::num::NonZeroUsize::get),
             );
-            match self.nfs.remove_many(dir, &names[start..start + take]) {
-                Ok(()) => {
-                    removed = true;
-                    start += take;
-                }
-                Err(error) if error.is_transport() => {
-                    return Err(vfsi_core::error_from_rpc(error, root));
-                }
-                Err(error) if resource_status(error.status) && take > 1 => {
-                    // REMOVE is ordered: only retry the suffix after the
-                    // server-confirmed successful prefix.
-                    let prefix = error.op_index.min(take.saturating_sub(1));
-                    removed |= prefix > 0;
-                    start += prefix;
-                }
-                Err(error) => {
-                    let status = error.status;
-                    let index = error.op_index.min(take.saturating_sub(1));
-                    removed |= index > 0;
-                    let name = &names[start + index];
-                    if status == nfsstat4_NFS4ERR_NOTEMPTY {
-                        subdirs.push(name.clone());
-                    } else if status == nfsstat4_NFS4ERR_NOENT {
-                        // Already gone.
+            let chunk = &names[start..start + take];
+            let outcomes = self.nfs.remove_many(dir, chunk).unwrap_or_else(|cause| {
+                chunk
+                    .iter()
+                    .map(|_| Err(vfsi_core::OpError::not_attempted(cause.clone())))
+                    .collect()
+            });
+            if outcomes.len() != chunk.len() {
+                note_read_error(
+                    roots,
+                    root,
+                    VfError::invalid_reply(None, "invalid recursive REMOVE count"),
+                    options,
+                )?;
+                return Err(RemoveStop::Root);
+            }
+            let mut stop = None;
+            for (name, result) in chunk.iter().zip(outcomes) {
+                let error = match result {
+                    Ok(()) => {
+                        roots[root].touch();
                         removed = true;
-                    } else if remove_status_is_retryable(status) {
-                        removed |=
-                            self.retry_remove_name(dir, name, root, first_error, options, error)?;
-                    } else {
-                        note_error(first_error, vfsi_core::error_from_rpc(error, root), options)?;
+                        continue;
                     }
-                    start += index + 1;
+                    Err(error) => error,
+                };
+                let next = if error.state() == vfsi_core::FailureState::Unknown
+                    || error.cause().is_transport()
+                {
+                    note_error(roots, root, error, options)
+                } else {
+                    match error.cause().status() {
+                        Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_NOTEMPTY)) => {
+                            roots[root].touch();
+                            subdirs.push(name.clone());
+                            Ok(())
+                        }
+                        Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_NOENT)) => {
+                            roots[root].touch();
+                            removed = true;
+                            Ok(())
+                        }
+                        Some(vfsi_core::StatusCode::Nfs(status))
+                            if remove_status_is_retryable(status) =>
+                        {
+                            self.retry_remove_name(
+                                dir,
+                                name,
+                                root,
+                                roots,
+                                options,
+                                error.into_cause(),
+                            )
+                            .map(|changed| {
+                                removed |= changed;
+                            })
+                        }
+                        _ => note_error(roots, root, error, options),
+                    }
+                };
+                if let Err(next) = next
+                    && (next == RemoveStop::Fatal || stop.is_none())
+                {
+                    stop = Some(next);
                 }
             }
+            if let Some(stop) = stop {
+                return Err(stop);
+            }
+            start += take;
         }
         Ok((subdirs, removed))
     }
@@ -599,10 +796,10 @@ impl NfsVecFs {
     fn remove_list(
         &mut self,
         parent: &NfsFh,
-        entries: &[(Box<[u8]>, usize)],
-        first_error: &mut Option<VfError>,
+        entries: &[(Box<[u8]>, usize, bool)],
+        roots: &mut [RemoveRoot],
         options: RemoveOptions,
-    ) -> VfResult<bool> {
+    ) -> RemoveRun<bool> {
         let mut removed = false;
         let mut start = 0;
         while start < entries.len() {
@@ -612,49 +809,105 @@ impl NfsVecFs {
                 options.batch_size().map_or(0, std::num::NonZeroUsize::get),
             );
             let chunk = &entries[start..start + take];
-            let names: Vec<Vec<u8>> = chunk.iter().map(|(name, _)| name.to_vec()).collect();
-            match self.nfs.remove_many(parent, &names) {
-                Ok(()) => {
-                    removed = true;
-                    start += take;
-                }
-                Err(error) if error.is_transport() => {
-                    return Err(vfsi_core::error_from_rpc(error, chunk[0].1));
-                }
-                Err(error) if resource_status(error.status) && take > 1 => {
-                    let prefix = error.op_index.min(take.saturating_sub(1));
-                    removed |= prefix > 0;
-                    start += prefix;
-                }
-                Err(error) => {
-                    let status = error.status;
-                    let index = error.op_index.min(take.saturating_sub(1));
-                    removed |= index > 0;
-                    let (name, root) = &chunk[index];
-                    if status == nfsstat4_NFS4ERR_NOENT {
-                        // Already gone.
-                        removed = true;
-                    } else if remove_status_is_retryable(status) {
-                        removed |= self.retry_remove_name(
-                            parent,
-                            name,
-                            *root,
-                            first_error,
-                            options,
-                            error,
-                        )?;
-                    } else {
-                        // A non-empty directory here means a concurrent actor
-                        // added entries; record it and move on.
-                        note_error(
-                            first_error,
-                            vfsi_core::error_from_rpc(error, *root),
-                            options,
-                        )?;
-                    }
-                    start += index + 1;
-                }
+            // No cancellation allocation on a healthy batch. A snapshot only
+            // on the error path lets later outcomes update roots independently.
+            let stopped = chunk
+                .iter()
+                .any(|(_, root, _)| roots[*root].stopped(options))
+                .then(|| {
+                    chunk
+                        .iter()
+                        .map(|(_, root, _)| roots[*root].stopped(options))
+                        .collect::<Vec<_>>()
+                });
+            let active = chunk
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| stopped.as_ref().is_none_or(|stopped| !stopped[*index]));
+            let names: Vec<_> = active
+                .clone()
+                .map(|(_, (name, _, _))| name.to_vec())
+                .collect();
+            if names.is_empty() {
+                start += take;
+                continue;
             }
+            let outcomes = self
+                .nfs
+                .remove_many(parent, &names)
+                .unwrap_or_else(|cause| {
+                    names
+                        .iter()
+                        .map(|_| Err(vfsi_core::OpError::not_attempted(cause.clone())))
+                        .collect()
+                });
+            if outcomes.len() != names.len() {
+                for (_, (_, root, _)) in active {
+                    let _ = note_read_error(
+                        roots,
+                        *root,
+                        VfError::invalid_reply(None, "invalid recursive REMOVE count"),
+                        options,
+                    );
+                }
+                return Err(RemoveStop::Fatal);
+            }
+            let mut fatal = false;
+            for ((_, (name, root, is_root)), result) in active.zip(outcomes) {
+                let error = match result {
+                    Ok(()) => {
+                        if *is_root {
+                            roots[*root].complete();
+                        } else {
+                            roots[*root].touch();
+                        }
+                        removed = true;
+                        continue;
+                    }
+                    Err(error) => error,
+                };
+                let next = if error.state() == vfsi_core::FailureState::Unknown
+                    || error.cause().is_transport()
+                {
+                    note_error(roots, *root, error, options)
+                } else {
+                    match error.cause().status() {
+                        Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_NOENT)) => {
+                            if *is_root {
+                                roots[*root].complete();
+                            } else {
+                                roots[*root].touch();
+                            }
+                            removed = true;
+                            Ok(())
+                        }
+                        Some(vfsi_core::StatusCode::Nfs(status))
+                            if remove_status_is_retryable(status) =>
+                        {
+                            self.retry_remove_name(
+                                parent,
+                                name,
+                                *root,
+                                roots,
+                                options,
+                                error.into_cause(),
+                            )
+                            .map(|changed| {
+                                if changed && *is_root {
+                                    roots[*root].complete();
+                                }
+                                removed |= changed;
+                            })
+                        }
+                        _ => note_error(roots, *root, error, options),
+                    }
+                };
+                fatal |= matches!(next, Err(RemoveStop::Fatal));
+            }
+            if fatal {
+                return Err(RemoveStop::Fatal);
+            }
+            start += take;
         }
         Ok(removed)
     }
@@ -666,9 +919,9 @@ impl NfsVecFs {
         dir: &NfsFh,
         names: &[Vec<u8>],
         root: usize,
-        first_error: &mut Option<VfError>,
+        roots: &mut [RemoveRoot],
         options: RemoveOptions,
-    ) -> VfResult<Vec<(NfsFh, Box<[u8]>)>> {
+    ) -> RemoveRun<Vec<(NfsFh, Box<[u8]>)>> {
         let mut children = Vec::new();
         let mut start = 0;
         while start < names.len() {
@@ -678,19 +931,26 @@ impl NfsVecFs {
                 options.batch_size().map_or(0, std::num::NonZeroUsize::get),
             );
             let chunk = &names[start..start + take];
-            let ops: Vec<(NfsFh, Vec<u8>)> = chunk
+            let ops: Vec<_> = chunk
                 .iter()
                 .map(|name| (dir.clone(), name.clone()))
                 .collect();
             match self.nfs.lookup_many(&ops) {
                 Ok(results) => {
+                    if results.len() != chunk.len() {
+                        note_read_error(
+                            roots,
+                            root,
+                            VfError::invalid_reply(None, "invalid recursive LOOKUP count"),
+                            options,
+                        )?;
+                        return Err(RemoveStop::Root);
+                    }
                     if take > 1
                         && results
                             .iter()
-                            .any(|result| matches!(result, Err(status) if resource_status(*status)))
+                            .any(|result| matches!(result,Err(status) if resource_status(*status)))
                     {
-                        // LOOKUP is read-only, so a rejected compound can be
-                        // retried in smaller pieces without replay concerns.
                         continue;
                     }
                     for (name, result) in chunk.iter().zip(results) {
@@ -698,18 +958,16 @@ impl NfsVecFs {
                             Ok(fh) => children.push((fh, Box::from(name.as_slice()))),
                             Err(nfsstat4_NFS4ERR_NOENT) => {}
                             Err(status) => {
-                                note_error(first_error, VfError::nfs(root, status), options)?;
+                                note_read_error(roots, root, VfError::nfs(None, status), options)?
                             }
                         }
                     }
                     start += take;
                 }
-                Err(error) if error.is_transport() => {
-                    return Err(vfsi_core::error_from_rpc(error, root));
-                }
-                Err(error) if resource_status(error.status) && take > 1 => {}
+                Err(error)
+                    if !error.is_transport() && resource_status(error.status) && take > 1 => {}
                 Err(error) => {
-                    note_error(first_error, vfsi_core::error_from_rpc(error, root), options)?;
+                    note_read_error(roots, root, vfsi_core::error_from_rpc(error, None), options)?;
                     start += take;
                 }
             }
@@ -724,34 +982,382 @@ impl NfsVecFs {
         dir: &NfsFh,
         name: &[u8],
         root: usize,
-        first_error: &mut Option<VfError>,
+        roots: &mut [RemoveRoot],
         options: RemoveOptions,
-        initial_error: RpcError,
-    ) -> VfResult<bool> {
+        initial_error: VfError,
+    ) -> RemoveRun<bool> {
         let owned = name.to_vec();
-        // The caller already made the initial attempt. `retries` counts
-        // additional attempts, not an unconditional extra call plus retries.
         let mut last_error = initial_error;
         for attempt in 0..options.retries() {
             std::thread::sleep(remove_backoff(attempt.saturating_add(1)));
-            match self.nfs.remove_many(dir, std::slice::from_ref(&owned)) {
-                Ok(()) => return Ok(true),
-                Err(error) if error.is_transport() => {
-                    return Err(vfsi_core::error_from_rpc(error, root));
+            match one_remove_outcome(self.nfs.remove_many(dir, std::slice::from_ref(&owned))) {
+                Ok(()) => {
+                    roots[root].touch();
+                    return Ok(true);
                 }
-                Err(error) if error.status == nfsstat4_NFS4ERR_NOENT => return Ok(true),
-                Err(error) if remove_status_is_retryable(error.status) => last_error = error,
                 Err(error) => {
-                    note_error(first_error, vfsi_core::error_from_rpc(error, root), options)?;
-                    return Ok(false);
+                    if error.state() == vfsi_core::FailureState::Unknown
+                        || error.cause().is_transport()
+                    {
+                        note_error(roots, root, error, options)?;
+                        return Ok(false);
+                    }
+                    match error.cause().status() {
+                        Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_NOENT)) => {
+                            roots[root].touch();
+                            return Ok(true);
+                        }
+                        Some(vfsi_core::StatusCode::Nfs(status))
+                            if remove_status_is_retryable(status) =>
+                        {
+                            roots[root].touch();
+                            last_error = error.into_cause();
+                        }
+                        _ => {
+                            note_error(roots, root, error, options)?;
+                            return Ok(false);
+                        }
+                    }
                 }
             }
         }
         note_error(
-            first_error,
-            vfsi_core::error_from_rpc(last_error, root),
+            roots,
+            root,
+            vfsi_core::OpError::failed(last_error, None),
             options,
         )?;
         Ok(false)
+    }
+}
+
+impl NfsVecFs {
+    pub(super) fn vlistdir_pages_nfs(
+        &mut self,
+        dirs: &[&Path],
+        masks: AttrMask,
+        cursors: Vec<Option<DirPageCursor>>,
+        page_size: usize,
+        max_entries: usize,
+        follow_symlinks: bool,
+    ) -> vfsi_core::VecResult<vfsi_sync::BackendDirectoryPage> {
+        use vfsi_core::OpError;
+        if dirs.len() != cursors.len() || page_size == 0 {
+            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+        }
+        if dirs.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !self.recovery_in_progress && cursors.iter().all(Option::is_none) {
+            return self.vector_read_with_recovery(
+                |_, _| true,
+                |client, indices| match indices {
+                    None => client.vlistdir_pages_impl(
+                        dirs,
+                        masks,
+                        (0..dirs.len()).map(|_| None).collect(),
+                        page_size,
+                        max_entries,
+                        follow_symlinks,
+                    ),
+                    Some(indices) => {
+                        let pending: Vec<_> = indices.iter().map(|&index| dirs[index]).collect();
+                        client.vlistdir_pages_impl(
+                            &pending,
+                            masks,
+                            (0..indices.len()).map(|_| None).collect(),
+                            page_size,
+                            max_entries,
+                            follow_symlinks,
+                        )
+                    }
+                },
+            );
+        }
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::BeforeDirectoryPage {
+            continuation: cursors.iter().any(Option::is_some),
+        })?;
+        let fresh: Vec<_> = cursors
+            .iter()
+            .enumerate()
+            .filter_map(|(index, cursor)| cursor.is_none().then_some(index))
+            .collect();
+        let mut states: Vec<Option<vfsi_core::OpResult<NfsDirectoryCursor>>> =
+            (0..dirs.len()).map(|_| None).collect();
+        let from_cause = |cause: VfError| {
+            if cause.is_transport() {
+                OpError::unknown(cause, None)
+            } else {
+                OpError::failed(cause, None)
+            }
+        };
+        let state = |fh| NfsDirectoryCursor {
+            fh,
+            cookie: 0,
+            seen_cookies: std::collections::HashSet::new(),
+            buffered: VecDeque::new(),
+        };
+        if !follow_symlinks || fresh.len() == 1 {
+            // Keep atomic no-follow component resolution and the scalar deep
+            // path fast path; failures remain local to their logical input.
+            let mut fatal: Option<VfError> = None;
+            for &index in &fresh {
+                let result = if let Some(cause) = &fatal {
+                    Err(OpError::not_attempted(cause.clone()))
+                } else {
+                    self.resolve_directory_path(dirs[index], follow_symlinks)
+                        .map_err(|cause| {
+                            if cause.is_transport() {
+                                fatal = Some(cause.clone());
+                            }
+                            from_cause(cause)
+                        })
+                };
+                states[index] = Some(result.map(state));
+            }
+        } else if !fresh.is_empty() {
+            let files: Vec<_> = fresh
+                .iter()
+                .map(|&index| FileOperand::from_os_path(dirs[index]))
+                .collect();
+            let refs: Vec<_> = files.iter().collect();
+            let resolved = self.resolve_files_nfs(&refs, true).unwrap_or_else(|cause| {
+                fresh
+                    .iter()
+                    .map(|_| Err(OpError::not_attempted(cause.clone())))
+                    .collect()
+            });
+            for (&index, result) in fresh.iter().zip(resolved) {
+                states[index] = Some(result.and_then(|(fh, kind)| {
+                    if kind != nfs_ftype4_NF4DIR {
+                        Err(OpError::failed(
+                            VfError::nfs(None, nfsstat4_NFS4ERR_NOTDIR),
+                            None,
+                        ))
+                    } else {
+                        Ok(state(fh))
+                    }
+                }));
+            }
+        }
+        let ids = request_mask_to_attr_list(&masks);
+        let mut children = Vec::new();
+        let mut child_indices = Vec::new();
+        let mut is_child = vec![false; dirs.len()];
+        for (index, cursor) in cursors.into_iter().enumerate() {
+            if let Some(cursor) = cursor {
+                if cursor.is::<NfsChildDirectoryCursor>() {
+                    let child = cursor
+                        .into_state::<NfsChildDirectoryCursor>()
+                        .expect("checked native child type");
+                    is_child[index] = true;
+                    child_indices.push(index);
+                    children.push((child.parent, child.name.into_vec()));
+                } else {
+                    states[index] = Some(
+                        cursor
+                            .into_state::<NfsDirectoryCursor>()
+                            .map_err(OpError::not_attempted),
+                    );
+                }
+            }
+        }
+        let child_pages = self
+            .nfs
+            .readdir_children_bounded(&children, &ids, 32 * 1024)
+            .unwrap_or_else(|cause| {
+                child_indices
+                    .iter()
+                    .map(|_| Err(OpError::not_attempted(cause.clone())))
+                    .collect()
+            });
+        let mut fatal = child_pages
+            .iter()
+            .filter_map(|r| r.as_ref().err())
+            .find(|error| error.cause().is_transport())
+            .map(|error| error.cause().clone());
+        for (&index, result) in child_indices.iter().zip(child_pages) {
+            states[index] = Some(result.and_then(|page| {
+                let mut seen_cookies = std::collections::HashSet::new();
+                validate_readdir_progress(0, page.cookie, &mut seen_cookies, None)
+                    .map_err(|cause| OpError::unknown(cause, None))?;
+                Ok(NfsDirectoryCursor {
+                    fh: page.fh,
+                    cookie: page.cookie,
+                    seen_cookies,
+                    buffered: page.entries.into(),
+                })
+            }));
+        }
+        let active: Vec<_> = states
+            .iter()
+            .enumerate()
+            .filter_map(|(index, result)| {
+                result
+                    .as_ref()
+                    .and_then(|r| r.as_ref().ok())
+                    .filter(|state| state.buffered.is_empty() && !is_child[index])
+                    .map(|_| index)
+            })
+            .collect();
+        if !active.is_empty() {
+            let pages = if let Some(cause) = fatal.take() {
+                active
+                    .iter()
+                    .map(|_| Err(OpError::not_attempted(cause.clone())))
+                    .collect()
+            } else {
+                let operations: Vec<_> = active
+                    .iter()
+                    .map(|&index| {
+                        let state = states[index].as_ref().unwrap().as_ref().unwrap();
+                        (state.fh.clone(), state.cookie)
+                    })
+                    .collect();
+                self.nfs
+                    .readdir_pages_bounded(&operations, &ids, 32 * 1024)
+                    .unwrap_or_else(|cause| {
+                        active
+                            .iter()
+                            .map(|_| Err(OpError::not_attempted(cause.clone())))
+                            .collect()
+                    })
+            };
+            for (&index, result) in active.iter().zip(pages) {
+                let current = states[index].take().expect("active directory");
+                states[index] = Some(current.and_then(|mut state| {
+                    let (entries, cookie) = result.map_err(|error| {
+                        // Fresh identity resolution already performed confirmed
+                        // work for this input even when its READDIR stayed unsent.
+                        if fresh.binary_search(&index).is_ok()
+                            && error.state() == vfsi_core::FailureState::NotAttempted
+                        {
+                            OpError::failed(error.into_cause(), None)
+                        } else {
+                            error
+                        }
+                    })?;
+                    validate_readdir_progress(state.cookie, cookie, &mut state.seen_cookies, None)
+                        .map_err(|cause| OpError::unknown(cause, None))?;
+                    state.cookie = cookie;
+                    state.buffered = entries.into();
+                    Ok(state)
+                }));
+            }
+        }
+        Ok(states
+            .into_iter()
+            .enumerate()
+            .map(|(index, result)| {
+                result
+                    .expect("all directory page inputs assigned")
+                    .and_then(|mut state| {
+                        let mut output = Vec::new();
+                        let mut seeds = Vec::new();
+                        for entry in state.buffered.drain(..state.buffered.len().min(page_size)) {
+                            let mut attrs = VfAttrs {
+                                file: FileOperand::from_os_path(
+                                    &dirs[index].join(path_from_bytes(&entry.name)),
+                                ),
+                                masks,
+                                ..Default::default()
+                            };
+                            let values = parse_attr_list(&ids, &entry.attrs)
+                                .map_err(|cause| OpError::unknown(cause, None))?;
+                            apply_attrs(&mut attrs, &values);
+                            seeds.push((attrs.ftype == VfType::Directory).then(|| {
+                                DirPageCursor::new(NfsChildDirectoryCursor {
+                                    parent: state.fh.clone(),
+                                    name: entry.name.into_boxed_slice(),
+                                })
+                            }));
+                            output.push(attrs);
+                        }
+                        let next = (!state.buffered.is_empty() || state.cookie != 0)
+                            .then(|| DirPageCursor::new(state));
+                        Ok((output, next, seeds))
+                    })
+            })
+            .collect())
+    }
+}
+
+#[cfg(test)]
+mod root_state_tests {
+    use super::*;
+    use vfsi_core::{FailureState, OpError};
+
+    #[test]
+    fn fatal_root_cause_replaces_an_earlier_ordinary_error_without_losing_completed_roots() {
+        let mut roots = vec![
+            RemoveRoot::Pending,
+            RemoveRoot::Pending,
+            RemoveRoot::Complete,
+        ];
+        let options = RemoveOptions::new().with_continue_on_error(true);
+        assert!(
+            note_error(
+                &mut roots,
+                0,
+                OpError::failed(VfError::errno(None, libc::EACCES as u32), None),
+                options
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            note_error(
+                &mut roots,
+                0,
+                OpError::failed(VfError::transport(None, "later read failed"), None),
+                options
+            ),
+            Err(RemoveStop::Fatal)
+        ));
+        let results = finish_remove_roots(roots, true);
+        assert!(results[0].as_ref().unwrap_err().cause().is_transport());
+        assert_eq!(
+            results[0].as_ref().unwrap_err().state(),
+            FailureState::Failed
+        );
+        assert_eq!(
+            results[1].as_ref().unwrap_err().state(),
+            FailureState::NotAttempted
+        );
+        assert!(results[2].is_ok());
+    }
+
+    #[test]
+    fn root_completion_never_erases_an_error_or_lost_mutation_reply() {
+        let mut roots = vec![RemoveRoot::Pending];
+        let options = RemoveOptions::new().with_continue_on_error(true);
+        assert!(
+            note_error(
+                &mut roots,
+                0,
+                OpError::not_attempted(VfError::errno(None, libc::EACCES as u32)),
+                options
+            )
+            .is_ok()
+        );
+        roots[0].complete();
+        assert!(
+            matches!(&roots[0],RemoveRoot::Failed(error) if error.state()==FailureState::Failed)
+        );
+        assert!(matches!(
+            note_error(
+                &mut roots,
+                0,
+                OpError::unknown(VfError::nfs(None, nfsstat4_NFS4ERR_ACCESS), None),
+                options
+            ),
+            Err(RemoveStop::Fatal)
+        ));
+        roots[0].complete();
+        let results = finish_remove_roots(roots, true);
+        assert_eq!(
+            results[0].as_ref().unwrap_err().state(),
+            FailureState::Unknown
+        );
     }
 }

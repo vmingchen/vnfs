@@ -55,9 +55,15 @@ fn copy_write_transport_maps_again_after_an_earlier_semantic_failure() {
         std::fs::write(root.0.join(name), b"ok").unwrap();
     }
     let mut backend = FaultBackend::new(&root.0, None);
-    backend.write_errors.extend([
-        VfError::errno(0, ERR_ACCES),
-        VfError::transport(Some(0), "later write disconnected"),
+    backend.write_item_errors.extend([
+        (
+            0,
+            vfsi_core::OpError::failed(VfError::errno(None, ERR_ACCES), None),
+        ),
+        (
+            1,
+            vfsi_core::OpError::unknown(VfError::transport(None, "later write disconnected"), None),
+        ),
     ]);
     let calls = backend.write_calls.clone();
     Python::attach(|py| {
@@ -76,21 +82,18 @@ fn copy_write_transport_maps_again_after_an_earlier_semantic_failure() {
     });
     assert_eq!(
         *calls.lock().unwrap(),
-        vec![
-            vec![PathBuf::from("/x"), "/y".into(), "/z".into()],
-            vec![PathBuf::from("/y"), "/z".into()],
-        ]
+        vec![vec![PathBuf::from("/x"), "/y".into(), "/z".into()]]
     );
 }
 
 #[test]
-fn descriptor_read_transport_maps_after_semantic_filtering() {
+fn descriptor_read_transport_keeps_original_position_without_replay() {
     Python::initialize();
     let root = TestRoot::new();
     let mut backend = FaultBackend::new(&root.0, None);
-    backend.read_errors.extend([
-        VfError::errno(0, ERR_NOENT),
-        VfError::transport(Some(1), "read disconnected"),
+    backend.read_item_errors.extend([
+        (0, VfError::errno(0, ERR_NOENT)),
+        (2, VfError::transport(Some(2), "read disconnected")),
     ]);
     let calls = backend.read_calls.clone();
     Python::attach(|py| {
@@ -99,17 +102,17 @@ fn descriptor_read_transport_maps_after_semantic_filtering() {
             .unwrap_err();
         assert_transport_index(py, error, Some(2));
     });
-    assert_eq!(calls.lock().unwrap().len(), 2);
+    assert_eq!(calls.lock().unwrap().len(), 1);
 }
 
 #[test]
-fn attribute_transport_maps_after_semantic_filtering_for_both_follow_modes() {
+fn attribute_transport_keeps_original_slot_without_replay_for_both_follow_modes() {
     let root = TestRoot::new();
     for follow in [false, true] {
         let mut backend = FaultBackend::new(&root.0, None);
-        backend.attrs_errors.extend([
-            Some(VfError::errno(0, ERR_NOENT)),
-            Some(VfError::transport(Some(1), "attrs disconnected")),
+        backend.attrs_item_errors.extend([
+            (0, VfError::errno(0, ERR_NOENT)),
+            (2, VfError::transport(Some(2), "attrs disconnected")),
         ]);
         let error = attrs_many_impl(
             &mut backend,
@@ -120,7 +123,7 @@ fn attribute_transport_maps_after_semantic_filtering_for_both_follow_modes() {
         .unwrap_err();
         assert!(error.is_transport());
         assert_eq!(error.index(), Some(2));
-        assert_eq!(backend.attrs_calls.lock().unwrap().len(), 2);
+        assert_eq!(backend.attrs_calls.lock().unwrap().len(), 1);
     }
 }
 
@@ -129,9 +132,9 @@ fn range_size_lookup_transport_uses_original_path_index() {
     Python::initialize();
     let root = TestRoot::new();
     let mut backend = FaultBackend::new(&root.0, None);
-    backend.attrs_errors.extend([
-        Some(VfError::errno(0, ERR_NOENT)),
-        Some(VfError::transport(Some(0), "range attrs disconnected")),
+    backend.attrs_item_errors.extend([
+        (0, VfError::errno(0, ERR_NOENT)),
+        (1, VfError::transport(Some(1), "range attrs disconnected")),
     ]);
     let reads = backend.read_calls.clone();
     Python::attach(|py| {
@@ -151,9 +154,9 @@ fn copy_identity_transport_maps_flattened_and_filtered_attribute_indices() {
         std::fs::write(root.0.join(name), b"ok").unwrap();
     }
     let mut backend = FaultBackend::new(&root.0, None);
-    backend.attrs_errors.extend([
-        Some(VfError::errno(0, ERR_NOENT)),
-        Some(VfError::transport(Some(1), "copy identity disconnected")),
+    backend.attrs_item_errors.extend([
+        (0, VfError::errno(0, ERR_NOENT)),
+        (2, VfError::transport(Some(2), "copy identity disconnected")),
     ]);
     let writes = backend.write_calls.clone();
     Python::attach(|py| {
@@ -248,9 +251,18 @@ fn oversized_extent_transport_maps_again_after_semantic_filtering() {
     let root = TestRoot::new();
     let mut backend = oversized_backend(&root);
     std::fs::write(root.0.join("other"), vec![43; 2048]).unwrap();
-    backend.extent_errors.extend([
-        VfError::errno(0, ERR_ACCES),
-        VfError::transport(Some(0), "later extent disconnected"),
+    backend.extent_item_errors.extend([
+        (
+            0,
+            vfsi_core::OpError::failed(VfError::errno(None, ERR_ACCES), None),
+        ),
+        (
+            1,
+            vfsi_core::OpError::unknown(
+                VfError::transport(None, "later extent disconnected"),
+                None,
+            ),
+        ),
     ]);
     let calls = backend.extent_calls.clone();
     let error = Python::attach(|py| {
@@ -267,14 +279,9 @@ fn oversized_extent_transport_maps_again_after_semantic_filtering() {
             .unwrap_err()
     });
     let calls = calls.lock().unwrap();
-    assert_eq!(calls.len(), 2);
-    assert_eq!(calls[1].len(), 1);
-    let expected = if calls[1][0] == Path::new("/large") {
-        1
-    } else {
-        3
-    };
-    Python::attach(|py| assert_transport_index(py, error, Some(expected)));
+    assert_eq!(calls.len(), 1, "no successful or failed slot is replayed");
+    assert_eq!(calls[0].len(), 2);
+    Python::attach(|py| assert_transport_index(py, error, Some(3)));
 }
 
 #[test]

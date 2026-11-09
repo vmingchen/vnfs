@@ -46,14 +46,6 @@ fn unique_open_handles_for_cleanup(opened: &[FileOperand]) -> Vec<FileOperand> {
         .collect()
 }
 
-pub(super) fn confirmed_close_prefix(error: &VfError, count: usize) -> usize {
-    if error.is_transport() {
-        0
-    } else {
-        error.index().unwrap_or(0).min(count)
-    }
-}
-
 fn insert_c_file(
     fs: &vfsi_fs,
     files: &mut std::collections::HashMap<i32, CFile>,
@@ -224,7 +216,8 @@ pub unsafe extern "C" fn vfsi_openv(
                 fail_results(results, failure, false);
                 return failure;
             }
-            match backend.vopen_raw_impl(&refs, &flags, &modes) {
+            match vfsi_sync::backend::helpers::open_raw_batch(&mut **backend, &refs, &flags, &modes)
+            {
                 Ok(opened) => opened,
                 Err(error) => {
                     let failure = vfsi_result::from_error(error);
@@ -339,29 +332,12 @@ pub unsafe extern "C" fn vfsi_closev(
             Ok(backend) => backend,
             Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
         };
-        match backend.vclose_impl(&files) {
-            Ok(()) => {
-                if let Ok(mut table) = fs.files.lock() {
-                    for fd in fds {
-                        table.remove(fd);
-                    }
-                }
-                complete_results(results);
-                vfsi_result::success(count)
+        let outcomes = backend.vclose_impl(&files);
+        let mut table = fs.files.lock().ok();
+        unit_results("close", results, outcomes, |index| {
+            if let Some(table) = &mut table {
+                table.remove(&fds[index]);
             }
-            Err(error) => {
-                let closed_prefix = confirmed_close_prefix(&error, fds.len());
-                if closed_prefix > 0 {
-                    if let Ok(mut table) = fs.files.lock() {
-                        for fd in fds.iter().take(closed_prefix) {
-                            table.remove(fd);
-                        }
-                    }
-                }
-                let failure = vfsi_result::from_error(error);
-                fail_results(results, failure, true);
-                failure
-            }
-        }
+        })
     })
 }

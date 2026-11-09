@@ -1,6 +1,6 @@
 [package]
 name = "vfsi-uring"
-version = "0.1.6"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -17,6 +17,7 @@ vfsi-local = { workspace = true }
 vfsi-sync = { workspace = true }
 
 [dev-dependencies]
+vfsi-sync = { workspace = true, features = ["test-support"] }
 vfsi-posix = { workspace = true }
 tempfile = "3"
 

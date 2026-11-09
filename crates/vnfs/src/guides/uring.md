@@ -15,7 +15,7 @@ use vnfs::files::{Vfsi, VfsiExt, OpenOp, OpenFlags, ReadOp};
 
 # fn main() -> vnfs::Result<()> {
 let fs = Uring::new("/data")?;
-let files = fs.vopen(&[
+let files = fs.open_batch(&[
     OpenOp::new("/file-1", OpenFlags::READ),
     OpenOp::new("/file-2", OpenFlags::READ),
 ])?;
@@ -24,7 +24,12 @@ let result = fs.vread(files.iter().map(|file| ReadOp::range(file, 0, 4096)),
 let close = fs.close_files(files);
 let results = result?;
 close?;
-for result in results { println!("{} bytes", result.bytes_read()); }
+for outcome in results {
+    match outcome {
+        Ok(read) => println!("{} bytes", read.bytes_read()),
+        Err(error) => eprintln!("{error}"),
+    }
+}
 # Ok(())
 # }
 ```

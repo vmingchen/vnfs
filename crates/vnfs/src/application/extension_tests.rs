@@ -8,37 +8,45 @@ fn page_faults_do_not_replay_transport_failures_and_reject_malformed_shapes() {
     use crate::{ControlFlow, ListDirOptions, ResourceLimits};
     for malformed in 0..4 {
         let mut calls = 0;
-        let result = visit_directory_pages(
-            &["/a"],
-            ListDirOptions::new(),
-            ResourceLimits::default(),
-            |_| Ok(32),
-            |_| Ok(()),
-            |_, _, _, _, _| {
-                calls += 1;
-                match malformed {
-                    0 => Err(crate::Error::transport(None, "lost reply")),
-                    1 => Ok(Vec::new()),
-                    2 => Ok(vec![(
-                        DirectoryListing {
-                            path: "/wrong".into(),
-                            entries: Vec::new(),
-                        },
-                        None,
-                        Vec::new(),
-                    )]),
-                    _ => Ok(vec![(
-                        DirectoryListing {
-                            path: "/a".into(),
-                            entries: Vec::new(),
-                        },
-                        Some(vfsi_sync::DirPageCursor::new(0usize)),
-                        Vec::new(),
-                    )]),
-                }
-            },
-            |_, _| -> Result<ControlFlow<()>> { panic!("invalid pages must not be delivered") },
-        );
+        let result = {
+            let page_inputs = &["/a"];
+            vfsi_core::internal::collect_vec_result(
+                visit_directory_pages(
+                    page_inputs,
+                    ListDirOptions::new(),
+                    ResourceLimits::default(),
+                    |_| Ok(32),
+                    |_| Ok(()),
+                    |_, _, _, _, _| {
+                        calls += 1;
+                        match malformed {
+                            0 => Err(crate::Error::transport(None, "lost reply")),
+                            1 => Ok(Vec::new()),
+                            2 => Ok(vec![Ok((
+                                DirectoryListing {
+                                    path: "/wrong".into(),
+                                    entries: Vec::new(),
+                                },
+                                None,
+                                Vec::new(),
+                            ))]),
+                            _ => Ok(vec![Ok((
+                                DirectoryListing {
+                                    path: "/a".into(),
+                                    entries: Vec::new(),
+                                },
+                                Some(vfsi_sync::DirPageCursor::new(0usize)),
+                                Vec::new(),
+                            ))]),
+                        }
+                    },
+                    |_, _| -> Result<ControlFlow<()>> {
+                        panic!("invalid pages must not be delivered")
+                    },
+                ),
+                page_inputs.len(),
+            )
+        };
         assert!(result.unwrap_err().is_transport());
         assert_eq!(calls, 1);
     }
@@ -49,19 +57,22 @@ fn page_faults_do_not_replay_transport_failures_and_reject_malformed_shapes() {
         ResourceLimits::default(),
         |_| Ok(32),
         |_| Ok(()),
-        |paths, _, _, _, _| {
+        |_, _, _, _, _| {
             calls += 1;
-            if paths.len() == 2 {
-                return Err(crate::Error::errno(1, libc::ENOENT as u32));
-            }
-            Ok(vec![(
-                DirectoryListing {
-                    path: "/a".into(),
-                    entries: Vec::new(),
-                },
-                None,
-                Vec::new(),
-            )])
+            Ok(vec![
+                Ok((
+                    DirectoryListing {
+                        path: "/a".into(),
+                        entries: vec![],
+                    },
+                    None,
+                    vec![],
+                )),
+                Err(vfsi_core::OpError::failed(
+                    crate::Error::errno(None, libc::ENOENT as u32),
+                    None,
+                )),
+            ])
         },
         |index, page| {
             assert_eq!(index, 0);
@@ -70,8 +81,16 @@ fn page_faults_do_not_replay_transport_failures_and_reject_malformed_shapes() {
         },
     )
     .unwrap();
-    assert_eq!(result, [crate::TraversalCompletion::Stopped]);
-    assert_eq!(calls, 2, "only a known semantic prefix is re-fetched");
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0], Ok(crate::TraversalCompletion::Stopped));
+    assert_eq!(
+        result[1].as_ref().unwrap_err().cause().raw_code(),
+        libc::ENOENT as u32
+    );
+    assert_eq!(
+        calls, 1,
+        "successful pages and failed slots are consumed without prefix replay"
+    );
 }
 
 #[test]
@@ -91,7 +110,7 @@ fn directory_continuations_run_in_vector_waves_and_cancellation_marks_unfinished
             |_| Ok(()),
             |paths, cursors, _, _, _| {
                 widths.push(paths.len());
-                paths
+                Ok(paths
                     .iter()
                     .zip(cursors)
                     .map(|(path, cursor)| {
@@ -111,7 +130,10 @@ fn directory_continuations_run_in_vector_waves_and_cancellation_marks_unfinished
                             Vec::new(),
                         ))
                     })
-                    .collect()
+                    .map(|result: Result<_>| {
+                        result.map_err(|cause| vfsi_core::OpError::failed(cause, None))
+                    })
+                    .collect())
             },
             |index, page| {
                 Ok(
@@ -126,10 +148,22 @@ fn directory_continuations_run_in_vector_waves_and_cancellation_marks_unfinished
         .unwrap();
         if stop {
             assert_eq!(widths, [2, 2]);
-            assert_eq!(result, [crate::TraversalCompletion::Stopped; 2]);
+            assert_eq!(
+                result,
+                [
+                    Ok(crate::TraversalCompletion::Stopped),
+                    Ok(crate::TraversalCompletion::Stopped)
+                ]
+            );
         } else {
             assert_eq!(widths, [2, 2, 2]);
-            assert_eq!(result, [crate::TraversalCompletion::Complete; 2]);
+            assert_eq!(
+                result,
+                [
+                    Ok(crate::TraversalCompletion::Complete),
+                    Ok(crate::TraversalCompletion::Complete)
+                ]
+            );
         }
     }
 }
@@ -195,7 +229,7 @@ fn unified_collection_keeps_grouping_limits_and_generic_metadata_paths() {
     std::os::unix::fs::symlink(root.path().join("a"), root.path().join("link")).unwrap();
     let paths = vec![String::from("/link"), String::from("/b")];
     let metadata = fs
-        .vgetattrs(
+        .getattrs_all(
             &paths,
             crate::AttrsOptions::new().with_follow_final_symlink(false),
         )
@@ -203,7 +237,7 @@ fn unified_collection_keeps_grouping_limits_and_generic_metadata_paths() {
     assert!(metadata[0].is_symlink());
     assert!(metadata[1].is_dir());
     assert!(
-        fs.vgetattrs(
+        fs.getattrs_all(
             &[std::path::PathBuf::from("/link")],
             crate::AttrsOptions::new().with_follow_final_symlink(false)
         )
@@ -211,7 +245,7 @@ fn unified_collection_keeps_grouping_limits_and_generic_metadata_paths() {
             .is_symlink()
     );
     assert!(
-        fs.vgetattrs(
+        fs.getattrs_all(
             &["/link"],
             crate::AttrsOptions::new().with_follow_final_symlink(false)
         )
@@ -219,7 +253,7 @@ fn unified_collection_keeps_grouping_limits_and_generic_metadata_paths() {
             .is_symlink()
     );
     assert!(
-        fs.vgetattrs::<String>(
+        fs.getattrs_all::<String>(
             &[],
             crate::AttrsOptions::new().with_follow_final_symlink(false)
         )
@@ -308,7 +342,7 @@ fn unified_visiting_preserves_depth_defaults_fields_and_failures() {
             ControlFlow::Break(())
         ))
         .unwrap(),
-        [TraversalCompletion::Stopped]
+        [TraversalCompletion::Stopped; 2]
     );
     let error = fs
         .visit_entries_with_options(&["/other", "/tree"], recursive, |index, _| {
@@ -341,11 +375,11 @@ fn removal_modes_preserve_roots_symlinks_and_vector_indices() {
     std::fs::create_dir_all(root.path().join("tree/nested")).unwrap();
     std::fs::write(root.path().join("tree/nested/file"), b"keep").unwrap();
     assert!(
-        fs.vremove(&["/tree"], RemoveMode::Entry, Default::default())
+        fs.removes_all(&["/tree"], RemoveMode::Entry, Default::default())
             .is_err()
     );
     assert!(root.path().join("tree/nested/file").exists());
-    fs.vremove(&["/tree"], RemoveMode::Contents, Default::default())
+    fs.removes_all(&["/tree"], RemoveMode::Contents, Default::default())
         .unwrap();
     assert!(root.path().join("tree").is_dir());
     assert!(
@@ -359,7 +393,7 @@ fn removal_modes_preserve_roots_symlinks_and_vector_indices() {
     std::fs::write(root.path().join("outside/file"), b"safe").unwrap();
     symlink(root.path().join("outside"), root.path().join("link")).unwrap();
     let error = fs
-        .vremove(
+        .removes_all(
             &["/tree", "/link"],
             RemoveMode::Contents,
             Default::default(),
@@ -368,13 +402,13 @@ fn removal_modes_preserve_roots_symlinks_and_vector_indices() {
     assert_eq!(error.index(), Some(1));
     assert!(root.path().join("tree").is_dir());
     assert!(root.path().join("outside/file").exists());
-    fs.vremove(&["/link"], RemoveMode::Tree, Default::default())
+    fs.removes_all(&["/link"], RemoveMode::Tree, Default::default())
         .unwrap();
     assert!(root.path().join("outside/file").exists());
-    fs.vremove(&["/outside"], RemoveMode::Tree, Default::default())
+    fs.removes_all(&["/outside"], RemoveMode::Tree, Default::default())
         .unwrap();
     assert!(!root.path().join("outside").exists());
-    fs.vremove(&["/tree"], RemoveMode::Entry, Default::default())
+    fs.removes_all(&["/tree"], RemoveMode::Entry, Default::default())
         .unwrap();
 
     for mode in [RemoveMode::Entry, RemoveMode::Tree, RemoveMode::Contents] {
@@ -385,7 +419,7 @@ fn removal_modes_preserve_roots_symlinks_and_vector_indices() {
     // The mounted generic remover rejects unsupported custom policy. Contents
     // must forward it rather than silently falling back to default options.
     assert!(
-        fs.vremove(
+        fs.removes_all(
             &["/policy"],
             RemoveMode::Contents,
             RemoveOptions::new().with_retries(0)
@@ -409,7 +443,7 @@ impl Probe {
         &self,
         ops: impl IntoIterator<Item = crate::ReadOp<'a, crate::PosixFile>>,
         options: crate::ReadOptions,
-    ) -> Result<Vec<crate::ReadResult>> {
+    ) -> vfsi_core::VecResult<crate::ReadResult> {
         self.calls.set(self.calls.get() + 1);
         let ops: Vec<_> = ops.into_iter().collect();
         if !ops.iter().all(|op| op.whole_file_path().is_some()) {
@@ -427,18 +461,19 @@ impl Probe {
                 results.pop();
             }
             2 => {
-                results[0] = crate::ReadResult::buffered(0, results[0].bytes_read(), true);
+                let read = results[0].as_mut().unwrap();
+                *read = crate::ReadResult::buffered(0, read.bytes_read(), true);
             }
             4 => {
-                results[0] =
-                    crate::ReadResult::owned(0, results[0].clone().into_data().unwrap(), false);
+                let read = results[0].as_mut().unwrap();
+                *read = crate::ReadResult::owned(0, read.clone().into_data().unwrap(), false);
             }
             5 => {
-                results[0] =
-                    crate::ReadResult::owned(1, results[0].clone().into_data().unwrap(), true);
+                let read = results[0].as_mut().unwrap();
+                *read = crate::ReadResult::owned(1, read.clone().into_data().unwrap(), true);
             }
             7 => {
-                results.push(crate::ReadResult::owned(0, Vec::new(), true));
+                results.push(Ok(crate::ReadResult::owned(0, Vec::new(), true)));
             }
             _ => {}
         }
@@ -517,7 +552,7 @@ fn blanket_helpers_preserve_order_empty_files_limits_and_error_indices() {
     assert_eq!(fs.read_files(&["/copy"]).unwrap(), [b"de".to_vec()]);
     let mut file = fs.create("/created").unwrap();
     assert!(!file.is_closed());
-    fs.vclose(std::slice::from_mut(&mut file)).unwrap();
+    fs.close_batch(std::slice::from_mut(&mut file)).unwrap();
     assert!(file.is_closed());
     fs.close_files(vec![file]).unwrap();
 }
@@ -536,7 +571,10 @@ impl WritePolicyProbe {
     fn inner(&self) -> &crate::Posix {
         &self.mounted
     }
-    fn partial(&self, ops: &[crate::WriteOp<'_, crate::PosixFile>]) -> Result<Vec<WriteResult>> {
+    fn partial(
+        &self,
+        ops: &[crate::WriteOp<'_, crate::PosixFile>],
+    ) -> vfsi_core::VecResult<WriteResult> {
         self.partial_calls.set(self.partial_calls.get() + 1);
         let short: Vec<_> = ops
             .iter()
@@ -546,11 +584,22 @@ impl WritePolicyProbe {
             .collect();
         self.mounted.vwrite(&short, Default::default())
     }
-    fn complete(&self, ops: &[crate::WriteOp<'_, crate::PosixFile>]) -> Result<Vec<WriteResult>> {
+    fn complete(
+        &self,
+        ops: &[crate::WriteOp<'_, crate::PosixFile>],
+    ) -> vfsi_core::VecResult<WriteResult> {
         self.complete_calls.set(self.complete_calls.get() + 1);
         if self.lose_reply.get() {
             self.partial(ops)?; // The server mutated data before the reply was lost.
-            return Err(crate::Error::transport(None, "injected lost write reply"));
+            return Ok(ops
+                .iter()
+                .map(|_| {
+                    Err(vfsi_core::OpError::unknown(
+                        crate::Error::transport(None, "injected lost write reply"),
+                        None,
+                    ))
+                })
+                .collect());
         }
         self.mounted
             .vwrite(ops, crate::WriteOptions::new().with_write_all(true))
@@ -584,7 +633,7 @@ fn write_options_select_completion_without_replaying_ambiguous_errors() {
     let ops = [crate::WriteOp::at(&file, 0, b"abcdef")];
     assert!(!crate::WriteOptions::default().write_all());
     assert_eq!(
-        fs.vwrite(&ops, Default::default()).unwrap()[0].bytes_written,
+        fs.write_batch(&ops, Default::default()).unwrap()[0].bytes_written,
         2
     );
     for options in [
@@ -593,23 +642,23 @@ fn write_options_select_completion_without_replaying_ambiguous_errors() {
             .with_write_all(true)
             .with_write_all(false),
     ] {
-        assert_eq!(fs.vwrite(&ops, options).unwrap()[0].bytes_written, 2);
+        assert_eq!(fs.write_batch(&ops, options).unwrap()[0].bytes_written, 2);
     }
     assert_eq!(fs.partial_calls.get(), 3);
     assert_eq!(fs.complete_calls.get(), 0);
     assert_eq!(fs.read_files(&["/file"]).unwrap(), [b"ab".to_vec()]);
     let complete = crate::WriteOptions::new().with_write_all(true);
-    assert_eq!(fs.vwrite(&ops, complete).unwrap()[0].bytes_written, 6);
+    assert_eq!(fs.write_batch(&ops, complete).unwrap()[0].bytes_written, 6);
     assert_eq!(fs.partial_calls.get(), 3);
     assert_eq!(fs.complete_calls.get(), 1);
     assert_eq!(fs.read_files(&["/file"]).unwrap(), [b"abcdef".to_vec()]);
 
     fs.lose_reply.set(true);
     let error = fs
-        .vwrite(&[crate::WriteOp::at(&file, 0, b"UVWXYZ")], complete)
+        .write_batch(&[crate::WriteOp::at(&file, 0, b"UVWXYZ")], complete)
         .unwrap_err();
     assert!(error.is_transport());
-    assert_eq!(error.index(), None);
+    assert_eq!(error.index(), Some(0));
     assert_eq!(fs.partial_calls.get(), 4);
     assert_eq!(
         fs.complete_calls.get(),
@@ -697,6 +746,10 @@ fn vector_walk_budgets_count_entries_not_listing_containers() {
         crate::MkDirOp::new("/a", 0o777),
         crate::MkDirOp::new("/b", 0o777),
     ])
+    .and_then(|outcomes| {
+        let count = outcomes.len();
+        vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+    })
     .unwrap();
     fs.write_files(&[("/a/f", b"x"), ("/b/f", b"y")]).unwrap();
     let options = crate::ListDirOptions::new()
@@ -760,6 +813,10 @@ fn vector_walk_visitors_charge_root_paths_once_and_honor_cancellation() {
         crate::MkDirOp::new("/a", 0o777),
         crate::MkDirOp::new("/b", 0o777),
     ])
+    .and_then(|outcomes| {
+        let count = outcomes.len();
+        vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+    })
     .unwrap();
     let options = crate::ListDirOptions::new()
         .with_recursive(true)
@@ -810,7 +867,7 @@ fn vector_walk_visitors_charge_root_paths_once_and_honor_cancellation() {
             |_, _| Ok(std::ops::ControlFlow::Break(()))
         )
         .unwrap(),
-        [crate::TraversalCompletion::Stopped]
+        [crate::TraversalCompletion::Stopped; 2]
     );
 }
 
@@ -867,13 +924,13 @@ fn blanket_scalar_helpers_and_new_vectors_preserve_limits_stop_and_indices() {
         fs.rename("/one/a", "/one/renamed").unwrap();
     }
     scalar(&fs);
-    fs.vrename(
+    fs.renames_all(
         &[("/one/renamed", "/one/a"), ("/two/b", "/two/c")],
         crate::RenameMode::Replace,
     )
     .unwrap();
     let error = fs
-        .vrename(
+        .renames_all(
             &[("/one/a", "/one/moved"), ("/absent", "/two/moved")],
             crate::RenameMode::Replace,
         )
@@ -924,7 +981,7 @@ fn blanket_scalar_helpers_and_new_vectors_preserve_limits_stop_and_indices() {
             Ok(std::ops::ControlFlow::Break(()))
         })
         .unwrap();
-    assert_eq!(completion, [crate::TraversalCompletion::Stopped]);
+    assert_eq!(completion, [crate::TraversalCompletion::Stopped; 2]);
     assert_eq!(seen, [0]);
 
     let mut seen = Vec::new();
@@ -938,7 +995,7 @@ fn blanket_scalar_helpers_and_new_vectors_preserve_limits_stop_and_indices() {
             },
         )
         .unwrap();
-    assert_eq!(completion, [crate::TraversalCompletion::Stopped]);
+    assert_eq!(completion, [crate::TraversalCompletion::Stopped; 2]);
     assert_eq!(seen, [0]);
 
     let error = fs
@@ -981,13 +1038,17 @@ fn blanket_scalar_helpers_and_new_vectors_preserve_limits_stop_and_indices() {
             },
         )
         .unwrap();
+    assert_eq!(completion.len(), 2);
     assert_eq!(
-        completion,
-        [crate::StreamCompletion::Stopped { next_offset: 2 }]
+        completion[0].as_ref().unwrap(),
+        &crate::StreamCompletion::Stopped { next_offset: 2 }
     );
+    let error = completion[1].as_ref().unwrap_err();
+    assert_eq!(error.cause().index(), None);
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
     assert_eq!(seen, [0]);
     let error = fs
-        .vstream(
+        .streams_all(
             &["/one/moved", "/absent"],
             crate::StreamOptions::new(),
             |_, _, _| Ok(std::ops::ControlFlow::Continue(())),
@@ -996,7 +1057,7 @@ fn blanket_scalar_helpers_and_new_vectors_preserve_limits_stop_and_indices() {
     assert_eq!(error.index(), Some(1));
     assert!(fs.remove_file("/one").is_err());
     assert!(fs.remove_dir("/one/moved").is_err());
-    fs.vremove(
+    fs.removes_all(
         &roots,
         crate::RemoveMode::Contents,
         crate::RemoveOptions::new(),

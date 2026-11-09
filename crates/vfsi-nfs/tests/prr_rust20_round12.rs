@@ -32,7 +32,15 @@ fn get(fs: &mut NfsVecFs, path: &str) -> Vec<u8> {
         .unwrap()
 }
 fn cleanup(fs: &mut NfsVecFs, root: &str) {
-    fs.remove_paths_impl(&[Path::new(root)], true).unwrap();
+    {
+        let remove_roots: &[&std::path::Path] = &[Path::new(root)];
+        vfsi_core::internal::collect_vec_result(
+            fs.remove_paths_impl(remove_roots, true),
+            remove_roots.len(),
+        )
+        .map(|_| ())
+    }
+    .unwrap();
 }
 fn chained(hardlink: bool) {
     let Some((mut fs, root)) = connect(if hardlink { "hardlink" } else { "chain" }) else {
@@ -49,16 +57,24 @@ fn chained(hardlink: bool) {
     put(&mut fs, &c, b"old");
     if hardlink {
         fs.vhardlink_impl(&[Path::new(&b)], &[Path::new(&alias)])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+            })
             .unwrap();
     }
     let source = if hardlink { &alias } else { &b };
-    let result = fs.vcopy_impl(
-        &[
+    let result = {
+        let copy_pairs = &[
             ExtentPair::new(&a, 0, &b, 0, None),
             ExtentPair::new(source, 0, &c, 0, None),
-        ],
-        CopyOptions::default(),
-    );
+        ];
+        vfsi_core::internal::collect_vec_result(
+            fs.vcopy_impl(copy_pairs, CopyOptions::default()),
+            copy_pairs.len(),
+        )
+        .map(|_| ())
+    };
     let actual_b = get(&mut fs, &b);
     let actual_c = get(&mut fs, &c);
     let enabled = fs.server_copy_enabled();
@@ -92,13 +108,17 @@ fn later_destination_does_not_invalidate_an_earlier_source() {
     put(&mut fs, &a, b"first");
     put(&mut fs, &b, b"stale");
     put(&mut fs, &c, b"second");
-    let result = fs.vcopy_impl(
-        &[
+    let result = {
+        let copy_pairs = &[
             ExtentPair::new(&a, 0, &b, 0, None),
             ExtentPair::new(&c, 0, &a, 0, None),
-        ],
-        CopyOptions::default(),
-    );
+        ];
+        vfsi_core::internal::collect_vec_result(
+            fs.vcopy_impl(copy_pairs, CopyOptions::default()),
+            copy_pairs.len(),
+        )
+        .map(|_| ())
+    };
     let actual_b = get(&mut fs, &b);
     let actual_a = get(&mut fs, &a);
     let enabled = fs.server_copy_enabled();
@@ -121,13 +141,17 @@ fn repeated_destination_preserves_final_size_without_disabling_server_copy() {
     put(&mut fs, &a, b"long-first");
     put(&mut fs, &b, b"x");
     put(&mut fs, &c, b"stale-tail");
-    let result = fs.vcopy_impl(
-        &[
+    let result = {
+        let copy_pairs = &[
             ExtentPair::new(&a, 0, &c, 0, None),
             ExtentPair::new(&b, 0, &c, 0, None),
-        ],
-        CopyOptions::default(),
-    );
+        ];
+        vfsi_core::internal::collect_vec_result(
+            fs.vcopy_impl(copy_pairs, CopyOptions::default()),
+            copy_pairs.len(),
+        )
+        .map(|_| ())
+    };
     let actual = get(&mut fs, &c);
     let enabled = fs.server_copy_enabled();
     cleanup(&mut fs, &root);
@@ -149,13 +173,17 @@ fn independent_pairs_keep_one_server_copy_cohort() {
     put(&mut fs, &a, b"first");
     put(&mut fs, &b, b"second");
     let before = fs.server_copy_stats();
-    let result = fs.vcopy_impl(
-        &[
+    let result = {
+        let copy_pairs = &[
             ExtentPair::new(&a, 0, &c, 0, None),
             ExtentPair::new(&b, 0, &d, 0, None),
-        ],
-        CopyOptions::default(),
-    );
+        ];
+        vfsi_core::internal::collect_vec_result(
+            fs.vcopy_impl(copy_pairs, CopyOptions::default()),
+            copy_pairs.len(),
+        )
+        .map(|_| ())
+    };
     let after = fs.server_copy_stats();
     let actual_c = get(&mut fs, &c);
     let actual_d = get(&mut fs, &d);
@@ -181,16 +209,24 @@ fn fanout(hardlink: bool) {
     put(&mut fs, &a, b"fresh");
     if hardlink {
         fs.vhardlink_impl(&[Path::new(&a)], &[Path::new(&alias)])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+            })
             .unwrap();
     }
     let source = if hardlink { &alias } else { &a };
-    let result = fs.vcopy_impl(
-        &[
+    let result = {
+        let copy_pairs = &[
             ExtentPair::new(&a, 0, &b, 0, None),
             ExtentPair::new(source, 0, &c, 0, None),
-        ],
-        CopyOptions::default(),
-    );
+        ];
+        vfsi_core::internal::collect_vec_result(
+            fs.vcopy_impl(copy_pairs, CopyOptions::default()),
+            copy_pairs.len(),
+        )
+        .map(|_| ())
+    };
     let actual_b = get(&mut fs, &b);
     let actual_c = get(&mut fs, &c);
     let enabled = fs.server_copy_enabled();
@@ -222,14 +258,18 @@ fn failed_dependent_suffix_keeps_original_index_and_does_not_replay_prefix() {
     put(&mut fs, &a, b"fresh");
     put(&mut fs, &b, b"stale");
     put(&mut fs, &c, b"old");
-    let result = fs.vcopy_impl(
-        &[
+    let result = {
+        let copy_pairs = &[
             ExtentPair::new(&a, 0, &b, 0, None),
             ExtentPair::new(&b, 0, &c, 0, None),
             ExtentPair::new(&c, 0, &c, 0, None),
-        ],
-        CopyOptions::default(),
-    );
+        ];
+        vfsi_core::internal::collect_vec_result(
+            fs.vcopy_impl(copy_pairs, CopyOptions::default()),
+            copy_pairs.len(),
+        )
+        .map(|_| ())
+    };
     let actual_b = get(&mut fs, &b);
     let actual_c = get(&mut fs, &c);
     let enabled = fs.server_copy_enabled();

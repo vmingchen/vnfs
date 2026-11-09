@@ -47,6 +47,10 @@ fn stable_owner_reconnect_preserves_independent_opens_and_shutdown() {
         }
         assert_eq!(
             fs.vread_impl(&[ReadOp::new(first.clone(), VfOffset::Cur, 1)])
+                .and_then(|outcomes| {
+                    let count = outcomes.len();
+                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                })
                 .unwrap()[0]
                 .data,
             expected
@@ -55,7 +59,15 @@ fn stable_owner_reconnect_preserves_independent_opens_and_shutdown() {
     let close_first = fs.close_impl(&first);
     let read_second = fs.read_raw_impl(&second, 0, 6);
     let close_second = fs.close_impl(&second);
-    fs.remove_paths_impl(&[Path::new(&path)], true).unwrap();
+    {
+        let remove_roots: &[&std::path::Path] = &[Path::new(&path)];
+        vfsi_core::internal::collect_vec_result(
+            fs.remove_paths_impl(remove_roots, true),
+            remove_roots.len(),
+        )
+        .map(|_| ())
+    }
+    .unwrap();
     let shutdown = fs.shutdown();
     assert!(
         failure.is_none(),
@@ -101,7 +113,15 @@ fn failed_stable_owner_reconnect_keeps_original_descriptors_usable() {
     fs.set_auto_reconnect(false);
     let read = fs.read_raw_impl(&file, 0, 8);
     let close = fs.close_impl(&file);
-    fs.remove_paths_impl(&[Path::new(&path)], true).unwrap();
+    {
+        let remove_roots: &[&std::path::Path] = &[Path::new(&path)];
+        vfsi_core::internal::collect_vec_result(
+            fs.remove_paths_impl(remove_roots, true),
+            remove_roots.len(),
+        )
+        .map(|_| ())
+    }
+    .unwrap();
     let shutdown = fs.shutdown();
     assert!(
         failed.is_err(),
@@ -153,7 +173,15 @@ fn reconnect_cleanup_failure_is_retained_and_retried_at_shutdown() {
     assert_eq!(fs.test_deferred_path_close_count(), 1);
     assert_eq!(fs.read_raw_impl(&file, 0, 5).unwrap(), b"alive");
     fs.close_impl(&file).unwrap();
-    fs.remove_paths_impl(&[Path::new(&path)], true).unwrap();
+    {
+        let remove_roots: &[&std::path::Path] = &[Path::new(&path)];
+        vfsi_core::internal::collect_vec_result(
+            fs.remove_paths_impl(remove_roots, true),
+            remove_roots.len(),
+        )
+        .map(|_| ())
+    }
+    .unwrap();
     fs.shutdown()
         .expect("shutdown must retry the obsolete OPEN cleanup");
 }

@@ -328,7 +328,7 @@ fn roots<P: AsRef<Path>>(
     for batch in tasks.chunks_mut(options.batch_size) {
         let paths: Vec<_> = batch.iter().map(|t| &t.source).collect();
         let metadata = fs
-            .vgetattrs(
+            .getattrs_all(
                 &paths,
                 AttrsOptions::new()
                     .with_fields(fields())
@@ -389,37 +389,37 @@ fn ensure_dirs(fs: &impl Vfsi, tasks: &mut [Task]) -> Result<()> {
     }
     let paths: Vec<_> = tasks
         .iter()
-        .map(|t| crate::MkDirOp::new(&t.destination, 0o777))
+        .map(|task| crate::MkDirOp::new(&task.destination, 0o777))
         .collect();
-    match fs.vmkdir(&paths) {
-        Ok(()) => {
-            for task in tasks {
-                task.fresh_destination = true;
-            }
-            Ok(())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            // Semantic EEXIST may follow creations. Reconcile each object; never
-            // infer a committed prefix or replay an ambiguous transport error.
-            for task in tasks {
-                match fs.symlink_attrs(&task.destination) {
-                    Ok(meta) if meta.is_dir() => {
-                        task.fresh_destination = false;
-                    }
-                    Ok(_) => return Err(invalid(task.root, &task.destination)),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        fs.vmkdir(&[crate::MkDirOp::new(&task.destination, 0o777)])
-                            .map_err(|e| mapped(e, std::slice::from_ref(task)))?;
-                        task.fresh_destination = true;
-                    }
-                    Err(e) => return Err(mapped(e, std::slice::from_ref(task))),
-                }
-            }
-            Ok(())
-        }
-        Err(e) => Err(mapped(e, tasks)),
+    let outcomes = fs.vmkdir(&paths).map_err(|error| mapped(error, tasks))?;
+    if outcomes.len() != tasks.len() {
+        return Err(Error::invalid_reply(
+            None,
+            "invalid directory creation outcome count",
+        ));
     }
+    for (index, result) in outcomes.into_iter().enumerate() {
+        match result {
+            Ok(()) => tasks[index].fresh_destination = true,
+            Err(error)
+                if error.state() != vfsi_core::FailureState::Unknown
+                    && error.cause().kind() == std::io::ErrorKind::AlreadyExists =>
+            {
+                let task = &mut tasks[index];
+                let attrs = fs
+                    .symlink_attrs(&task.destination)
+                    .map_err(|error| mapped(error, std::slice::from_ref(task)))?;
+                if !attrs.is_dir() {
+                    return Err(invalid(task.root, &task.destination));
+                }
+                task.fresh_destination = false;
+            }
+            Err(error) => return Err(mapped(error.into_cause().with_index(index), tasks)),
+        }
+    }
+    Ok(())
 }
+
 fn run<P: AsRef<Path>>(
     fs: &impl Vfsi,
     sources: &[P],
@@ -548,7 +548,7 @@ fn copy_independent_roots(
         let options_visit = budget.remaining_options(ListDirOptions::new().with_fields(fields()));
         let mut callback_error = None;
         let completed = fs
-            .vlistdirs(&paths, options_visit, |index, page| {
+            .listdirs_all(&paths, options_visit, |index, page| {
                 let result = (|| {
                     let parent = wave
                         .get(index)
@@ -751,7 +751,7 @@ fn copy_batch(
                 OpenOp::new(&t.destination, OpenFlags::WRITE | OpenFlags::CREATE_NEW).mode(0o600)
             })
             .collect();
-        let handles = fs.vopen(&requests).map_err(|e| mapped(e, tasks))?;
+        let handles = fs.open_batch(&requests).map_err(|e| mapped(e, tasks))?;
         let valid = handles.len() == tasks.len();
         let close = fs.close_files(handles).map_err(|e| mapped(e, tasks));
         if !valid {
@@ -761,7 +761,7 @@ fn copy_batch(
         }
         close?;
         let pairs: Vec<_> = tasks.iter().map(|t| (&t.source, &t.destination)).collect();
-        fs.vcopy(&pairs, CopyOptions::default())
+        fs.copies_all(&pairs, CopyOptions::default())
             .map_err(|e| mapped(e, tasks))?;
         summary.files_copied += tasks.len() as u64;
         summary.bytes_copied = None;
@@ -779,7 +779,7 @@ fn copy_batch(
         .iter()
         .map(|t| OpenOp::new(&t.source, OpenFlags::READ))
         .collect();
-    let sources = fs.vopen(&requests).map_err(|e| mapped(e, tasks))?;
+    let sources = fs.open_batch(&requests).map_err(|e| mapped(e, tasks))?;
     let mut destinations = Vec::new();
     let mut selected = Vec::new();
     let operation = (|| {
@@ -794,7 +794,7 @@ fn copy_batch(
                 let request =
                     OpenOp::new(&task.destination, OpenFlags::WRITE | OpenFlags::CREATE_NEW)
                         .mode(0o600);
-                match fs.vopen(&[request]) {
+                match fs.open_batch(&[request]) {
                     Ok(mut files) => {
                         if files.len() != 1 {
                             let _ = fs.close_files(files);
@@ -819,7 +819,7 @@ fn copy_batch(
                 .iter()
                 .map(|t| OpenOp::new(&t.destination, flags).mode(0o600))
                 .collect();
-            destinations = fs.vopen(&requests).map_err(|e| mapped(e, tasks))?;
+            destinations = fs.open_batch(&requests).map_err(|e| mapped(e, tasks))?;
             if destinations.len() != tasks.len() {
                 return Err(contract("transfer: invalid destination OPEN cardinality"));
             }
@@ -846,7 +846,7 @@ fn copy_batch(
                 })
                 .collect();
             let read = fs
-                .vread(reads, ReadOptions::new())
+                .read_batch(reads, ReadOptions::new())
                 .map_err(|e| active_error(e, &active, &selected, tasks))?;
             if read.len() != active.len() {
                 return Err(contract("transfer: invalid READ cardinality"));
@@ -878,7 +878,7 @@ fn copy_batch(
                 })
                 .collect();
             let written = fs
-                .vwrite(&writes, WriteOptions::new().with_write_all(true))
+                .write_batch(&writes, WriteOptions::new().with_write_all(true))
                 .map_err(|e| active_error(e, &active, &selected, tasks))?;
             if written.len() != read.len() {
                 return Err(contract("transfer: invalid WRITE cardinality"));
@@ -939,7 +939,8 @@ fn copy_batch(
                     )
                 })
                 .unzip();
-            fs.vsetattrs(&updates).map_err(|e| mapped(e, &completed))?;
+            fs.setattrs_all(&updates)
+                .map_err(|e| mapped(e, &completed))?;
         }
         Ok(())
     })();
@@ -1005,7 +1006,7 @@ fn prepare_replace(fs: &impl Vfsi, tasks: &[Task]) -> Result<()> {
     }
     if !existing.is_empty() {
         let paths: Vec<_> = existing.iter().map(|t| &t.destination).collect();
-        fs.vremove(
+        fs.removes_all(
             &paths,
             crate::RemoveMode::Entry,
             crate::RemoveOptions::new(),
@@ -1119,31 +1120,43 @@ fn move_run<P: AsRef<Path>>(
                 .iter()
                 .map(|task| (&task.source, &task.destination))
                 .collect();
-            match fs.vrename(&pairs, crate::RenameMode::NoReplace) {
-                Ok(()) => summary.roots_renamed += renames.len() as u64,
-                Err(error) if !error.is_transport() => {
-                    // A strict batch may have renamed a prefix. Do not infer that
-                    // prefix from its index or replay any rename. Reconcile paths
-                    // before copying the confirmed untouched operands instead.
-                    let can_fallback = matches!(
-                        error.kind(),
-                        std::io::ErrorKind::CrossesDevices
-                            | std::io::ErrorKind::AlreadyExists
-                            | std::io::ErrorKind::Unsupported
-                    );
-                    reconcile_renames(
-                        fs,
-                        &renames,
-                        error.clone(),
-                        can_fallback,
-                        &mut copies,
-                        &mut summary,
-                    )?;
-                    if !can_fallback {
-                        return Err(mapped(error, &renames));
+            let outcomes = match fs.vrename(&pairs, crate::RenameMode::NoReplace) {
+                Ok(outcomes) => outcomes,
+                Err(cause) => renames
+                    .iter()
+                    .map(|_| Err(vfsi_core::OpError::not_attempted(cause.clone())))
+                    .collect(),
+            };
+            if outcomes.len() != renames.len() {
+                return Err(Error::invalid_reply(
+                    None,
+                    "rename outcome count differs from requests",
+                ));
+            }
+            for (index, (task, result)) in renames.iter().zip(outcomes).enumerate() {
+                match result {
+                    Ok(()) => summary.roots_renamed += 1,
+                    Err(error) => {
+                        if error.progress().is_some() {
+                            return Err(mapped(
+                                Error::invalid_reply(index, "rename cannot report byte progress"),
+                                &renames,
+                            ));
+                        }
+                        let fallback = error.state() != vfsi_core::FailureState::Unknown
+                            && !error.cause().is_transport()
+                            && matches!(
+                                error.cause().kind(),
+                                std::io::ErrorKind::CrossesDevices
+                                    | std::io::ErrorKind::AlreadyExists
+                                    | std::io::ErrorKind::Unsupported
+                            );
+                        if !fallback {
+                            return Err(mapped(error.into_cause().with_index(index), &renames));
+                        }
+                        prepare_rename_fallback(fs, task, error.into_cause(), &mut copies)?;
                     }
                 }
-                Err(error) => return Err(mapped(error, &renames)),
             }
         }
         copies.sort_by_key(|task| task.root);
@@ -1168,7 +1181,7 @@ fn move_run<P: AsRef<Path>>(
             .collect();
         if !complete.is_empty() {
             let paths: Vec<_> = complete.iter().map(|task| &task.source).collect();
-            fs.vremove(&paths, crate::RemoveMode::Tree, crate::RemoveOptions::new())
+            fs.removes_all(&paths, crate::RemoveMode::Tree, crate::RemoveOptions::new())
                 .map_err(|error| mapped(error, &complete))?;
             summary.roots_removed += complete.len() as u64;
         }
@@ -1176,59 +1189,34 @@ fn move_run<P: AsRef<Path>>(
     Ok(summary)
 }
 
-fn reconcile_renames(
+fn prepare_rename_fallback(
     fs: &impl Vfsi,
-    tasks: &[Task],
+    task: &Task,
     failure: Error,
-    allow_fallback: bool,
     copies: &mut Vec<Task>,
-    summary: &mut TransferSummary,
 ) -> Result<()> {
-    for task in tasks {
-        match fs.symlink_attrs(&task.source) {
-            Ok(source) => {
-                if task.metadata.fs_obj_id().is_some()
-                    && !same_file(fs, &task.source, &task.metadata, &task.source, &source)
-                {
-                    return Err(invalid(task.root, &task.source));
-                }
-                match fs.symlink_attrs(&task.destination) {
-                    Err(error)
-                        if error.kind() == std::io::ErrorKind::NotFound && allow_fallback =>
-                    {
-                        copies.push(task.clone())
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        return Err(mapped(failure.clone(), tasks));
-                    }
-                    Err(error) => return Err(mapped(error, std::slice::from_ref(task))),
-                    Ok(target)
-                        if allow_fallback
-                            && !same_file(
-                                fs,
-                                &task.source,
-                                &task.metadata,
-                                &task.destination,
-                                &target,
-                            ) =>
-                    {
-                        copies.push(task.clone())
-                    }
-                    Ok(_) => return Err(mapped(failure.clone(), tasks)),
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let target = fs
-                    .symlink_attrs(&task.destination)
-                    .map_err(|error| mapped(error, std::slice::from_ref(task)))?;
-                if !same_file(fs, &task.source, &task.metadata, &task.destination, &target) {
-                    return Err(mapped(failure.clone(), tasks));
-                }
-                summary.roots_renamed += 1;
-            }
-            Err(error) => return Err(mapped(error, std::slice::from_ref(task))),
+    let tasks = std::slice::from_ref(task);
+    let source = fs.symlink_attrs(&task.source).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            mapped(failure.clone().with_index(0), tasks)
+        } else {
+            mapped(error.with_index(0), tasks)
         }
+    })?;
+    if task.metadata.fs_obj_id().is_some()
+        && !same_file(fs, &task.source, &task.metadata, &task.source, &source)
+    {
+        return Err(invalid(task.root, &task.source));
     }
+    match fs.symlink_attrs(&task.destination) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(mapped(error.with_index(0), tasks)),
+        Ok(target) if same_file(fs, &task.source, &task.metadata, &task.destination, &target) => {
+            return Err(mapped(failure.with_index(0), tasks));
+        }
+        Ok(_) => {}
+    }
+    copies.push(task.clone());
     Ok(())
 }
 

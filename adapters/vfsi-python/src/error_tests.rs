@@ -6,9 +6,12 @@ fn bulk_failures_preserve_native_status_and_original_request_positions() {
     Python::attach(|py| {
         let root = prr_test_support::TestRoot::new();
         let mut backend = prr_test_support::FaultBackend::new(&root.0, None);
-        backend.attrs_errors.extend([
-            Some(VfError::nfs(0, 2)),
-            Some(VfError::smb(0, 0xc000_0257).with_context("vgetattrs", "/second")),
+        backend.attrs_item_errors.extend([
+            (0, VfError::nfs(0, 2)),
+            (
+                1,
+                VfError::smb(1, 0xc000_0257).with_context("vgetattrs", "/second"),
+            ),
         ]);
         let calls = backend.attrs_calls.clone();
         let (_, errors) = attrs_many_impl(
@@ -49,7 +52,7 @@ fn bulk_failures_preserve_native_status_and_original_request_positions() {
             0xc000_0257
         );
         assert!(second.str().unwrap().to_string().contains("/second"));
-        assert_eq!(calls.lock().unwrap().len(), 2);
+        assert_eq!(calls.lock().unwrap().len(), 1);
     });
 }
 

@@ -30,9 +30,7 @@ macro_rules! client_methods {
             $complete,
             $attrs,
             $write_receiver,
-            <$client>::directory_page_batch_size,
-            <$client>::open_native,
-            <$client>::stream_native;
+            <$client>::directory_page_batch_size;
             vrename_impl, vsymlink_impl, vreadlink_impl, vhardlink_impl,
             vstatfs_impl, vsetattrs_impl, limits_impl, vopen_impl,
             vclose_impl, vmkdir_impl, vcopy_impl, capabilities_impl

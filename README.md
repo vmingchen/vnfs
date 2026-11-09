@@ -113,10 +113,21 @@ and `Backend` names and `sfsi`/`vfsi` namespace aliases are removed.
 Lifecycle/configuration methods keep descriptive names, and protocol internals
 keep their wire vocabulary. `VfsiExt` also provides bulk composed workflows.
 
-This is a breaking Rust migration: `VecFs`/`VecFsExt` are removed. Strict typed
-opens use `vopen_impl`; indexed partial outcomes use `vopen_outcomes_impl`.
-All writes use the borrowed `vwrite_impl` boundary. Owned preparation storage
-uses `WriteOp::borrowed()` without copying payloads.
+Vector methods on `Vfsi` return `VecResult<T>`: an outer rejection means no
+input was dispatched; otherwise each input has its own success or `OpError`.
+Results retain input order without requiring sequential execution. An item
+error records completion certainty and any acknowledged I/O progress.
+`VfsiExt` provides strict conveniences such as `getattrs_all` and
+`listdirs_all`; these select one error after execution and discard other
+outcomes. Use vector results directly for selective recovery, without assuming
+a successful prefix or automatically replaying failed mutations.
+
+This is a breaking Rust migration. `VecFs`/`VecFsExt` are removed, backend
+typed opens use `vopen_impl` with per-input outcomes, and all writes use the
+borrowed `vwrite_impl` boundary. Owned preparation storage uses
+`WriteOp::borrowed()` without copying payloads. See the
+[vector-result migration guide](docs/vector-results-migration.md) for ownership,
+failure certainty, compatibility policies and the remaining verification gates.
 Typed attribute updates use `vsetattrs_impl`; raw attribute masks use
 `vsetattrs_raw_impl`. C/Python operation names are unchanged. See the
 [backend guide](docs/BACKENDS.md) for current execution contracts and the

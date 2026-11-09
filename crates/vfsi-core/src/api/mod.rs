@@ -11,7 +11,7 @@
 //! `<property>()` to inspect it. Neither performs I/O. Read-budget overrides
 //! remain optional: `None` inherits the client's policy. Resolve inherited
 //! limits before interpreting them as effective execution budgets. Dedicated
-//! builders such as [`OpenOptions`] retain their
+//! builders such as [`OpenOptions`](crate::api::OpenOptions) retain their
 //! standard builder-style verbs.
 
 pub type Result<T> = crate::VfResult<T>;
@@ -21,6 +21,7 @@ pub use crate::{
     FilesystemStats, FsObjId, OpenFlags, OpenOp, Permissions, RemoveOptions, StatusCode,
     TransportKind, VfType as FileType,
 };
+pub use crate::{FailureState, IoProgress, OpError, OpResult, VecResult};
 /// Per-pair rename semantics requested by [`Vfsi::vrename`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RenameMode {

@@ -262,14 +262,20 @@ impl Session {
         Ok(())
     }
 
+    pub(crate) fn ensure_usable(&self) -> RpcResult<()> {
+        if self.poisoned {
+            Err(RpcError::transport(
+                "NFS session is unusable after an ambiguous transport failure; reconnect",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Prepend a SEQUENCE op and send the compound. The slot seqid advances
     /// whenever the server consumed the SEQUENCE (i.e. it returned NFS4_OK).
     pub(crate) fn compound(&mut self, c: &mut Compound) -> RpcResult<CompoundRes> {
-        if self.poisoned {
-            return Err(RpcError::transport(
-                "NFS session is unusable after an ambiguous transport failure; reconnect",
-            ));
-        }
+        self.ensure_usable()?;
         c.args.minorversion = self.minorversion;
         let seq = nfs_argop4 {
             argop: nfs_opnum4_NFS4_OP_SEQUENCE,

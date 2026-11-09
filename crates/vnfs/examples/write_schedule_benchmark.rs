@@ -41,8 +41,31 @@ impl HandleBackend for Sink {
     fn open_path_impl(&mut self, _: VfPathBase, _: &Path, _: i32, _: u32) -> VfResult<FileOperand> {
         Ok(self.open())
     }
+    fn vclose_impl(&mut self, files: &[vfsi_core::FileOperand]) -> vfsi_core::VecResult<()> {
+        Ok(files
+            .iter()
+            .map(|file| {
+                self.close_impl(file)
+                    .map_err(|error| vfsi_core::OpError::unknown(error, None))
+            })
+            .collect())
+    }
+
     fn close_impl(&mut self, _: &FileOperand) -> VfResult<()> {
         Ok(())
+    }
+    fn vfsync_impl(
+        &mut self,
+        files: &[FileOperand],
+        _mode: vfsi_sync::api::SyncMode,
+    ) -> vfsi_sync::VecResult<()> {
+        Ok(files
+            .iter()
+            .map(|file| {
+                self.sync_data(file)
+                    .map_err(|cause| vfsi_sync::OpError::unknown(cause, None))
+            })
+            .collect())
     }
     fn sync_data(&mut self, _: &FileOperand) -> VfResult<()> {
         Ok(())
@@ -51,7 +74,13 @@ impl HandleBackend for Sink {
         Err(VfError::unsupported(0))
     }
     fn write_impl(&mut self, request: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult> {
-        Ok(self.vwrite_impl(&[request])?.remove(0))
+        Ok(self
+            .vwrite_impl(&[request])
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            })?
+            .remove(0))
     }
     fn seek_impl(&mut self, _: &FileOperand, _: std::io::SeekFrom) -> VfResult<u64> {
         Err(VfError::unsupported(0))
@@ -69,13 +98,42 @@ impl HandleBackend for Sink {
 }
 
 impl VectorBackend for Sink {
-    fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
-        Err(VfError::unsupported(0))
+    fn vopen_raw_impl(
+        &mut self,
+        paths: &[&std::path::Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> vfsi_sync::VecResult<vfsi_sync::FileOperand> {
+        if paths.len() != flags.len() || paths.len() != modes.len() {
+            return Err(vfsi_sync::VfError::from_kind(
+                None,
+                std::io::ErrorKind::InvalidInput,
+            ));
+        }
+        Ok(paths
+            .iter()
+            .zip(flags)
+            .zip(modes)
+            .map(|((path, flags), mode)| {
+                self.open_raw_impl(path, *flags, *mode).map_err(|cause| {
+                    if cause.is_transport() {
+                        vfsi_sync::OpError::unknown(cause, None)
+                    } else {
+                        vfsi_sync::OpError::failed(cause, None)
+                    }
+                })
+            })
+            .collect())
+    }
+
+    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
+        let result: VfResult<Vec<ReadResult>> = { Err(VfError::unsupported(0)) };
+        result.map(|results| results.into_iter().map(Ok).collect())
     }
     fn vwrite_impl(
         &mut self,
         writes: &[WriteOp<&FileOperand, &[u8]>],
-    ) -> VfResult<Vec<WriteResult>> {
+    ) -> vfsi_sync::VecResult<WriteResult> {
         self.dispatches += 1;
         Ok(writes
             .iter()
@@ -95,6 +153,7 @@ impl VectorBackend for Sink {
                     stable: true,
                 }
             })
+            .map(Ok)
             .collect())
     }
 }
@@ -201,6 +260,10 @@ fn measure<F: VectorBackend + 'static>(
     // outside the timed region. Both binaries run the same monomorphized API.
     let before = client
         .vwrite_all_native(&requests)
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .expect("verify write results");
     assert_eq!(before.len(), plan.items.len());
     for (result, item) in before.iter().zip(&plan.items) {
@@ -213,6 +276,10 @@ fn measure<F: VectorBackend + 'static>(
         black_box(
             client
                 .vwrite_all_native(black_box(&requests))
+                .and_then(|outcomes| {
+                    let count = outcomes.len();
+                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                })
                 .expect("warmup writes"),
         );
     }
@@ -221,12 +288,20 @@ fn measure<F: VectorBackend + 'static>(
         black_box(
             client
                 .vwrite_all_native(black_box(&requests))
+                .and_then(|outcomes| {
+                    let count = outcomes.len();
+                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                })
                 .expect("measured writes"),
         );
     }
     let elapsed = start.elapsed().as_nanos();
     let after = client
         .vwrite_all_native(&requests)
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .expect("verify final write results");
     assert_eq!(after.len(), plan.items.len());
     assert!(

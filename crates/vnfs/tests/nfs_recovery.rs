@@ -61,6 +61,10 @@ fn read_recovers_after_server_restart_and_reopens_live_descriptor() {
             .with_creation()
             .with_truncate(),
     ]))
+    .and_then(|outcomes| {
+        let count = outcomes.len();
+        vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+    })
     .expect("create recovery files");
     let files = fs
         .vopen_raw_simple_impl(
@@ -86,6 +90,10 @@ fn read_recovers_after_server_restart_and_reopens_live_descriptor() {
             ReadOp::new(files[0].clone(), VfOffset::Cur, 3),
             ReadOp::new(files[1].clone(), VfOffset::Cur, 4),
         ])
+        .and_then(|outcomes| {
+            let count = outcomes.len();
+            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+        })
         .expect("read should recover after restart");
     assert_eq!(result[0].data, b"cde");
     assert_eq!(result[1].data, b"vwxy");
@@ -102,12 +110,25 @@ fn read_recovers_after_server_restart_and_reopens_live_descriptor() {
         6
     );
 
-    fs.vclose_impl(&files).expect("close recovered descriptors");
-    fs.vremove_impl(&[
-        FileOperand::from_path(&first_path),
-        FileOperand::from_path(&second_path),
-    ])
+    assert!(
+        fs.vclose_impl(&files)
+            .expect("close recovered descriptors")
+            .into_iter()
+            .all(|result| result.is_ok())
+    );
+    {
+        let remove_files = &[
+            FileOperand::from_path(&first_path),
+            FileOperand::from_path(&second_path),
+        ];
+        vfsi_core::internal::collect_vec_result(fs.vremove_impl(remove_files), remove_files.len())
+            .map(|_| ())
+    }
     .expect("remove recovery files");
-    fs.vremove_impl(&[FileOperand::from_path(&dir)])
-        .expect("remove recovery directory");
+    {
+        let remove_files = &[FileOperand::from_path(&dir)];
+        vfsi_core::internal::collect_vec_result(fs.vremove_impl(remove_files), remove_files.len())
+            .map(|_| ())
+    }
+    .expect("remove recovery directory");
 }
