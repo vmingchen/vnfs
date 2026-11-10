@@ -1,5 +1,46 @@
 # Release build-time baseline
 
+## 2026-11-09 independent vector results
+
+The coordinated Rust/C source is 7b0a8833bfb3455d2fe2dfcb17757f16b4c78593; the compatible NFS 0.2.1
+portability patch is 2d7c5b7ccfb80982a6ccd13956c29980620e1a12. All archives were published from clean main
+with normal Cargo verification and --locked. Registry checksums and clean VCS
+revisions were verified from the downloaded public archives; the
+[publication ledger](migrations/rust-publication-2026-11-09.json) records them.
+
+These are complete publish-command wall times using existing caches and two
+build jobs, including package verification, upload and index visibility.
+Archive-download/provenance checks are separate from each timed command.
+
+| Package | Publish command |
+|---|---:|
+| vfsi-core 0.2.0 | 4.267s |
+| vfsi-sync 0.2.0 | 3.725s |
+| vfsi-local 0.2.0 | 4.413s |
+| vfsi-posix 0.2.0 | 3.581s |
+| vfsi-uring 0.2.0 | 3.308s |
+| vfsi-nfs 0.2.0 | 11.477s |
+| vfsi-smb 0.2.0 | 10.068s |
+| vnfs 0.0.32 | 8.004s |
+| vfsi-c 0.3.16 | 13.444s |
+
+The NFS 0.2.1 patch used normal Cargo verification (4.96s compilation); its
+complete command duration was not measured. Do not substitute that compilation
+time for an end-to-end publication duration.
+
+Independent review and local full Rust/Python/live-backend gates preceded the
+release. The first canonical x86 CI exposed signed-char test initialization,
+an iterator lint, old ordered-routing assertions and a detached fuzz pin.
+Those were corrected and re-reviewed; all routed regressions then passed
+on fresh private NFS mounts for minor versions 1 and 2. The first 4.2 kernel
+mount reused stale client state, so only the completed fresh-endpoint run is
+counted as evidence. No existing host mount or server was restarted.
+
+All four ports passed registry-only local verification and their reviewed
+integration commits are pinned in ecosystem/ports.toml. Canonical same-commit
+CI, the full four-port gate, Python publication and mirror promotion are
+tracked separately; these timings do not claim those remote gates passed.
+
 ## 2026-11-08 writer helpers and matching C SDK
 
 Rust source: `a907e2863e54695d7b9438ae3ebe4e30d65b4c0a`, after its

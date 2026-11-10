@@ -1,8 +1,11 @@
 # Migrating applications to per-operation results
 
-These are unreleased source adaptations for the vector-results migration.
-The patches apply to the currently checked-out HEADs of the four-port source
-set; they do not change those repositories or claim published compatibility.
+The Rust ports now use published vnfs 0.0.32 with the compatible NFS 0.2.1
+patch. Git and rsync pin the checksum-verified vfsi-c 0.3.16 SDK (ABI v3).
+Their reviewed integration commits are recorded in
+[the ecosystem manifest](../../ecosystem/ports.toml).
+The patch artifacts below preserve the original prepublication adaptations.
+
 Patch bases:
 coreutils 544d1ed1f919faad23b5b1e4c860328cc4a31264;
 findutils dc2809ebe017251f9e3217fc6f4141a687ebddd8.
@@ -54,10 +57,10 @@ regenerate it from the registry after publication.
 
 ## Coordinated release order
 
-Prepared versions are vfsi-core/sync/local/posix/uring/nfs/smb 0.2.0,
-vnfs 0.0.32, vfsi-c 0.3.16, nfs4fs 0.3.13, vfsi-fsspec 0.1.13,
-and vsmb/vsmbfs 0.1.7. The shared private native adapter is 0.1.7.
-nfsv41-sys stays at 0.1.15. These values are local preparation, not publication.
+Published Rust/C versions are vfsi-core/sync/local/posix/uring/smb 0.2.0,
+vfsi-nfs 0.2.1, vnfs 0.0.32 and vfsi-c 0.3.16. Prepared Python versions are
+nfs4fs 0.3.13, vfsi-fsspec 0.1.13 and vsmb/vsmbfs 0.1.7. The shared private native adapter is 0.1.7.
+nfsv41-sys stays at 0.1.15. Python publication waits for successful same-commit CI.
 
 1. Review and commit the complete buildable Rust migration. Publish dependencies
    in dependency order (core, sync, local, posix/uring/nfs/smb, vnfs), verifying
@@ -73,5 +76,7 @@ nfsv41-sys stays at 0.1.15. These values are local preparation, not publication.
    promotion. Disposable local-source tests are useful prepublication evidence,
    not substitutes for that release gate.
 
-No commit, push, publication, remote CI success, or mirror promotion is implied
-by these prepared patches. Those steps remain outside the uncommitted migration.
+Source and port commits are now published to their canonical branches; Rust/C
+registry artifacts are verified. Remote same-commit gates, Python publication,
+and mirror promotion remain release steps, with success recorded only after
+observing the corresponding external results.
