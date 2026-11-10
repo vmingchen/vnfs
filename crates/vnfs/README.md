@@ -17,7 +17,7 @@ Connect directly to a server—no kernel mount required.
 
 ```toml
 [dependencies]
-vnfs = "0.0.32"
+vnfs = "0.0.33"
 ```
 
 On Ubuntu 24.04 or newer, install the Linux native build prerequisites:
@@ -131,6 +131,6 @@ MIT OR Apache-2.0, at your option.
 [benchmark]: https://github.com/vmingchen/vnfs/blob/main/crates/vnfs/examples/small_files_benchmark.rs
 [fast]: https://www.usenix.org/conference/fast17/technical-sessions/presentation/chen
 
-The published 0.0.32 API uses independent per-operation vector results.
+The published 0.0.33 API uses independent per-operation vector results.
 Its source and backend trait changes require the coordinated vfsi-* 0.2.0
 series; see the workspace migration guide before upgrading an implementor.

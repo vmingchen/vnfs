@@ -78,5 +78,29 @@
     "publish_seconds": null,
     "sha256": "27468714eee6bd1db5a6fbb8c89761bbdafe277e5923188a51817ac3f71a5b7d",
     "verified_registry_archive": true
+  },
+  {
+    "crate": "vfsi-nfs",
+    "version": "0.2.2",
+    "commit": "32d2ef2510590836d5a80a564af98b85f8d823b7",
+    "publish_seconds": 13.413305331021547,
+    "sha256": "a2316e3402248c80ac5c12b98ef6b31fc262c274e9a3d85755cef0af40d2271e",
+    "verified_registry_archive": true
+  },
+  {
+    "crate": "vnfs",
+    "version": "0.0.33",
+    "commit": "32d2ef2510590836d5a80a564af98b85f8d823b7",
+    "publish_seconds": 8.772382683120668,
+    "sha256": "5fff53084233d0a7928e86ca63a9d76cd24cdff441bb3aaf4c0e0b08183e1a8b",
+    "verified_registry_archive": true
+  },
+  {
+    "crate": "vfsi-c",
+    "version": "0.3.17",
+    "commit": "32d2ef2510590836d5a80a564af98b85f8d823b7",
+    "publish_seconds": 16.76856792997569,
+    "sha256": "36214a310c1943791871a509eafcc97b3615748ec6d0702bd82bf89772ba337f",
+    "verified_registry_archive": true
   }
 ]

@@ -1,14 +1,47 @@
 # Per-operation results for vectorized Vfsi calls
 
-Status: source migration implemented; coordinated release in progress. The shared
-result/error foundation, metadata queries, canonical read/write APIs, handle
-lifecycle and namespace vectors, directory paging/visitor APIs and file
-streaming are implemented. Local compatibility checks pass. Performance
-measurements and release coordination are described below.
-The shared return type is **VecResult**. Registry publication and port pins are
-coordinated after source review; ecosystem provenance records released artifacts.
+Status: implemented and published. Every canonical vectorized Vfsi method now
+uses VecResult, with independent input-indexed outcomes and batching preserved.
+Convenience collection stays in VfsiExt; no temporary _outcomes API is exposed.
+C ABI v3 and the existing Python return/exception conventions are preserved.
 
-## Latest verification checkpoint (2026-11-09)
+## Coordinated release checkpoint (2026-11-09)
+
+- Published Rust packages: vfsi-core/sync/local/posix/uring/smb 0.2.0,
+  vfsi-nfs 0.2.2 and vnfs 0.0.33. Published C SDK: vfsi-c 0.3.17 (ABI v3).
+  The original cohort and corrective archives retain their actual source
+  revisions in the [Rust publication ledger](migrations/rust-publication-2026-11-09.json).
+- Published Python packages: nfs4fs 0.3.13, vfsi-fsspec 0.1.13 and
+  vsmb/vsmbfs 0.1.7. All twelve public archives were downloaded and their PyPI
+  digests verified; [the Python ledger](migrations/python-publication-2026-11-09.json)
+  records files and successful release workflows. Isolated wheel installation
+  passes dependency/import and dummy I/O checks. The published ARM64 nfs4fs
+  wheel also passes required NFS 4.2 server COPY for a 17 MiB file.
+- Corrective source 32d2ef2510590836d5a80a564af98b85f8d823b7 passed
+  [canonical CI](https://github.com/vmingchen/vnfs/actions/runs/42732339110)
+  and the [six-job port/ABI gate](https://github.com/vmingchen/vnfs/actions/runs/42732339242)
+  before Rust/C publication. NFS authentication, real io_uring, SMB, both NFS
+  minor versions, patched server COPY and the Python matrix are green.
+- All four actual application integration commits use published registry
+  artifacts, pass local parity/fallback tests and their own public-package CI,
+  and are pushed. Their exact revisions appear in the
+  [ecosystem manifest](../ecosystem/ports.toml); the
+  [migration guide](migrations/README.md) describes the adapters.
+- The release gate exposed an NFS replay bug. Hidden timeout resends are
+  disabled; definite credential rejection permits at most one safe refresh.
+  An uncached duplicate reply marks submitted inputs Unknown and future
+  unsubmitted waves NotAttempted, without replaying mutations or COPY fallback.
+  Potentially acquired OPEN state quarantines the identity. Real-wire
+  regressions and independent review cover the correction.
+- Healthy batching/performance evidence and measured costs remain in the
+  [benchmark report](benchmarks/vector-results/README.md); the error-path
+  correction does not claim a new healthy timing measurement.
+
+Mirror promotion requires CI and all six port/ABI jobs on the final metadata
+commit, enforced by ci/check-promotion.py. Published artifact provenance points
+to release source commits, independently of later documentation commits.
+
+## Prepublication verification checkpoint (2026-11-09)
 
 The operation-family sections below are historical checkpoints; their open-gate
 notes describe evidence available at that point, rather than the latest status.

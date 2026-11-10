@@ -1,7 +1,7 @@
 # Migrating applications to per-operation results
 
-The Rust ports now use published vnfs 0.0.32 with the compatible NFS 0.2.1
-patch. Git and rsync pin the checksum-verified vfsi-c 0.3.16 SDK (ABI v3).
+The Rust ports now use published vnfs 0.0.33 with NFS 0.2.2 replay protection.
+Git and rsync pin the checksum-verified vfsi-c 0.3.17 SDK (ABI v3).
 Their reviewed integration commits are recorded in
 [the ecosystem manifest](../../ecosystem/ports.toml).
 The patch artifacts below preserve the original prepublication adaptations.
@@ -51,14 +51,15 @@ is overridden only in the Cargo invocation:
 
     cargo test --offline --config 'patch.crates-io.vnfs.path="/home/ubuntu/vnfs02/crates/vnfs"' --features vnfs
 
-The patch manifests themselves use vnfs = "=0.0.32", without a local path.
+The historical patch manifests use vnfs = "=0.0.32", without a local path;
+current integration branches pin 0.0.33 and NFS 0.2.2.
 Do not check a lockfile containing local source resolution into a release port;
 regenerate it from the registry after publication.
 
 ## Coordinated release order
 
 Published Rust/C versions are vfsi-core/sync/local/posix/uring/smb 0.2.0,
-vfsi-nfs 0.2.1, vnfs 0.0.32 and vfsi-c 0.3.16. Prepared Python versions are
+vfsi-nfs 0.2.2, vnfs 0.0.33 and vfsi-c 0.3.17. Published Python versions are
 nfs4fs 0.3.13, vfsi-fsspec 0.1.13 and vsmb/vsmbfs 0.1.7. The shared private native adapter is 0.1.7.
 nfsv41-sys stays at 0.1.15. Python publication waits for successful same-commit CI.
 
@@ -76,7 +77,8 @@ nfsv41-sys stays at 0.1.15. Python publication waits for successful same-commit 
    promotion. Disposable local-source tests are useful prepublication evidence,
    not substitutes for that release gate.
 
-Source and port commits are now published to their canonical branches; Rust/C
-registry artifacts are verified. Remote same-commit gates, Python publication,
-and mirror promotion remain release steps, with success recorded only after
-observing the corresponding external results.
+Source and port commits are pushed to their canonical branches. Rust/C and
+Python registry artifacts are published and checksum-verified. All four pushed
+ports pass their public-package integration workflows. The final documentation
+commit must independently pass same-commit CI and all six port/ABI jobs before
+mirror promotion; publication evidence does not waive that gate.

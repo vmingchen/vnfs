@@ -1,0 +1,90 @@
+{
+  "vfsi-fsspec": {
+    "version": "0.1.13",
+    "commit": "32d2ef2510590836d5a80a564af98b85f8d823b7",
+    "release_run": 42732526031,
+    "files": [
+      {
+        "filename": "vfsi_fsspec-0.1.13-py3-none-any.whl",
+        "sha256": "ca7e42604eff6052ec074fb74326b32f8d54ea52129b035df8f5abbe1e26c79b",
+        "verified_download": true
+      },
+      {
+        "filename": "vfsi_fsspec-0.1.13.tar.gz",
+        "sha256": "2bd6731b6474e677ae05cd4014ae943e1315def9b034a6f5b03cfc3b4a7a85c4",
+        "verified_download": true
+      }
+    ]
+  },
+  "vsmb": {
+    "version": "0.1.7",
+    "commit": "32d2ef2510590836d5a80a564af98b85f8d823b7",
+    "release_run": 42732525896,
+    "files": [
+      {
+        "filename": "vsmb-0.1.7-cp314-cp314t-manylinux_2_28_x86_64.whl",
+        "sha256": "8d67f5475ad78f1842dd5c4b254ac4a874121e5088045a2b44e93a325c672286",
+        "verified_download": true
+      },
+      {
+        "filename": "vsmb-0.1.7-cp39-abi3-manylinux_2_28_aarch64.whl",
+        "sha256": "84fda816ffe1f1872d6ddc8c6274f8ee84f915c72b118cfc9b5ee7b81feeb867",
+        "verified_download": true
+      },
+      {
+        "filename": "vsmb-0.1.7-cp39-abi3-manylinux_2_28_x86_64.whl",
+        "sha256": "2285614a06171c997023bc208d22f3a90530772d32ed53638928f031e012c69b",
+        "verified_download": true
+      },
+      {
+        "filename": "vsmb-0.1.7.tar.gz",
+        "sha256": "e7fbe36463f6c9a69899a3de5d177f1a8cb2db9b9409a91d9389c4769093b39b",
+        "verified_download": true
+      }
+    ]
+  },
+  "vsmbfs": {
+    "version": "0.1.7",
+    "commit": "32d2ef2510590836d5a80a564af98b85f8d823b7",
+    "release_run": 42733448651,
+    "files": [
+      {
+        "filename": "vsmbfs-0.1.7-py3-none-any.whl",
+        "sha256": "d118f7fbfd487cedadabad28326f12fe883b33df542552d7ac873d4fb051a037",
+        "verified_download": true
+      },
+      {
+        "filename": "vsmbfs-0.1.7.tar.gz",
+        "sha256": "0bb54d1e9d2f7cc4499ed2a328e7a4f66435325fef9d8169dc1a6322c138ef02",
+        "verified_download": true
+      }
+    ]
+  },
+  "nfs4fs": {
+    "version": "0.3.13",
+    "commit": "32d2ef2510590836d5a80a564af98b85f8d823b7",
+    "release_run": 42733448068,
+    "files": [
+      {
+        "filename": "nfs4fs-0.3.13-cp314-cp314t-manylinux_2_28_x86_64.whl",
+        "sha256": "76cd56cb169f6580170fb1626c6e30843399db529c2e6c69ce109e9d54f21df9",
+        "verified_download": true
+      },
+      {
+        "filename": "nfs4fs-0.3.13-cp39-abi3-manylinux_2_28_aarch64.whl",
+        "sha256": "488495b29cfe69b9de47b9579de63d5d32ec16eee76008bea21aa74fc97b1394",
+        "verified_download": true
+      },
+      {
+        "filename": "nfs4fs-0.3.13-cp39-abi3-manylinux_2_28_x86_64.whl",
+        "sha256": "c068e611746ad6a8e0cff47217420b32b8d7a1cfc5b370f0d313f7a821d07305",
+        "verified_download": true
+      },
+      {
+        "filename": "nfs4fs-0.3.13.tar.gz",
+        "sha256": "6fc70b8591b5f059d376ba69771b7eff299c7bed34b5dbdc20522ca814dedc91",
+        "verified_download": true
+      }
+    ]
+  }
+}

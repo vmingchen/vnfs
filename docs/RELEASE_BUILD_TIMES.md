@@ -41,6 +41,49 @@ integration commits are pinned in ecosystem/ports.toml. Canonical same-commit
 CI, the full four-port gate, Python publication and mirror promotion are
 tracked separately; these timings do not claim those remote gates passed.
 
+### NFS replay-safety follow-up
+
+Reviewed source `32d2ef2510590836d5a80a564af98b85f8d823b7` passed
+[canonical CI](https://github.com/vmingchen/vnfs/actions/runs/42732339110) and the
+[six-job port/ABI gate](https://github.com/vmingchen/vnfs/actions/runs/42732339242)
+before corrective publication. These normal locked Cargo publish commands used
+the existing two-job cache; registry archives and clean VCS revisions were
+verified afterward.
+
+| Package | Complete publish command |
+|---|---:|
+| vfsi-nfs 0.2.2 | 13.413s |
+| vnfs 0.0.33 | 8.772s |
+| vfsi-c 0.3.17 | 16.769s |
+
+The current full Rust check/test gate passes 1,321 tests (test phase 198s);
+smoke takes 14s and the rebuilt Python gate 59s. Required native NFS integration
+and the five uncached-reply regressions pass, including negotiated NFS 4.1/4.2
+sessions. Three repeated 17 MiB Python server-COPY checks also pass. These
+measurements describe warm local verification, not cold builds or benchmarks.
+
+### Python publication
+
+All four releases use reviewed source 32d2ef2510590836d5a80a564af98b85f8d823b7.
+These workflow wall times run from creation through completion, including
+queueing, CI waits, builds, tests and publication. They are not compilation-only
+or cold-build estimates. The shared-engine and vsmb workflows waited for the
+existing main CI; redundant tag-triggered CI copies were cancelled while the
+required main CI was retained.
+
+| Release workflow | Complete wall time | Result |
+|---|---:|---|
+| [vfsi-fsspec 0.1.13](https://github.com/vmingchen/vnfs/actions/runs/42732526031) | 6m 32s | Success |
+| [vsmb 0.1.7](https://github.com/vmingchen/vnfs/actions/runs/42732525896) | 6m 49s | Success |
+| [vsmbfs 0.1.7](https://github.com/vmingchen/vnfs/actions/runs/42733448651) | 1m 08s | Success |
+| [nfs4fs 0.3.13](https://github.com/vmingchen/vnfs/actions/runs/42733448068) | 23m 05s | Success |
+
+The ARM64 nfs4fs wheel is built under QEMU; the installed-wheel live NFS
+RPCSEC_GSS job passes before publication. Every published Python archive matches
+its PyPI digest. An isolated ARM64 installation additionally passes dummy I/O
+and required live NFS 4.2 server COPY (17 MiB). See the
+[Python publication ledger](migrations/python-publication-2026-11-09.json).
+
 ## 2026-11-08 writer helpers and matching C SDK
 
 Rust source: `a907e2863e54695d7b9438ae3ebe4e30d65b4c0a`, after its
