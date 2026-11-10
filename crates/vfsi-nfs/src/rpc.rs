@@ -421,66 +421,97 @@ impl RpcClient {
         xres: xdrproc_t,
         res: *mut c_void,
     ) -> RpcResult<()> {
-        // SAFETY: clnt_req is a C aggregate of scalars, raw pointers and
-        // nullable callbacks. Zero is valid before pthread initialization.
-        let mut req = Box::new(unsafe { std::mem::zeroed::<clnt_req>() });
-        req.cc_clnt = self.clnt;
-        req.cc_auth = self.auth;
-        req.cc_proc = proc_;
-        req.cc_call = xdrpair {
-            proc_: xargs,
-            where_: args,
-        };
-        req.cc_reply = xdrpair {
-            proc_: xres,
-            where_: res,
-        };
-        // SAFETY: libntirpc initializes this immutable null-auth descriptor
-        // before calls; reading its scalar contents does not mutate it.
-        req.cc_verf = unsafe { _null_auth };
-        req.cc_free_cb = Some(req_free_cb);
-        req.cc_size = std::mem::size_of::<clnt_req>();
-        req.cc_refcnt = 1;
+        let mut may_refresh = true;
+        loop {
+            // SAFETY: clnt_req is a C aggregate of scalars, raw pointers and
+            // nullable callbacks. Zero is valid before pthread initialization.
+            let mut req = Box::new(unsafe { std::mem::zeroed::<clnt_req>() });
+            req.cc_clnt = self.clnt;
+            req.cc_auth = self.auth;
+            req.cc_proc = proc_;
+            req.cc_call = xdrpair {
+                proc_: xargs,
+                where_: args,
+            };
+            req.cc_reply = xdrpair {
+                proc_: xres,
+                where_: res,
+            };
+            // SAFETY: libntirpc initializes this immutable null-auth descriptor
+            // before calls; reading its scalar contents does not mutate it.
+            req.cc_verf = unsafe { _null_auth };
+            req.cc_free_cb = Some(req_free_cb);
+            req.cc_size = std::mem::size_of::<clnt_req>();
+            req.cc_refcnt = 1;
 
-        // Transfer ownership before the C callback can free the allocation.
-        let reqp = Box::into_raw(req);
-        // SAFETY: reqp owns live request storage; the caller guarantees that
-        // its argument/result graphs match their codecs. Our reference stays
-        // live until the explicit release following setup or wait_reply.
-        let stat = unsafe {
-            waitq_init(reqp);
-            clnt_req_setup(reqp, self.request_timeout)
-        };
-        if stat != clnt_stat_RPC_SUCCESS {
-            // SAFETY: our request reference remains live after failed setup.
-            // Final release tears down the wait queue and calls req_free_cb.
-            unsafe { clnt_req_release(reqp) };
-            return Err(RpcError::transport_with_kind(
-                rpc_transport_kind(stat),
-                format!("clnt_req_setup failed: {stat}"),
-            ));
+            // Transfer ownership before the C callback can free the allocation.
+            let reqp = Box::into_raw(req);
+            // SAFETY: reqp owns live request storage; the caller guarantees that
+            // its argument/result graphs match their codecs. Our reference stays
+            // live until the explicit release following setup or wait_reply.
+            let stat = unsafe {
+                waitq_init(reqp);
+                clnt_req_setup(reqp, self.request_timeout)
+            };
+            if stat != clnt_stat_RPC_SUCCESS {
+                // SAFETY: our request reference remains live after failed setup.
+                // Final release tears down the wait queue and calls req_free_cb.
+                unsafe { clnt_req_release(reqp) };
+                return Err(RpcError::transport_with_kind(
+                    rpc_transport_kind(stat),
+                    format!("clnt_req_setup failed: {stat}"),
+                ));
+            }
+            // SAFETY: our request reference keeps reqp alive throughout the wait.
+            // Copy the error before releasing it; no pointer access follows the
+            // release, which may free the allocation through req_free_cb.
+            let (status, err) = unsafe {
+                // Do not let libntirpc silently retransmit a timed-out NFS
+                // request. Its original mutations may already have completed.
+                (*reqp).cc_refreshes = 0;
+                let status = clnt_req_wait_reply(reqp);
+                let err = (*reqp).cc_error;
+                clnt_req_release(reqp);
+                (status, err)
+            };
+            // SAFETY: RPC_AUTHERROR selects the RE_why union member.
+            let auth_rejected = status == clnt_stat_RPC_AUTHERROR
+                && refreshable_auth_rejection(unsafe { err.ru.RE_why });
+            if may_refresh && auth_rejected {
+                may_refresh = false;
+                // SAFETY: this client owns the live authentication object and its
+                // operation table. Only a definite server credential/context
+                // rejection reaches this branch; no NFS operation was accepted.
+                // In particular, a locally rejected reply verifier cannot replay.
+                let refreshed = unsafe {
+                    (*(*self.auth).ah_ops)
+                        .ah_refresh
+                        .is_some_and(|refresh| refresh(self.auth, std::ptr::null_mut()))
+                };
+                if refreshed {
+                    continue;
+                }
+            }
+            if status != clnt_stat_RPC_SUCCESS {
+                return Err(RpcError::transport_with_kind(
+                    rpc_transport_kind(status),
+                    format!(
+                        "RPC call failed: stat={status}, rpc_err.status={}",
+                        err.re_status
+                    ),
+                ));
+            }
+            return Ok(());
         }
-        // SAFETY: our request reference keeps reqp alive throughout the wait.
-        // Copy the error before releasing it; no pointer access follows the
-        // release, which may free the allocation through req_free_cb.
-        let (status, err) = unsafe {
-            (*reqp).cc_refreshes = 1;
-            let status = clnt_req_wait_reply(reqp);
-            let err = (*reqp).cc_error;
-            clnt_req_release(reqp);
-            (status, err)
-        };
-        if status != clnt_stat_RPC_SUCCESS {
-            return Err(RpcError::transport_with_kind(
-                rpc_transport_kind(status),
-                format!(
-                    "RPC call failed: stat={status}, rpc_err.status={}",
-                    err.re_status
-                ),
-            ));
-        }
-        Ok(())
     }
+}
+
+// RPCSEC_GSS credential/context rejections and AUTH_SHORT expiry are
+// definite RPC admission failures. AUTH_INVALIDRESP can follow execution.
+fn refreshable_auth_rejection(reason: auth_stat) -> bool {
+    reason == auth_stat_AUTH_REJECTEDCRED
+        || reason == auth_stat_RPCSEC_GSS_CREDPROBLEM
+        || reason == auth_stat_RPCSEC_GSS_CTXPROBLEM
 }
 
 fn rpc_transport_kind(status: clnt_stat) -> vfsi_core::TransportKind {
@@ -704,6 +735,221 @@ mod tests {
                 "waitq_init must leave the mutex locked for clnt_req"
             );
             unsafe { waitq_fini(&mut req) };
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support;
+
+#[cfg(test)]
+mod no_hidden_resend_tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    use super::test_support::{accepted_reply, read_record as record};
+
+    #[test]
+    fn timeout_does_not_resend_a_request_on_a_live_tcp_connection() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let peer = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_millis(600)))
+                .unwrap();
+            let first = record(&mut socket).unwrap();
+            assert_eq!(
+                u32::from_be_bytes(first[20..24].try_into().unwrap()),
+                NFSPROC4_COMPOUND
+            );
+            let mut calls = 1;
+            while record(&mut socket).is_ok() {
+                calls += 1;
+            }
+            calls
+        });
+        let rpc = RpcClient::connect_with_timeouts(
+            &endpoint,
+            Duration::from_secs(1),
+            Duration::from_millis(40),
+        )
+        .unwrap();
+        let error = crate::compound::Compound::new()
+            .call(&rpc)
+            .err()
+            .expect("RPC must time out");
+        assert_eq!(
+            error.transport_kind,
+            Some(vfsi_core::TransportKind::Timeout)
+        );
+        drop(rpc);
+        assert_eq!(
+            peer.join().unwrap(),
+            1,
+            "an unanswered mutation must not be transmitted twice"
+        );
+    }
+
+    #[test]
+    fn successful_reply_is_not_retransmitted() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let peer = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_millis(600)))
+                .unwrap();
+            let mut count = 0;
+            while let Ok(request) = record(&mut socket) {
+                count += 1;
+                accepted_reply(&mut socket, &request, &[0; 12]);
+            }
+            count
+        });
+        let rpc = RpcClient::connect_with_timeouts(
+            &endpoint,
+            Duration::from_secs(1),
+            Duration::from_millis(100),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::compound::Compound::new()
+                .call(&rpc)
+                .unwrap()
+                .status(),
+            0
+        );
+        drop(rpc);
+        assert_eq!(peer.join().unwrap(), 1);
+    }
+
+    #[test]
+    fn only_definite_server_authentication_rejections_allow_refresh() {
+        for reason in 0..=14 {
+            assert_eq!(
+                refreshable_auth_rejection(reason),
+                matches!(reason, 2 | 13 | 14)
+            );
+        }
+        assert!(
+            !refreshable_auth_rejection(auth_stat_AUTH_INVALIDRESP),
+            "a bad verifier can arrive after the NFS operation executed"
+        );
+    }
+}
+
+#[cfg(test)]
+mod bounded_auth_refresh_tests {
+    use super::test_support::{accepted_reply, read_record, write_record};
+    use super::*;
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static REFRESHES: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn refresh(_auth: *mut AUTH, _context: *mut c_void) -> bool {
+        REFRESHES.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+    unsafe extern "C" fn reject_verifier(_auth: *mut AUTH, _verifier: *mut opaque_auth) -> bool {
+        false
+    }
+
+    // Test-only replacement of one owned AUTH object's operation table.
+    // Restore the original before the replacement table or the client is freed,
+    // including on assertion unwind.
+    struct AuthOpsGuard<'a> {
+        rpc: &'a RpcClient,
+        original: *mut __auth_auth_ops,
+        _replacement: Box<__auth_auth_ops>,
+    }
+    impl<'a> AuthOpsGuard<'a> {
+        fn new(rpc: &'a RpcClient, bad_verifier: bool) -> Self {
+            // SAFETY: RpcClient owns a live AUTH and operation table. We copy
+            // the table rather than mutating the shared original C table.
+            let original = unsafe { (*rpc.auth).ah_ops };
+            // SAFETY: original points to this live AUTH object's initialized table.
+            let mut replacement = Box::new(unsafe { *original });
+            replacement.ah_refresh = Some(refresh);
+            if bad_verifier {
+                replacement.ah_validate = Some(reject_verifier);
+            }
+            // SAFETY: the guard keeps this replacement alive and restores the
+            // original pointer before Drop can destroy the owned AUTH.
+            unsafe {
+                (*rpc.auth).ah_ops = &mut *replacement;
+            }
+            Self {
+                rpc,
+                original,
+                _replacement: replacement,
+            }
+        }
+    }
+    impl Drop for AuthOpsGuard<'_> {
+        fn drop(&mut self) {
+            // SAFETY: the guard borrows the client, so its AUTH and original
+            // operation table remain live until restoration has completed.
+            unsafe {
+                (*self.rpc.auth).ah_ops = self.original;
+            }
+        }
+    }
+
+    #[test]
+    fn only_denied_credentials_refresh_once_and_replies_never_replay_after_bad_verifiers() {
+        for bad_verifier in [false, true] {
+            REFRESHES.store(0, Ordering::SeqCst);
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let endpoint = listener.local_addr().unwrap().to_string();
+            let peer = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_millis(600)))
+                    .unwrap();
+                let mut ids = Vec::new();
+                while let Ok(request) = read_record(&mut socket) {
+                    ids.push(request[..4].to_vec());
+                    if ids.len() == 1 && !bad_verifier {
+                        let mut body = request[..4].to_vec();
+                        // MSG_DENIED / AUTH_ERROR / rejected credential: no
+                        // NFS operation was admitted by this first request.
+                        for word in [1u32, 1, 1, auth_stat_AUTH_REJECTEDCRED] {
+                            body.extend_from_slice(&word.to_be_bytes());
+                        }
+                        write_record(&mut socket, &body);
+                    } else {
+                        // This accepted operation may have executed; a local
+                        // verifier rejection must not refresh or retransmit it.
+                        accepted_reply(&mut socket, &request, &[0; 12]);
+                    }
+                }
+                ids
+            });
+            let rpc = RpcClient::connect_with_timeouts(
+                &endpoint,
+                Duration::from_secs(1),
+                Duration::from_millis(200),
+            )
+            .unwrap();
+            let guard = AuthOpsGuard::new(&rpc, bad_verifier);
+            let result = crate::compound::Compound::new().call(&rpc);
+            drop(guard);
+            drop(rpc);
+            let ids = peer.join().unwrap();
+            if bad_verifier {
+                assert_eq!(
+                    result.err().expect("bad verifier").transport_kind,
+                    Some(vfsi_core::TransportKind::Auth)
+                );
+                assert_eq!(REFRESHES.load(Ordering::SeqCst), 0);
+                assert_eq!(ids.len(), 1);
+            } else {
+                assert!(result.is_ok());
+                assert_eq!(REFRESHES.load(Ordering::SeqCst), 1);
+                assert_eq!(ids.len(), 2);
+                assert_ne!(ids[0], ids[1], "authentication retry needs a fresh RPC XID");
+            }
         }
     }
 }

@@ -25,7 +25,7 @@ vfsi-core = { path = "crates/vfsi-core", version = "0.2.0" }
 vfsi-local = { path = "crates/vfsi-local", version = "0.2.0" }
 vfsi-posix = { path = "crates/vfsi-posix", version = "0.2.0" }
 vfsi-uring = { path = "crates/vfsi-uring", version = "0.2.0" }
-vfsi-nfs = { path = "crates/vfsi-nfs", version = "0.2.0" }
+vfsi-nfs = { path = "crates/vfsi-nfs", version = "0.2.2" }
 vfsi-smb = { path = "crates/vfsi-smb", version = "0.2.0" }
 vfsi-sync = { path = "crates/vfsi-sync", version = "0.2.0" }
 

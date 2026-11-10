@@ -28,6 +28,17 @@ use io_progress::{complete_read_suffix, complete_write_suffix};
 #[cfg(feature = "test-faults")]
 use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 
+/// An uncached duplicate reply hides the entire original compound, even
+/// though its SEQUENCE succeeded. Keep the native NFS cause independently of
+/// certainty instead of pretending this protocol status is a transport error.
+pub(crate) fn uncertain_completion(cause: &vfsi_core::VfError) -> bool {
+    cause.is_transport()
+        || cause.status()
+            == Some(vfsi_core::StatusCode::Nfs(
+                nfsstat4_NFS4ERR_RETRY_UNCACHED_REP,
+            ))
+}
+
 /// Opaque NFS protocol reference to a server-side filesystem object.
 ///
 /// This addresses the object for NFS operations; it is not the
@@ -1627,6 +1638,18 @@ impl NfsClient {
                 return Err(error);
             }
         };
+        if reply.status() == nfsstat4_NFS4ERR_RETRY_UNCACHED_REP {
+            // SEQUENCE success plus an uncached-reply status on the next
+            // operation says nothing about the original request's effects.
+            // Never let ordinary failed-item decoding replay its suffix.
+            if compound.has_open() {
+                self.quarantine_open_identity();
+            }
+            let index = (0..reply.nops())
+                .find(|&index| reply.op_status(index) == nfsstat4_NFS4ERR_RETRY_UNCACHED_REP)
+                .unwrap_or(0);
+            return Err(RpcError::op(index, nfsstat4_NFS4ERR_RETRY_UNCACHED_REP));
+        }
         if reply.status() != nfsstat4_NFS4_OK
             && compound.has_named_open()
             && compound.has_unaddressed_open(&reply)
@@ -3364,7 +3387,7 @@ impl NfsClient {
                     let cause = fatal
                         .clone()
                         .unwrap_or_else(|| vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_IO));
-                    if fatal.as_ref().is_some_and(vfsi_core::VfError::is_transport)
+                    if fatal.as_ref().is_some_and(uncertain_completion)
                         && submitted.iter().any(|&(caller, _, _)| caller == index)
                     {
                         OpError::unknown(cause, None)
@@ -3450,7 +3473,7 @@ impl NfsClient {
                 }
                 let error = error.unwrap_or_else(|| {
                     let submitted = wave.submitted.iter().any(|&(caller, _, _)| caller == index);
-                    if fatal.as_ref().is_some_and(vfsi_core::VfError::is_transport) && submitted {
+                    if fatal.as_ref().is_some_and(uncertain_completion) && submitted {
                         OpError::unknown(fallback.clone(), None)
                     } else if data.is_empty() {
                         OpError::not_attempted(fallback.clone())
@@ -3787,7 +3810,7 @@ impl NfsClient {
                                     Ok(end) => end_of_file = end,
                                     Err(error) => {
                                         let cause = vfsi_core::error_from_rpc(error, None);
-                                        errors[*caller] = Some(if cause.is_transport() {
+                                        errors[*caller] = Some(if uncertain_completion(&cause) {
                                             vfsi_core::OpError::unknown(cause, None)
                                         } else {
                                             vfsi_core::OpError::failed(cause, None)
@@ -5532,3 +5555,6 @@ mod remove_results_tests;
 
 #[cfg(all(test, feature = "test-faults"))]
 mod readdir_results_tests;
+
+#[cfg(all(test, feature = "test-faults"))]
+mod uncached_reply_tests;

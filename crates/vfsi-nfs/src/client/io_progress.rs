@@ -1,5 +1,5 @@
 //! Contiguous completion of acknowledged short NFS wire operations.
-use super::{RpcError, RpcResult, checked_offset};
+use super::{RpcError, RpcResult, checked_offset, uncertain_completion};
 use nfsv41_sys::{nfsstat4_NFS4ERR_IO, stable_how4_FILE_SYNC4};
 #[cfg(test)]
 use vfsi_core::{FailureState, IoProgress};
@@ -32,7 +32,7 @@ pub(super) fn complete_read_suffix<C>(
 
 pub(super) fn write_rpc_error(error: RpcError) -> OpError {
     let cause = vfsi_core::error_from_rpc(error, None);
-    if cause.is_transport() {
+    if uncertain_completion(&cause) {
         OpError::unknown(cause, None)
     } else {
         OpError::failed(cause, None)

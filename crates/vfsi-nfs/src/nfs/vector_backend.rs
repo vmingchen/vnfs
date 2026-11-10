@@ -94,7 +94,7 @@ impl VectorBackend for NfsVecFs {
                 .and_then(|()| {
                     self.open_raw_impl(paths[index], flags[index], modes[index])
                         .map_err(|error| {
-                            if error.is_transport() {
+                            if crate::client::uncertain_completion(&error) {
                                 vfsi_core::OpError::unknown(error, None)
                             } else {
                                 vfsi_core::OpError::failed(error, None)
@@ -920,7 +920,7 @@ impl VectorBackend for NfsVecFs {
                     self.copy_extent(&source, &destination, pair)
                 })();
                 result.map_err(|cause| {
-                    if cause.is_transport() {
+                    if crate::client::uncertain_completion(&cause) {
                         fatal = Some(cause.clone());
                         vfsi_core::OpError::unknown(cause, None)
                     } else {

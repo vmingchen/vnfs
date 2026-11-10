@@ -3,7 +3,7 @@
 use super::*;
 
 fn copy_error(cause: VfError) -> vfsi_core::OpError {
-    if cause.is_transport() {
+    if crate::client::uncertain_completion(&cause) {
         vfsi_core::OpError::unknown(cause, None)
     } else {
         vfsi_core::OpError::failed(cause, None)
@@ -812,5 +812,27 @@ mod tests {
 
         assert_eq!(error.raw_code(), ERR_IO);
         assert_eq!(writes, 1);
+    }
+}
+
+#[cfg(test)]
+mod uncached_reply_tests {
+    use super::*;
+
+    #[test]
+    fn lost_cached_copy_reply_is_unknown_and_cannot_fall_back() {
+        let result = Err(copy_error(VfError::nfs(
+            None,
+            nfsstat4_NFS4ERR_RETRY_UNCACHED_REP,
+        )));
+        let error = result.as_ref().unwrap_err();
+        assert_eq!(error.state(), vfsi_core::FailureState::Unknown);
+        assert_eq!(
+            error.cause().status(),
+            Some(vfsi_core::StatusCode::Nfs(
+                nfsstat4_NFS4ERR_RETRY_UNCACHED_REP
+            ))
+        );
+        assert!(!copy_rejection_allows_fallback(&result, 0));
     }
 }
