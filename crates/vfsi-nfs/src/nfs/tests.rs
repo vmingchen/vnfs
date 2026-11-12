@@ -935,10 +935,11 @@ fn live_close_status_failure_preserves_prefix_and_resumes_only_unexecuted_suffix
         })
         .collect();
     let fd = files[1].fd().unwrap();
-    let open = &fs.open_files[&fd];
-    // The server has closed this input, but local registration is deliberately
-    // retained to exercise an actual CLOSE error inside the compound.
+    let open = fs.open_files.get_mut(&fd).unwrap();
+    // Retire the real state, then use a deliberately invalid stateid. Reusing
+    // the closed stateid can be acknowledged as a duplicate CLOSE by the server.
     fs.nfs.close(&open.fh, &open.stateid).unwrap();
+    open.stateid.other = [0x7f; 12];
     let _ = thread_compound_stats();
     let outcomes = fs.vclose_impl(&files).unwrap();
     let compounds = thread_compound_stats().0;

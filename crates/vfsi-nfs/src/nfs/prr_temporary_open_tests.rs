@@ -63,9 +63,11 @@ fn multi_compound_path_cleanup_closes_latest_states_in_one_batch() {
     fs.close_path_opens(&outcome.opened);
     let compounds = crate::compound::thread_compound_stats().0;
     let confirmed = fs.nfs.confirmed_path_closes() - before;
-    let second_closes: Vec<_> = latest
+    // A server may acknowledge duplicate CLOSE for replay tolerance. READ with
+    // the closed stateid instead proves cleanup retired the newest OPEN.
+    let closed_reads: Vec<_> = latest
         .iter()
-        .map(|close| fs.nfs.close_many_path(std::slice::from_ref(close)))
+        .map(|close| fs.nfs.read(&close.fh, &close.stateid, 0, 1))
         .collect();
     fs.nfs.remove(&dir, "large").unwrap();
     fs.nfs.remove(&dir, "other").unwrap();
@@ -75,7 +77,7 @@ fn multi_compound_path_cleanup_closes_latest_states_in_one_batch() {
         "the latest OPEN for both objects must be closed"
     );
     assert_eq!(compounds, 1, "temporary cleanup must remain batched");
-    for result in second_closes {
+    for result in closed_reads {
         let error = result.expect_err("helper must have closed the current stateid");
         assert_eq!(error.status, nfsstat4_NFS4ERR_BAD_STATEID);
     }
