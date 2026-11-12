@@ -4,6 +4,18 @@ use super::*;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+fn record_cleanup_error(
+    diagnostics: &Mutex<(std::collections::VecDeque<VfError>, u64)>,
+    error: VfError,
+) {
+    let mut diagnostics = diagnostics.lock().unwrap_or_else(|e| e.into_inner());
+    if diagnostics.0.len() == 32 {
+        diagnostics.0.pop_front();
+        diagnostics.1 = diagnostics.1.saturating_add(1);
+    }
+    diagnostics.0.push_back(error);
+}
+
 pub(super) enum CleanupTarget {
     File(FileOperand, PathBuf),
     Directory(VfDir, PathBuf),
@@ -20,6 +32,7 @@ pub(super) struct SharedBackend<F: HandleBackend> {
     pub(super) cursor_owner: Arc<()>,
     pending: Mutex<Vec<PendingClose<F>>>,
     has_pending: AtomicBool,
+    diagnostics: Mutex<(std::collections::VecDeque<VfError>, u64)>,
 }
 impl<F: HandleBackend> SharedBackend<F> {
     pub(super) fn new(backend: F) -> Self {
@@ -28,6 +41,7 @@ impl<F: HandleBackend> SharedBackend<F> {
             cursor_owner: Arc::new(()),
             pending: Mutex::new(Vec::new()),
             has_pending: AtomicBool::new(false),
+            diagnostics: Mutex::new(Default::default()),
         }
     }
     pub(super) fn defer(
@@ -48,8 +62,14 @@ impl<F: HandleBackend> SharedBackend<F> {
                 guard: Some(guard),
                 pending: &self.pending,
                 has_pending: &self.has_pending,
+                diagnostics: &self.diagnostics,
             })
             .map_err(|_| ())
+    }
+    pub(super) fn take_cleanup_errors(&self) -> (Vec<VfError>, u64) {
+        let mut diagnostics = self.diagnostics.lock().unwrap_or_else(|e| e.into_inner());
+        let dropped = std::mem::take(&mut diagnostics.1);
+        (diagnostics.0.drain(..).collect(), dropped)
     }
     pub(super) fn lock(&self) -> Result<BackendGuard<'_, F>, ()> {
         let mut guard = self.lock_without_cleanup()?;
@@ -79,6 +99,7 @@ impl<F: HandleBackend> SharedBackend<F> {
             let mut first = None;
             for close in std::mem::take(pending) {
                 if let Err(error) = (close.close)(backend, &close.target) {
+                    record_cleanup_error(&self.diagnostics, error.clone());
                     first.get_or_insert(error);
                     failed.push(close);
                 }
@@ -126,6 +147,7 @@ pub(super) struct BackendGuard<'a, F: HandleBackend> {
     guard: Option<std::sync::MutexGuard<'a, Option<F>>>,
     pending: &'a Mutex<Vec<PendingClose<F>>>,
     has_pending: &'a AtomicBool,
+    diagnostics: &'a Mutex<(std::collections::VecDeque<VfError>, u64)>,
 }
 impl<F: HandleBackend> std::ops::Deref for BackendGuard<'_, F> {
     type Target = F;
@@ -148,16 +170,28 @@ impl<F: HandleBackend> std::ops::DerefMut for BackendGuard<'_, F> {
 }
 impl<F: HandleBackend> BackendGuard<'_, F> {
     pub(super) fn drain_cleanup(&mut self) -> VfResult<()> {
+        let outcomes = self.drain_cleanup_outcomes();
+        let count = outcomes.len();
+        vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+    }
+
+    pub(super) fn drain_cleanup_outcomes(&mut self) -> Vec<vfsi_core::OpResult<()>> {
         if !self.has_pending.swap(false, Ordering::AcqRel) {
-            return Ok(());
+            return Vec::new();
         }
         let pending = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
         let mut failed = Vec::new();
-        let mut first = None;
+        let mut outcomes = Vec::with_capacity(pending.len());
         for close in pending {
-            if let Err(error) = (close.close)(self, &close.target) {
-                first.get_or_insert(error);
-                failed.push(close);
+            match (close.close)(self, &close.target) {
+                Ok(()) => outcomes.push(Ok(())),
+                Err(error) => {
+                    // This bounded diagnostic history never owns cleanup targets.
+                    // Keep ownership in pending, and preserve the operation's primary error.
+                    record_cleanup_error(self.diagnostics, error.clone());
+                    outcomes.push(Err(vfsi_core::OpError::unknown(error, None)));
+                    failed.push(close);
+                }
             }
         }
         if !failed.is_empty() {
@@ -167,7 +201,7 @@ impl<F: HandleBackend> BackendGuard<'_, F> {
                 .extend(failed);
             self.has_pending.store(true, Ordering::Release);
         }
-        first.map_or(Ok(()), Err)
+        outcomes
     }
 }
 impl<F: HandleBackend> Drop for BackendGuard<'_, F> {

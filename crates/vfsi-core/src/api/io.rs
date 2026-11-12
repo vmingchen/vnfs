@@ -18,6 +18,8 @@ pub enum SyncMode {
 /// Every I/O request uses the supplied client's vector engine. The file stays
 /// owned by the caller. `read_to_end` and `read_to_string` bound newly collected
 /// bytes by the client's read budget; on failure the cursor may have advanced.
+/// A failed read with a confirmed prefix acknowledges those bytes, then reports
+/// its saved failure before further I/O; collectors retain the prefix on error.
 /// Explicitly allocated caller buffers remain caller-managed. `write_all` uses
 /// the standard `Write` loop over single-wave vector writes: acknowledged short
 /// writes advance the cursor, and interruption retries only the remaining bytes.
@@ -32,31 +34,42 @@ pub(super) struct StdIo<'a, C: Vfsi + ?Sized> {
     cursor: Cursor,
 }
 
-// A prefix error carries no actual append offset. Keep its pending diagnostic
-// in the unresolved cursor itself rather than maintaining overlapping flags.
+// Read prefixes have a known position; write prefixes lack an actual append
+// offset. Keep each pending diagnostic with its corresponding cursor state.
 enum Cursor {
-    At(u64),
+    At {
+        position: u64,
+        pending: Option<io::Error>,
+    },
     Unresolved(Option<io::Error>),
+}
+impl Cursor {
+    fn at(position: u64) -> Self {
+        Self::At {
+            position,
+            pending: None,
+        }
+    }
 }
 impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
     pub(super) fn new(client: &'a C, file: &'a C::File) -> Self {
         Self {
             client,
             file,
-            cursor: Cursor::At(0),
+            cursor: Cursor::at(0),
         }
     }
 
-    fn report_pending_write(&mut self) -> io::Result<()> {
-        match &mut self.cursor {
-            Cursor::At(_) => Ok(()),
-            Cursor::Unresolved(error) => error.take().map_or(Ok(()), Err),
-        }
+    fn report_pending_error(&mut self) -> io::Result<()> {
+        let error = match &mut self.cursor {
+            Cursor::At { pending, .. } | Cursor::Unresolved(pending) => pending,
+        };
+        error.take().map_or(Ok(()), Err)
     }
 
     fn known_position(&self) -> io::Result<u64> {
         match self.cursor {
-            Cursor::At(position) => Ok(position),
+            Cursor::At { position, .. } => Ok(position),
             Cursor::Unresolved(_) => Err(io::Error::other(
                 "write prefix has no resolved cursor; inspect the error and seek explicitly",
             )),
@@ -67,7 +80,7 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
         if buffer.is_empty() {
             return Ok((0, false));
         }
-        self.report_pending_write()?;
+        self.report_pending_error()?;
         let position = self.known_position()?;
         let length = buffer.len().min(budget);
         if !buffer.is_empty() && length == 0 {
@@ -83,20 +96,28 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
         if values.len() != 1 {
             return Err(invalid("invalid read count").into());
         }
+        let mut pending = None;
         let value = match values.into_iter().next().expect("validated read count") {
             Ok(value) => value,
             Err(error) => {
-                let (cause, _, progress) = error.into_parts();
-                match progress {
+                match error.progress() {
                     Some(crate::IoProgress::Read(prefix))
                         if prefix.is_buffered()
                             && prefix.offset() == position
                             && prefix.bytes_read() > 0
                             && prefix.bytes_read() <= length =>
                     {
+                        let prefix = prefix.clone();
+                        let mut kind = error.cause().kind();
+                        // A collector may retry zero-progress interruptions, but
+                        // this logical failure already delivered a prefix.
+                        if kind == io::ErrorKind::Interrupted {
+                            kind = io::ErrorKind::Other;
+                        }
+                        pending = Some(io::Error::new(kind, error));
                         prefix
                     }
-                    _ => return Err(cause.with_index(0).into()),
+                    _ => return Err(error.into_cause().with_index(0).into()),
                 }
             }
         };
@@ -107,8 +128,12 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
         {
             return Err(invalid("invalid read progress").into());
         }
-        self.cursor = Cursor::At(position + value.bytes_read() as u64);
-        Ok((value.bytes_read(), value.eof()))
+        let eof = pending.is_none() && value.eof();
+        self.cursor = Cursor::At {
+            position: position + value.bytes_read() as u64,
+            pending,
+        };
+        Ok((value.bytes_read(), eof))
     }
     fn read_uninterrupted(
         &mut self,
@@ -123,11 +148,10 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
         }
     }
     fn write_at(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.report_pending_write()?;
+        self.report_pending_error()?;
         let position = self.known_position()?;
-        position
-            .checked_add(buffer.len() as u64)
-            .ok_or_else(|| Error::errno(0, libc::EOVERFLOW as u32))?;
+        // The backend applies append semantics before validating the range;
+        // the requested cursor may be ignored by an append handle.
         let mut values = self.client.vwrite(
             &[WriteOp::at(self.file, position, buffer)],
             WriteOptions::new(),
@@ -177,7 +201,7 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
             return Err(invalid("invalid write progress").into());
         }
         // Append descriptors report the actual position selected by the backend.
-        self.cursor = Cursor::At(
+        self.cursor = Cursor::at(
             value
                 .offset
                 .checked_add(value.bytes_written as u64)
@@ -198,7 +222,7 @@ impl<C: Vfsi + ?Sized> Read for StdIo<'_, C> {
             .map(|(count, _)| count)
     }
     fn read_to_end(&mut self, output: &mut Vec<u8>) -> io::Result<usize> {
-        self.report_pending_write()?;
+        self.report_pending_error()?;
         let budget = self.client.limits().max_read_bytes();
         let mut added = 0;
         loop {
@@ -232,11 +256,14 @@ impl<C: Vfsi + ?Sized> Read for StdIo<'_, C> {
     }
     fn read_to_string(&mut self, output: &mut String) -> io::Result<usize> {
         let mut bytes = Vec::new();
-        let count = self.read_to_end(&mut bytes)?;
-        let text =
-            std::str::from_utf8(&bytes).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
-        output.push_str(text);
-        Ok(count)
+        let result = self.read_to_end(&mut bytes);
+        match std::str::from_utf8(&bytes) {
+            Ok(text) => {
+                output.push_str(text);
+                result
+            }
+            Err(_) => result.and_then(|_| Err(io::ErrorKind::InvalidData.into())),
+        }
     }
 }
 impl<C: Vfsi + ?Sized> Write for StdIo<'_, C> {
@@ -257,20 +284,20 @@ impl<C: Vfsi + ?Sized> Write for StdIo<'_, C> {
                 Err(error) => return Err(error),
             }
         }
-        self.report_pending_write()
+        self.report_pending_error()
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.report_pending_write()?;
+        self.report_pending_error()?;
         self.client.sync_data(self.file).map_err(Into::into)
     }
 }
 impl<C: Vfsi + ?Sized> Seek for StdIo<'_, C> {
     fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
-        self.report_pending_write()?;
+        self.report_pending_error()?;
         let (base, offset) = match position {
             SeekFrom::Start(position) => {
-                self.cursor = Cursor::At(position);
+                self.cursor = Cursor::at(position);
                 return Ok(position);
             }
             SeekFrom::Current(offset) => (self.known_position()?, offset),
@@ -288,7 +315,7 @@ impl<C: Vfsi + ?Sized> Seek for StdIo<'_, C> {
         let position = i128::from(base) + i128::from(offset);
         let position =
             u64::try_from(position).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-        self.cursor = Cursor::At(position);
+        self.cursor = Cursor::at(position);
         Ok(position)
     }
 }

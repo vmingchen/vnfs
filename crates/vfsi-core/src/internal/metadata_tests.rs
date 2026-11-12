@@ -33,10 +33,24 @@ fn timestamp_normalization_handles_both_sides_of_epoch() {
     }
     if let Some(time) = UNIX_EPOCH.checked_sub(Duration::new(i64::MAX as u64, 1)) {
         assert_eq!(
-            validate_setattrs(&SetAttrsOp::new("/file").modified(time))
-                .unwrap_err()
-                .raw_code(),
-            libc::EOVERFLOW as u32
+            validate_setattrs(&SetAttrsOp::new("/file").modified(time)).unwrap(),
+            [None, Some((i64::MIN, 999_999_999))]
         );
+    }
+}
+
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+#[test]
+fn timestamp_normalization_accepts_the_minimum_signed_second() {
+    for (duration, expected) in [
+        (Duration::from_secs(i64::MAX as u64 + 1), (i64::MIN, 0)),
+        (Duration::new(i64::MAX as u64, 1), (i64::MIN, 999_999_999)),
+        (Duration::new(i64::MAX as u64, 999_999_999), (i64::MIN, 1)),
+    ] {
+        let time = UNIX_EPOCH
+            .checked_sub(duration)
+            .expect("Unix signed-second time");
+        let op = SetAttrsOp::new("/file").accessed(time).modified(time);
+        assert_eq!(validate_setattrs(&op).unwrap(), [Some(expected); 2]);
     }
 }

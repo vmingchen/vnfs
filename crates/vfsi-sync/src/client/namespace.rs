@@ -152,8 +152,8 @@ impl<F: VectorBackend> FsClient<F> {
 }
 
 impl<F: VectorBackend> FsClient<F> {
-    /// Copy whole files in request order. A successful prefix may remain if
-    /// a later request fails; this operation does not provide atomicity.
+    /// Copy independent whole-file pairs, retaining one outcome per input.
+    /// Sibling copies may succeed around failures; this operation is not atomic.
     pub(crate) fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         pairs: &[(P, Q)],

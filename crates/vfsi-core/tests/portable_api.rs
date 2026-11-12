@@ -27,6 +27,7 @@ impl FileHandle for TestFile {
 struct PortableFs {
     reads: Cell<usize>,
     streams: Cell<usize>,
+    stream_index_shift: Cell<usize>,
     listings: Cell<usize>,
     shape: Cell<u8>,
     tree: Cell<bool>,
@@ -203,7 +204,7 @@ impl Vfsi for PortableFs {
                         None,
                     ))
                 } else {
-                    callback(index, 0, b"payload")
+                    callback(index + self.stream_index_shift.get(), 0, b"payload")
                         .map(|decision| {
                             if decision.is_break() {
                                 StreamCompletion::Stopped { next_offset: 7 }
@@ -923,4 +924,34 @@ fn scalar_stream_preserves_nested_callback_error_after_rich_normalization() {
         .unwrap_err();
     assert_eq!(actual, expected);
     assert_eq!(fs.streams.get(), 1);
+}
+
+#[test]
+fn scalar_stream_rejects_foreign_callback_indices_before_delivery() {
+    for index in [0, 1, 99] {
+        let fs = PortableFs::default();
+        fs.shape.set(13);
+        fs.stream_index_shift.set(index);
+        let mut delivered = Vec::new();
+        let result = fs.read_stream_with_options("/a", StreamOptions::new(), |offset, bytes| {
+            assert_eq!(offset, 0);
+            delivered.extend_from_slice(bytes);
+            Ok(std::ops::ControlFlow::Continue(()))
+        });
+        if index == 0 {
+            assert_eq!(result.unwrap(), StreamCompletion::Complete);
+            assert_eq!(delivered, b"payload");
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(
+                error.transport_kind(),
+                Some(vfsi_core::TransportKind::InvalidReply)
+            );
+            assert!(
+                delivered.is_empty(),
+                "never deliver a different input's bytes"
+            );
+        }
+        assert_eq!(fs.streams.get(), 1, "never replay a malformed stream");
+    }
 }

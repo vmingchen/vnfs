@@ -23,8 +23,14 @@ fn with_indexed_context<'a>(
     operation: &'static str,
     path: impl FnOnce(usize) -> Option<&'a Path>,
 ) -> VfError {
-    match error.index().and_then(path) {
-        Some(path) => error.with_context(operation, path),
+    match error.index() {
+        Some(index) => match path(index) {
+            Some(path) => error.with_context(operation, path),
+            None => VfError::invalid_reply(
+                None,
+                format!("{operation} backend returned an invalid error index"),
+            ),
+        },
         None => error,
     }
 }
@@ -120,6 +126,24 @@ impl<F: HandleBackend> FsClient<F> {
         }
     }
 
+    /// Attempt queued cleanup in queue order, retaining each unsuccessful target.
+    /// Completion states are conservative because scalar cleanup hooks expose no
+    /// finer submission knowledge. Ordinary file operations are never replayed.
+    pub fn drain_cleanup_outcomes(&self) -> vfsi_core::VecResult<()> {
+        Ok(self
+            .inner
+            .lock_without_cleanup()
+            .map_err(|_| poisoned())?
+            .drain_cleanup_outcomes())
+    }
+
+    /// Take bounded diagnostics from previous cleanup attempts, including implicit
+    /// drains before ordinary I/O. The second value counts older diagnostics
+    /// evicted since the previous call. Taking diagnostics never retires targets.
+    pub fn take_cleanup_errors(&self) -> (Vec<VfError>, u64) {
+        self.inner.take_cleanup_errors()
+    }
+
     /// Drain queued Drop cleanup and report the first failure. Failed targets
     /// remain owned for later cleanup. No new file operation is replayed.
     pub fn drain_cleanup(&self) -> VfResult<()> {
@@ -146,13 +170,9 @@ impl<F: VectorBackend> FsClient<F> {
         }
         let mut filesystem = self.lock()?;
         let mut outcomes = filesystem.vopen_impl(requests).map_err(|error| {
-            if error.index().is_some_and(|index| index >= requests.len()) {
-                VfError::invalid_reply(None, "invalid open rejection index")
-            } else {
-                with_indexed_context(error, "vopen", |index| {
-                    requests.get(index).map(|request| request.path())
-                })
-            }
+            with_indexed_context(error, "vopen", |index| {
+                requests.get(index).map(|request| request.path())
+            })
         })?;
         let own = |file, index: usize| OpenFile {
             inner: Arc::clone(&self.inner),

@@ -101,9 +101,6 @@ pub fn copy_tree_batches_with<F: VectorBackend + ?Sized>(
                 backend.vlistdir_pages_impl(&[path], masks, vec![cursor], 256, usize::MAX, true),
                 1,
             )?;
-            if pages.len() != 1 {
-                return Err(VfError::invalid_reply(None, "invalid tree-copy page count"));
-            }
             Ok(pages.pop().expect("validated one page"))
         },
         copy_files,

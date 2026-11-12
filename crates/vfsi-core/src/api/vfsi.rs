@@ -380,7 +380,7 @@ pub trait Vfsi {
     ///
     /// Submit independent siblings together. Do not rely on creating a parent
     /// and its child in the same vector; create parents first or use
-    /// a dependency-aware tree builder for dependency-aware fresh-tree creation.
+    /// a dependency-aware tree builder to create fresh trees.
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, MkDirOp};
@@ -480,8 +480,7 @@ pub trait Vfsi {
     /// Pages may interleave between roots. Outcome position is input identity,
     /// not execution order or a completed-prefix count.
     ///
-    /// Sorting and enter/leave options are rejected before I/O; use VfsiExt::listdir
-    /// for those policies.
+    /// For sorting and enter/leave events, use VfsiExt::listdir with WalkOptions.
     /// Metadata is selected on directory pages, not through per-entry stat
     /// calls. Entry symlinks are never followed during recursive descent.
     /// Descendants reopened by pathname reject symlinks in every component;

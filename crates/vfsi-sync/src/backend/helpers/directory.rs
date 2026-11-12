@@ -220,11 +220,15 @@ pub fn native_read_dir_impl_default<F: VectorBackend + ?Sized>(
     path: &std::path::Path,
     options: ListDirOptions,
 ) -> VfResult<Vec<DirEntry>> {
+    if !options.allow_symlink_components() {
+        // Whole-listing backends cannot guarantee atomic no-follow resolution.
+        return Err(VfError::unsupported(0).with_context("read_dir", path));
+    }
     let requested = options
         .max_entries_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_ENTRIES)
         .saturating_add(1);
     let entries = backend
-        .listdir_impl(path, metadata_mask(), requested, false)
+        .listdir_impl(path, options.fields(), requested, false)
         .map_err(|error| error.with_context("read_dir", path))?;
     if entries.len() > options.max_entries_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_ENTRIES) {
         return Err(VfError::errno(

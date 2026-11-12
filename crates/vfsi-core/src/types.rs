@@ -4,7 +4,7 @@
 //!
 //! Paths are native Unix [`Path`]s. An absolute path starts with `/` and is
 //! resolved against the filesystem root (for NFS, the export root), while a
-//! relative path is resolved against the client's current working directory
+//! relative path is resolved against the client's current working directory.
 //! `PathBuf`/`OsStr` preserve arbitrary filename bytes; UTF-8 conversion is a
 //! convenience for callers that need it.
 
@@ -594,8 +594,8 @@ pub struct VfAttrs {
     /// Requested attributes for a get/set call; also which attributes the
     /// caller cares about.
     pub masks: AttrMask,
-    /// Which requested attributes were actually returned (populated by
-    /// `getattrsv` / `lgetattrsv`). A field is only meaningful when its bit is
+    /// Which requested attributes were actually returned by the backend.
+    /// A field is only meaningful when its bit is
     /// set here; `masks` alone cannot distinguish "not requested" from
     /// "requested but not returned" from "returned as zero".
     pub returned: AttrMask,

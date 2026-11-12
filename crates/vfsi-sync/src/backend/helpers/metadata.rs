@@ -1,51 +1,54 @@
 use super::*;
 
+fn query_attributes<F: VectorBackend + ?Sized>(
+    backend: &mut F,
+    file: FileOperand,
+    masks: AttrMask,
+    follow: bool,
+) -> VfResult<VfAttrs> {
+    let mut attrs = VfAttrs {
+        file,
+        masks,
+        ..Default::default()
+    };
+    let result = if follow {
+        backend.vgetattrs_impl(std::slice::from_mut(&mut attrs))
+    } else {
+        backend.vgetattrs_nofollow_impl(std::slice::from_mut(&mut attrs))
+    };
+    vfsi_core::internal::collect_vec_result(result, 1)?;
+    Ok(attrs)
+}
+
 pub fn stat_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     path: &Path,
 ) -> VfResult<VfAttrs> {
-    let mut a = VfAttrs {
-        file: FileOperand::from_os_path(path),
-        masks: AttrMask::stat(),
-        ..VfAttrs::default()
-    };
-    vfsi_core::internal::collect_vec_result(
-        backend.vgetattrs_impl(std::slice::from_mut(&mut a)),
-        1,
-    )?;
-    Ok(a)
+    query_attributes(
+        backend,
+        FileOperand::from_os_path(path),
+        AttrMask::stat(),
+        true,
+    )
 }
 
 pub fn lstat_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     path: &Path,
 ) -> VfResult<VfAttrs> {
-    let mut a = VfAttrs {
-        file: FileOperand::from_os_path(path),
-        masks: AttrMask::stat(),
-        ..VfAttrs::default()
-    };
-    vfsi_core::internal::collect_vec_result(
-        backend.vgetattrs_nofollow_impl(std::slice::from_mut(&mut a)),
-        1,
-    )?;
-    Ok(a)
+    query_attributes(
+        backend,
+        FileOperand::from_os_path(path),
+        AttrMask::stat(),
+        false,
+    )
 }
 
 pub fn fstat_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
-    tcf: &FileOperand,
+    file: &FileOperand,
 ) -> VfResult<VfAttrs> {
-    let mut a = VfAttrs {
-        file: tcf.clone(),
-        masks: AttrMask::stat(),
-        ..VfAttrs::default()
-    };
-    vfsi_core::internal::collect_vec_result(
-        backend.vgetattrs_impl(std::slice::from_mut(&mut a)),
-        1,
-    )?;
-    Ok(a)
+    query_attributes(backend, file.clone(), AttrMask::stat(), true)
 }
 
 pub fn exists_impl_default<F: VectorBackend + ?Sized>(
@@ -79,21 +82,16 @@ pub fn native_metadata_impl_default<F: VectorBackend + ?Sized>(
         Target::Path(path) => Some(path),
         Target::File(file) => file.path(),
     };
-    let mut attrs = VfAttrs {
+    query_attributes(
+        backend,
         file,
-        masks: options.fields(),
-        ..VfAttrs::default()
-    };
-    let result = if options.follow_final_symlink() {
-        backend.vgetattrs_impl(std::slice::from_mut(&mut attrs))
-    } else {
-        backend.vgetattrs_nofollow_impl(std::slice::from_mut(&mut attrs))
-    };
-    vfsi_core::internal::collect_vec_result(result, 1).map_err(|error| match path {
+        options.fields(),
+        options.follow_final_symlink(),
+    )
+    .map_err(|error| match path {
         Some(path) => error.with_context("metadata", path),
         None => error,
-    })?;
-    Ok(attrs)
+    })
 }
 
 pub fn native_metadata_path_impl_default<F: VectorBackend + ?Sized>(

@@ -380,9 +380,6 @@ pub(super) fn collect_directory<F: Vfsi + ?Sized>(
             options,
             NonZeroUsize::new(128).expect("nonzero page size"),
         )?;
-        if pages.len() != 1 {
-            return Err(Error::invalid_reply(None, "invalid directory page count"));
-        }
         let mut page = pages.pop().expect("validated page count");
         if page.listing.path != path
             || (page.listing.entries.is_empty() && page.continuation.is_some())

@@ -289,16 +289,29 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
     let mut owned_indices = Vec::new();
     let mut buffer_ops = Vec::with_capacity(if buffered_first { capacity } else { 0 });
     let mut buffer_indices = Vec::new();
+    // Backend request projections are opaque. Retain the original bounds
+    // lazily; singleton and all-whole-file batches need no extra allocation.
+    let mut expected = Vec::new();
     let mut mixed = false;
     let mut requested = 0usize;
     let mut count = 0usize;
     for (index, op) in ops.enumerate() {
         count += 1;
-        let length = match &op.source {
-            OpSource::Whole(_) => 0,
-            OpSource::Range(_, _, length) => *length,
-            OpSource::Into(_, _, buffer) => buffer.len(),
+        let bounds = match &op.source {
+            OpSource::Whole(_) => None,
+            OpSource::Range(_, offset, length) => Some((*offset, *length)),
+            OpSource::Into(_, offset, buffer) => Some((*offset, buffer.len())),
         };
+        let length = bounds.map_or(0, |(_, length)| length);
+        if let Some(bounds) = bounds {
+            if expected.is_empty() {
+                expected.reserve(capacity);
+                expected.resize(index, (0, 0));
+            }
+            expected.push(bounds);
+        } else if !expected.is_empty() {
+            expected.push((0, 0));
+        }
         requested = requested
             .checked_add(length)
             .filter(|bytes| *bytes <= budget)
@@ -343,11 +356,13 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
     } else {
         read_phase(buffers(&mut buffer_ops, budget), buffer_count)
             .into_iter()
-            .map(|result| {
+            .enumerate()
+            .map(|(local, result)| {
+                let index = if mixed { buffer_indices[local] } else { local };
                 checked_read(
                     result.map(|read| ReadResult::buffered(read.offset, read.bytes_read, read.eof)),
                     true,
-                    None,
+                    Some(expected[index]),
                     false,
                     &mut remaining,
                 )
@@ -362,12 +377,15 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
     } else {
         read_phase(owned(&owned_ops, remaining), owned_ops.len())
             .into_iter()
-            .map(|result| {
+            .enumerate()
+            .map(|(local, result)| {
+                let index = if mixed { owned_indices[local] } else { local };
+                let whole = matches!(owned_ops[local].source, Source::Whole(_));
                 checked_read(
                     result.map(|read| ReadResult::owned(read.offset, read.data, read.eof)),
                     false,
-                    None,
-                    false,
+                    if whole { None } else { Some(expected[index]) },
+                    whole,
                     &mut remaining,
                 )
             })

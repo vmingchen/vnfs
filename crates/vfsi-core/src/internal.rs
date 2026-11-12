@@ -1,8 +1,8 @@
 //! Unstable implementation contracts shared by VFSI backend crates.
 //!
 //! Nothing in this module is part of the application-facing API. Backends
-//! use these types for shared request storage and to retain ordered per-request
-//! results until a strict vector API converts them into `Result<Vec<_>, _>`.
+//! use these types for shared request storage, independent per-input outcomes,
+//! and explicit compatibility projections that select one error after execution.
 
 pub use crate::write::WriteRequest;
 
@@ -42,16 +42,14 @@ fn system_time_parts(time: std::time::SystemTime) -> VfResult<(i64, u32)> {
         )),
         Err(error) => {
             let duration = error.duration();
-            let seconds = i64::try_from(duration.as_secs())
-                .map_err(|_| VfError::errno(0, libc::EOVERFLOW as u32))?;
-            if duration.subsec_nanos() == 0 {
-                Ok((-seconds, 0))
-            } else {
-                let seconds = seconds
-                    .checked_add(1)
-                    .ok_or_else(|| VfError::errno(0, libc::EOVERFLOW as u32))?;
-                Ok((-seconds, 1_000_000_000 - duration.subsec_nanos()))
-            }
+            let nanos = duration.subsec_nanos();
+            // Normalize in a wider signed type before narrowing. The magnitude
+            // of i64::MIN is one greater than i64::MAX, but is still valid.
+            let seconds = -i128::from(duration.as_secs()) - i128::from(nanos != 0);
+            Ok((
+                i64::try_from(seconds).map_err(|_| VfError::errno(0, libc::EOVERFLOW as u32))?,
+                if nanos == 0 { 0 } else { 1_000_000_000 - nanos },
+            ))
         }
     }
 }
@@ -253,6 +251,7 @@ pub mod faults {
         BeforeCopyCleanup {
             destination: bool,
         },
+        BeforeGetattrDispatch,
         BeforeCopySourceAttrs,
         AfterCopySourceAttrs {
             index: usize,

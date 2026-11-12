@@ -437,3 +437,194 @@ fn singleton_reads_reject_progress_beyond_request_even_with_spare_budget() {
     .unwrap();
     assert_eq!(whole[0].as_ref().unwrap().bytes_read(), 4);
 }
+
+#[test]
+fn multi_reads_validate_each_request_and_keep_valid_siblings() {
+    use vfsi_core::{IoProgress, OpError, OpResult, VfError};
+    for mixed in [false, true] {
+        for buffered_bad in [false, true] {
+            for prefix in [false, true] {
+                for (bad_offset, bad_count, eof) in [(99, 1, false), (7, 2, false), (7, 0, false)] {
+                    if prefix && bad_count == 0 {
+                        continue;
+                    }
+                    let mut first = [0; 1];
+                    let mut second = [0; 1];
+                    let ops = if mixed {
+                        if buffered_bad {
+                            vec![
+                                ReadOp::range(&File, 11, 1),
+                                ReadOp::into(&File, 7, &mut first),
+                                ReadOp::whole("/empty"),
+                            ]
+                        } else {
+                            vec![
+                                ReadOp::into(&File, 11, &mut first),
+                                ReadOp::whole("/empty"),
+                                ReadOp::range(&File, 7, 1),
+                            ]
+                        }
+                    } else if buffered_bad {
+                        vec![
+                            ReadOp::into(&File, 7, &mut first),
+                            ReadOp::into(&File, 11, &mut second),
+                        ]
+                    } else {
+                        vec![ReadOp::range(&File, 7, 1), ReadOp::range(&File, 11, 1)]
+                    };
+                    let result = consume_ops(
+                        ops,
+                        32,
+                        |_, offset, length| (offset, length),
+                        |_, offset, buffer| (offset, buffer),
+                        |requests, _| {
+                            Ok(requests
+                                .iter()
+                                .map(|request| -> OpResult<OwnedReadResult> {
+                                    let Some(&(offset, _)) = request.range_ref() else {
+                                        return Ok(OwnedReadResult {
+                                            offset: 0,
+                                            data: vec![],
+                                            eof: true,
+                                        });
+                                    };
+                                    if offset == 7 {
+                                        let data = vec![0; bad_count];
+                                        if prefix {
+                                            return Err(OpError::failed(
+                                                VfError::errno(None, libc::EIO as u32),
+                                                Some(IoProgress::Read(ReadResult::owned(
+                                                    bad_offset, data, eof,
+                                                ))),
+                                            ));
+                                        }
+                                        Ok(OwnedReadResult {
+                                            offset: bad_offset,
+                                            data,
+                                            eof,
+                                        })
+                                    } else {
+                                        Ok(OwnedReadResult {
+                                            offset,
+                                            data: vec![42],
+                                            eof: false,
+                                        })
+                                    }
+                                })
+                                .collect())
+                        },
+                        |requests, _| {
+                            Ok(requests
+                                .iter()
+                                .map(|(offset, _)| {
+                                    if *offset == 7 {
+                                        if prefix {
+                                            return Err(OpError::failed(
+                                                VfError::errno(None, libc::EIO as u32),
+                                                Some(IoProgress::Read(ReadResult::buffered(
+                                                    bad_offset, bad_count, eof,
+                                                ))),
+                                            ));
+                                        }
+                                        Ok(ReadIntoResult {
+                                            offset: bad_offset,
+                                            bytes_read: bad_count,
+                                            eof,
+                                        })
+                                    } else {
+                                        Ok(ReadIntoResult {
+                                            offset: *offset,
+                                            bytes_read: 1,
+                                            eof: false,
+                                        })
+                                    }
+                                })
+                                .collect())
+                        },
+                    )
+                    .unwrap();
+                    let bad = if mixed {
+                        if buffered_bad { 1 } else { 2 }
+                    } else {
+                        0
+                    };
+                    for (index, outcome) in result.iter().enumerate() {
+                        if index == bad {
+                            let error = outcome
+                                .as_ref()
+                                .expect_err("malformed input must be rejected");
+                            assert!(error.cause().is_transport());
+                            assert!(
+                                error.progress().is_none(),
+                                "malformed prefix must not escape"
+                            );
+                        } else {
+                            assert!(outcome.is_ok(), "valid sibling {index}: {outcome:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn multi_whole_reads_validate_start_and_completion_without_losing_error_prefixes() {
+    use vfsi_core::{IoProgress, OpError, VfError};
+    for (offset, eof, failure, valid) in [
+        (1, true, false, false),
+        (0, false, false, false),
+        (0, false, true, true),
+    ] {
+        let results = consume_ops::<File, (), ()>(
+            [ReadOp::whole("/a"), ReadOp::whole("/b")],
+            32,
+            |_, _, _| (),
+            |_, _, _| (),
+            |_, _| {
+                let first = if failure {
+                    Err(OpError::failed(
+                        VfError::errno(None, libc::EIO as u32),
+                        Some(IoProgress::Read(ReadResult::owned(offset, vec![1], eof))),
+                    ))
+                } else {
+                    Ok(OwnedReadResult {
+                        offset,
+                        data: vec![1],
+                        eof,
+                    })
+                };
+                Ok(vec![
+                    first,
+                    Ok(OwnedReadResult {
+                        offset: 0,
+                        data: vec![2],
+                        eof: true,
+                    }),
+                ])
+            },
+            |_, _| panic!("no buffers"),
+        )
+        .unwrap();
+        let error = results[0].as_ref().unwrap_err();
+        assert_eq!(error.progress().is_some(), valid);
+        assert_eq!(error.cause().is_transport(), !valid);
+        assert!(results[1].is_ok());
+    }
+}
+
+#[test]
+fn normalized_deep_paths_allocate_output_once_at_the_final_size() {
+    let path = vec!["x".repeat(64); 64].join("/");
+    let (normalized, allocations) = measured(|| vfsi_core::path::normalize_bytes(path.as_bytes()));
+    assert_eq!(normalized, path.as_bytes());
+    assert!(
+        allocations <= 6,
+        "component bookkeeping plus one final allocation, got {allocations}"
+    );
+    assert_eq!(
+        normalized.capacity(),
+        normalized.len(),
+        "returned paths must not retain geometric growth slack"
+    );
+}

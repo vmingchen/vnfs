@@ -189,6 +189,7 @@ struct ScalarOnly {
     oversized_read: bool,
     oversized_write_count: bool,
     read_failure: bool,
+    read_failure_call: Option<usize>,
     transport_failure: bool,
     vector_result_limit: Arc<Mutex<Option<usize>>>,
     wrong_result_file: bool,
@@ -553,6 +554,7 @@ handle_contract!(PagedBackend);
 struct LegacyDirectoryBackend {
     scalar: ScalarOnly,
     calls: usize,
+    last_fields: Option<vfsi_sync::AttrMask>,
 }
 handle_contract!(LegacyDirectoryBackend);
 impl VectorBackend for LegacyDirectoryBackend {
@@ -571,13 +573,44 @@ impl VectorBackend for LegacyDirectoryBackend {
     fn listdir_impl(
         &mut self,
         _: &std::path::Path,
-        _: vfsi_sync::AttrMask,
+        fields: vfsi_sync::AttrMask,
         _: usize,
         _: bool,
     ) -> VfResult<Vec<VfAttrs>> {
         self.calls += 1;
+        self.last_fields = Some(fields);
         Ok(Vec::new())
     }
+}
+
+#[test]
+fn scalar_directory_default_rejects_unsupported_no_follow_before_listing() {
+    let mut backend = LegacyDirectoryBackend::default();
+    let path = std::path::Path::new("/tree");
+    let error = backend
+        .read_dir_impl(
+            path,
+            ListDirOptions::new().with_allow_symlink_components(false),
+        )
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert_eq!(error.operation(), Some("read_dir"));
+    assert_eq!(error.path(), Some(path));
+    assert_eq!(backend.calls, 0);
+}
+
+#[test]
+fn scalar_directory_default_preserves_selected_fields() {
+    let mut backend = LegacyDirectoryBackend::default();
+    let fields = vfsi_sync::AttrMask::SIZE | vfsi_sync::AttrMask::MODE;
+    backend
+        .read_dir_impl(
+            std::path::Path::new("/tree"),
+            ListDirOptions::new().with_fields(vfsi_sync::AttrMask::SIZE),
+        )
+        .unwrap();
+    assert_eq!(backend.calls, 1);
+    assert_eq!(backend.last_fields, Some(fields));
 }
 
 #[test]
@@ -1685,8 +1718,11 @@ impl HandleBackend for ScalarOnly {
             entered.wait();
             release.wait();
         }
-        self.read_calls.fetch_add(1, Ordering::SeqCst);
+        let call = self.read_calls.fetch_add(1, Ordering::SeqCst) + 1;
         assert!(!self.direct_into_only, "owned read path must not run");
+        if self.read_failure_call == Some(call) {
+            return Err(VfError::errno(None, libc::EIO as u32));
+        }
         if self.read_failure {
             return Err(VfError::errno(0, libc::EACCES as u32));
         }
@@ -4653,10 +4689,15 @@ fn native_directory_preflight_propagates_inner_metadata_failure() {
 #[derive(Default)]
 struct ReadOutcomes {
     scalar: ScalarOnly,
+    rejection: Option<VfError>,
     calls: usize,
     lengths: Vec<usize>,
     malformed: bool,
     fail_first: bool,
+    fail_once: bool,
+    prefix_eof: bool,
+    prefix_errno: Option<i32>,
+    prefix_failed: bool,
 }
 handle_contract!(ReadOutcomes);
 impl VectorBackend for ReadOutcomes {
@@ -4672,10 +4713,24 @@ impl VectorBackend for ReadOutcomes {
     fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_sync::VecResult<ReadResult> {
         self.calls += 1;
         self.lengths.push(reads.len());
+        if let Some(error) = &self.rejection {
+            return Err(error.clone());
+        }
         Ok(reads
             .iter()
             .enumerate()
             .map(|(index, read)| {
+                if self.fail_once && self.calls > 1 {
+                    let VfOffset::At(offset) = read.offset else {
+                        unreachable!()
+                    };
+                    return Ok(ReadResult {
+                        file: read.file.clone(),
+                        offset,
+                        data: Vec::new(),
+                        eof: true,
+                    });
+                }
                 if index == 1 || self.fail_first {
                     if self.malformed {
                         return Ok(ReadResult {
@@ -4685,12 +4740,18 @@ impl VectorBackend for ReadOutcomes {
                             eof: false,
                         });
                     }
-                    return Err(vfsi_sync::OpError::unknown(
-                        VfError::transport(Some(99), "lost reply after prefix"),
-                        Some(vfsi_sync::IoProgress::Read(
-                            vfsi_core::api::ReadResult::owned(0, b"p".to_vec(), false),
-                        )),
+                    let cause = self.prefix_errno.map_or_else(
+                        || VfError::transport(Some(99), "lost reply after prefix"),
+                        |code| VfError::errno(None, code as u32),
+                    );
+                    let prefix = Some(vfsi_sync::IoProgress::Read(
+                        vfsi_core::api::ReadResult::owned(0, b"p".to_vec(), self.prefix_eof),
                     ));
+                    return Err(if self.prefix_failed {
+                        vfsi_sync::OpError::failed(cause, prefix)
+                    } else {
+                        vfsi_sync::OpError::unknown(cause, prefix)
+                    });
                 }
                 Ok(ReadResult {
                     file: read.file.clone(),
@@ -4700,6 +4761,49 @@ impl VectorBackend for ReadOutcomes {
                 })
             })
             .collect())
+    }
+}
+
+#[test]
+fn native_read_rejections_never_export_indices_outside_the_submitted_vector() {
+    for buffered in [false, true] {
+        for index in [None, Some(0), Some(1), Some(99)] {
+            let client = FsClient::new(ReadOutcomes {
+                rejection: Some(VfError::errno(index, libc::EACCES as u32)),
+                ..Default::default()
+            });
+            let file = client.open("/data").unwrap();
+            let error = if buffered {
+                let mut buffer = [0xa5; 1];
+                let error = client
+                    .vread_into_native(&mut [file.read_request_at_into(0, &mut buffer)])
+                    .unwrap_err();
+                assert_eq!(buffer, [0xa5]);
+                error
+            } else {
+                client
+                    .vread_native(&[file.read_request_at(0, 1)])
+                    .unwrap_err()
+            };
+            if index.is_some_and(|index| index >= 1) {
+                assert_eq!(error.index(), None);
+                assert_eq!(
+                    error.transport_kind(),
+                    Some(vfsi_core::TransportKind::InvalidReply)
+                );
+                assert_eq!(error.path(), None);
+            } else {
+                assert_eq!(error.index(), index);
+                assert_eq!(error.raw_code(), libc::EACCES as u32);
+                assert_eq!(error.path(), index.map(|_| std::path::Path::new("/data")));
+            }
+            file.close().unwrap();
+            assert_eq!(
+                client.into_inner().unwrap().calls,
+                1,
+                "never replay a rejection"
+            );
+        }
     }
 }
 
@@ -5192,6 +5296,7 @@ fn std_io_advances_only_confirmed_prefix_when_a_read_also_fails() {
     let mut io = client.std_io(&file);
     assert_eq!(io.read(&mut buffer).unwrap(), 1);
     assert_eq!(buffer, [b'p', 99, 99]);
+    assert!(io.read(&mut [0; 1]).is_err());
     assert_eq!(io.stream_position().unwrap(), 1);
     drop(io);
     file.close().unwrap();
@@ -7297,4 +7402,152 @@ fn standard_write_all_reports_failure_after_full_acknowledgement_without_retry()
     assert!(io.stream_position().is_err());
     io.write_all(b"").unwrap();
     assert_eq!(calls.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn std_io_read_prefix_errors_are_reported_before_further_io() {
+    for errno in [libc::EIO, libc::EINTR] {
+        let client = FsClient::new(ReadOutcomes {
+            fail_first: true,
+            fail_once: true,
+            prefix_errno: Some(errno),
+            ..Default::default()
+        });
+        let file = client.open("/file").unwrap();
+        let mut io = client.std_io(&file);
+        let mut buffer = [99; 3];
+        assert_eq!(io.read(&mut buffer).unwrap(), 1);
+        assert_eq!(buffer, [b'p', 99, 99]);
+        let error = io.read(&mut [0; 1]).unwrap_err();
+        assert_ne!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(io.stream_position().unwrap(), 1);
+        assert_eq!(io.read(&mut [0; 1]).unwrap(), 0);
+        drop(io);
+        file.close().unwrap();
+        assert_eq!(client.into_inner().unwrap().calls, 2);
+    }
+}
+
+#[test]
+fn std_io_read_collectors_retain_prefix_and_report_its_failure_even_at_eof() {
+    for eof in [false, true] {
+        for failed in [false, true] {
+            for errno in [libc::EIO, libc::EINTR] {
+                for string in [false, true] {
+                    let client = FsClient::new(ReadOutcomes {
+                        fail_first: true,
+                        fail_once: true,
+                        prefix_eof: eof,
+                        prefix_errno: Some(errno),
+                        prefix_failed: failed,
+                        ..Default::default()
+                    });
+                    let file = client.open("/file").unwrap();
+                    let mut io = client.std_io(&file);
+                    let error = if string {
+                        let mut output = String::from("existing");
+                        let error = io.read_to_string(&mut output).unwrap_err();
+                        assert_eq!(output, "existingp");
+                        error
+                    } else {
+                        let mut output = b"existing".to_vec();
+                        let error = io.read_to_end(&mut output).unwrap_err();
+                        assert_eq!(output, b"existingp");
+                        error
+                    };
+                    assert_ne!(error.kind(), std::io::ErrorKind::Interrupted);
+                    assert_eq!(io.stream_position().unwrap(), 1);
+                    drop(io);
+                    file.close().unwrap();
+                    assert_eq!(client.into_inner().unwrap().calls, 1);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn std_io_read_to_string_keeps_valid_text_before_a_later_io_error() {
+    for (data, expected) in [
+        (b"abcdef".as_slice(), "existingabc"),
+        (b"a\xffcdef", "existing"),
+    ] {
+        let client = FsClient::new(ScalarOnly {
+            data: data.to_vec(),
+            read_failure_call: Some(2),
+            ..Default::default()
+        })
+        .with_limits(vfsi_sync::ResourceLimits::new().with_max_read_bytes(3));
+        let file = client.open("/file").unwrap();
+        let mut io = client.std_io(&file);
+        let mut output = String::from("existing");
+        assert!(io.read_to_string(&mut output).is_err());
+        assert_eq!(output, expected);
+        assert_eq!(io.stream_position().unwrap(), 3);
+    }
+}
+
+#[test]
+fn cleanup_outcomes_and_bounded_history_preserve_ownership_and_primary_io() {
+    let backend = ScalarOnly {
+        close_failures_remaining: 100,
+        ..Default::default()
+    };
+    let closes = backend.close_observed.clone();
+    let client = FsClient::new(backend);
+    drop(client.open("/file").unwrap());
+    let outcomes = client.drain_cleanup_outcomes().unwrap();
+    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes[0].is_err());
+    for _ in 0..39 {
+        assert!(client.drain_cleanup().is_err());
+    }
+    let (errors, dropped) = client.take_cleanup_errors();
+    assert_eq!(errors.len(), 32);
+    assert_eq!(dropped, 8);
+    assert!(errors.iter().all(|e| e.operation() == Some("close")));
+    assert!(client.take_cleanup_errors().0.is_empty());
+    assert_eq!(closes.load(Ordering::SeqCst), 40);
+    // Diagnostics do not relinquish the failed cleanup owner.
+    assert!(client.drain_cleanup_outcomes().unwrap()[0].is_err());
+    assert_eq!(closes.load(Ordering::SeqCst), 41);
+}
+
+#[test]
+fn scalar_metadata_defaults_preserve_targets_fields_following_and_failures() {
+    use vfsi_sync::backend::helpers::{fstat_impl_default, lstat_impl_default, stat_impl_default};
+    let mut backend = AttrsBackend::default();
+    let path = std::path::Path::new("/link");
+    let handle = FileOperand::from_fd(7);
+    let path_operand = FileOperand::from_os_path(path);
+    assert_eq!(
+        stat_impl_default(&mut backend, path).unwrap().file,
+        path_operand
+    );
+    assert_eq!(
+        lstat_impl_default(&mut backend, path).unwrap().file,
+        path_operand
+    );
+    assert_eq!(
+        fstat_impl_default(&mut backend, &handle).unwrap().file,
+        handle
+    );
+    assert_eq!(
+        backend.queries,
+        [
+            (true, path_operand.clone(), vfsi_core::AttrMask::stat()),
+            (false, path_operand, vfsi_core::AttrMask::stat()),
+            (true, handle.clone(), vfsi_core::AttrMask::stat()),
+        ]
+    );
+    backend.metadata_failure = Some(0);
+    for error in [
+        stat_impl_default(&mut backend, path).unwrap_err(),
+        lstat_impl_default(&mut backend, path).unwrap_err(),
+        fstat_impl_default(&mut backend, &handle).unwrap_err(),
+    ] {
+        assert_eq!(error.index(), Some(0));
+        assert_eq!(error.raw_code(), libc::EACCES as u32);
+        assert_eq!(error.operation(), None);
+    }
 }

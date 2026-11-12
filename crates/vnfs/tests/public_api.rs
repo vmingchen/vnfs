@@ -785,7 +785,8 @@ fn explicit_io_adapter_bounds_collecting_reads_and_preserves_retained_identity()
             io.read_to_string(&mut text).unwrap_err().kind(),
             std::io::ErrorKind::FileTooLarge
         );
-        assert_eq!(text, "prefix");
+        assert_eq!(text, "prefixabc");
+        assert_eq!(io.stream_position().unwrap(), 4); // same bounded EOF probe
         assert_eq!(io.seek(SeekFrom::End(-2)).unwrap(), 4);
         assert!(io.seek(SeekFrom::Current(-5)).is_err());
         assert_eq!(io.stream_position().unwrap(), 4);
@@ -843,10 +844,15 @@ fn explicit_io_adapter_bounds_collecting_reads_and_preserves_retained_identity()
         io.seek(SeekFrom::Start(0)).unwrap();
         io.write_all(b"ef").unwrap();
         assert_eq!(io.stream_position().unwrap(), 6);
-        let mut output = [0; 6];
+        for (offset, byte, end) in [(u64::MAX, b'g', 7), (u64::MAX - 1, b'h', 8)] {
+            io.seek(SeekFrom::Start(offset)).unwrap();
+            assert_eq!(io.write(&[byte]).unwrap(), 1);
+            assert_eq!(io.stream_position().unwrap(), end);
+        }
+        let mut output = [0; 8];
         io.seek(SeekFrom::Start(0)).unwrap();
         io.read_exact(&mut output).unwrap();
-        assert_eq!(&output, b"abcdef");
+        assert_eq!(&output, b"abcdefgh");
     }
     for auto in [false, true] {
         let root = tempfile::tempdir().unwrap();

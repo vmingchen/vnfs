@@ -262,8 +262,14 @@ pub fn stream_read_chunks(
             batch_indices.push(index);
             budget -= length;
         }
-        let remap_error = |error: VfError| {
-            error.map_index(|index| batch_indices.get(index).copied().unwrap_or(index))
+        let remap_error = |error: VfError| match error.index() {
+            Some(index) => match batch_indices.get(index) {
+                Some(&input) => error.with_index(input),
+                None => {
+                    VfError::invalid_reply(None, "vstream backend returned an invalid error index")
+                }
+            },
+            None => error,
         };
         let results = read(&reads).map_err(remap_error)?;
         validate_read_results("vstream_impl", &reads, &results).map_err(remap_error)?;
@@ -312,4 +318,68 @@ pub fn native_read_file_impl_default<F: VectorBackend + ?Sized>(
             }
             Ok(data)
         })
+}
+
+#[cfg(test)]
+mod stream_error_tests {
+    use super::*;
+
+    #[test]
+    fn stream_errors_reject_indices_outside_the_submitted_wave() {
+        let files: Vec<_> = (0..4).map(FileOperand::from_fd).collect();
+        let mut calls = 0;
+        let error = stream_read_chunks(
+            &files,
+            |_| 1,
+            1,
+            |_| {
+                calls += 1;
+                // Input 1 exists globally but was absent from this one-input wave.
+                Err(VfError::errno(1, libc::EACCES as u32))
+            },
+            |_, _| panic!("failed wave must not deliver data"),
+        )
+        .unwrap_err();
+        assert_eq!(calls, 1, "contract errors must not trigger replay");
+        assert_eq!(error.index(), None);
+        assert_eq!(
+            error.transport_kind(),
+            Some(vfsi_core::TransportKind::InvalidReply)
+        );
+    }
+
+    #[test]
+    fn stream_errors_map_wave_indices_and_preserve_unknown_attribution() {
+        for index in [Some(0), None] {
+            let files: Vec<_> = (0..4).map(FileOperand::from_fd).collect();
+            let mut calls = 0;
+            let mut delivered = Vec::new();
+            let error = stream_read_chunks(
+                &files,
+                |_| 1,
+                1,
+                |reads| {
+                    calls += 1;
+                    if calls == 3 {
+                        return Err(VfError::errno(index, libc::EACCES as u32));
+                    }
+                    Ok(vec![ReadResult {
+                        file: reads[0].file.clone(),
+                        offset: 0,
+                        data: vec![1],
+                        eof: true,
+                    }])
+                },
+                |input, _| {
+                    delivered.push(input);
+                    true
+                },
+            )
+            .unwrap_err();
+            assert_eq!(calls, 3);
+            assert_eq!(delivered, [0, 1]);
+            assert_eq!(error.index(), index.map(|_| 2));
+            assert_eq!(error.raw_code(), libc::EACCES as u32);
+        }
+    }
 }

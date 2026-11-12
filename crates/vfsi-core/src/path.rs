@@ -68,7 +68,10 @@ pub fn normalize_bytes(path: &[u8]) -> Vec<u8> {
             c => parts.push(c),
         }
     }
-    let mut out = Vec::new();
+    // The normalized bytes and separators are bounded by the original input.
+    // Allocate exactly once and avoid retaining geometric growth slack.
+    let length = parts.iter().map(|part| part.len()).sum::<usize>() + parts.len().saturating_sub(1);
+    let mut out = Vec::with_capacity(length);
     for (i, part) in parts.iter().enumerate() {
         if i > 0 {
             out.push(b'/');

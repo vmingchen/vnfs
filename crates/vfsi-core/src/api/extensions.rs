@@ -290,12 +290,6 @@ pub trait VfsiExt: Vfsi {
                 .map(|path| crate::api::ReadOp::whole(path.as_ref())),
             options,
         )?;
-        if results.len() != paths.len() {
-            return Err(crate::api::Error::invalid_reply(
-                None,
-                "vread_native returned an invalid result count",
-            ));
-        }
         results
             .into_iter()
             .enumerate()
@@ -439,8 +433,15 @@ pub trait VfsiExt: Vfsi {
     ) -> Result<crate::api::StreamCompletion> {
         let mut callback = callback;
         let mut callback_error = None;
-        let result = self.vstream(&[path], options, |_, offset, data| {
-            let result = callback(offset, data);
+        let result = self.vstream(&[path], options, |index, offset, data| {
+            let result = if index == 0 {
+                callback(offset, data)
+            } else {
+                Err(Error::invalid_reply(
+                    None,
+                    "invalid scalar stream input index",
+                ))
+            };
             if let Err(error) = &result {
                 callback_error = Some(error.clone());
             }
@@ -547,12 +548,6 @@ pub trait VfsiExt: Vfsi {
             })
             .collect();
         let files = self.open_batch(&requests)?;
-        if files.len() != entries.len() {
-            return Err(crate::api::Error::invalid_reply(
-                None,
-                "vopen returned an invalid result count",
-            ));
-        }
         let writes: Vec<_> = files
             .iter()
             .zip(entries)
