@@ -320,6 +320,17 @@ fn server_address_defaults_to_port_445() {
 }
 
 #[test]
+fn ipv6_hosts_receive_a_bracketed_default_port() {
+    for host in ["::1", "2001:db8::1234", "::ffff:192.0.2.1"] {
+        let endpoint = normalize_server(host);
+        assert_eq!(endpoint, format!("[{host}]:445"));
+        let socket: std::net::SocketAddr = endpoint.parse().unwrap();
+        assert_eq!(socket.ip(), host.parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(socket.port(), 445);
+    }
+}
+
+#[test]
 fn connection_deadlines_are_configurable_and_nonzero() {
     let defaults = SmbConnectOptions::default();
     assert_eq!(defaults.connect_timeout, Duration::from_secs(10));
@@ -2713,4 +2724,131 @@ fn live_local_metadata_rejections_are_unattempted_without_wire_io() {
         fs.close_impl(&file).unwrap();
     }
     fs.unlink_impl(&path).unwrap();
+}
+
+#[test]
+fn live_prr_setattrs_resolves_paths_once_after_chdir() {
+    let Some(mut fs) = sync_test_backend() else {
+        return;
+    };
+    let local_root = std::env::var("VFSI_SMB_LOCAL_ROOT").unwrap();
+    let name = format!("vfsi-setattrs-cwd-{}", std::process::id());
+    let root = PathBuf::from(format!("/{name}"));
+    let local = Path::new(&local_root).join(&name);
+    // Both formerly misresolved paths exist, so verify isolation as well as success.
+    std::fs::create_dir_all(local.join("cwd").join(&name)).unwrap();
+    std::fs::create_dir_all(local.join("cwd").join(&name).join("cwd")).unwrap();
+    for path in [
+        local.join("absolute"),
+        local.join("cwd/relative"),
+        local.join("cwd").join(&name).join("absolute"),
+        local.join("cwd").join(&name).join("cwd/relative"),
+    ] {
+        std::fs::write(path, b"keep-this").unwrap();
+    }
+    fs.chdir(&root.join("cwd")).unwrap();
+    let updates = [
+        VfAttrs {
+            file: FileOperand::from_os_path(&root.join("absolute")),
+            masks: AttrMask::SIZE | AttrMask::MTIME,
+            size: 2,
+            mtime_sec: 1_700_000_001,
+            ..Default::default()
+        },
+        VfAttrs {
+            file: FileOperand::from_os_path(Path::new("relative")),
+            masks: AttrMask::SIZE | AttrMask::MTIME,
+            size: 3,
+            mtime_sec: 1_700_000_002,
+            ..Default::default()
+        },
+    ];
+    let outcomes = fs.vsetattrs_raw_impl(&updates).unwrap();
+    assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
+    assert_eq!(std::fs::read(local.join("absolute")).unwrap(), b"ke");
+    assert_eq!(std::fs::read(local.join("cwd/relative")).unwrap(), b"kee");
+    assert_eq!(
+        std::fs::read(local.join("cwd").join(&name).join("absolute")).unwrap(),
+        b"keep-this"
+    );
+    assert_eq!(
+        std::fs::read(local.join("cwd").join(&name).join("cwd/relative")).unwrap(),
+        b"keep-this"
+    );
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(
+        std::fs::metadata(local.join("absolute")).unwrap().mtime(),
+        1_700_000_001
+    );
+    assert_eq!(
+        std::fs::metadata(local.join("cwd/relative"))
+            .unwrap()
+            .mtime(),
+        1_700_000_002
+    );
+    fs.shutdown().unwrap();
+    std::fs::remove_dir_all(local).unwrap();
+}
+
+#[test]
+fn live_prr_concurrent_path_reads_recover_every_disconnected_sibling() {
+    let Some(mut fs) = sync_test_backend() else {
+        return;
+    };
+    let path = PathBuf::from(format!("/vfsi-read-reconnect-{}", std::process::id()));
+    let file = fs
+        .open_raw_impl(&path, libc::O_CREAT | libc::O_TRUNC | libc::O_RDWR, 0o666)
+        .unwrap();
+    fs.write_raw_impl(&file, 0, b"0123456789").unwrap();
+    fs.close_impl(&file).unwrap();
+    fs.client.connection().mark_dead();
+    assert!(fs.client.is_disconnected());
+    let reads = [
+        ReadOp::from_os_path(&path, VfOffset::At(1), 3),
+        ReadOp::from_os_path(&path, VfOffset::At(6), 3),
+    ];
+    let outcomes = fs.vread_impl(&reads).unwrap();
+    assert_eq!(outcomes[0].as_ref().unwrap().data, b"123");
+    assert_eq!(outcomes[1].as_ref().unwrap().data, b"678");
+    fs.unlink_impl(&path).unwrap();
+    fs.shutdown().unwrap();
+}
+
+#[test]
+fn live_collected_directory_paths_resolve_once_after_chdir() {
+    let Some(mut fs) = sync_test_backend() else {
+        return;
+    };
+    let local_root = std::env::var("VFSI_SMB_LOCAL_ROOT").unwrap();
+    let name = format!("vfsi-list-cwd-{}", std::process::id());
+    let root = PathBuf::from(format!("/{name}"));
+    let local = Path::new(&local_root).join(&name);
+    for (directory, entry) in [
+        ("target".to_owned(), "absolute"),
+        ("work/target".to_owned(), "relative"),
+        (format!("work/{name}/target"), "wrong-absolute"),
+        (format!("work/{name}/work/target"), "wrong-relative"),
+    ] {
+        let path = local.join(directory);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join(entry), b"data").unwrap();
+    }
+    fs.chdir(&root.join("work")).unwrap();
+    for (request, expected) in [
+        (root.join("target"), root.join("target/absolute")),
+        (PathBuf::from("target"), root.join("work/target/relative")),
+    ] {
+        let entries = fs.listdir_impl(&request, AttrMask::MODE, 0, false).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].file.path().unwrap(), expected);
+        let mut visited = Vec::new();
+        fs.visit_dir_impl(&request, AttrMask::MODE, 0, &mut |entry| {
+            visited.push(entry.file.path().unwrap().to_path_buf());
+            true
+        })
+        .unwrap();
+        assert_eq!(visited, [expected]);
+    }
+    fs.shutdown().unwrap();
+    std::fs::remove_dir_all(local).unwrap();
 }

@@ -51,7 +51,7 @@ use tokio::runtime::{Builder, Runtime};
 #[cfg(feature = "test-faults")]
 use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 
-use vfsi_core::path::{normalize_bytes, path_bytes, path_from_bytes};
+use vfsi_core::path::{normalize_bytes, path_bytes};
 
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
 const FILE_DIRECTORY_FILE: u32 = 0x0000_0001;

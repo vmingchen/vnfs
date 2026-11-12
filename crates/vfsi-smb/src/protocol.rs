@@ -819,6 +819,8 @@ pub(super) fn normalize_server(server: &str) -> String {
         } else {
             server.to_owned()
         }
+    } else if server.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{server}]:445")
     } else if server
         .rsplit_once(':')
         .is_some_and(|(_, p)| p.parse::<u16>().is_ok())

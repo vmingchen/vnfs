@@ -1,4 +1,6 @@
 use super::*;
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStringExt;
 
 impl HandleBackend for SmbVecFs {
     fn vclose_impl(&mut self, files: &[FileOperand]) -> vfsi_core::VecResult<()> {
@@ -90,7 +92,7 @@ impl HandleBackend for SmbVecFs {
         } else {
             self.cwd.join(path)
         };
-        path_from_bytes(&normalize_bytes(path_bytes(&root_relative)))
+        OsString::from_vec(normalize_bytes(path_bytes(&root_relative))).into()
     }
 
     fn open_path_impl(
@@ -102,7 +104,7 @@ impl HandleBackend for SmbVecFs {
     ) -> VfResult<FileOperand> {
         validate_create_mode(flags, mode, 0)?;
         let path = match base {
-            VfPathBase::Abs => path_from_bytes(&normalize_bytes(path_bytes(pathname))),
+            VfPathBase::Abs => OsString::from_vec(normalize_bytes(path_bytes(pathname))).into(),
             VfPathBase::Cwd => self.abs_path(pathname),
         };
         let path_string = self.path_string(&path)?;

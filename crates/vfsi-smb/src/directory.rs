@@ -258,7 +258,7 @@ impl SmbVecFs {
         recursive: bool,
     ) -> VfResult<Vec<VfAttrs>> {
         let mut output = Vec::new();
-        let mut pending = vec![self.abs_path(dir)];
+        let mut pending = vec![Path::new("/").join(self.abs_path(dir))];
         while let Some(current) = pending.pop() {
             let mut cursor = None;
             let mut children = Vec::new();

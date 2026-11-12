@@ -337,7 +337,7 @@ impl VectorBackend for SmbVecFs {
                 let path = if retained.is_none() {
                     Some(
                         self.file_path(&attrs.file)
-                            .and_then(|path| self.local_path_string(&path))
+                            .and_then(|path| self.path_string(&path))
                             .map_err(OpError::not_attempted)?,
                     )
                 } else {
@@ -1021,14 +1021,15 @@ impl SmbVecFs {
         queue_deferred_closes(&results, &mut self.deferred_closes, |id| {
             DeferredClose::new(self.tree.clone(), id)
         });
+        // Recovery of one input changes the live connection state. Eligibility
+        // belongs to the failed wave, so keep it for every original sibling.
+        let disconnected = self.client.is_disconnected();
         for (index, outcome) in indices.into_iter().zip(results) {
             let read = &reads[index];
             // Only failed inputs with no confirmed data enter the existing
             // reconnect path. Successful sibling results are never replayed.
             let result = match outcome.result {
-                Err(error) if self.client.is_disconnected() && error.progress().is_none() => {
-                    self.read_one(read)
-                }
+                Err(error) if disconnected && error.progress().is_none() => self.read_one(read),
                 result => result.map(|data| {
                     let VfOffset::At(offset) = read.offset else {
                         unreachable!()
