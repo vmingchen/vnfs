@@ -76,7 +76,7 @@ pub(crate) fn readdir_verifier_peer(
     readdir_test_peer(listener, sparse, None)
 }
 
-/// A filtered first page followed by success, a cookie cycle, or a status error.
+/// Filtered pages followed by success, a cookie cycle, or a status error.
 #[cfg(feature = "test-faults")]
 pub(crate) fn readdir_filtered_peer(
     listener: std::net::TcpListener,
@@ -98,11 +98,15 @@ fn readdir_test_peer(
             .set_read_timeout(Some(std::time::Duration::from_secs(2)))
             .unwrap();
         let mut observed = Vec::new();
-        for page in 0..if filtered.as_deref() == Some("siblings-status") {
-            3
-        } else {
-            2
-        } {
+        let advancing = filtered
+            .as_deref()
+            .is_some_and(|mode| mode.starts_with("advancing-"));
+        let pages = match filtered.as_deref() {
+            Some("siblings-status") => 3,
+            Some("advancing-limit" | "advancing-visible" | "advancing-eof") => 16,
+            _ => 2,
+        };
+        for page in 0..pages {
             let request = read_record(&mut socket).unwrap();
             let ops = compound_operations(&request);
             let word = |at| u32::from_be_bytes(ops[at..at + 4].try_into().unwrap());
@@ -124,7 +128,7 @@ fn readdir_test_peer(
             let valid = if page == 0 {
                 cookie == 0 && verifier == [0; 8]
             } else {
-                cookie == 42 && verifier == [0x7e; 8]
+                cookie == if advancing { 41 + page } else { 42 } && verifier == [0x7e; 8]
             };
             let mut payload = successful_sequence_reply(&request, if child { 5 } else { 3 });
             let mut push = |word: u32| payload.extend_from_slice(&word.to_be_bytes());
@@ -164,7 +168,15 @@ fn readdir_test_peer(
                 let cycle = page == 1 && filtered.as_deref() == Some("cycle");
                 payload
                     .extend_from_slice(&(if cycle { 42u64 } else { 42u64 + page }).to_be_bytes());
-                let dot = filtered.is_some() && (page == 0 || cycle);
+                let dot = if advancing {
+                    page + 1 < pages
+                        || matches!(
+                            filtered.as_deref(),
+                            Some("advancing-eof" | "advancing-limit")
+                        )
+                } else {
+                    filtered.is_some() && (page == 0 || cycle)
+                };
                 payload.extend_from_slice(&(if dot { 1u32 } else { 3u32 }).to_be_bytes());
                 payload.extend_from_slice(if dot {
                     b".\0\0\0"
@@ -190,7 +202,12 @@ fn readdir_test_peer(
                 payload.extend_from_slice(&(attrs.len() as u32).to_be_bytes());
                 payload.extend_from_slice(&attrs);
                 payload.extend_from_slice(&0u32.to_be_bytes()); // next entry absent
-                payload.extend_from_slice(&(if cycle { 0 } else { page as u32 }).to_be_bytes()); // second page EOF
+                let eof = if advancing {
+                    page + 1 == pages && filtered.as_deref() != Some("advancing-limit")
+                } else {
+                    !cycle && page != 0
+                };
+                payload.extend_from_slice(&u32::from(eof).to_be_bytes());
             } else {
                 payload[..4].copy_from_slice(&nfsstat4_NFS4ERR_BAD_COOKIE.to_be_bytes());
             }

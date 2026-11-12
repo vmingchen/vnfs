@@ -199,7 +199,7 @@ fn readdir_response_budgets_follow_each_actual_wire_wave() {
 }
 
 #[test]
-fn filtered_pages_follow_verifiers_and_reject_cycles_and_continuation_failures() {
+fn filtered_pages_follow_verifiers_and_bound_continuations() {
     use crate::rpc::{RpcClient, test_support::readdir_filtered_peer};
     use std::{net::TcpListener, time::Duration};
     let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
@@ -211,7 +211,14 @@ fn filtered_pages_follow_verifiers_and_reject_cycles_and_continuation_failures()
         .parse()
         .unwrap();
     for mode in ["scalar", "vector", "child"] {
-        for outcome in ["success", "cycle", "status"] {
+        for outcome in [
+            "success",
+            "cycle",
+            "status",
+            "advancing-limit",
+            "advancing-visible",
+            "advancing-eof",
+        ] {
             let mut client = NfsClient::connect_minor(&server, minor).unwrap();
             let root = client.root().clone();
             let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -243,13 +250,34 @@ fn filtered_pages_follow_verifiers_and_reject_cycles_and_continuation_failures()
             client.replace_test_rpc(original);
             let observed = peer.join().unwrap();
             client.shutdown().unwrap();
-            assert_eq!(observed, [(0, [0; 8]), (42, [0x7e; 8])], "{mode}/{outcome}");
+            if outcome.starts_with("advancing-") {
+                assert_eq!(observed.len(), 16, "{mode}/{outcome}: bounded wire work");
+                assert_eq!(observed[0], (0, [0; 8]));
+                for (index, request) in observed.iter().enumerate().skip(1) {
+                    assert_eq!(*request, (41 + index as u64, [0x7e; 8]));
+                }
+            } else {
+                assert_eq!(observed, [(0, [0; 8]), (42, [0x7e; 8])], "{mode}/{outcome}");
+            }
             match outcome {
-                "success" => {
+                "success" | "advancing-visible" => {
                     let (entries, cookie) = result.unwrap();
                     assert_eq!(entries.len(), 1);
                     assert_eq!(entries[0].name, b"two");
                     assert_eq!(cookie.value, 0);
+                }
+                "advancing-eof" => {
+                    let (entries, cookie) = result.unwrap();
+                    assert!(entries.is_empty());
+                    assert_eq!(cookie.value, 0);
+                }
+                "advancing-limit" => {
+                    let error = result.unwrap_err();
+                    assert_eq!(
+                        error.cause().transport_kind(),
+                        Some(vfsi_core::TransportKind::InvalidReply)
+                    );
+                    assert!(error.cause().to_string().contains("filtered-page limit"));
                 }
                 "cycle" => assert!(result.unwrap_err().cause().is_transport()),
                 _ => {

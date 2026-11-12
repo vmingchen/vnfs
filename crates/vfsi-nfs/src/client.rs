@@ -4750,7 +4750,9 @@ impl NfsClient {
     }
 
     // Dot entries are accepted and filtered, so an empty decoded page is not
-    // necessarily EOF. Consume those pages before exposing a logical page.
+    // necessarily EOF. Bound this work before the caller's entry budgets and
+    // callbacks can run, even if a broken server keeps advancing its cookies.
+    // Ordinary pages require no extra RPC; allow at most 16 filtered wire pages.
     fn finish_readdir_page(
         &mut self,
         dir: &NfsFh,
@@ -4766,6 +4768,12 @@ impl NfsClient {
         while page.0.is_empty() && page.1.value != 0 {
             if !seen.insert(page.1.value) {
                 return Err(RpcError::transport("READDIR continuation cookie repeated"));
+            }
+            if seen.len() > 16 {
+                return Err(RpcError::transport_with_kind(
+                    vfsi_core::TransportKind::InvalidReply,
+                    "READDIR exceeded filtered-page limit (16)",
+                ));
             }
             page = self.readdir_wire_bounded(dir, page.1, attrs, max_response_bytes)?;
             if page.1.value != 0 && seen.contains(&page.1.value) {

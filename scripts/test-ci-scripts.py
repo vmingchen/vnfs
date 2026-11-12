@@ -3,6 +3,8 @@
 import io
 import json
 import os
+import re
+import shlex
 from pathlib import Path
 import shutil
 import subprocess
@@ -10,6 +12,57 @@ import sys
 import tarfile
 import tempfile
 import unittest
+
+
+class BackendLibraryCoverageTests(unittest.TestCase):
+    """Live regressions must execute with fixtures, rather than silently skip."""
+
+    root = Path(__file__).resolve().parents[1]
+
+    def assert_library_suite(self, script, package, features):
+        commands = [shlex.split(line.strip()) for line in script.splitlines()
+                    if line.strip().startswith("cargo test ")]
+        library = [args for args in commands if "--lib" in args and "--ignored" not in args and
+                   args[args.index("-p") + 1] == package]
+        self.assertEqual(len(library), 1, script)
+        args = library[0]
+        self.assertEqual(args[args.index("--features") + 1], features)
+        before, after = args[:args.index("--")], args[args.index("--") + 1:]
+        # Any additional positional argument here filters out future regressions.
+        self.assertEqual(before, ["cargo", "test", "-p", package,
+                                  "--features", features, "--lib"])
+        self.assertEqual(after, ["--test-threads=1"])
+
+    def test_hosted_live_jobs_run_unfiltered_backend_libraries(self):
+        workflow = (self.root / ".github/workflows/ci.yml").read_text()
+        for job, step, package, features, required in [
+            ("nfs-integration", "Run vfsi-nfs directly against NFS",
+             "vfsi-nfs", "test-faults", "VFSI_NFS_REQUIRED: 1"),
+            ("nfs-server-copy-integration", "Run vfsi-nfs directly against patched NFSv4.2",
+             "vfsi-nfs", "server-copy test-faults", "VFSI_NFS_REQUIRED: 1"),
+            ("smb-integration", "Run SMB conformance and integration tests",
+             "vfsi-smb", "$rust_features", "VFSI_SMB_REQUIRED: 1"),
+        ]:
+            with self.subTest(job=job):
+                # Bound the search to this job and step, including its fixture env.
+                body = re.search(r"^  " + job + r":\n(.*?)(?=^  [\w-]+:|\Z)",
+                                 workflow, re.M | re.S)
+                self.assertIsNotNone(body, job)
+                body = re.search(r"      - name: " + re.escape(step) +
+                                 r"\n(.*?)(?=^      - |\Z)",
+                                 body[1], re.M | re.S)
+                self.assertIsNotNone(body, step)
+                self.assertIn(required, body[1])
+                self.assert_library_suite(body[1], package, features)
+
+    def test_local_live_jobs_run_unfiltered_backend_libraries(self):
+        runner = (self.root / "scripts/test-ci-local.sh").read_text()
+        for backend in ("nfs", "smb"):
+            with self.subTest(backend=backend):
+                body = re.search(r"^run_" + backend + r"\(\) \{\n(.*?)^\}",
+                                 runner, re.M | re.S)[1]
+                self.assertIn("VFSI_" + backend.upper() + "_REQUIRED=1", body)
+                self.assert_library_suite(body, "vfsi-" + backend, "test-faults")
 
 
 class ArchiveVerificationTests(unittest.TestCase):

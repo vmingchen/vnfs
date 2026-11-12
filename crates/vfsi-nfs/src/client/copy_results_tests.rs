@@ -93,6 +93,8 @@ fn copy_ack_validation_keeps_short_eof_and_rejects_untrackable_effects() {
     }
 }
 
+// This test sends real COPYs; ordinary distro-Ganesha jobs need not support COPY.
+#[cfg(feature = "server-copy")]
 #[test]
 fn live_copy_results_preserve_status_sparse_validation_and_submission_boundaries() {
     let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {

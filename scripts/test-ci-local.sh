@@ -17,7 +17,8 @@ rust: check + fast. all/full: rust + python + nfs + smb.
 
 The managed server flags are opt-in. Without them, nfs needs a server at
 VFSI_NFS_SERVER (default 127.0.0.1), and smb needs VFSI_SMB_SERVER and
-VFSI_SMB_SHARE. Managed NFS refuses to take over an occupied TCP/2049;
+VFSI_SMB_SHARE plus VFSI_SMB_LOCAL_ROOT (the share's local backing directory).
+Managed NFS refuses to take over an occupied TCP/2049;
 managed Samba uses an unprivileged high port (default 14445). Both use
 temporary configuration and stop only their own processes on exit.
 The full NFS Rust suite also needs the local server registered with rpcbind
@@ -300,6 +301,7 @@ run_nfs() {
     export VNFS_TEST_MINOR=$minor VFSI_NFS_MINOR=$minor
     cargo test -p vnfs --features "test-faults rpcsec-gss" --test nfs
     cargo test -p vfsi-nfs --features "server-copy test-faults" --test nfs -- --test-threads=1
+    cargo test -p vfsi-nfs --features test-faults --lib -- --test-threads=1
     ci/test-c-nfs.sh
     VFSI_NFS_EXPORT=${VFSI_NFS_EXPORT:-/} VFSI_NFS_REQUIRED=1 cargo test -p vnfs --test ordered_directory_nfs -- --nocapture --test-threads=1
     VFSI_NFS_EXPORT=${VFSI_NFS_EXPORT:-/} cargo test -p vnfs --test canonical_examples canonical_workflows_on_nfsv41_and_nfsv42 -- --ignored --test-threads=1
@@ -314,7 +316,9 @@ run_smb() {
   ((managed_smb == 0)) || start_smb
   : "${VFSI_SMB_SERVER:?Set VFSI_SMB_SERVER or use --managed-smb}"
   : "${VFSI_SMB_SHARE:?Set VFSI_SMB_SHARE or use --managed-smb}"
+  : "${VFSI_SMB_LOCAL_ROOT:?Set VFSI_SMB_LOCAL_ROOT to the Samba share backing directory or use --managed-smb}"
   export VFSI_SMB_REQUIRED=1
+  cargo test -p vfsi-smb --features test-faults --lib -- --test-threads=1
   cargo test -p vfsi-smb --features test-faults --test smb -- --test-threads=1
   prepare_smb_python
   "$python_bin" -m pytest adapters/vsmb/tests adapters/vsmbfs/tests

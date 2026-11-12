@@ -1632,6 +1632,9 @@ fn live_concurrent_write_results_isolate_rejections_and_preserve_wire_failures()
     // External fixtures still exercise the rejection/concurrent-success cases above.
     if let Ok(root) = std::env::var("VFSI_SMB_LOCAL_ROOT") {
         let denied = Path::new(&root).join(paths[1].strip_prefix("/").unwrap());
+        // Own the ACL fixture locally: CI's SMB account need not be the runner.
+        std::fs::remove_file(&denied).unwrap();
+        std::fs::write(&denied, b"old").unwrap();
         std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o444)).unwrap();
         let writes: Vec<_> = operands
             .iter()
@@ -2736,15 +2739,22 @@ fn live_prr_setattrs_resolves_paths_once_after_chdir() {
     let root = PathBuf::from(format!("/{name}"));
     let local = Path::new(&local_root).join(&name);
     // Both formerly misresolved paths exist, so verify isolation as well as success.
-    std::fs::create_dir_all(local.join("cwd").join(&name)).unwrap();
-    std::fs::create_dir_all(local.join("cwd").join(&name).join("cwd")).unwrap();
-    for path in [
-        local.join("absolute"),
-        local.join("cwd/relative"),
-        local.join("cwd").join(&name).join("absolute"),
-        local.join("cwd").join(&name).join("cwd/relative"),
-    ] {
-        std::fs::write(path, b"keep-this").unwrap();
+    // Create through SMB so the fixture belongs to the server's account,
+    // which differs from the runner for both guest and authenticated CI shares.
+    fs.ensure_dir_impl(&root.join("cwd").join(&name).join("cwd"), 0o777)
+        .unwrap();
+    let paths = [
+        root.join("absolute"),
+        root.join("cwd/relative"),
+        root.join("cwd").join(&name).join("absolute"),
+        root.join("cwd").join(&name).join("cwd/relative"),
+    ];
+    for path in &paths {
+        let file = fs
+            .open_raw_impl(path, libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o666)
+            .unwrap();
+        fs.write_raw_impl(&file, 0, b"keep-this").unwrap();
+        fs.close_impl(&file).unwrap();
     }
     fs.chdir(&root.join("cwd")).unwrap();
     let updates = [
@@ -2786,8 +2796,19 @@ fn live_prr_setattrs_resolves_paths_once_after_chdir() {
             .mtime(),
         1_700_000_002
     );
+    fs.chdir(Path::new("/")).unwrap();
+    for path in &paths {
+        fs.unlink_impl(path).unwrap();
+    }
+    for directory in [
+        root.join("cwd").join(&name).join("cwd"),
+        root.join("cwd").join(&name),
+        root.join("cwd"),
+        root,
+    ] {
+        fs.remove_impl(&directory, false).unwrap();
+    }
     fs.shutdown().unwrap();
-    std::fs::remove_dir_all(local).unwrap();
 }
 
 #[test]
