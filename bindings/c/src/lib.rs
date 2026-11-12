@@ -128,10 +128,12 @@ pub use handles::{vfsi_close, vfsi_closev, vfsi_open, vfsi_openv};
 mod metadata;
 pub use metadata::{vfsi_setattrv, vfsi_stat, vfsi_statv};
 mod io;
+mod io_outcomes;
 pub use io::{
     vfsi_pread, vfsi_preadv, vfsi_pwrite, vfsi_pwritev, vfsi_read_paths,
     vfsi_read_paths_with_limit, vfsi_read_streamv,
 };
+pub use io_outcomes::{vfsi_preadv_ex, vfsi_pwritev_ex};
 mod namespace;
 #[cfg(test)]
 use filesystem::make_fs;
@@ -247,6 +249,26 @@ pub struct vfsi_setattr_op {
     pub atime_nsec: u32,
     pub mtime_sec: i64,
     pub mtime_nsec: u32,
+}
+
+pub const VFSI_IO_SUCCESS: u32 = 0;
+pub const VFSI_IO_NOT_ATTEMPTED: u32 = 1;
+pub const VFSI_IO_FAILED: u32 = 2;
+pub const VFSI_IO_UNKNOWN: u32 = 3;
+
+/// Independent I/O status from the optional extended vector symbols.
+/// failure_state: 0=success, 1=not attempted, 2=failed, 3=unknown.
+/// Counts live only in the corresponding operation's got/wrote field.
+/// offset_known is 1 only for an actual confirmed position; eof describes
+/// successful reads only. A failed append prefix has no invented position.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct vfsi_io_result {
+    pub status: vfsi_result,
+    pub failure_state: u32,
+    pub offset: u64,
+    pub offset_known: u8,
+    pub eof: u8,
 }
 
 #[repr(C)]

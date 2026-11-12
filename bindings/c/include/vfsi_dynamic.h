@@ -40,6 +40,8 @@ typedef struct vfsi_dynamic_api {
                                          const struct vfsi_listing_options *,
                                          vfsi_indexed_listdir_cursor_ids_cb, void *,
                                          struct vfsi_listing_result *);
+  struct vfsi_result (*preadv_ex)(struct vfsi_fs *, struct vfsi_pread_op *, size_t, struct vfsi_io_result *);
+  struct vfsi_result (*pwritev_ex)(struct vfsi_fs *, struct vfsi_pwrite_op *, size_t, struct vfsi_io_result *);
   void (*dir_cursor_free)(struct vfsi_dir_cursor *);
   int (*read_paths)(struct vfsi_fs *, const char *const *, size_t,
                     vfsi_read_paths_cb, void *);
@@ -101,6 +103,8 @@ static inline int vfsi_dynamic_load(vfsi_dynamic_api *api, void *handle) {
   VFSI_DYNAMIC_SYMBOL(listdirs_from_cursors, 0);
   VFSI_DYNAMIC_SYMBOL(listdirs_from_cursors_with_ids, 0);
   VFSI_DYNAMIC_SYMBOL(dir_cursor_free, 0);
+  VFSI_DYNAMIC_SYMBOL(preadv_ex, 0);
+  VFSI_DYNAMIC_SYMBOL(pwritev_ex, 0);
   VFSI_DYNAMIC_SYMBOL(read_paths, 0);
   VFSI_DYNAMIC_SYMBOL(read_paths_with_limit, 0);
   VFSI_DYNAMIC_SYMBOL(get_object_id, 0);

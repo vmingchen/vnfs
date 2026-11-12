@@ -1,7 +1,7 @@
 //! C scalar, vector, and streaming I/O.
 use super::*;
 
-fn validate_c_read_results(
+pub(super) fn validate_c_read_results(
     reads: &[ReadOp],
     results: &[vfsi_sync::ReadResult],
 ) -> Result<(), VfError> {
@@ -42,7 +42,7 @@ fn validate_c_read_results(
     Ok(())
 }
 
-fn validate_c_write_results(
+pub(super) fn validate_c_write_results(
     writes: &[WriteOp<&FileOperand, &[u8]>],
     results: &[vfsi_sync::WriteResult],
 ) -> Result<(), VfError> {

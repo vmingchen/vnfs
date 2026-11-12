@@ -128,6 +128,14 @@ enum MalformedReply {
     OpenDuplicate,
     OpenPath,
     OpenNegativeFd,
+    ListingNulName,
+    ListingMissingName,
+    ListingNulDirectory,
+    ReadMiddleTransport,
+    ReadReject,
+    WriteReject,
+    ReadPanic,
+    WriteMiddlePartial,
     ReadWrongFile,
     ReadWrongOffset,
     ReadNoProgress,
@@ -283,7 +291,13 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
                 masks
             };
             entries.push(VfAttrs {
-                file: FileOperand::from_os_path(&dir.join(format!("entry-{entry}"))),
+                file: match self.malformed_reply {
+                    Some(MalformedReply::ListingNulName) => {
+                        FileOperand::from_os_path(&dir.join("bad\0name"))
+                    }
+                    Some(MalformedReply::ListingMissingName) => FileOperand::from_fd(10),
+                    _ => FileOperand::from_os_path(&dir.join(format!("entry-{entry}"))),
+                },
                 masks,
                 returned,
                 ftype: vfsi_sync::VfType::Regular,
@@ -334,6 +348,10 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
     }
 
     fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
+        if self.malformed_reply == Some(MalformedReply::ReadPanic) {
+            panic!("injected backend panic");
+        }
+
         let result: vfsi_sync::VfResult<Vec<vfsi_sync::ReadResult>> = {
             let Some(size) = self.read_size else {
                 return Err(VfError::unsupported(0));
@@ -366,7 +384,30 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
                 })
                 .collect())
         };
-        result.map(|results| results.into_iter().map(Ok).collect())
+        result.map(|results| {
+            results
+                .into_iter()
+                .enumerate()
+                .map(|(index, read)| {
+                    if index == 1
+                        && self.malformed_reply == Some(MalformedReply::ReadMiddleTransport)
+                    {
+                        Err(vfsi_sync::OpError::unknown(
+                            VfError::transport(None, "lost read"),
+                            Some(vfsi_sync::IoProgress::Read(
+                                vfsi_sync::api::ReadResult::owned(
+                                    read.offset,
+                                    b"p".to_vec(),
+                                    false,
+                                ),
+                            )),
+                        ))
+                    } else {
+                        Ok(read)
+                    }
+                })
+                .collect()
+        })
     }
 
     fn vwrite_impl(
@@ -410,7 +451,17 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
                 },
                 stable: true,
             })
-            .map(Ok)
+            .enumerate()
+            .map(|(index, write)| {
+                if index == 1 && self.malformed_reply == Some(MalformedReply::WriteMiddlePartial) {
+                    Err(vfsi_sync::OpError::unknown(
+                        VfError::transport(None, "lost write"),
+                        Some(vfsi_sync::IoProgress::Write { bytes_written: 1 }),
+                    ))
+                } else {
+                    Ok(write)
+                }
+            })
             .collect())
     }
 
@@ -446,7 +497,13 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
                     masks
                 };
                 let attrs = VfAttrs {
-                    file: FileOperand::from_os_path(&dir.join(format!("entry-{entry}"))),
+                    file: match self.malformed_reply {
+                        Some(MalformedReply::ListingNulName) => {
+                            FileOperand::from_os_path(&dir.join("bad\0name"))
+                        }
+                        Some(MalformedReply::ListingMissingName) => FileOperand::from_fd(10),
+                        _ => FileOperand::from_os_path(&dir.join(format!("entry-{entry}"))),
+                    },
                     masks,
                     returned,
                     mode: libc::S_IFREG | 0o644,
@@ -457,7 +514,12 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
                     ..Default::default()
                 };
                 self.emitted += 1;
-                if !cb(&attrs, dir) {
+                let parent = if self.malformed_reply == Some(MalformedReply::ListingNulDirectory) {
+                    dir.join("bad\0directory")
+                } else {
+                    dir.to_path_buf()
+                };
+                if !cb(&attrs, &parent) {
                     return Ok(());
                 }
                 delivered += 1;
@@ -3213,4 +3275,324 @@ fn removev_exports_nonprefix_successes_with_abi_v3_item_results() {
     assert_eq!(items[2].category, VFSI_ERROR_NONE);
     assert!(!root.path().join("first").exists());
     assert!(!root.path().join("last").exists());
+}
+
+#[test]
+fn legacy_listings_reject_unrepresentable_names_instead_of_delivering_empty_names() {
+    unsafe extern "C" fn scalar(_: *const c_char, _: *const vfsi_attrs, data: *mut c_void) -> bool {
+        *(data as *mut usize) += 1;
+        true
+    }
+    unsafe extern "C" fn vector(
+        _: *const c_char,
+        _: *const c_char,
+        _: *const vfsi_attrs,
+        data: *mut c_void,
+    ) -> bool {
+        *(data as *mut usize) += 1;
+        true
+    }
+    for malformed_reply in [
+        MalformedReply::ListingNulName,
+        MalformedReply::ListingMissingName,
+        MalformedReply::ListingNulDirectory,
+    ] {
+        let fs = make_fs(
+            Box::new(ListingBackend {
+                calls: Default::default(),
+                entries_per_dir: 1,
+                emitted: 0,
+                missing: AttrMask::empty(),
+                missing_after: usize::MAX,
+                fail_call: None,
+                write_calls: None,
+                open_preflight_error: None,
+                read_size: None,
+                open_result_count: None,
+                read_result_count: None,
+                write_result_count: None,
+                close_attempts: None,
+                close_failure_fd: None,
+                malformed_reply: Some(malformed_reply),
+            }),
+            PathBuf::from("/"),
+            PathBuf::from("/"),
+        );
+        let dir = CString::new("/dir").unwrap();
+        let mut calls = 0usize;
+        let data = (&mut calls as *mut usize).cast();
+        unsafe {
+            if malformed_reply != MalformedReply::ListingNulDirectory {
+                assert_eq!(
+                    vfsi_listdir(fs, dir.as_ptr(), Some(scalar), data),
+                    libc::EBADMSG
+                );
+            }
+            assert_eq!(
+                vfsi_listdirv(
+                    fs,
+                    [dir.as_ptr()].as_ptr(),
+                    1,
+                    10,
+                    false,
+                    Some(vector),
+                    data
+                ),
+                libc::EBADMSG
+            );
+            vfsi_free(fs);
+        }
+        assert_eq!(
+            calls, 0,
+            "invalid names must not become successful empty callbacks"
+        );
+    }
+}
+
+fn independent_io_fixture(malformed_reply: MalformedReply) -> *mut vfsi_fs {
+    let fs = make_fs(
+        Box::new(ListingBackend {
+            calls: Default::default(),
+            entries_per_dir: 0,
+            emitted: 0,
+            missing: AttrMask::empty(),
+            missing_after: 0,
+            fail_call: None,
+            write_calls: if malformed_reply == MalformedReply::WriteReject {
+                None
+            } else {
+                Some(Default::default())
+            },
+            open_preflight_error: None,
+            read_size: if malformed_reply == MalformedReply::ReadReject {
+                None
+            } else {
+                Some(2)
+            },
+            open_result_count: None,
+            read_result_count: None,
+            write_result_count: None,
+            close_attempts: None,
+            close_failure_fd: None,
+            malformed_reply: Some(malformed_reply),
+        }),
+        PathBuf::from("/"),
+        PathBuf::from("/"),
+    );
+    let fs_ref = unsafe { &*fs };
+    for fd in 10..13 {
+        fs_ref.files.lock().unwrap().insert(
+            fd,
+            CFile {
+                file: FileOperand::from_fd(fd),
+                append: false,
+            },
+        );
+    }
+    fs
+}
+
+#[test]
+fn extended_vectors_keep_siblings_and_confirmed_failed_prefixes() {
+    let fs = independent_io_fixture(MalformedReply::ReadMiddleTransport);
+    let mut buffers = [[0xa5u8; 2]; 3];
+    let mut reads: Vec<_> = buffers
+        .iter_mut()
+        .enumerate()
+        .map(|(i, b)| vfsi_pread_op {
+            fd: 10 + i as i32,
+            buf: b.as_mut_ptr().cast(),
+            len: 2,
+            offset: 9,
+            got: 99,
+        })
+        .collect();
+    let mut results: [std::mem::MaybeUninit<vfsi_io_result>; 3] =
+        unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+    let result = unsafe { vfsi_preadv_ex(fs, reads.as_mut_ptr(), 3, results.as_mut_ptr().cast()) };
+    assert_eq!(result.category, VFSI_ERROR_NONE);
+    let results = results.map(|r| unsafe { r.assume_init() });
+    assert_eq!(results.map(|r| r.failure_state), [0, 3, 0]);
+    assert_eq!(reads.iter().map(|r| r.got).collect::<Vec<_>>(), [2, 1, 2]);
+    assert_eq!(buffers, [*b"xx", [b'p', 0xa5], *b"xx"]);
+    assert_eq!(results[1].offset, 9);
+    assert_eq!(results[1].offset_known, 1);
+    unsafe {
+        vfsi_free(fs);
+    }
+
+    let fs = independent_io_fixture(MalformedReply::WriteMiddlePartial);
+    let mut writes: Vec<_> = (0..3)
+        .map(|i| vfsi_pwrite_op {
+            fd: 10 + i,
+            buf: b"ab".as_ptr().cast(),
+            len: 2,
+            offset: 9,
+            wrote: 99,
+        })
+        .collect();
+    let mut results: [std::mem::MaybeUninit<vfsi_io_result>; 3] =
+        unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+    assert_eq!(
+        unsafe { vfsi_pwritev_ex(fs, writes.as_mut_ptr(), 3, results.as_mut_ptr().cast()) }
+            .category,
+        VFSI_ERROR_NONE
+    );
+    let results = results.map(|r| unsafe { r.assume_init() });
+    assert_eq!(results.map(|r| r.failure_state), [0, 3, 0]);
+    assert_eq!(
+        writes.iter().map(|r| r.wrote).collect::<Vec<_>>(),
+        [2, 1, 2]
+    );
+    assert_eq!(results[1].offset_known, 0);
+    // Invalid handles are per input and cannot suppress valid siblings.
+    writes[1].fd = 999;
+    let mut results = results;
+    assert_eq!(
+        unsafe { vfsi_pwritev_ex(fs, writes.as_mut_ptr(), 3, results.as_mut_ptr()) }.category,
+        VFSI_ERROR_NONE
+    );
+    assert_eq!(results[1].failure_state, 1);
+    assert_eq!(results[1].status.err_no, libc::EBADF as u32);
+    unsafe {
+        vfsi_free(fs);
+    }
+}
+
+#[test]
+fn extended_vectors_remap_rejections_after_invalid_handles() {
+    for mode in [MalformedReply::ReadReject, MalformedReply::WriteReject] {
+        let fs = independent_io_fixture(mode);
+        let mut results = [std::mem::MaybeUninit::<vfsi_io_result>::uninit(); 2];
+        let mut buffer = [0u8; 2];
+        let result = if mode == MalformedReply::ReadReject {
+            let mut ops = [
+                vfsi_pread_op {
+                    fd: 999,
+                    buf: buffer.as_mut_ptr().cast(),
+                    len: 1,
+                    offset: 0,
+                    got: 0,
+                },
+                vfsi_pread_op {
+                    fd: 10,
+                    buf: unsafe { buffer.as_mut_ptr().add(1) }.cast(),
+                    len: 1,
+                    offset: 0,
+                    got: 0,
+                },
+            ];
+            unsafe { vfsi_preadv_ex(fs, ops.as_mut_ptr(), 2, results.as_mut_ptr().cast()) }
+        } else {
+            let mut ops = [
+                vfsi_pwrite_op {
+                    fd: 999,
+                    buf: buffer.as_ptr().cast(),
+                    len: 1,
+                    offset: 0,
+                    wrote: 0,
+                },
+                vfsi_pwrite_op {
+                    fd: 10,
+                    buf: buffer.as_ptr().cast(),
+                    len: 1,
+                    offset: 0,
+                    wrote: 0,
+                },
+            ];
+            unsafe { vfsi_pwritev_ex(fs, ops.as_mut_ptr(), 2, results.as_mut_ptr().cast()) }
+        };
+        assert_eq!(result.category, VFSI_ERROR_UNSUPPORTED);
+        assert_eq!(result.index, 1);
+        unsafe {
+            vfsi_free(fs);
+        }
+    }
+}
+
+#[test]
+fn extended_read_panic_returns_unknown_and_poisoned_backend_rejects_future_io() {
+    let fs = independent_io_fixture(MalformedReply::ReadPanic);
+    let mut buffer = [0xa5u8; 2];
+    let mut op = vfsi_pread_op {
+        fd: 10,
+        buf: buffer.as_mut_ptr().cast(),
+        len: 2,
+        offset: 0,
+        got: 0,
+    };
+    let mut result = std::mem::MaybeUninit::<vfsi_io_result>::uninit();
+    assert_eq!(
+        unsafe { vfsi_preadv_ex(fs, &mut op, 1, result.as_mut_ptr()) }.category,
+        VFSI_ERROR_NONE
+    );
+    let first = unsafe { result.assume_init() };
+    assert_eq!(first.failure_state, VFSI_IO_UNKNOWN);
+    assert_eq!(op.got, 0);
+    assert_eq!(buffer, [0xa5; 2]);
+    assert!(unsafe { &*fs }.fs.lock().is_err());
+    assert_ne!(
+        unsafe { vfsi_preadv_ex(fs, &mut op, 1, result.as_mut_ptr()) }.category,
+        VFSI_ERROR_NONE
+    );
+    assert_eq!(
+        unsafe { result.assume_init() }.failure_state,
+        VFSI_IO_NOT_ATTEMPTED
+    );
+    unsafe {
+        vfsi_free(fs);
+    }
+}
+
+#[test]
+fn extended_rejections_clear_all_stale_counts_before_dispatch() {
+    let fs = independent_io_fixture(MalformedReply::ReadMiddleTransport);
+    let mut buffers = [[0xa5u8; 2]; 3];
+    let mut reads: Vec<_> = buffers
+        .iter_mut()
+        .enumerate()
+        .map(|(i, b)| vfsi_pread_op {
+            fd: 10 + i as i32,
+            buf: if i == 1 {
+                std::ptr::null_mut()
+            } else {
+                b.as_mut_ptr().cast()
+            },
+            len: 2,
+            offset: 0,
+            got: 99,
+        })
+        .collect();
+    let mut statuses = [std::mem::MaybeUninit::<vfsi_io_result>::uninit(); 3];
+    assert_eq!(
+        unsafe { vfsi_preadv_ex(fs, reads.as_mut_ptr(), 3, statuses.as_mut_ptr().cast()) }.category,
+        VFSI_ERROR_INVALID_ARGUMENT
+    );
+    assert!(reads.iter().all(|r| r.got == 0));
+    assert_eq!(buffers, [[0xa5; 2]; 3]);
+    assert!(statuses
+        .iter()
+        .all(|r| unsafe { r.assume_init() }.failure_state == VFSI_IO_NOT_ATTEMPTED));
+    let mut writes: Vec<_> = (0..3)
+        .map(|i| vfsi_pwrite_op {
+            fd: 10 + i,
+            buf: if i == 1 {
+                std::ptr::null()
+            } else {
+                b"ab".as_ptr().cast()
+            },
+            len: 2,
+            offset: 0,
+            wrote: 99,
+        })
+        .collect();
+    assert_eq!(
+        unsafe { vfsi_pwritev_ex(fs, writes.as_mut_ptr(), 3, statuses.as_mut_ptr().cast()) }
+            .category,
+        VFSI_ERROR_INVALID_ARGUMENT
+    );
+    assert!(writes.iter().all(|r| r.wrote == 0));
+    unsafe {
+        vfsi_free(fs);
+    }
 }

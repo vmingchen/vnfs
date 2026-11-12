@@ -35,6 +35,14 @@ static int library_dummy_open_mount(const char *root, const char *mount,
     return ENOTSUP;
 }
 
+static struct vfsi_result library_preadv_ex(struct vfsi_fs *fs, struct vfsi_pread_op *ops,
+                                          size_t count, struct vfsi_io_result *results)
+{
+    (void)fs; (void)ops; (void)count; (void)results;
+    struct vfsi_result result = {0};
+    return result;
+}
+
 #define RETURN_SYMBOL(pointer)                                               \
     do {                                                                     \
         void *symbol;                                                        \
@@ -59,6 +67,11 @@ static void *fixture_dlsym(void *handle, const char *name)
             library_dummy_open_mount;
         RETURN_SYMBOL(function);
     }
+    if (strcmp(name, "vfsi_preadv_ex") == 0 && fixture == OPTIONAL_PRESENT) {
+        struct vfsi_result (*function)(struct vfsi_fs *, struct vfsi_pread_op *,
+                                       size_t, struct vfsi_io_result *) = library_preadv_ex;
+        RETURN_SYMBOL(function);
+    }
     return NULL;
 }
 
@@ -77,6 +90,7 @@ int main(void)
     assert(api.handle == RTLD_DEFAULT);
     assert(api.abi_version == library_version && api.free == library_free);
     assert(api.dummy_open_mount == NULL && api.nfs_open_mount_export == NULL);
+    assert(api.preadv_ex == NULL && api.pwritev_ex == NULL);
     assert(api.nfs_from_mount == NULL && api.listdir == NULL && api.listdirs == NULL);
     assert(api.listdirs_from_cursors_with_ids == NULL && api.dir_cursor_free == NULL);
     assert(api.read_paths == NULL && api.read_paths_with_limit == NULL);
@@ -88,6 +102,8 @@ int main(void)
     assert(api.dummy_open_mount == library_dummy_open_mount);
 
     /* Reusing a table must clear optional pointers from a previous load. */
+    assert(api.preadv_ex == library_preadv_ex && api.pwritev_ex == NULL);
+
     fixture = OPTIONALS_ABSENT;
     assert(vfsi_dynamic_load(&api, &fixture) == 0);
     assert(api.dummy_open_mount == NULL);

@@ -226,3 +226,18 @@ Each bounded native read wave completes before delivery; callbacks may query
 the same handle and can stop before the next wave. EOF-completion counts and
 input-index association are unchanged. Keep the handle and inputs live for the
 full streaming call.
+
+
+### Independent I/O outcomes (optional symbols)
+
+`vfsi_preadv_ex` and `vfsi_pwritev_ex` preserve ABI v3 and leave the legacy
+symbols unchanged. Resolve them before dispatch with `vfsi_dynamic_load`.
+If absent, choose the legacy/POSIX path before starting I/O; never replay an
+extended call through fallback after execution.
+
+A successful batch return means the item array contains accepted execution
+outcomes, not that all inputs succeeded. Inspect each `vfsi_io_result.status`
+and `failure_state` (`VFSI_IO_*`). The operation's `got`/`wrote` field is
+the sole confirmed byte count, including failed prefixes. Only `offset_known`
+authorizes using the returned actual offset. Failed append prefixes do not
+invent a position, and `Unknown` never authorizes mutation replay.

@@ -591,14 +591,7 @@ pub unsafe extern "C" fn vfsi_listdir_with_limits(
                 return Err(VfError::errno(0, libc::ENOTSUP as u32));
             }
             for a in entries {
-                let name = a
-                    .file
-                    .path()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.as_bytes())
-                    .and_then(cstr_from_os)
-                    .unwrap_or_default();
-                let attrs = vfsi_attrs::from_vf(&a);
+                let (attrs, name) = prepare_listing_entry(&a, mask(), Some(0))?;
                 // SAFETY: callback was provided by C and is called from the same
                 // thread while `attrs`/`name` are alive.
                 if !unsafe { cb(name.as_ptr(), &attrs, userdata) } {
@@ -697,17 +690,10 @@ pub unsafe extern "C" fn vfsi_listdirv(
                     }
                 };
                 let dir = kernel_dir.as_os_str().as_bytes();
-                let Some(dir) = cstr_from_os(dir) else {
-                    break;
-                };
-                let name = attrs
-                    .file
-                    .path()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.as_bytes())
-                    .and_then(cstr_from_os)
-                    .unwrap_or_default();
-                let a = vfsi_attrs::from_vf(&attrs);
+                let dir = cstr_from_os(dir).ok_or_else(|| {
+                    VfError::invalid_reply(None, "invalid listing directory name")
+                })?;
+                let (a, name) = prepare_listing_entry(&attrs, mask(), None)?;
                 // SAFETY: `c_cb` was provided by C and is invoked from the same
                 // thread while its arguments are alive. No filesystem mutex is held.
                 if !unsafe { c_cb(dir.as_ptr(), name.as_ptr(), &a, userdata) } {

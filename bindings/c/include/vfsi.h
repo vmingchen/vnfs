@@ -125,6 +125,14 @@
  */
 #define VFSI_CAP_ANCHORED_REMOVAL (1 << 9)
 
+#define VFSI_IO_SUCCESS 0
+
+#define VFSI_IO_NOT_ATTEMPTED 1
+
+#define VFSI_IO_FAILED 2
+
+#define VFSI_IO_UNKNOWN 3
+
 /**
  * Version of the additive listing callback with scoped object identity.
  */
@@ -383,6 +391,21 @@ typedef bool (*vfsi_read_stream_cb)(const char *path,
                                     void *userdata);
 
 typedef bool (*vfsi_read_paths_cb)(const char *path, const uint8_t *data, size_t len, void *userdata);
+
+/**
+ * Independent I/O status from the optional extended vector symbols.
+ * failure_state: 0=success, 1=not attempted, 2=failed, 3=unknown.
+ * Counts live only in the corresponding operation's got/wrote field.
+ * offset_known is 1 only for an actual confirmed position; eof describes
+ * successful reads only. A failed append prefix has no invented position.
+ */
+typedef struct vfsi_io_result {
+  struct vfsi_result status;
+  uint32_t failure_state;
+  uint64_t offset;
+  uint8_t offset_known;
+  uint8_t eof;
+} vfsi_io_result;
 
 typedef struct vfsi_mkdir_op {
   const char *path;
@@ -950,6 +973,34 @@ int vfsi_read_paths_with_limit(struct vfsi_fs *fs,
                                size_t max_bytes,
                                vfsi_read_paths_cb cb,
                                void *userdata);
+
+/**
+ * Independent positioned reads. A successful return means the batch was accepted:
+ * inspect every item, including siblings after failures. A return error rejects
+ * the batch before dispatch. got includes confirmed failed prefixes;
+ * progress never grants replay permission. Never fall back after dispatch.
+ * # Safety
+ * Same pointer, lifetime and non-aliasing contract as the legacy vector API,
+ * with count writable vfsi_io_result outputs. Read buffers may be uninitialized.
+ */
+struct vfsi_result vfsi_preadv_ex(struct vfsi_fs *fs,
+                                  struct vfsi_pread_op *ops,
+                                  size_t count,
+                                  struct vfsi_io_result *results);
+
+/**
+ * Independent positioned writes. A successful return means the batch was accepted:
+ * inspect every item, including siblings after failures. A return error rejects
+ * the batch before dispatch. wrote includes confirmed failed prefixes;
+ * progress never grants replay permission. Never fall back after dispatch.
+ * # Safety
+ * Same pointer, lifetime and non-aliasing contract as the legacy vector API,
+ * with count writable vfsi_io_result outputs. Read buffers may be uninitialized.
+ */
+struct vfsi_result vfsi_pwritev_ex(struct vfsi_fs *fs,
+                                   struct vfsi_pwrite_op *ops,
+                                   size_t count,
+                                   struct vfsi_io_result *results);
 
 /**
  * Create a directory (`create_parents != 0` behaves like `mkdir -p`).
