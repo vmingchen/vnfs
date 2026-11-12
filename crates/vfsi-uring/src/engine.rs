@@ -26,6 +26,9 @@ struct Counters {
     enters: AtomicU64,
     scratch_growths: AtomicU64,
     copied_read_bytes: AtomicU64,
+    poisoned_executors: AtomicU64,
+    retained_buffer_bytes: AtomicU64,
+    retained_descriptors: AtomicU64,
 }
 
 /// Cumulative execution counters; a snapshot may span an ongoing operation.
@@ -51,6 +54,12 @@ pub struct Stats {
     pub scratch_growths: u64,
     /// Bytes copied from scratch into borrowed read destinations.
     pub copied_read_bytes: u64,
+    /// Fatal publication/drain failures; poisoned engines never submit again.
+    pub poisoned_executors: u64,
+    /// Buffer allocation capacity deliberately retained after fatal submission failure.
+    pub retained_buffer_bytes: u64,
+    /// Descriptor ownership references retained (not necessarily distinct OS fds).
+    pub retained_descriptors: u64,
 }
 
 #[derive(Clone, Default)]
@@ -72,6 +81,9 @@ impl Telemetry {
             enters: counters.enters.load(Ordering::Relaxed),
             scratch_growths: counters.scratch_growths.load(Ordering::Relaxed),
             copied_read_bytes: counters.copied_read_bytes.load(Ordering::Relaxed),
+            poisoned_executors: counters.poisoned_executors.load(Ordering::Relaxed),
+            retained_buffer_bytes: counters.retained_buffer_bytes.load(Ordering::Relaxed),
+            retained_descriptors: counters.retained_descriptors.load(Ordering::Relaxed),
         }
     }
 }
@@ -382,6 +394,19 @@ impl Engine {
             // result may be larger than its wave slice; retain its entire final
             // allocation, bounded by the caller's read/output budget.
             // Normal negative CQEs are drained and do NOT leak resources.
+            counters.poisoned_executors.fetch_add(1, Ordering::Relaxed);
+            let retained = pending
+                .iter()
+                .filter_map(|op| op.owned.as_ref())
+                .fold(scratch.capacity() as u64, |bytes, data| {
+                    bytes.saturating_add(data.capacity() as u64)
+                });
+            counters
+                .retained_buffer_bytes
+                .fetch_add(retained, Ordering::Relaxed);
+            counters
+                .retained_descriptors
+                .fetch_add(pending.len() as u64, Ordering::Relaxed);
             self.ring.take();
             std::mem::forget(pending);
             std::mem::forget(scratch);
@@ -2281,6 +2306,23 @@ mod tests {
             engine.scratch.is_empty(),
             "poisoned calls must not grow a new arena"
         );
+        let retained = telemetry.snapshot();
+        assert_eq!(retained.poisoned_executors, 1);
+        assert!(retained.retained_buffer_bytes >= 3);
+        assert_eq!(retained.retained_descriptors, 2);
+        // Rejected work on a poisoned executor cannot retain another wave.
+        assert!(
+            engine.write(&[Write {
+                file: &file,
+                offset: 0,
+                data: b"again"
+            }])[0]
+                .is_err()
+        );
+        let after = telemetry.snapshot();
+        assert_eq!(retained.retained_buffer_bytes, after.retained_buffer_bytes);
+        assert_eq!(retained.retained_descriptors, after.retained_descriptors);
+        assert_eq!(after.poisoned_executors, 1);
         drop(engine);
         drop(file);
         // This exceptional path deliberately retains the bounded wave:

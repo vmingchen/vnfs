@@ -274,3 +274,12 @@ Writes exclude fsync. Advisory-cold reads use `POSIX_FADV_DONTNEED` after syncin
 outside timing; this does not evict device/controller caches or guarantee cold
 physical media. See `docs/uring-benchmark.md` in the repository for results and
 environment. Do not expect io_uring to win on every workload.
+
+
+Fatal submission/drain failures poison that executor. Future calls reject work
+without publishing another wave. Telemetry exposes `poisoned_executors`,
+`retained_buffer_bytes` (buffer capacities only), and
+`retained_descriptors` (ownership references, not distinct OS descriptors).
+These resources deliberately remain alive when kernel-reference termination
+cannot be established. This is not a reclamation mechanism; cancellation or
+closing the ring is not used as permission to free uncertain in-flight storage.
