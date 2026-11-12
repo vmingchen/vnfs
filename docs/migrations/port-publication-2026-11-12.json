@@ -1,0 +1,58 @@
+[
+  {
+    "port": "coreutils",
+    "revision": "b57693b4e743fffb344babff7c82a50d10cd0a50",
+    "vnfs": "0.0.34",
+    "vfsi_c": null,
+    "checks": [
+      {
+        "workflow": "VFSI public package integration",
+        "run": 43149566599,
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43149566599",
+        "conclusion": "success"
+      }
+    ]
+  },
+  {
+    "port": "findutils",
+    "revision": "17720e4858a10fa7cbf17c936985b362c25e9a7b",
+    "vnfs": "0.0.34",
+    "vfsi_c": null,
+    "checks": [
+      {
+        "workflow": "VFSI public package integration",
+        "run": 43150186238,
+        "url": "https://github.com/vfsi/vfsi-port-findutils/actions/runs/43150186238",
+        "conclusion": "success"
+      }
+    ]
+  },
+  {
+    "port": "git",
+    "revision": "877f8caf6c05cb01197b2b04fbee0f2f538e477b",
+    "vnfs": "0.0.34",
+    "vfsi_c": "0.3.18",
+    "checks": [
+      {
+        "workflow": "Test VFSI public package integration",
+        "run": 43150314675,
+        "url": "https://github.com/vfsi/vfsi-port-git/actions/runs/43150314675",
+        "conclusion": "success"
+      }
+    ]
+  },
+  {
+    "port": "rsync",
+    "revision": "7f4f8f87a58510acfcc71fc28c3461138327b848",
+    "vnfs": "0.0.34",
+    "vfsi_c": "0.3.18",
+    "checks": [
+      {
+        "workflow": "Test VFSI public package integration",
+        "run": 43150317492,
+        "url": "https://github.com/vfsi/vfsi-port-rsync/actions/runs/43150317492",
+        "conclusion": "success"
+      }
+    ]
+  }
+]

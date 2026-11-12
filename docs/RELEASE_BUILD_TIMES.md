@@ -1,5 +1,69 @@
 # Release build-time baseline
 
+## 2026-11-12 coordinated maintenance patches
+
+All Rust/C archives and Python distributions use clean source `4cc234dcd278686278f8194801fa475caa4c3f9e`.
+Publication followed [19-job canonical CI](https://github.com/vmingchen/vnfs/actions/runs/43147329613)
+and the [six-job port/ABI gate](https://github.com/vmingchen/vnfs/actions/runs/43147329420).
+C ABI remains v3. Registry checksums and source revisions are recorded in the
+[Rust ledger](migrations/rust-publication-2026-11-12.json) and
+[Python ledger](migrations/python-publication-2026-11-12.json).
+
+Normal locked Cargo publication used two build jobs and the existing shared
+target directory. Times include packaging, verification, upload and Cargo's
+index-visibility wait; archive verification is separate.
+
+| Crate | Complete publish command |
+|---|---:|
+| nfsv41-sys 0.1.16 | 67.212s |
+| vfsi-core 0.2.1 | 4.119s |
+| vfsi-sync 0.2.1 | 4.803s |
+| vfsi-local 0.2.1 | 4.971s |
+| vfsi-posix 0.2.1 | 3.094s |
+| vfsi-uring 0.2.1 | 2.868s |
+| vfsi-nfs 0.2.3 | 19.007s |
+| vfsi-smb 0.2.1 | 12.498s |
+| vnfs 0.0.34 | 10.569s |
+| vfsi-c 0.3.18 | 20.582s |
+
+The nfsv41-sys command includes a registry-index wait that timed out after
+upload; its public metadata, archive, checksum and clean VCS revision were
+then verified successfully. Cargo reported 5.68s for that package's verification
+build. The 67.212s publish time should not be treated as compilation time.
+
+Python times below are workflow creation through completion, including queueing,
+builds, installation tests, GSS verification where applicable, and publication.
+The Python ledger also retains per-job and per-step durations. Redundant
+tag-triggered CI copies were cancelled after canonical same-commit CI passed;
+release workflows and canonical CI were retained.
+
+| Python release | Complete workflow wall time |
+|---|---:|
+| [vfsi-fsspec 0.1.14](https://github.com/vmingchen/vnfs/actions/runs/43148565823) | 77s |
+| [vsmb 0.1.8](https://github.com/vmingchen/vnfs/actions/runs/43148567238) | 249s |
+| [vsmbfs 0.1.8](https://github.com/vmingchen/vnfs/actions/runs/43149091660) | 85s |
+| [nfs4fs 0.3.14](https://github.com/vmingchen/vnfs/actions/runs/43148769001) | 1515s |
+
+All four application ports now pin the public vnfs 0.0.34 / vfsi-c 0.3.18
+release family; their exact revisions and successful VFSI consumer checks
+are in the [port ledger](migrations/port-publication-2026-11-12.json).
+Coreutils and findutils resolve only registry VFSI dependencies; Git and rsync
+verify the SDK archive checksum before invoking its registry-only builder.
+
+Local verification included the complete server-independent Rust runner,
+Python suites, required NFSv4.1/v4.2 and Samba checks, real io_uring checks,
+C ABI checks, and public-dependency builds/parity tests for all four ports.
+Findutils' 286 unit tests ran in a private mount namespace to exclude an
+unresponsive pre-existing host NFS mount; host mounts were unchanged.
+An exhausted shared-memory user quota was resolved by relocating one old
+build cache while preserving its original path through a symlink.
+
+Pre-release CI exposed import ordering and test assumptions about minimum
+fsspec constructors, independent READDIR request/reply budgets, and duplicate
+CLOSE acknowledgements. Those regressions were repaired before publication.
+These results describe the stated fixtures and cache state, not cold-build
+benchmarks or a universal performance comparison.
+
 ## 2026-11-09 independent vector results
 
 The coordinated Rust/C source is 7b0a8833bfb3455d2fe2dfcb17757f16b4c78593; the compatible NFS 0.2.1

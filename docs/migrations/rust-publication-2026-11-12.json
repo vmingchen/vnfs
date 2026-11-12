@@ -1,0 +1,92 @@
+[
+  {
+    "crate": "nfsv41-sys",
+    "version": "0.1.16",
+    "commit": "4cc234dcd278686278f8194801fa475caa4c3f9e",
+    "publish_started_utc": "2026-11-12T03:26:25.861772+00:00",
+    "publish_seconds": 67.21173035167158,
+    "sha256": "d8fa7707cc5d83e211bd07863aac15f83573296506a8119c82e4dbee0ec9bf77",
+    "verified_registry_archive": true
+  },
+  {
+    "crate": "vfsi-core",
+    "version": "0.2.1",
+    "commit": "4cc234dcd278686278f8194801fa475caa4c3f9e",
+    "publish_started_utc": "2026-11-12T03:27:33.871396+00:00",
+    "publish_seconds": 4.119388735853136,
+    "sha256": "2922d39fad081c44159409a6fa7998e6a366f6727e9f0d073c5b19db95d8c773",
+    "verified_registry_archive": true
+  },
+  {
+    "crate": "vfsi-sync",
+    "version": "0.2.1",
+    "commit": "4cc234dcd278686278f8194801fa475caa4c3f9e",
+    "publish_started_utc": "2026-11-12T03:27:38.348201+00:00",
+    "publish_seconds": 4.8030922412872314,
+    "sha256": "caf6f36a4194728ca36987888847f1c20f77bb0cdf6c4a5db3bee9a91c3258d7",
+    "verified_registry_archive": true
+  },
+  {
+    "crate": "vfsi-local",
+    "version": "0.2.1",
+    "commit": "4cc234dcd278686278f8194801fa475caa4c3f9e",
+    "publish_started_utc": "2026-11-12T03:27:43.832961+00:00",
+    "publish_seconds": 4.971258523873985,
+    "sha256": "71631b7559cbb1bca949a513faab0301a2663d6c959e6280a6dd1884f6ea22d8",
+    "verified_registry_archive": true
+  },
+  {
+    "crate": "vfsi-posix",
+    "version": "0.2.1",
+    "commit": "4cc234dcd278686278f8194801fa475caa4c3f9e",
+    "publish_started_utc": "2026-11-12T03:27:49.383453+00:00",
+    "publish_seconds": 3.094455609098077,
+    "sha256": "65aaddc84deffc14c18786f1bc4c6b0420c9b5e8e433c72e41ed67edd6a36773",
+    "verified_registry_archive": true
+  },
+  {
+    "crate": "vfsi-uring",
+    "version": "0.2.1",
+    "commit": "4cc234dcd278686278f8194801fa475caa4c3f9e",
+    "publish_started_utc": "2026-11-12T03:27:52.996471+00:00",
+    "publish_seconds": 2.8683858634904027,
+    "sha256": "1843c52204632682b21b1be42cd1b37732e30c7b1b96632ff27a46d1a426ba78",
+    "verified_registry_archive": true
+  },
+  {
+    "crate": "vfsi-nfs",
+    "version": "0.2.3",
+    "commit": "4cc234dcd278686278f8194801fa475caa4c3f9e",
+    "publish_started_utc": "2026-11-12T03:27:56.468413+00:00",
+    "publish_seconds": 19.006843690760434,
+    "sha256": "322f3b432e6ab3b8f823d24fa97c36fc98b88909a35067bd3193da67d1f7f46e",
+    "verified_registry_archive": true
+  },
+  {
+    "crate": "vfsi-smb",
+    "version": "0.2.1",
+    "commit": "4cc234dcd278686278f8194801fa475caa4c3f9e",
+    "publish_started_utc": "2026-11-12T03:28:16.439439+00:00",
+    "publish_seconds": 12.497948243282735,
+    "sha256": "b83a802d04c1f538f5004f0af445b7a74a7a6e7bc082213fa65ef21e833ebb95",
+    "verified_registry_archive": true
+  },
+  {
+    "crate": "vnfs",
+    "version": "0.0.34",
+    "commit": "4cc234dcd278686278f8194801fa475caa4c3f9e",
+    "publish_started_utc": "2026-11-12T03:28:29.552569+00:00",
+    "publish_seconds": 10.569444761611521,
+    "sha256": "150782198f4ef756e421625cfe5199201c7ff9183eff12762bf30ba948e1f76f",
+    "verified_registry_archive": true
+  },
+  {
+    "crate": "vfsi-c",
+    "version": "0.3.18",
+    "commit": "4cc234dcd278686278f8194801fa475caa4c3f9e",
+    "publish_started_utc": "2026-11-12T03:28:40.831987+00:00",
+    "publish_seconds": 20.582418141886592,
+    "sha256": "a8cdd7c5e57b3d46dc42fe7603b1180c44ea1e5ad95e185f71596531bb7b472c",
+    "verified_registry_archive": true
+  }
+]
