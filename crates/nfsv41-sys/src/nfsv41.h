@@ -6070,19 +6070,45 @@ extern "C" {
 		return true;
 	}
 
-	static inline bool xdr_entry4(XDR * xdrs, entry4 *objp)
+	static inline bool xdr_entry4_fields(XDR * xdrs, entry4 *objp)
 	{
 		if (!xdr_nfs_cookie4(xdrs, &objp->cookie))
 			return false;
 		if (!xdr_component4(xdrs, &objp->name))
 			return false;
-		if (!xdr_fattr4(xdrs, &objp->attrs))
+		return xdr_fattr4(xdrs, &objp->attrs);
+	}
+
+	static inline bool xdr_entry4(XDR * xdrs, entry4 *objp)
+	{
+		bool result = xdr_entry4_fields(xdrs, objp);
+		entry4 **next = &objp->nextentry;
+
+		/* A peer controls list depth. Keep decode AND partial-tree cleanup
+		 * iterative; recursing through xdr_pointer can exhaust the stack. */
+		if (xdrs->x_op == XDR_FREE) {
+			entry4 *entry = *next;
+			*next = NULL;
+			while (entry != NULL) {
+				entry4 *following = entry->nextentry;
+				entry->nextentry = NULL;
+				if (!xdr_pointer(xdrs, (void **)&entry, sizeof(entry4),
+						 (xdrproc_t) xdr_entry4_fields))
+					result = false;
+				entry = following;
+			}
+			return result;
+		}
+		if (!result)
 			return false;
-		if (!xdr_pointer
-		    (xdrs, (void **)&objp->nextentry, sizeof(entry4),
-		     (xdrproc_t) xdr_entry4))
-			return false;
-		return true;
+		for (;;) {
+			if (!xdr_pointer(xdrs, (void **)next, sizeof(entry4),
+					 (xdrproc_t) xdr_entry4_fields))
+				return false;
+			if (*next == NULL)
+				return true;
+			next = &(*next)->nextentry;
+		}
 	}
 
 	static inline bool xdr_dirlist4(XDR * xdrs, dirlist4 *objp)
