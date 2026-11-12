@@ -3,11 +3,32 @@
 This project follows [Semantic Versioning](https://semver.org/) for the
 `nfs4fs` package. Rust crate and C ABI versions are tracked independently.
 
-## Unreleased
+## 2026-11-12 — coordinated maintenance patches
 
-Prepared Rust release: vnfs 0.0.32 and vfsi-core/vfsi-sync/backend crates 0.2.0.
-Prepared compatible C SDK: vfsi-c 0.3.16, retaining ABI v3 and optional symbols.
-Prepared Python patches: nfs4fs 0.3.13, vfsi-fsspec 0.1.13, vsmb/vsmbfs 0.1.7.
+Coordinated patches: vnfs 0.0.34; vfsi-nfs 0.2.3; vfsi-core/vfsi-sync,
+local/POSIX/io_uring/SMB backends 0.2.1; nfsv41-sys 0.1.16; vfsi-c 0.3.18.
+Python patches: nfs4fs 0.3.14, vfsi-fsspec 0.1.14, vsmb/vsmbfs 0.1.8.
+C ABI remains v3.
+
+- Bound filtered-only READDIR continuations and iterative directory decoding;
+  retain cookie verifiers and honor returned attribute masks.
+- Preserve dependent cursor I/O ordering, recovery identities and cleanup
+  ownership across independent vector outcomes.
+- Expose optional C per-input read/write outcomes without extending ABI-v3
+  attributes; validate directory names at the C boundary.
+- Preserve Python per-file outcomes and acknowledged prefixes, harden buffered
+  reads/writes and cache-lock cleanup, and correct vsmbfs build requirements.
+- Improve POSIX read allocation and descriptor handling; expose io_uring
+  poisoning and retained-resource diagnostics.
+- Run all non-ignored backend library regressions in fixture-backed CI and local
+  CI, with real server COPY tests isolated to COPY-enabled configurations.
+
+## 2026-11-09 — independent vector outcomes
+
+Published Rust release: vnfs 0.0.33, vfsi-nfs 0.2.2 and the remaining
+vfsi-core/vfsi-sync/backend crates 0.2.0.
+Published C SDK: vfsi-c 0.3.17, retaining ABI v3 and optional symbols.
+Published Python patches: nfs4fs 0.3.13, vfsi-fsspec 0.1.13, vsmb/vsmbfs 0.1.7.
 
 - Change every canonical Vfsi vector directly to VecResult, with one outcome
   per input and explicit failure certainty and acknowledged I/O progress.
