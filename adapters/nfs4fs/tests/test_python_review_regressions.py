@@ -245,13 +245,13 @@ def test_empty_group_readers_do_not_issue_or_amplify_vector_reads(
         fs.pipe(payloads)
         files = fs.open_many([OpenFile(fs, path, mode="rb") for path in payloads])
         requests = []
-        original = fs._client.pread_many
+        original = fs._client.preadv
 
         def record(fds, offsets, lengths):
             requests.append(list(lengths))
             return original(fds, offsets, lengths)
 
-        monkeypatch.setattr(fs._client, "pread_many", record)
+        monkeypatch.setattr(fs._client, "preadv", record)
         try:
             for handle, payload in zip(files, payloads.values()):
                 assert handle.read() == payload

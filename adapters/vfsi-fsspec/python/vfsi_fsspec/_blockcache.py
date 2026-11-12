@@ -347,11 +347,14 @@ def _cache_lock(cache_fs):
             finally:
                 held.pop(storage, None)
         finally:
-            if acquired:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            with _LOCKS_GUARD:
-                _ACTIVE_LOCK_FDS.discard(fd)
-                os.close(fd)
+            try:
+                if acquired:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                # close also releases the kernel lock if explicit unlock fails.
+                with _LOCKS_GUARD:
+                    _ACTIVE_LOCK_FDS.discard(fd)
+                    os.close(fd)
 
 
 def _invalidate_registered_paths(

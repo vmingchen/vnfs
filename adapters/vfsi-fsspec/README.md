@@ -22,3 +22,18 @@ Transactional writes require both a native creation-permissions API and a backen
 with POSIX permission support. Unsupported backends, including current SMB,
 reject transactional writes before allocating a spool or creating staging files;
 ordinary I/O remains supported. A method signature alone is not a capability.
+
+
+### Independent native I/O outcomes
+
+Recent native modules provide `preadv`, `pwritev`, `appendv` and
+`read_allv`. These return one success value or exception per input. Exceptions
+retain `failure_state` (`not_attempted`, `failed` or `unknown`) and optional
+`read_prefix`/`read_offset`/`read_eof` or `bytes_written`. Unsupported inputs
+use the existing `NotImplementedError` class. A failed prefix is not a successful
+operation; an unknown mutation must not be replayed.
+
+Grouped buffered I/O uses these methods when available: healthy reads are kept,
+only failed read suffixes can recover, and healthy writes continue through later
+waves. Old native modules retain their existing path. The older `*_many` native
+methods keep their return shapes and exception behavior as compatibility projections.

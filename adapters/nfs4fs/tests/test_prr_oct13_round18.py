@@ -101,7 +101,7 @@ def test_vectorized_group_mmap_failure_is_retryable(dummy_fs, monkeypatch):
 
     try:
         with monkeypatch.context() as patch:
-            patch.setattr(dummy_fs._client, "pread_many", fail)
+            patch.setattr(dummy_fs._client, "preadv", fail)
             with pytest.raises(OSError):
                 files[0].read(1)
             assert all(not file.cache.blocks for file in files)

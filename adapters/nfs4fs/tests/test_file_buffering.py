@@ -151,7 +151,7 @@ def test_update_modes_remain_raw(dummy_fs):
 def test_open_files_batches_buffer_misses(dummy_fs, monkeypatch):
     paths = [f"/read-{index}" for index in range(4)]
     dummy_fs.pipe({path: bytes([65 + index]) * 16 for index, path in enumerate(paths)})
-    calls = _record_calls(monkeypatch, dummy_fs._client, "pread_many")
+    calls = _record_calls(monkeypatch, dummy_fs._client, "preadv")
     with _open_files(dummy_fs, paths, "rb") as files:
         for index, file in enumerate(files):
             assert file.read(4) == bytes([65 + index]) * 4
@@ -179,7 +179,7 @@ def test_group_handles_mixed_sizes_and_seek_patterns(dummy_fs, monkeypatch):
         "/mixed-c": b"ABCDEFGHIJKLMNO",
     }
     dummy_fs.pipe(contents)
-    calls = _record_calls(monkeypatch, dummy_fs._client, "pread_many")
+    calls = _record_calls(monkeypatch, dummy_fs._client, "preadv")
     with _open_files(dummy_fs, list(contents), "rb") as files:
         assert files[0].read(4) == b"ab"
         files[1].seek(8)
@@ -193,7 +193,7 @@ def test_open_files_whole_reads_are_vectorized(dummy_fs, monkeypatch):
     paths = [f"/whole-{index}" for index in range(4)]
     expected = {path: bytes([65 + index]) * 16 for index, path in enumerate(paths)}
     dummy_fs.pipe(expected)
-    calls = _record_calls(monkeypatch, dummy_fs._client, "pread_many")
+    calls = _record_calls(monkeypatch, dummy_fs._client, "preadv")
     with _open_files(dummy_fs, paths, "rb") as files:
         assert [file.read() for file in files] == [expected[path] for path in paths]
     assert len(calls) == 1
@@ -210,7 +210,7 @@ def test_open_files_respects_vector_byte_cap(tmp_path, monkeypatch):
     ) as fs:
         paths = [f"/cap-{index}" for index in range(4)]
         fs.pipe({path: bytes([65 + index]) * 16 for index, path in enumerate(paths)})
-        calls = _record_calls(monkeypatch, fs._client, "pread_many")
+        calls = _record_calls(monkeypatch, fs._client, "preadv")
         with _open_files(fs, paths, "rb") as files:
             assert [file.read(2) for file in files] == [
                 bytes([65 + index]) * 2 for index in range(4)
@@ -230,7 +230,7 @@ def test_group_retains_at_most_one_speculative_block_per_sibling(tmp_path, monke
     ) as fs:
         paths = [f"/one-block-{index}" for index in range(3)]
         fs.pipe({path: bytes([65 + index]) * 20 for index, path in enumerate(paths)})
-        calls = _record_calls(monkeypatch, fs._client, "pread_many")
+        calls = _record_calls(monkeypatch, fs._client, "preadv")
         with _open_files(fs, paths, "rb") as files:
             assert files[0].read(12) == b"A" * 12
             sibling_ranges = [
@@ -259,7 +259,7 @@ def test_group_whole_read_only_prefetches_one_sibling_block(tmp_path, monkeypatc
     ) as fs:
         paths = [f"/whole-cap-{index}" for index in range(3)]
         fs.pipe({path: bytes([65 + index]) * 20 for index, path in enumerate(paths)})
-        calls = _record_calls(monkeypatch, fs._client, "pread_many")
+        calls = _record_calls(monkeypatch, fs._client, "preadv")
         with _open_files(fs, paths, "rb") as files:
             assert files[0].read() == b"A" * 20
         assert calls[0][0][2] == [20, 4, 4]
@@ -285,7 +285,7 @@ def test_vectorized_buffering_can_be_disabled(tmp_path, monkeypatch):
 def test_concurrent_group_reads_share_one_vector_fetch(dummy_fs, monkeypatch):
     paths = [f"/thread-{index}" for index in range(4)]
     dummy_fs.pipe({path: bytes([65 + index]) * 16 for index, path in enumerate(paths)})
-    calls = _record_calls(monkeypatch, dummy_fs._client, "pread_many")
+    calls = _record_calls(monkeypatch, dummy_fs._client, "preadv")
     with _open_files(dummy_fs, paths, "rb") as files:
         barrier = threading.Barrier(len(files))
         results = [None] * len(files)
@@ -309,7 +309,7 @@ def test_concurrent_group_reads_share_one_vector_fetch(dummy_fs, monkeypatch):
 def test_group_read_reconnects_and_reopens_once(dummy_fs, monkeypatch):
     paths = ["/retry-a", "/retry-b"]
     dummy_fs.pipe({path: b"retry-data" for path in paths})
-    original = dummy_fs._client.pread_many
+    original = dummy_fs._client.preadv
     attempts = 0
 
     def flaky(*args, **kwargs):
@@ -319,7 +319,7 @@ def test_group_read_reconnects_and_reopens_once(dummy_fs, monkeypatch):
             raise ConnectionError("injected read failure")
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(dummy_fs._client, "pread_many", flaky)
+    monkeypatch.setattr(dummy_fs._client, "preadv", flaky)
     with _open_files(dummy_fs, paths, "rb") as files:
         assert [file.read(2) for file in files] == [b"re", b"re"]
     assert attempts == 2
@@ -544,7 +544,7 @@ def test_open_files_flushes_writes_in_vector_waves(tmp_path, monkeypatch):
         skip_instance_cache=True,
     ) as fs:
         paths = [f"/part-{index}" for index in range(3)]
-        calls = _record_calls(monkeypatch, fs._client, "pwrite_many")
+        calls = _record_calls(monkeypatch, fs._client, "pwritev")
         with _open_files(fs, paths, "wb") as files:
             for index, file in enumerate(files):
                 file.write(bytes([65 + index]) * 9)
@@ -567,7 +567,7 @@ def test_grouped_append_uses_vector_path(tmp_path, monkeypatch):
     ) as fs:
         paths = ["/append-a", "/append-b"]
         fs.pipe({path: b"old" for path in paths})
-        calls = _record_calls(monkeypatch, fs._client, "append_many")
+        calls = _record_calls(monkeypatch, fs._client, "appendv")
         with _open_files(fs, paths, "ab") as files:
             for file in files:
                 assert file.tell() == 3
@@ -658,7 +658,7 @@ def test_grouped_write_transport_failure_is_not_replayed(tmp_path, monkeypatch):
             attempts += 1
             raise ConnectionError("injected ambiguous write failure")
 
-        monkeypatch.setattr(fs._client, "pwrite_many", fail_once)
+        monkeypatch.setattr(fs._client, "pwritev", fail_once)
         opened = None
         with pytest.raises(ConnectionError, match="injected ambiguous write failure"):
             with _open_files(fs, paths, "wb") as opened:
@@ -757,7 +757,7 @@ def test_persistent_blockcache_open_files_populates_in_one_vector_wave(
         skip_instance_cache=True,
     )
     opens = _record_calls(monkeypatch, target._client, "open_many")
-    reads = _record_calls(monkeypatch, target._client, "pread_many")
+    reads = _record_calls(monkeypatch, target._client, "preadv")
     closes = _record_calls(monkeypatch, target._client, "close_many")
     try:
         with _open_files(cached, paths, "rb") as files:
@@ -807,7 +807,7 @@ def test_persistent_blockcache_open_files_complete_hits_stay_local(
             assert [file.read() for file in files] == [expected[path] for path in paths]
 
         opens = _record_calls(monkeypatch, target._client, "open_many")
-        reads = _record_calls(monkeypatch, target._client, "pread_many")
+        reads = _record_calls(monkeypatch, target._client, "preadv")
         with _open_files(cached, paths, "rb") as files:
             assert [file.read() for file in files] == [expected[path] for path in paths]
         assert opens == []
@@ -848,7 +848,7 @@ def test_persistent_blockcache_open_files_batch_validates_new_generations(
         target.pipe(replacement)
 
         stats = _record_calls(monkeypatch, target._client, "stat_many")
-        reads = _record_calls(monkeypatch, target._client, "pread_many")
+        reads = _record_calls(monkeypatch, target._client, "preadv")
         with _open_files(cached, paths, "rb") as files:
             assert [file.read(2) for file in files] == [
                 replacement[path][:2] for path in paths
@@ -1442,7 +1442,7 @@ def test_open_files_vectorizes_eager_all_cache(tmp_path, monkeypatch):
         paths = [f"/all-{index}" for index in range(4)]
         fs.pipe({path: bytes([65 + index]) * 4 for index, path in enumerate(paths)})
         scalar_reads = _record_calls(monkeypatch, fs._client, "pread")
-        vector_reads = _record_calls(monkeypatch, fs._client, "pread_many")
+        vector_reads = _record_calls(monkeypatch, fs._client, "preadv")
         with _open_files(fs, paths, "rb") as files:
             assert [file.read(1) for file in files] == [b"A", b"B", b"C", b"D"]
         assert scalar_reads == []
@@ -1534,3 +1534,182 @@ def test_file_buffering_smoke_on_network_backends(request, fs_fixture, tmp_path)
     finally:
         fs.write_buffering = old_write_buffering
         fs.block_size = old_block_size
+
+
+@pytest.mark.parametrize("transport", [False, True])
+@pytest.mark.parametrize("deferred", [False, True])
+def test_close_many_retires_successful_suffix_and_retries_only_failed_owner(
+    dummy_fs, monkeypatch, transport, deferred
+):
+    paths = ["/close-independent-a", "/close-independent-b", "/close-independent-c"]
+    dummy_fs.pipe({path: b"data" for path in paths})
+    pool = dummy_fs._client
+    tokens = pool.open_many(paths, ["rb"] * len(paths))
+    tokens_by_native = {pool._resolve(token)[1]: token for token in tokens}
+    owner = pool._resolve(tokens[0])[0]
+    native = pool._clients[owner]
+    original = native.close_many
+    calls = []
+
+    def fail_once(fds, **kwargs):
+        calls.append(list(fds))
+        if len(calls) == 1:
+            original(fds[1:])
+            error = (
+                ConnectionError("independent close failure")
+                if transport
+                else PermissionError(errno.EACCES, "independent close failure")
+            )
+            error.index = 0
+            error._closed_indices = [1, 2]
+            raise error
+        return original(fds, **kwargs)
+
+    monkeypatch.setattr(native, "close_many", fail_once)
+    if deferred:
+        pool._auto_reconnect = False
+        pool.defer_close_many(tokens)
+        pool._retry_deferred_closes()
+    else:
+        with pytest.raises(OSError, match="independent close failure"):
+            pool.close_many(tokens)
+    failed_token = tokens_by_native[calls[0][0]]
+    assert set(pool._fds) == {failed_token}
+    assert pool._deferred_close == {failed_token}
+    pool._retry_deferred_closes()
+    pool._retry_deferred_closes()
+    assert calls[1:] == [[calls[0][0]]]
+    assert not pool._fds
+    assert not pool._deferred_close
+
+
+def test_close_many_never_infers_retirement_from_an_error_index(dummy_fs, monkeypatch):
+    paths = ["/close-no-prefix-a", "/close-no-prefix-b"]
+    dummy_fs.pipe({path: b"data" for path in paths})
+    pool = dummy_fs._client
+    tokens = pool.open_many(paths, ["rb"] * 2)
+    native = pool._clients[pool._resolve(tokens[0])[0]]
+
+    def reject(fds, **kwargs):
+        error = PermissionError(errno.EACCES, "no close was submitted")
+        error.index = 1
+        raise error
+
+    with monkeypatch.context() as patch:
+        patch.setattr(native, "close_many", reject)
+        with pytest.raises(PermissionError):
+            pool.close_many(tokens)
+        assert set(pool._fds) == set(tokens)
+        pool._retry_deferred_closes()
+        assert set(pool._fds) == set(tokens)
+    pool._retry_deferred_closes()
+    assert not pool._fds
+
+
+def test_group_close_finishes_successful_suffix_after_independent_failure(
+    dummy_fs, monkeypatch
+):
+    paths = ["/group-independent-a", "/group-independent-b", "/group-independent-c"]
+    dummy_fs.pipe({path: b"data" for path in paths})
+    opened = _open_files(dummy_fs, paths, "rb").__enter__()
+    pool = dummy_fs._client
+    tokens = [file._fd for file in opened]
+    native = pool._clients[pool._resolve(tokens[0])[0]]
+    original = native.close_many
+    attempts = 0
+
+    def fail_once(fds, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            original(fds[1:])
+            error = PermissionError(errno.EACCES, "group close failure")
+            error.index = 0
+            error._closed_indices = [1, 2]
+            raise error
+        return original(fds, **kwargs)
+
+    monkeypatch.setattr(native, "close_many", fail_once)
+    opened[0].close()
+    opened[1].close()
+    with pytest.raises(PermissionError):
+        opened[2].close()
+    assert opened[0]._fd is not None
+    assert all(file.closed for file in opened[1:])
+    assert all(file._fd is None for file in opened[1:])
+    opened[0].close()
+    assert all(file.closed for file in opened)
+    assert not pool._fds
+
+
+@pytest.mark.parametrize("indices", [None, [], [-1], [2], [True], "0"])
+def test_close_many_rejects_invalid_completion_metadata(dummy_fs, monkeypatch, indices):
+    paths = ["/close-invalid-meta-a", "/close-invalid-meta-b"]
+    dummy_fs.pipe({path: b"data" for path in paths})
+    pool = dummy_fs._client
+    tokens = pool.open_many(paths, ["rb"] * 2)
+    native = pool._clients[pool._resolve(tokens[0])[0]]
+
+    def reject(fds, **kwargs):
+        error = PermissionError(errno.EACCES, "no completion")
+        error.index = 1
+        error._closed_indices = indices
+        raise error
+
+    with monkeypatch.context() as patch:
+        patch.setattr(native, "close_many", reject)
+        with pytest.raises(PermissionError):
+            pool.close_many(tokens)
+        assert set(pool._fds) == set(tokens)
+    pool._retry_deferred_closes()
+    assert not pool._fds
+
+
+def test_scalar_close_retry_reconciles_consumed_native_ownership(dummy_fs, monkeypatch):
+    dummy_fs.pipe_file("/close-consumed", b"data")
+    pool = dummy_fs._client
+    token = pool.open("/close-consumed", "rb")
+    _, fd, native = pool._resolve(token)
+    original = native.close
+    reconciled = []
+
+    def consumed_close(native_fd):
+        original(native_fd)
+        raise OSError(errno.EIO, "consumed close ownership")
+
+    def reconcile(fds, *, _deferred=False):
+        assert _deferred and fds == [fd]
+        reconciled.append(fd)
+
+    monkeypatch.setattr(native, "close", consumed_close)
+    monkeypatch.setattr(native, "close_many", reconcile)
+    with pytest.raises(OSError, match="consumed close ownership"):
+        pool.close(token)
+    assert pool.descriptor_valid(token)
+    pool.close(token)
+    assert reconciled == [fd]
+    assert not pool.descriptor_valid(token)
+    assert not pool._deferred_close
+
+
+def test_deferred_cleanup_preserves_legacy_native_close_signature(
+    dummy_fs, monkeypatch
+):
+    dummy_fs.pipe_file("/close-legacy", b"data")
+    pool = dummy_fs._client
+    token = pool.open("/close-legacy", "rb")
+    _, fd, native = pool._resolve(token)
+    original = native.close_many
+    calls = []
+
+    def legacy_close_many(fds):
+        calls.append(list(fds))
+        return original(fds)
+
+    monkeypatch.setattr(pool, "_native_has_deferred_close", False)
+    monkeypatch.setattr(native, "close_many", legacy_close_many)
+    pool.defer_close_many([token])
+    pool._retry_deferred_closes()
+    assert calls == [[fd]]
+    assert not pool.descriptor_valid(token)
+    assert not pool._deferred_close

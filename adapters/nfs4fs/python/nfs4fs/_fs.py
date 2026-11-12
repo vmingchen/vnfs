@@ -198,16 +198,22 @@ class Nfs4FileSystem(_VfsiFileSystem):
                     identity is None or reader._identity != identity
                 ):
                     raise _stale_handle_error(internal)
+                chunk = reader._pread_at(offset, length)
+                if len(chunk) == length:
+                    # Native reads already return immutable bytes. Reuse a
+                    # complete chunk without another buffer and two copies.
+                    return bytes(chunk)
                 data = bytearray(length)
                 filled = 0
                 while filled < length:
-                    chunk = reader._pread_at(offset + filled, length - filled)
                     if not chunk:
                         raise OSError(f"short pipelined read at offset {offset}")
                     if len(chunk) > length - filled:
                         raise OSError(f"oversized pipelined read at offset {offset}")
                     data[filled : filled + len(chunk)] = chunk
                     filled += len(chunk)
+                    if filled < length:
+                        chunk = reader._pread_at(offset + filled, length - filled)
                 return bytes(data)
 
             pending = deque()

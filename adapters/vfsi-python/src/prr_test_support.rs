@@ -65,7 +65,11 @@ pub(crate) struct FaultBackend {
     pub(crate) replace_after_write_error: Option<(PathBuf, Vec<u8>)>,
     pub(crate) read_all_errors_after_write: std::collections::VecDeque<VfError>,
     pub(crate) read_all_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
+    pub(crate) read_all_item_errors: Vec<(usize, vfsi_core::OpError)>,
     pub(crate) write_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
+    pub(crate) close_item_errors: Vec<(usize, vfsi_core::OpError)>,
+    pub(crate) consumed_close_error: Option<VfError>,
+    deferred_closes: Vec<FileOperand>,
 }
 impl FaultBackend {
     pub(crate) fn new(root: &Path, read_error: Option<VfError>) -> Self {
@@ -92,7 +96,11 @@ impl FaultBackend {
             replace_after_write_error: None,
             read_all_errors_after_write: std::collections::VecDeque::new(),
             read_all_calls: Arc::default(),
+            read_all_item_errors: Vec::new(),
             write_calls: Arc::default(),
+            close_item_errors: Vec::new(),
+            consumed_close_error: None,
+            deferred_closes: Vec::new(),
         }
     }
     fn attrs_results(&mut self, attrs: &mut [VfAttrs], follow: bool) -> vfsi_core::VecResult<()> {
@@ -137,11 +145,42 @@ impl HandleBackend for FaultBackend {
         self.inner.open_impl(op)
     }
     fn vclose_impl(&mut self, files: &[vfsi_core::FileOperand]) -> vfsi_core::VecResult<()> {
-        self.inner.vclose_impl(files)
+        let mut errors = std::mem::take(&mut self.close_item_errors);
+        Ok(files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| {
+                if let Some(position) = errors.iter().position(|(slot, _)| *slot == index) {
+                    Err(errors.remove(position).1)
+                } else {
+                    self.inner
+                        .close_impl(file)
+                        .map_err(vfsi_core::OpError::not_attempted)
+                }
+            })
+            .collect())
     }
 
     fn close_impl(&mut self, file: &FileOperand) -> vfsi_core::VfResult<()> {
-        self.inner.close_impl(file)
+        self.inner.close_impl(file)?;
+        if let Some(error) = self.consumed_close_error.take() {
+            self.deferred_closes.push(file.clone());
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn close_deferred(&mut self, file: &FileOperand) -> vfsi_core::VfResult<()> {
+        if let Some(index) = self
+            .deferred_closes
+            .iter()
+            .position(|pending| pending.fd() == file.fd())
+        {
+            self.deferred_closes.remove(index);
+            Ok(())
+        } else {
+            self.inner.close_impl(file)
+        }
     }
     fn read_impl(&mut self, op: &ReadOp) -> vfsi_core::VfResult<ReadResult> {
         self.inner.read_impl(op)
@@ -358,6 +397,9 @@ impl VectorBackend for FaultBackend {
             return Err(error.clone());
         }
         let mut outcomes = self.inner.vread_all_with_options_impl(files, options)?;
+        for (index, error) in std::mem::take(&mut self.read_all_item_errors) {
+            outcomes[index] = Err(error);
+        }
         for error in injected {
             let index = error.index().expect("validated injected position");
             outcomes[index] = Err(if error.is_transport() {
@@ -370,9 +412,10 @@ impl VectorBackend for FaultBackend {
     }
 }
 impl BindingBackend for FaultBackend {}
-pub(crate) fn client(backend: FaultBackend) -> NfsClient {
+pub(crate) fn client(backend: impl BindingBackend + Send + 'static) -> NfsClient {
     NfsClient {
         fs: Mutex::new(Some(Box::new(backend))),
+        append_fds: Mutex::new(HashSet::new()),
         read_all_max_total_bytes: 1024,
         directory_max_entries: 100,
         directory_max_path_bytes: 1024,

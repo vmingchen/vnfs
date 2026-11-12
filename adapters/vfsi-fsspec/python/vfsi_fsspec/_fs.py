@@ -639,7 +639,16 @@ class _ClientPool:
         }
     )
     _FD_MANY_METHODS = frozenset(
-        {"fstat_many", "pread_many", "pwrite_many", "append_many", "close_many"}
+        {
+            "fstat_many",
+            "pread_many",
+            "pwrite_many",
+            "append_many",
+            "close_many",
+            "preadv",
+            "pwritev",
+            "appendv",
+        }
     )
 
     def __init__(self, native_module, factory_args, size=1, auto_reconnect=True):
@@ -648,6 +657,17 @@ class _ClientPool:
             for _ in range(size)
         ]
         self._auto_reconnect = auto_reconnect
+        self._native_has_vector_outcomes = all(
+            hasattr(native_module.NfsClient, name)
+            for name in ("preadv", "pwritev", "appendv")
+        )
+        try:
+            self._native_has_deferred_close = (
+                "_deferred"
+                in inspect.signature(native_module.NfsClient.close_many).parameters
+            )
+        except (AttributeError, TypeError, ValueError):
+            self._native_has_deferred_close = False
         self._lock = threading.RLock()
         # This lock must remain stable while reconnect replaces the per-client
         # locks inherited from a multithreaded parent after fork.
@@ -725,6 +745,21 @@ class _ClientPool:
                 self._fds.pop(token, None)
                 self._deferred_close.discard(token)
 
+    def _discard_confirmed_closes(self, error, tokens):
+        # An error index identifies one failed input, never a successful prefix.
+        indices = getattr(error, "_closed_indices", None)
+        if isinstance(indices, (list, tuple)) and all(
+            type(index) is int and 0 <= index < len(tokens) for index in indices
+        ):
+            self._discard_tokens([tokens[index] for index in indices])
+
+    def _close_deferred_many(self, client, fds):
+        # Older native modules lack ownership reconciliation; keep their
+        # ordinary cleanup signature usable when the shared Python layer updates.
+        if self._native_has_deferred_close:
+            return client.close_many(fds, _deferred=True)
+        return client.close_many(fds)
+
     def _retry_deferred_closes(self):
         """Best-effort retry descriptors orphaned by a failed setup cleanup."""
         with self._lock:
@@ -743,24 +778,21 @@ class _ClientPool:
                         for token in tokens
                         if token in self._fds and self._fds[token][0] == owner
                     ]
+                    if not live:
+                        continue
                     client = self._clients[owner]
-                if not live:
-                    continue
                 try:
-                    client.close_many([native_fd for _, native_fd in live])
+                    self._close_deferred_many(
+                        client, [native_fd for _, native_fd in live]
+                    )
                 except BaseException as error:
+                    self._discard_confirmed_closes(error, [token for token, _ in live])
                     if _is_transport_error(error):
                         if self._auto_reconnect and _can_reconnect(error):
                             try:
                                 self._reconnect_client(owner)
                             except BaseException:
                                 pass
-                    else:
-                        completed = getattr(error, "index", 0)
-                        if isinstance(completed, int) and 0 <= completed <= len(live):
-                            self._discard_tokens(
-                                [token for token, _ in live[:completed]]
-                            )
                 else:
                     self._discard_tokens([token for token, _ in live])
 
@@ -949,7 +981,15 @@ class _ClientPool:
                 owner, _, _ = self._resolve(token)
                 with self._client_locks[owner]:
                     _, native_fd, client = self._resolve(token)
-                    result = getattr(client, name)(native_fd, *args, **kwargs)
+                    try:
+                        if name == "close" and token in self._deferred_close:
+                            result = self._close_deferred_many(client, [native_fd])
+                        else:
+                            result = getattr(client, name)(native_fd, *args, **kwargs)
+                    except BaseException:
+                        if name == "close":
+                            self.defer_close_many([token])
+                        raise
                 if name == "close":
                     self._discard_tokens([token])
                 return result
@@ -981,14 +1021,17 @@ class _ClientPool:
                         client = resolved[0][2]
                         native_fds = [native_fd for _, native_fd, _ in resolved]
                     try:
+                        if (
+                            name == "close_many"
+                            and self._native_has_deferred_close
+                            and any(token in self._deferred_close for token in tokens)
+                        ):
+                            kwargs = {**kwargs, "_deferred": True}
                         result = getattr(client, name)(native_fds, *args, **kwargs)
                     except BaseException as error:
                         if name == "close_many":
-                            completed = getattr(error, "index", 0)
-                            if isinstance(completed, int) and 0 <= completed <= len(
-                                tokens
-                            ):
-                                self._discard_tokens(tokens[:completed])
+                            self._discard_confirmed_closes(error, tokens)
+                            self.defer_close_many(tokens)
                         raise
                 if name == "close_many":
                     self._discard_tokens(tokens)
@@ -1194,6 +1237,8 @@ class _RawVfsiFile(io.RawIOBase):
             raise ValueError("I/O operation on closed file")
         if not self._readable:
             raise io.UnsupportedOperation("not readable")
+        if size is not None:
+            size = operator.index(size)
         if size is None or size < 0:
             if self._fd is None and self._pos == 0:
                 # Whole-file read: one batched read, no size stat, no OPEN.
@@ -1293,6 +1338,8 @@ class _RawVfsiFile(io.RawIOBase):
             raise io.UnsupportedOperation("not writable")
         if size is None:
             size = self._pos
+        else:
+            size = operator.index(size)
         if size < 0:
             raise OSError(errno.EINVAL, "Invalid argument")
         fd = self._ensure_open()
@@ -1567,6 +1614,10 @@ class VfsiFile(AbstractBufferedFile):
     def read(self, size=-1):
         if not self._has_read_cache():
             return self._raw.read(size)
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+        if size is not None:
+            size = operator.index(size)
         if (
             self._buffered_read
             and self.cache_type != "blockcache"
@@ -1574,8 +1625,6 @@ class VfsiFile(AbstractBufferedFile):
             and self.loc == 0
             and self._cache_is_pristine()
         ):
-            if self.closed:
-                raise ValueError("I/O operation on closed file")
             if self._buffer_group is not None and self.fs.vectorized_buffering:
                 data = self._buffer_group.read_all(self)
             elif self._raw._fd is not None:
@@ -2062,6 +2111,71 @@ class _BufferGroup:
         ):
             self._reopen_readers()
         fds = [file._raw._ensure_open() for file in files]
+        if getattr(self.fs._client, "_native_has_vector_outcomes", False):
+            try:
+                outcomes = self.fs._client.preadv(fds, offsets, lengths)
+            except OSError as error:
+                # Native outer errors reject before dispatch. Retrying reads
+                # here cannot replay an already-delivered successful sibling.
+                if not self.fs.auto_reconnect or not _can_reconnect(error):
+                    raise
+                self._reopen_readers()
+                fds = [file._raw._ensure_open() for file in files]
+                outcomes = self.fs._client.preadv(fds, offsets, lengths)
+            if len(outcomes) != len(files):
+                raise OSError(errno.EIO, "invalid positioned-read outcome count")
+            retry = [
+                index
+                for index, result in enumerate(outcomes)
+                if isinstance(result, OSError)
+                and self.fs.auto_reconnect
+                and _can_reconnect(result)
+                and not files[index]._raw.writable()
+                and not getattr(result, "read_eof", False)
+                and len(getattr(result, "read_prefix", b"")) < lengths[index]
+            ]
+            if retry:
+                prefixes = {
+                    index: getattr(outcomes[index], "read_prefix", b"")
+                    for index in retry
+                }
+                try:
+                    self._reopen_readers()
+                    resumed = self.fs._client.preadv(
+                        [files[index]._raw._ensure_open() for index in retry],
+                        [offsets[index] + len(prefixes[index]) for index in retry],
+                        [lengths[index] - len(prefixes[index]) for index in retry],
+                    )
+                except OSError:
+                    # Reconnect cannot erase successful siblings or replace the
+                    # original failure when recovery itself is unavailable.
+                    resumed = [outcomes[index] for index in retry]
+                    prefixes = {index: b"" for index in retry}
+                if len(resumed) != len(retry):
+                    raise OSError(errno.EIO, "invalid resumed-read outcome count")
+                for index, result in zip(retry, resumed):
+                    prefix = prefixes[index]
+                    if isinstance(result, BaseException):
+                        if prefix:
+                            result.read_prefix = prefix + getattr(
+                                result, "read_prefix", b""
+                            )
+                            result.read_offset = offsets[index]
+                            result.read_eof = False
+                    else:
+                        result = prefix + result
+                    outcomes[index] = result
+            return (
+                [
+                    None if isinstance(result, BaseException) else result
+                    for result in outcomes
+                ],
+                {
+                    index: result
+                    for index, result in enumerate(outcomes)
+                    if isinstance(result, BaseException)
+                },
+            )
         try:
             return self.fs._client.pread_many(fds, offsets, lengths)
         except OSError as error:
@@ -2231,6 +2345,7 @@ class _BufferGroup:
             and file._write_spool is not None
             and file._spool_read_offset < file._write_spool.seek(0, io.SEEK_END)
         ]
+        first_error = None
         while pending:
             wave = []
             datas = []
@@ -2258,7 +2373,47 @@ class _BufferGroup:
                 with self.fs._cache_mutation(
                     [file.path for file in wave], descriptors=fds
                 ):
-                    if wave[0]._base_mode == "a":
+                    if getattr(self.fs._client, "_native_has_vector_outcomes", False):
+                        appending = wave[0]._base_mode == "a"
+                        outcomes = (
+                            self.fs._client.appendv(fds, datas)
+                            if appending
+                            else self.fs._client.pwritev(
+                                fds, [file._raw._pos for file in wave], datas
+                            )
+                        )
+                        if len(outcomes) != len(wave):
+                            raise OSError(
+                                errno.EIO, "invalid buffered-write outcome count"
+                            )
+                        for file, data, result in zip(wave, datas, outcomes):
+                            if isinstance(result, BaseException):
+                                # A failed append prefix has no trustworthy actual
+                                # position. Retain its error and never replay it.
+                                file._write_failed = True
+                                file._raw._broken = True
+                                first_error = first_error or _oserror(
+                                    result, file.path, index=self.files.index(file)
+                                )
+                                continue
+                            written = result[0] if appending else result
+                            if appending:
+                                file._reconcile_append_position(
+                                    file._raw._pos, written, result[1]
+                                )
+                            else:
+                                file._raw._pos += written
+                            file._spool_read_offset += written
+                            if written != len(data):
+                                error = OSError(
+                                    errno.EIO, "short buffered write", file.path
+                                )
+                                error.failure_state = "failed"
+                                error.bytes_written = written
+                                file._write_failed = True
+                                file._raw._broken = True
+                                first_error = first_error or error
+                    elif wave[0]._base_mode == "a":
                         results = self.fs._client.append_many(fds, datas)
                         for file, data, (written, position) in zip(
                             wave, datas, results
@@ -2295,8 +2450,11 @@ class _BufferGroup:
             pending = [
                 file
                 for file in pending
-                if file._spool_read_offset < file._write_spool.seek(0, io.SEEK_END)
+                if not file._write_failed
+                and file._spool_read_offset < file._write_spool.seek(0, io.SEEK_END)
             ]
+        if first_error is not None:
+            raise first_error
 
     def _exit_wrapped(self, *exc):
         self.finish()
@@ -2394,11 +2552,15 @@ class _BufferGroup:
                         try:
                             self.fs._client.close_many(fds)
                         except BaseException as error:
-                            completed = getattr(error, "index", 0)
-                            if isinstance(completed, int) and 0 <= completed <= len(
-                                batch
-                            ):
-                                _finish_group_files(batch[:completed])
+                            _finish_group_files(
+                                [
+                                    member
+                                    for member in batch
+                                    if not self.fs._client.descriptor_valid(
+                                        member._raw._fd
+                                    )
+                                ]
+                            )
                             first_error = first_error or error
                         else:
                             local_error = _finish_group_files(batch)

@@ -227,14 +227,14 @@ def test_transaction_cleanup_attempts_all_files_and_preserves_primary_error(
 @pytest.mark.parametrize("compression", [None, "gzip", "bz2"])
 def test_wrapped_buffered_exit_uses_vector_writes(fs, monkeypatch, compression):
     fs.write_buffering = True
-    original = fs._client.pwrite_many
+    original = fs._client.pwritev
     waves = []
 
     def record(fds, offsets, data):
         waves.append(len(fds))
         return original(fds, offsets, data)
 
-    monkeypatch.setattr(fs._client, "pwrite_many", record)
+    monkeypatch.setattr(fs._client, "pwritev", record)
     entries = [
         OpenFile(
             fs, f"/batch-{i}", mode="wt", compression=compression if i == 3 else None
@@ -263,7 +263,7 @@ def test_wrapper_write_failure_closes_every_handle_without_replay(
         raise failure
 
     with monkeypatch.context() as patch:
-        patch.setattr(fs._client, "pwrite_many" if buffered else "pwrite", fail)
+        patch.setattr(fs._client, "pwritev" if buffered else "pwrite", fail)
         with pytest.raises(OSError) as error:
             with context as files:
                 for file in files:
@@ -327,7 +327,7 @@ def test_wrapped_native_close_retry_never_refinalizes_or_rewrites(
     entries = [OpenFile(fs, "/retry", mode="wt", compression=compression)]
     files = fs.open_many(entries)
     files[0].write("payload")
-    original_write = fs._client.pwrite_many
+    original_write = fs._client.pwritev
     writes = []
     primary = OSError(errno.ENOSPC, "write failure")
     cleanup = OSError(errno.EIO, "close failure")
@@ -342,7 +342,7 @@ def test_wrapped_native_close_retry_never_refinalizes_or_rewrites(
         raise cleanup
 
     with monkeypatch.context() as patch:
-        patch.setattr(fs._client, "pwrite_many", record)
+        patch.setattr(fs._client, "pwritev", record)
         patch.setattr(fs._client, "close_many", fail_close)
         with pytest.raises(OSError) as error:
             fs.commit_many(files)
@@ -355,7 +355,7 @@ def test_wrapped_native_close_retry_never_refinalizes_or_rewrites(
         files[0].write("must not accept bytes after finalization")
     count = len(writes)
     with monkeypatch.context() as patch:
-        patch.setattr(fs._client, "pwrite_many", record)
+        patch.setattr(fs._client, "pwritev", record)
         if write_failure:
             with pytest.raises(OSError) as error:
                 fs.commit_many(files)
@@ -434,7 +434,7 @@ def test_mixed_append_and_overwrite_wrappers_use_separate_write_waves(fs, monkey
         OpenFile(fs, "/overwrite", mode="wt"),
     ]
     appends, writes = [], []
-    append, write = fs._client.append_many, fs._client.pwrite_many
+    append, write = fs._client.appendv, fs._client.pwritev
 
     def record_append(fds, data):
         appends.append(len(fds))
@@ -445,8 +445,8 @@ def test_mixed_append_and_overwrite_wrappers_use_separate_write_waves(fs, monkey
         return write(fds, offsets, data)
 
     with monkeypatch.context() as patch:
-        patch.setattr(fs._client, "append_many", record_append)
-        patch.setattr(fs._client, "pwrite_many", record_write)
+        patch.setattr(fs._client, "appendv", record_append)
+        patch.setattr(fs._client, "pwritev", record_write)
         with OpenFiles(entries, mode="wt", fs=fs) as files:
             for file in files:
                 file.write("new")

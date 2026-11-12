@@ -66,7 +66,7 @@ def test_grouped_read_recovery_never_replays_writable_open(
         return original_open_many(paths, modes)
 
     monkeypatch.setattr(fs._client, "open_many", record_open_many)
-    original_pread_many = fs._client.pread_many
+    original_pread_many = fs._client.preadv
     attempts = 0
 
     def fail_once(fds, offsets, lengths):
@@ -76,7 +76,7 @@ def test_grouped_read_recovery_never_replays_writable_open(
             raise ConnectionError("injected grouped read transport failure")
         return original_pread_many(fds, offsets, lengths)
 
-    monkeypatch.setattr(fs._client, "pread_many", fail_once)
+    monkeypatch.setattr(fs._client, "preadv", fail_once)
     if auto_reconnect:
         assert reader.read(1) == b"r"
         assert recovery_opens
@@ -302,7 +302,7 @@ def test_group_read_recovery_keeps_healthy_readers_vectorized(fs, monkeypatch):
         return original_open_many(paths, modes)
 
     monkeypatch.setattr(fs._client, "open_many", record_open_many)
-    original_pread_many = fs._client.pread_many
+    original_pread_many = fs._client.preadv
     attempts = 0
     vector_sizes = []
 
@@ -314,7 +314,7 @@ def test_group_read_recovery_keeps_healthy_readers_vectorized(fs, monkeypatch):
             raise ConnectionError("injected grouped reader failure")
         return original_pread_many(fds, offsets, lengths)
 
-    monkeypatch.setattr(fs._client, "pread_many", fail_once)
+    monkeypatch.setattr(fs._client, "preadv", fail_once)
     try:
         assert files[0].read(1) == b"a"
         assert open_batches == [
@@ -631,7 +631,7 @@ def test_reader_recovery_rejects_same_fileid_in_different_filesystem(
             def failed_read(*args, **kwargs):
                 raise ConnectionError("injected grouped read transport failure")
 
-            monkeypatch.setattr(fs._client, "pread_many", failed_read)
+            monkeypatch.setattr(fs._client, "preadv", failed_read)
         with pytest.raises(OSError) as error:
             reader.read(1)
         assert error.value.errno == errno.ESTALE

@@ -24,8 +24,22 @@ fn ranged_read_transport_never_becomes_semantic_recovery() {
                     Some(vec![Some(2); 3]),
                 )
                 .unwrap_err();
-            assert!(error.is_instance_of::<PyConnectionError>(py));
-            if let Some(index) = index {
+            if index.is_some_and(|index| index >= 3) {
+                assert!(error.is_instance_of::<PyOSError>(py));
+                assert!(!error.value(py).hasattr("index").unwrap());
+                assert_eq!(
+                    error
+                        .value(py)
+                        .getattr("transport_kind")
+                        .unwrap()
+                        .extract::<String>()
+                        .unwrap(),
+                    "invalid_reply"
+                );
+            } else {
+                assert!(error.is_instance_of::<PyConnectionError>(py));
+            }
+            if let Some(index) = index.filter(|index| *index < 3) {
                 assert_eq!(
                     error
                         .value(py)

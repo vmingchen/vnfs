@@ -55,7 +55,7 @@ def test_cached_reads_complete_short_native_results(
     payload = b"abcdefghijklmnop"
     fs.pipe({"/short": payload, "/sibling": payload[::-1]})
     pread = fs._client.pread
-    pread_many = fs._client.pread_many
+    pread_many = fs._client.preadv
     calls = []
 
     def short_scalar(fd, length, offset):
@@ -66,7 +66,7 @@ def test_cached_reads_complete_short_native_results(
         return pread_many(fds, offsets, [min(length, 2) for length in lengths])
 
     monkeypatch.setattr(fs._client, "pread", short_scalar)
-    monkeypatch.setattr(fs._client, "pread_many", short_vector)
+    monkeypatch.setattr(fs._client, "preadv", short_vector)
     fs.block_size = 4
     fs.cache_type = cache
     context = (
@@ -106,7 +106,7 @@ def test_completed_read_does_not_drain_short_speculative_sibling(
     )
     current, sibling = files
     sibling_fd = sibling._fd
-    native_read = fs._client.pread_many
+    native_read = fs._client.preadv
     requests = []
 
     def short_sibling(fds, offsets, lengths):
@@ -122,7 +122,7 @@ def test_completed_read_does_not_drain_short_speculative_sibling(
             ],
         )
 
-    monkeypatch.setattr(fs._client, "pread_many", short_sibling)
+    monkeypatch.setattr(fs._client, "preadv", short_sibling)
     try:
         assert current.read(-1 if whole else 1) == b"a" * (128 if whole else 1)
         assert len(requests) == 1, "completed read waited for speculative-only I/O"
@@ -145,7 +145,7 @@ def test_grouped_short_read_continuation_preserves_completed_results(
     paths = ["/first", "/complete", "/last"]
     fs.pipe(dict.fromkeys(paths, payload))
     files = fs.open_many([OpenFile(fs, path, "rb") for path in paths])
-    original = fs._client.pread_many
+    original = fs._client.preadv
     calls = []
 
     def partial_then_failure(fds, offsets, lengths):
@@ -155,20 +155,23 @@ def test_grouped_short_read_continuation_preserves_completed_results(
         if len(calls) == 2:
             if outcome == "reconnect":
                 raise ConnectionError("injected continuation disconnect")
-            data, errors = original(fds, offsets, lengths)
-            data[1] = None if outcome == "error" else b""
-            if outcome == "error":
-                errors[1] = errno.EIO
-            return data, errors
+            results = original(fds, offsets, lengths)
+            results[1] = (
+                OSError(errno.EIO, "injected continuation failure")
+                if outcome == "error"
+                else b""
+            )
+            return results
         return original(fds, offsets, lengths)
 
-    monkeypatch.setattr(fs._client, "pread_many", partial_then_failure)
+    monkeypatch.setattr(fs._client, "preadv", partial_then_failure)
     try:
         data, errors = files[0]._buffer_group._pread_many(files, [0, 0, 0], [8, 8, 8])
         assert data[:2] == [payload, payload]
         if outcome == "error":
             assert data[2] is None
-            assert errors == {2: errno.EIO}
+            assert set(errors) == {2}
+            assert errors[2].errno == errno.EIO
         else:
             assert errors == {}
             assert data[2] == (payload[:2] if outcome == "eof" else payload)

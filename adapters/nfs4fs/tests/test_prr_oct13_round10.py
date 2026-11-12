@@ -168,7 +168,7 @@ def test_failed_member_flush_does_not_close_healthy_sibling(
         raise primary
 
     with monkeypatch.context() as patch:
-        patch.setattr(dummy_fs._client, "pwrite_many", fail_write)
+        patch.setattr(dummy_fs._client, "pwritev", fail_write)
         with pytest.raises(OSError):
             files[failed_index].close()
         assert not files[1 - failed_index].closed

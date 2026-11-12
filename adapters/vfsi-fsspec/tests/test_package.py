@@ -266,3 +266,108 @@ def test_copy_special_sources_respects_error_policy(kind, on_error, symlinks):
             ("copy_many", [("/alpha", "/out/alpha")])
         ]
         assert callback.size == callback.value == 2
+
+
+class _FileMemoryClient(_MemoryClient):
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.handles = {}
+        self.next_fd = 0
+
+    def open(self, path, mode):
+        assert mode in ("rb", "rb+")
+        self.next_fd += 1
+        self.handles[self.next_fd] = path
+        self.calls.append(("open", path))
+        return self.next_fd
+
+    def close(self, fd):
+        del self.handles[fd]
+
+    def fstat(self, fd):
+        self.calls.append(("fstat", fd))
+        return {"type": "file", "size": len(self.files[self.handles[fd]])}
+
+    def pread(self, fd, length, offset):
+        self.calls.append(("pread", fd, length, offset))
+        return self.files[self.handles[fd]][offset : offset + length]
+
+    def ftruncate(self, fd, size):
+        import operator
+
+        size = operator.index(size)
+        self.calls.append(("ftruncate", fd, size))
+        path = self.handles[fd]
+        self.files[path] = self.files[path][:size].ljust(size, b"\0")
+
+
+class _FileMemoryFileSystem(_MemoryFileSystem):
+    _native_module = SimpleNamespace(NfsClient=_FileMemoryClient)
+
+
+@pytest.mark.parametrize("cache", ["none", "readahead", "mmap"])
+@pytest.mark.parametrize("position", [0, 1])
+@pytest.mark.parametrize("size", [-1.5, 0.0, 1.5, "2", b"2"])
+def test_invalid_read_sizes_do_not_consume_or_fetch_data(cache, position, size):
+    fs = _FileMemoryFileSystem(backend="memory", root="", skip_instance_cache=True)
+    native = _FileMemoryClient.instances[-1]
+    try:
+        with fs.open("/alpha", "rb", cache_type=cache, block_size=2) as file:
+            file.seek(position)
+            native.calls.clear()
+            with pytest.raises(TypeError):
+                file.read(size)
+            assert file.tell() == position
+            assert not native.calls
+            assert file.read(1) == b"alpha"[position : position + 1]
+    finally:
+        fs.close()
+
+
+@pytest.mark.parametrize("cache", ["none", "readahead", "mmap"])
+def test_read_sizes_accept_integer_protocol_and_preserve_read_all(cache):
+    class Size:
+        def __index__(self):
+            return 2
+
+    fs = _FileMemoryFileSystem(backend="memory", root="", skip_instance_cache=True)
+    try:
+        with fs.open("/alpha", "rb", cache_type=cache, block_size=2) as file:
+            assert file.read(Size()) == b"al"
+            assert file.tell() == 2
+            assert file.read(None) == b"pha"
+    finally:
+        fs.close()
+
+
+@pytest.mark.parametrize("size", [-1.5, 0.0, 1.5, "2", b"2"])
+def test_invalid_truncate_sizes_are_rejected_before_lazy_open(size):
+    fs = _FileMemoryFileSystem(backend="memory", root="", skip_instance_cache=True)
+    native = _FileMemoryClient.instances[-1]
+    try:
+        with fs.open("/alpha", "r+b", cache_type="none") as file:
+            native.calls.clear()
+            with pytest.raises(TypeError):
+                file.truncate(size)
+            assert not native.calls
+            assert native.files["/alpha"] == b"alpha"
+            assert file.tell() == 0
+    finally:
+        fs.close()
+
+
+def test_truncate_accepts_integer_protocol_without_moving_cursor():
+    class Size:
+        def __index__(self):
+            return 2
+
+    fs = _FileMemoryFileSystem(backend="memory", root="", skip_instance_cache=True)
+    native = _FileMemoryClient.instances[-1]
+    try:
+        with fs.open("/alpha", "r+b", cache_type="none") as file:
+            file.seek(1)
+            assert file.truncate(Size()) == 2
+            assert native.files["/alpha"] == b"al"
+            assert file.tell() == 1
+    finally:
+        fs.close()

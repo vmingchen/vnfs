@@ -116,10 +116,10 @@ def test_group_read_error_uses_openfiles_position(dummy_fs, monkeypatch, duplica
     error.index = 0
 
     def fail_current(fds, offsets, lengths):
-        return [None] * len(fds), {0: error}
+        return [error] + [b""] * (len(fds) - 1)
 
     with OpenFiles([OpenFile(dummy_fs, path) for path in paths], fs=dummy_fs) as files:
-        monkeypatch.setattr(dummy_fs._client, "pread_many", fail_current)
+        monkeypatch.setattr(dummy_fs._client, "preadv", fail_current)
         monkeypatch.setattr(
             dummy_fs,
             "info",

@@ -152,6 +152,30 @@ def test_pipelined_stream_budget_counts_active_workers(fs):
     assert chunks == [(0, b"abcd"), (4, b"efgh")]
 
 
+def test_pipelined_stream_reuses_complete_native_chunks(fs, monkeypatch):
+    payload = bytes(range(256)) * 12
+    fs.pipe_file("/data", payload)
+    original = fs._client.pread
+    native_chunks = {}
+
+    def observe(fd, length, offset):
+        data = original(fd, length, offset)
+        native_chunks[offset] = data
+        return data
+
+    monkeypatch.setattr(fs._client, "pread", observe)
+    delivered = []
+    assert fs.read_stream_pipelined(
+        "/data",
+        lambda offset, data: delivered.append((offset, data)),
+        workers=2,
+        chunk_size=1024,
+    ) == len(payload)
+    assert b"".join(data for _, data in delivered) == payload
+    assert all(data is native_chunks[offset] for offset, data in delivered)
+    assert fs._client._fds == {}
+
+
 def test_pipelined_stream_retries_short_reads(fs, monkeypatch):
     fs.pipe_file("/data", b"abcdefghij")
     original = fs._client.pread

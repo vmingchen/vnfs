@@ -19,7 +19,7 @@ fn copy_write_transport_maps_filtered_source_indices_without_replay() {
         (Some(0), Some(1)),
         (Some(1), Some(2)),
         (None, None),
-        (Some(99), Some(99)),
+        (Some(99), None),
     ] {
         let root = TestRoot::new();
         for name in ["a", "b"] {
@@ -39,7 +39,21 @@ fn copy_write_transport_maps_filtered_source_indices_without_replay() {
                     ],
                 )
                 .unwrap_err();
-            assert_transport_index(py, error, expected);
+            if subset_index.is_some_and(|index| index >= 2) {
+                assert!(error.is_instance_of::<PyOSError>(py));
+                assert!(!error.value(py).hasattr("index").unwrap());
+                assert_eq!(
+                    error
+                        .value(py)
+                        .getattr("transport_kind")
+                        .unwrap()
+                        .extract::<String>()
+                        .unwrap(),
+                    "invalid_reply"
+                );
+            } else {
+                assert_transport_index(py, error, expected);
+            }
         });
         assert_eq!(calls.lock().unwrap().len(), 1);
         assert!(!root.0.join("x").exists());
