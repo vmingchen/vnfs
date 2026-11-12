@@ -6,7 +6,6 @@ import os
 from types import SimpleNamespace
 
 import pytest
-
 from vfsi_fsspec import _blockcache
 
 

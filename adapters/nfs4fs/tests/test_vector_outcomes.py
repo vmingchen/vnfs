@@ -1,8 +1,9 @@
 """Independent outcomes retain healthy work and never replay failed writes."""
 
 import errno
-from fsspec.core import OpenFile, OpenFiles
+
 import pytest
+from fsspec.core import OpenFile, OpenFiles
 
 
 def opened(fs, paths, mode):
