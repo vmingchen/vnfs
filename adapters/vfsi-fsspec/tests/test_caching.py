@@ -22,12 +22,14 @@ def test_mmap_fetch_checks_each_block_once_and_preserves_gaps(tmp_path, end, mul
     backing.write_bytes(payload)
     blocks = CountingSet({0, 2})
     requests = []
+    multi_requests = []
 
     def fetch(start, stop):
         requests.append((start, stop))
         return payload[start:stop]
 
     def fetch_many(ranges):
+        multi_requests.append(list(ranges))
         return [fetch(start, stop) for start, stop in ranges]
 
     cache = _Nfs4MMapCache(
@@ -36,8 +38,10 @@ def test_mmap_fetch_checks_each_block_once_and_preserves_gaps(tmp_path, end, mul
         len(payload),
         str(backing),
         blocks,
-        multi_fetcher=fetch_many if multi else None,
     )
+    # Older supported fsspec releases lack this constructor keyword. Exercise
+    # our optional multi-range path without requiring a newer base constructor.
+    cache.multi_fetcher = fetch_many if multi else None
     try:
         assert cache._fetch(0, end) == payload[:end]
         requested = (end + 1) // 2
@@ -45,6 +49,9 @@ def test_mmap_fetch_checks_each_block_once_and_preserves_gaps(tmp_path, end, mul
         assert cache.hit_count == 2
         expected_ranges = [(2, 4)] if end == 5 else [(2, 4), (6, 8)]
         assert requests == expected_ranges
+        assert multi_requests == (
+            [expected_ranges] if multi and len(expected_ranges) > 1 else []
+        )
         assert cache.miss_count == len(expected_ranges)
         assert cache.total_requested_bytes == 2 * len(expected_ranges)
         assert blocks == set(range(requested))

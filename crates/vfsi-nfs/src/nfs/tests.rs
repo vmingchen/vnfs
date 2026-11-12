@@ -2611,3 +2611,85 @@ fn live_cleanup_partial_path_open_failure_retains_failed_batch_cleanup() {
     fs.shutdown().unwrap();
     assert_eq!(retained, 1);
 }
+
+#[test]
+fn live_directory_visit_continuation_reuses_resolved_nfs_handle() {
+    use vfsi_core::api::{ListDirOptions, VfsiExt};
+    let Ok(host) = std::env::var("VFSI_NFS_SERVER") else {
+        assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+        return;
+    };
+    let minor = std::env::var("VFSI_NFS_MINOR")
+        .unwrap_or_else(|_| "2".into())
+        .parse()
+        .unwrap();
+    let dir = format!("/visit-dir-count-{}-{minor}", std::process::id());
+    let mut admin = NfsVecFs::connect_minor(&host, minor).unwrap();
+    admin.ensure_dir_impl(Path::new(&dir), 0o755).unwrap();
+    for index in 0..80 {
+        let path = format!("{dir}/entry-{index:03}-{}", "x".repeat(96));
+        let file = admin
+            .open_raw_impl(
+                Path::new(&path),
+                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                0o644,
+            )
+            .unwrap();
+        admin.write_raw_impl(&file, 0, b"x").unwrap();
+        admin.close_impl(&file).unwrap();
+    }
+    let mut raw = NfsVecFs::connect_minor(&host, minor).unwrap();
+    // Request and reply budgets are independent. Cap the reply in this private
+    // backend test so the fixture must paginate on every server configuration.
+    raw.nfs.max_response_bytes = 4 * 1024;
+    let mask = AttrMask::MODE
+        | AttrMask::SIZE
+        | AttrMask::NLINK
+        | AttrMask::FILEID
+        | AttrMask::UID
+        | AttrMask::GID
+        | AttrMask::ATIME
+        | AttrMask::MTIME
+        | AttrMask::CTIME
+        | AttrMask::CHANGE;
+    let _ = crate::compound::thread_compound_stats();
+    let mut raw_count = 0;
+    raw.visit_dir_impl(Path::new(&dir), mask, 0, &mut |_| {
+        raw_count += 1;
+        true
+    })
+    .unwrap();
+    let raw_compounds = crate::compound::thread_compound_stats().0;
+
+    let mut backend = NfsVecFs::connect_minor(&host, minor).unwrap();
+    backend.nfs.max_response_bytes = 4 * 1024;
+    let visitor = vfsi_sync::FsClient::new(backend);
+    let _ = crate::compound::thread_compound_stats();
+    let mut native_count = 0;
+    visitor
+        .listdir(&dir, ListDirOptions::new().with_fields(mask), |_| {
+            native_count += 1;
+            Ok(vfsi_core::api::WalkControl::Continue)
+        })
+        .unwrap();
+    let native_compounds = crate::compound::thread_compound_stats().0;
+    assert_eq!(raw_count, 80);
+    assert_eq!(native_count, 80);
+    assert!(
+        raw_compounds > 3,
+        "fixture must require multiple READDIR pages"
+    );
+    assert!(
+        native_compounds <= raw_compounds,
+        "native pagination must not re-resolve directories: native={native_compounds}, raw={raw_compounds}; EOF may avoid a final probe"
+    );
+    {
+        let remove_roots: &[&std::path::Path] = &[Path::new(&dir)];
+        vfsi_core::internal::collect_vec_result(
+            admin.remove_paths_impl(remove_roots, true),
+            remove_roots.len(),
+        )
+        .map(|_| ())
+    }
+    .unwrap();
+}
