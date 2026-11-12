@@ -43,20 +43,12 @@ pub fn tree_stats(
 ) -> Result<TreeStats> {
     let root = root.as_ref();
     let fields = Attributes::MODE | Attributes::SIZE;
-    let mut metadata = fs.getattrs_all(
-        &[root],
+    let metadata = fs.attrs_with_options(
+        root,
         AttrsOptions::new()
             .with_fields(fields)
             .with_follow_final_symlink(false),
     )?;
-    if metadata.len() != 1 {
-        return Err(crate::Error::transport_with_kind(
-            None,
-            crate::TransportKind::InvalidReply,
-            "tree_stats: invalid metadata count",
-        ));
-    }
-    let metadata = metadata.remove(0);
     let mut stats = TreeStats::default();
     stats.add(&metadata)?;
     if metadata.is_dir() {

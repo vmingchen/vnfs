@@ -31,8 +31,15 @@ impl Auto {
         &self,
         paths: &[P],
     ) -> vfsi_core::VecResult<AutoDir> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
         let paths: Vec<_> = paths.iter().map(AsRef::as_ref).collect();
-        let resolved: Vec<_> = paths.iter().map(|path| self.resolve_tree(path)).collect();
+        let mounts = read_mounts(true);
+        let resolved: Vec<_> = paths
+            .iter()
+            .map(|path| self.resolve_tree(path, &mounts))
+            .collect();
         self.vopen_dirs_resolved(&paths, &resolved)
     }
 
@@ -657,20 +664,10 @@ impl Auto {
         let resolved: Vec<_> = paths
             .iter()
             .map(|path| {
-                if mode != vfsi_core::api::RemoveMode::Entry
-                    && self.host_path(path).is_some_and(|host| {
-                        mounts
-                            .mount_points
-                            .iter()
-                            .any(|point| point != &host && point.starts_with(&host))
-                    })
-                {
-                    Resolved {
-                        route: Route::Posix,
-                        path: path.to_path_buf(),
-                    }
-                } else {
+                if mode == vfsi_core::api::RemoveMode::Entry {
                     self.resolve(path, &mounts)
+                } else {
+                    self.resolve_tree(path, &mounts)
                 }
             })
             .collect();

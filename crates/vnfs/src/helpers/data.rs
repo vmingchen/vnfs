@@ -17,14 +17,21 @@ pub fn copy_to_writer(
     let path = path.as_ref();
     let mut written = 0u64;
     let mut write_error = None;
-    let completion = source.read_stream_with_options(path, options, |_, data| {
+    let completion = source.read_stream_with_options(path, options, |offset, data| {
+        if offset != written {
+            return Err(Error::invalid_reply(
+                Some(0),
+                "invalid writer stream offset",
+            ));
+        }
+        let next = written
+            .checked_add(data.len() as u64)
+            .ok_or_else(|| Error::errno(0, libc::EOVERFLOW as u32))?;
         if let Err(error) = writer.write_all(data) {
             write_error = Some(Error::from_io(0, error).with_context("copy_to_writer", path));
             return Ok(std::ops::ControlFlow::Break(()));
         }
-        written = written
-            .checked_add(data.len() as u64)
-            .ok_or_else(|| Error::errno(0, libc::EOVERFLOW as u32))?;
+        written = next;
         Ok(std::ops::ControlFlow::Continue(()))
     });
     if let Some(error) = write_error {
@@ -211,12 +218,6 @@ fn copy_to_writers_round_robin<P: AsRef<Path>, W: Write>(
             writer_stream_error(error, base, |i| (i < paths.len()).then_some(i))
         })?;
         let operation = (|| {
-            if files.len() != paths.len() {
-                return Err(Error::invalid_reply(
-                    None,
-                    "invalid writer stream open count",
-                ));
-            }
             let mut active: Vec<_> = (0..files.len()).collect();
             while !active.is_empty() {
                 let requests: Vec<_> = active
@@ -226,12 +227,6 @@ fn copy_to_writers_round_robin<P: AsRef<Path>, W: Write>(
                 let results = source.read_batch(requests, reads).map_err(|error| {
                     writer_stream_error(error, base, |i| active.get(i).copied())
                 })?;
-                if results.len() != active.len() {
-                    return Err(Error::invalid_reply(
-                        None,
-                        "invalid writer stream read count",
-                    ));
-                }
                 let mut pending = Vec::with_capacity(active.len());
                 for (&local, result) in active.iter().zip(results) {
                     let index = base + local;

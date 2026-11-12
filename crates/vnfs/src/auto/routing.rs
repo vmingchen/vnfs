@@ -83,8 +83,7 @@ impl Auto {
 
     /// Recursive operations retain kernel routing if another mount appears
     /// underneath their root, rather than bypassing that mounted subtree.
-    pub(super) fn resolve_tree(&self, path: &Path) -> Resolved {
-        let mounts = read_mounts(true);
+    pub(super) fn resolve_tree(&self, path: &Path, mounts: &MountTable) -> Resolved {
         if self.host_path(path).is_some_and(|host| {
             mounts
                 .mount_points
@@ -96,7 +95,7 @@ impl Auto {
                 path: path.to_path_buf(),
             };
         }
-        self.resolve(path, &mounts)
+        self.resolve(path, mounts)
     }
 
     /// Inspect the currently eligible path route. An individual operation

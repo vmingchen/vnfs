@@ -1090,9 +1090,13 @@ fn move_run<P: AsRef<Path>>(
             task.fresh_destination = containers[0].fresh_destination;
         }
     }
-    // Contents operands can share destinations. Preserve their root ordering;
+    // Contents operands can share destinations. Only the first root can rely
+    // on a newly created container: earlier roots may create later targets.
     // Container roots were preflighted as independent and can be vectorized.
     let cohort = if options.layout == CopyLayout::Contents {
+        for task in tasks.iter_mut().skip(1) {
+            task.fresh_destination = false;
+        }
         1
     } else {
         options.batch_size

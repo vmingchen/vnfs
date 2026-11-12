@@ -10,6 +10,7 @@ use vnfs::{directory::*, error::*, files::*, helpers::*, posix::*};
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Fault {
     None,
+    StreamOffset(u64),
     ShortRead,
     BadRead,
     BadWrite,
@@ -42,6 +43,7 @@ enum Fault {
 #[derive(Default)]
 struct Calls {
     read_attempts: usize,
+    stream_calls: usize,
     metadata: Vec<usize>,
     syncs: Vec<(SyncMode, usize)>,
     attrs: Vec<usize>,
@@ -406,6 +408,22 @@ impl Vfsi for Harness {
         o: StreamOptions,
         c: impl FnMut(usize, u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
     ) -> vfsi_core::VecResult<StreamCompletion> {
+        self.calls.borrow_mut().stream_calls += 1;
+        if let Fault::StreamOffset(offset) = self.fault.get() {
+            let mut callback = c;
+            for (offset, data) in [(0, b"abc".as_slice()), (offset, b"def".as_slice())] {
+                match callback(0, offset, data) {
+                    Err(cause) => return Ok(vec![Err(OpError::failed(cause, None))]),
+                    Ok(ControlFlow::Break(())) => {
+                        return Ok(vec![Ok(StreamCompletion::Stopped {
+                            next_offset: offset + data.len() as u64,
+                        })]);
+                    }
+                    Ok(ControlFlow::Continue(())) => {}
+                }
+            }
+            return Ok(vec![Ok(StreamCompletion::Complete)]);
+        }
         self.fs.vstream(p, o, c)
     }
 }
@@ -1387,4 +1405,60 @@ fn move_can_copy_after_a_whole_vector_pre_dispatch_rename_rejection() {
     assert_eq!(fs.calls.borrow().renames, 1);
     assert_eq!(std::fs::read(root.path().join("out/a")).unwrap(), payload());
     assert!(!root.path().join("src/a").exists());
+}
+
+#[test]
+fn contents_moves_replace_colliding_roots_in_input_order() {
+    for existing in [false, true] {
+        for progress in [false, true] {
+            let (t, fs) = fixture();
+            std::fs::create_dir_all(t.path().join("a")).unwrap();
+            std::fs::create_dir_all(t.path().join("b")).unwrap();
+            std::fs::write(t.path().join("a/x"), b"first").unwrap();
+            std::fs::write(t.path().join("b/x"), b"second").unwrap();
+            if existing {
+                std::fs::create_dir(t.path().join("out")).unwrap();
+                std::fs::write(t.path().join("out/x"), b"old").unwrap();
+            }
+            let options = TransferOptions::new()
+                .with_layout(CopyLayout::Contents)
+                .with_existing(Existing::Replace);
+            let sources = ["/a/x", "/b/x"];
+            let summary = if progress {
+                move_items_with_progress(&fs, &sources, "/out", options, |_| {
+                    Ok(ControlFlow::Continue(()))
+                })
+            } else {
+                move_items(&fs, &sources, "/out", options)
+            }
+            .unwrap();
+            assert_eq!(summary.roots_removed, 2);
+            assert_eq!(std::fs::read(t.path().join("out/x")).unwrap(), b"second");
+            assert!(!t.path().join("a/x").exists());
+            assert!(!t.path().join("b/x").exists());
+        }
+    }
+}
+
+#[test]
+fn single_writer_rejects_discontinuous_stream_offsets_before_writing_them() {
+    for offset in [0, 2, 3, 4] {
+        let root = tempfile::tempdir().unwrap();
+        let fs = Harness::new(root.path());
+        fs.fault.set(Fault::StreamOffset(offset));
+        let mut output = Vec::new();
+        let result = copy_to_writer(&fs, "/source", &mut output, StreamOptions::new());
+        if offset == 3 {
+            assert_eq!(result.unwrap(), 6);
+            assert_eq!(output, b"abcdef");
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.transport_kind(), Some(TransportKind::InvalidReply));
+            assert_eq!(
+                output, b"abc",
+                "never append a repeated, overlapping or gapped chunk"
+            );
+        }
+        assert_eq!(fs.calls.borrow().stream_calls, 1, "never replay the stream");
+    }
 }

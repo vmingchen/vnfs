@@ -261,13 +261,6 @@ impl TreeBuilder {
             let handles = fs
                 .open_batch(&requests)
                 .map_err(|e| entry_error(e, batch, &self.entries))?;
-            if handles.len() != batch.len() {
-                let _ = fs.close_files(handles);
-                return Err(
-                    Error::transport(None, "create_tree: invalid OPEN result count")
-                        .with_context("create_tree", root),
-                );
-            }
             let writes: Vec<_> = handles
                 .iter()
                 .zip(batch)
