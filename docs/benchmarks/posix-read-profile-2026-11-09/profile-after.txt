@@ -1,0 +1,44 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 1K of event 'cpu-clock:u'
+# Event count (approx.): 1359359358
+#
+# Overhead  Command          Shared Object          Symbol
+# ........  ...............  .....................  .....................................................................................................
+#
+    30.85%  vnfs-posix-read  vnfs-posix-read-after  [.] <vfsi_local::LocalBackend as vfsi_sync::backend::VectorBackend>::vread_impl
+    21.80%  vnfs-posix-read  libc.so.6              [.] __internal_syscall_cancel
+    10.31%  vnfs-posix-read  libc.so.6              [.] __memset_generic
+     3.53%  vnfs-posix-read  vnfs-posix-read-after  [.] vfsi_sync::client::read::<impl vfsi_sync::client::FsClient<F>>::vread_with_limit_projected_native
+     2.95%  vnfs-posix-read  libc.so.6              [.] _int_malloc
+     2.36%  vnfs-posix-read  libc.so.6              [.] __libc_calloc2
+     2.28%  vnfs-posix-read  vnfs-posix-read-after  [.] <alloc::vec::into_iter::IntoIter<T,A> as core::iter::traits::iterator::Iterator>::try_fold
+     1.91%  vnfs-posix-read  vnfs-posix-read-after  [.] <core::iter::adapters::map::Map<I,F> as core::iter::traits::iterator::Iterator>::try_fold
+     1.91%  vnfs-posix-read  vnfs-posix-read-after  [.] vfsi_sync::contracts::validate_read_results
+     1.77%  vnfs-posix-read  vnfs-posix-read-after  [.] core::hash::BuildHasher::hash_one
+     1.69%  vnfs-posix-read  vnfs-posix-read-after  [.] vfsi_core::api::read::consume_ops
+     1.55%  vnfs-posix-read  vnfs-posix-read-after  [.] alloc::vec::in_place_collect::from_iter_in_place
+     1.40%  vnfs-posix-read  vnfs-posix-read-after  [.] vfsi_core::api::read::checked_read
+     1.33%  vnfs-posix-read  libc.so.6              [.] _int_free_chunk
+     1.10%  vnfs-posix-read  libc.so.6              [.] __libc_calloc
+     1.03%  vnfs-posix-read  libc.so.6              [.] __syscall_cancel
+     1.03%  vnfs-posix-read  libc.so.6              [.] unlink_chunk.isra.0
+     0.96%  vnfs-posix-read  libc.so.6              [.] _int_free_create_chunk
+     0.96%  vnfs-posix-read  libc.so.6              [.] _int_free_maybe_trim
+     0.88%  vnfs-posix-read  libc.so.6              [.] cfree@GLIBC_2.17
+     0.88%  vnfs-posix-read  vnfs-posix-read-after  [.] vfsi_local::LocalBackend::prepare_read
+     0.74%  vnfs-posix-read  vnfs-posix-read-after  [.] vnfs_posix_read_profile::main
+     0.66%  vnfs-posix-read  vnfs-posix-read-after  [.] <vfsi_posix::PosixIo as vfsi_local::io::DescriptorIo>::read_owned
+     0.66%  vnfs-posix-read  vnfs-posix-read-after  [.] alloc::vec::in_place_collect::from_iter_in_place
+     0.66%  vnfs-posix-read  vnfs-posix-read-after  [.] vfsi_sync::client::read_result
+     0.59%  vnfs-posix-read  vnfs-posix-read-after  [.] calloc@plt
+     0.52%  vnfs-posix-read  vnfs-posix-read-after  [.] <std::hash::random::DefaultHasher as core::hash::Hasher>::write
+     0.52%  vnfs-posix-read  vnfs-posix-read-after  [.] __rustc::__rdl_alloc_zeroed
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

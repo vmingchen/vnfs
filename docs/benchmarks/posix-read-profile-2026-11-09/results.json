@@ -1,0 +1,2087 @@
+{
+  "baseline": "a0e613e POSIX code",
+  "cpu": 3,
+  "toolchain": "rustc 1.93.1 (01f6ddf75 2026-02-11) (built from a source tarball)",
+  "profile": "release, debug=line-tables; separate allocation-instrumented and native runs",
+  "bytes_per_read": 4096,
+  "cases": [
+    {
+      "allocation_instrumentation": false,
+      "cohort": 1,
+      "case": "success",
+      "iterations": 200000,
+      "summary": {
+        "wall_ns": {
+          "before": 123413084,
+          "after": 111596464,
+          "after_over_before": 0.9007907537236385,
+          "bootstrap_95": [
+            0.8905823908269939,
+            0.9280725707885042
+          ]
+        },
+        "cpu_us": {
+          "before": 123403,
+          "after": 111594,
+          "after_over_before": 0.9008302910355377,
+          "bootstrap_95": [
+            0.8905425442022863,
+            0.9280938123752495
+          ]
+        },
+        "allocations": {
+          "before": 0,
+          "after": 0
+        },
+        "allocated_bytes": {
+          "before": 0,
+          "after": 0
+        },
+        "peak_live_delta": {
+          "before": 0,
+          "after": 0
+        }
+      },
+      "pairs": [
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 1,
+            "cpu_us": 131460,
+            "failed": 0,
+            "iterations": 200000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2340,
+            "returned_bytes": 819200000,
+            "successful": 200000,
+            "wall_ns": 131466442
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 1,
+            "cpu_us": 111334,
+            "failed": 0,
+            "iterations": 200000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2364,
+            "returned_bytes": 819200000,
+            "successful": 200000,
+            "wall_ns": 111341339
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 1,
+            "cpu_us": 125446,
+            "failed": 0,
+            "iterations": 200000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2360,
+            "returned_bytes": 819200000,
+            "successful": 200000,
+            "wall_ns": 125450173
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 1,
+            "cpu_us": 111715,
+            "failed": 0,
+            "iterations": 200000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2360,
+            "returned_bytes": 819200000,
+            "successful": 200000,
+            "wall_ns": 111723715
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 1,
+            "cpu_us": 113213,
+            "failed": 0,
+            "iterations": 200000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2364,
+            "returned_bytes": 819200000,
+            "successful": 200000,
+            "wall_ns": 113215220
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 1,
+            "cpu_us": 120853,
+            "failed": 0,
+            "iterations": 200000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2344,
+            "returned_bytes": 819200000,
+            "successful": 200000,
+            "wall_ns": 120870826
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 1,
+            "cpu_us": 126823,
+            "failed": 0,
+            "iterations": 200000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2364,
+            "returned_bytes": 819200000,
+            "successful": 200000,
+            "wall_ns": 126830386
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 1,
+            "cpu_us": 114246,
+            "failed": 0,
+            "iterations": 200000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2352,
+            "returned_bytes": 819200000,
+            "successful": 200000,
+            "wall_ns": 114247639
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 1,
+            "cpu_us": 123403,
+            "failed": 0,
+            "iterations": 200000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2356,
+            "returned_bytes": 819200000,
+            "successful": 200000,
+            "wall_ns": 123413084
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 1,
+            "cpu_us": 112029,
+            "failed": 0,
+            "iterations": 200000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2352,
+            "returned_bytes": 819200000,
+            "successful": 200000,
+            "wall_ns": 112031549
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 1,
+            "cpu_us": 110631,
+            "failed": 0,
+            "iterations": 200000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2360,
+            "returned_bytes": 819200000,
+            "successful": 200000,
+            "wall_ns": 110628129
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 1,
+            "cpu_us": 123101,
+            "failed": 0,
+            "iterations": 200000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2352,
+            "returned_bytes": 819200000,
+            "successful": 200000,
+            "wall_ns": 123108500
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 1,
+            "cpu_us": 110950,
+            "failed": 0,
+            "iterations": 200000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2364,
+            "returned_bytes": 819200000,
+            "successful": 200000,
+            "wall_ns": 110952213
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 1,
+            "cpu_us": 120730,
+            "failed": 0,
+            "iterations": 200000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2364,
+            "returned_bytes": 819200000,
+            "successful": 200000,
+            "wall_ns": 120739076
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 1,
+            "cpu_us": 111594,
+            "failed": 0,
+            "iterations": 200000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2364,
+            "returned_bytes": 819200000,
+            "successful": 200000,
+            "wall_ns": 111596464
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 1,
+            "cpu_us": 120240,
+            "failed": 0,
+            "iterations": 200000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2364,
+            "returned_bytes": 819200000,
+            "successful": 200000,
+            "wall_ns": 120245407
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 1,
+            "cpu_us": 123506,
+            "failed": 0,
+            "iterations": 200000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2364,
+            "returned_bytes": 819200000,
+            "successful": 200000,
+            "wall_ns": 123519792
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 1,
+            "cpu_us": 110906,
+            "failed": 0,
+            "iterations": 200000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2364,
+            "returned_bytes": 819200000,
+            "successful": 200000,
+            "wall_ns": 110908337
+          }
+        }
+      ]
+    },
+    {
+      "allocation_instrumentation": false,
+      "cohort": 8,
+      "case": "success",
+      "iterations": 80000,
+      "summary": {
+        "wall_ns": {
+          "before": 293557227,
+          "after": 281601399,
+          "after_over_before": 0.9599203871754791,
+          "bootstrap_95": [
+            0.955794480758488,
+            1.0089038273351516
+          ]
+        },
+        "cpu_us": {
+          "before": 293552,
+          "after": 281574,
+          "after_over_before": 0.9598844497738049,
+          "bootstrap_95": [
+            0.9557886849007119,
+            1.0088957201248665
+          ]
+        },
+        "allocations": {
+          "before": 0,
+          "after": 0
+        },
+        "allocated_bytes": {
+          "before": 0,
+          "after": 0
+        },
+        "peak_live_delta": {
+          "before": 0,
+          "after": 0
+        }
+      },
+      "pairs": [
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 8,
+            "cpu_us": 281398,
+            "failed": 0,
+            "iterations": 80000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2380,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 281403773
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 8,
+            "cpu_us": 293402,
+            "failed": 0,
+            "iterations": 80000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2396,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 293412518
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 8,
+            "cpu_us": 294074,
+            "failed": 0,
+            "iterations": 80000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2396,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 294078479
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 8,
+            "cpu_us": 296690,
+            "failed": 0,
+            "iterations": 80000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2396,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 296696903
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 8,
+            "cpu_us": 294385,
+            "failed": 0,
+            "iterations": 80000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2396,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 294403480
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 8,
+            "cpu_us": 299278,
+            "failed": 0,
+            "iterations": 80000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2388,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 299302703
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 8,
+            "cpu_us": 293164,
+            "failed": 0,
+            "iterations": 80000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2396,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 293168476
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 8,
+            "cpu_us": 281074,
+            "failed": 0,
+            "iterations": 80000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2396,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 281081773
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 8,
+            "cpu_us": 280610,
+            "failed": 0,
+            "iterations": 80000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2380,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 280617812
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 8,
+            "cpu_us": 293590,
+            "failed": 0,
+            "iterations": 80000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2400,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 293596393
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 8,
+            "cpu_us": 281574,
+            "failed": 0,
+            "iterations": 80000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2384,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 281601399
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 8,
+            "cpu_us": 292749,
+            "failed": 0,
+            "iterations": 80000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2396,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 292758433
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 8,
+            "cpu_us": 293552,
+            "failed": 0,
+            "iterations": 80000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2400,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 293557227
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 8,
+            "cpu_us": 281776,
+            "failed": 0,
+            "iterations": 80000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2392,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 281791567
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 8,
+            "cpu_us": 292791,
+            "failed": 0,
+            "iterations": 80000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2396,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 292822849
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 8,
+            "cpu_us": 281304,
+            "failed": 0,
+            "iterations": 80000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2396,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 281314106
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 8,
+            "cpu_us": 289872,
+            "failed": 0,
+            "iterations": 80000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2396,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 289879341
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 8,
+            "cpu_us": 313130,
+            "failed": 0,
+            "iterations": 80000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2384,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 313134829
+          }
+        }
+      ]
+    },
+    {
+      "allocation_instrumentation": false,
+      "cohort": 64,
+      "case": "success",
+      "iterations": 10000,
+      "summary": {
+        "wall_ns": {
+          "before": 310590904,
+          "after": 289733965,
+          "after_over_before": 0.945685669111821,
+          "bootstrap_95": [
+            0.9280545080347291,
+            0.9614662756149819
+          ]
+        },
+        "cpu_us": {
+          "before": 310576,
+          "after": 289726,
+          "after_over_before": 0.9457115798196634,
+          "bootstrap_95": [
+            0.9280672797801012,
+            0.9614644370769261
+          ]
+        },
+        "allocations": {
+          "before": 0,
+          "after": 0
+        },
+        "allocated_bytes": {
+          "before": 0,
+          "after": 0
+        },
+        "peak_live_delta": {
+          "before": 0,
+          "after": 0
+        }
+      },
+      "pairs": [
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 311416,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 4564,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 311427115
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 289015,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 4452,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 289021338
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 303434,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2660,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 303442924
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 291741,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2660,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 291750138
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 304098,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2660,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 304114968
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 287589,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2660,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 287597167
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 301387,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2648,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 301398043
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 288273,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2640,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 288287794
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 310609,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2636,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 310630696
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 299936,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2660,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 299947621
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 293759,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2652,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 293769977
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 311649,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2640,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 311650407
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 311008,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2660,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 311012322
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 291094,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2648,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 291110636
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 310576,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2660,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 310590904
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 287308,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2656,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 287307207
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 289726,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2648,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 289733965
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 302226,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2660,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 302235879
+          }
+        }
+      ]
+    },
+    {
+      "allocation_instrumentation": false,
+      "cohort": 256,
+      "case": "success",
+      "iterations": 2500,
+      "summary": {
+        "wall_ns": {
+          "before": 302756338,
+          "after": 296932320,
+          "after_over_before": 0.9644858853426225,
+          "bootstrap_95": [
+            0.7853583226282272,
+            1.196173801261632
+          ]
+        },
+        "cpu_us": {
+          "before": 302731,
+          "after": 296920,
+          "after_over_before": 0.9645025898661088,
+          "bootstrap_95": [
+            0.7853530544446561,
+            1.1961613234850053
+          ]
+        },
+        "allocations": {
+          "before": 0,
+          "after": 0
+        },
+        "allocated_bytes": {
+          "before": 0,
+          "after": 0
+        },
+        "peak_live_delta": {
+          "before": 0,
+          "after": 0
+        }
+      },
+      "pairs": [
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 256,
+            "cpu_us": 365152,
+            "failed": 0,
+            "iterations": 2500,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 4624,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 365154986
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 256,
+            "cpu_us": 378591,
+            "failed": 0,
+            "iterations": 2500,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 5144,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 378600653
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 256,
+            "cpu_us": 286953,
+            "failed": 0,
+            "iterations": 2500,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 3556,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 286965165
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 256,
+            "cpu_us": 302731,
+            "failed": 0,
+            "iterations": 2500,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 3560,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 302756338
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 256,
+            "cpu_us": 288673,
+            "failed": 0,
+            "iterations": 2500,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 4568,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 288684421
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 256,
+            "cpu_us": 293688,
+            "failed": 0,
+            "iterations": 2500,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 3556,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 293691394
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 256,
+            "cpu_us": 294737,
+            "failed": 0,
+            "iterations": 2500,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 3572,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 294738689
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 256,
+            "cpu_us": 352553,
+            "failed": 0,
+            "iterations": 2500,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 5288,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 352558698
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 256,
+            "cpu_us": 286482,
+            "failed": 0,
+            "iterations": 2500,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 3568,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 286494913
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 256,
+            "cpu_us": 375748,
+            "failed": 0,
+            "iterations": 2500,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 4992,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 375754060
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 256,
+            "cpu_us": 358131,
+            "failed": 0,
+            "iterations": 2500,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 5372,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 358139048
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 256,
+            "cpu_us": 295862,
+            "failed": 0,
+            "iterations": 2500,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 3572,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 295875234
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 256,
+            "cpu_us": 285131,
+            "failed": 0,
+            "iterations": 2500,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 3568,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 285137410
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 256,
+            "cpu_us": 288794,
+            "failed": 0,
+            "iterations": 2500,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 3572,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 288803254
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 256,
+            "cpu_us": 374281,
+            "failed": 0,
+            "iterations": 2500,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 5256,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 374291723
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 256,
+            "cpu_us": 353749,
+            "failed": 0,
+            "iterations": 2500,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 5296,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 353769035
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 256,
+            "cpu_us": 378072,
+            "failed": 0,
+            "iterations": 2500,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 5444,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 378085151
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 256,
+            "cpu_us": 296920,
+            "failed": 0,
+            "iterations": 2500,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 3564,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 296932320
+          }
+        }
+      ]
+    },
+    {
+      "allocation_instrumentation": false,
+      "cohort": 64,
+      "case": "mixed",
+      "iterations": 10000,
+      "summary": {
+        "wall_ns": {
+          "before": 302838088,
+          "after": 287872585,
+          "after_over_before": 0.9501144206257226,
+          "bootstrap_95": [
+            0.9366274295450472,
+            0.9659386272270077
+          ]
+        },
+        "cpu_us": {
+          "before": 302831,
+          "after": 287864,
+          "after_over_before": 0.9501277751157962,
+          "bootstrap_95": [
+            0.9366489241185916,
+            0.9658874676251388
+          ]
+        },
+        "allocations": {
+          "before": 0,
+          "after": 0
+        },
+        "allocated_bytes": {
+          "before": 0,
+          "after": 0
+        },
+        "peak_live_delta": {
+          "before": 0,
+          "after": 0
+        }
+      },
+      "pairs": [
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 285540,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2660,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 285541369
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 300528,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2660,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 300533665
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 301607,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2660,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 301618001
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 286525,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2644,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 286533081
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 296782,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2660,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 296783861
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 302162,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2660,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 302173545
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 287864,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2656,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 287872585
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 302831,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2660,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 302838088
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 295177,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2660,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 295180440
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 310489,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2660,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 310499028
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 292378,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2640,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 292398682
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 302704,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2660,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 302709379
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 312674,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 4564,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 312684577
+          },
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 288332,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2640,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 288337670
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 285248,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2656,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 285250869
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 304541,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2660,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 304551052
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 287436,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2656,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 287559084
+          },
+          "before": {
+            "allocated_bytes": 0,
+            "allocations": 0,
+            "cohort": 64,
+            "cpu_us": 306807,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 0,
+            "peak_rss_kib": 2660,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 306823518
+          }
+        }
+      ]
+    },
+    {
+      "allocation_instrumentation": true,
+      "cohort": 64,
+      "case": "success",
+      "iterations": 10000,
+      "summary": {
+        "wall_ns": {
+          "before": 308585356,
+          "after": 294003187,
+          "after_over_before": 0.9553526584765136,
+          "bootstrap_95": [
+            0.9005315605386496,
+            0.9884904309989685
+          ]
+        },
+        "cpu_us": {
+          "before": 308575,
+          "after": 293995,
+          "after_over_before": 0.9553846354149714,
+          "bootstrap_95": [
+            0.9005216339333318,
+            0.9665337474278849
+          ]
+        },
+        "allocations": {
+          "before": 740000,
+          "after": 710000,
+          "after_over_before": 0.9594594594594594,
+          "bootstrap_95": [
+            0.9594594594594594,
+            0.9594594594594594
+          ]
+        },
+        "allocated_bytes": {
+          "before": 2851840000,
+          "after": 2795520000,
+          "after_over_before": 0.9802513464991023,
+          "bootstrap_95": [
+            0.9802513464991023,
+            0.9802513464991023
+          ]
+        },
+        "peak_live_delta": {
+          "before": 280576,
+          "after": 279552,
+          "after_over_before": 0.9963503649635036,
+          "bootstrap_95": [
+            0.9963503649635036,
+            0.9963503649635036
+          ]
+        }
+      },
+      "pairs": [
+        {
+          "before": {
+            "allocated_bytes": 2851840000,
+            "allocations": 740000,
+            "cohort": 64,
+            "cpu_us": 305684,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 280576,
+            "peak_rss_kib": 2720,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 305688597
+          },
+          "after": {
+            "allocated_bytes": 2795520000,
+            "allocations": 710000,
+            "cohort": 64,
+            "cpu_us": 302156,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 279552,
+            "peak_rss_kib": 2720,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 302170253
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 2795520000,
+            "allocations": 710000,
+            "cohort": 64,
+            "cpu_us": 288818,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 279552,
+            "peak_rss_kib": 4600,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 288827129
+          },
+          "before": {
+            "allocated_bytes": 2851840000,
+            "allocations": 740000,
+            "cohort": 64,
+            "cpu_us": 320723,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 280576,
+            "peak_rss_kib": 4752,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 320729602
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 2851840000,
+            "allocations": 740000,
+            "cohort": 64,
+            "cpu_us": 312972,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 280576,
+            "peak_rss_kib": 2720,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 312990452
+          },
+          "after": {
+            "allocated_bytes": 2795520000,
+            "allocations": 710000,
+            "cohort": 64,
+            "cpu_us": 302498,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 279552,
+            "peak_rss_kib": 2724,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 302518504
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 2851840000,
+            "allocations": 740000,
+            "cohort": 64,
+            "cpu_us": 328261,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 280576,
+            "peak_rss_kib": 4688,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 328273624
+          },
+          "after": {
+            "allocated_bytes": 2795520000,
+            "allocations": 710000,
+            "cohort": 64,
+            "cpu_us": 290630,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 279552,
+            "peak_rss_kib": 2708,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 290633635
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 2851840000,
+            "allocations": 740000,
+            "cohort": 64,
+            "cpu_us": 308575,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 280576,
+            "peak_rss_kib": 2724,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 308585356
+          },
+          "after": {
+            "allocated_bytes": 2795520000,
+            "allocations": 710000,
+            "cohort": 64,
+            "cpu_us": 293995,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 279552,
+            "peak_rss_kib": 2716,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 294003187
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 2795520000,
+            "allocations": 710000,
+            "cohort": 64,
+            "cpu_us": 292709,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 279552,
+            "peak_rss_kib": 2720,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 292716641
+          },
+          "before": {
+            "allocated_bytes": 2851840000,
+            "allocations": 740000,
+            "cohort": 64,
+            "cpu_us": 304952,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 280576,
+            "peak_rss_kib": 2724,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 304960678
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 2795520000,
+            "allocations": 710000,
+            "cohort": 64,
+            "cpu_us": 309576,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 279552,
+            "peak_rss_kib": 2724,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 309582942
+          },
+          "before": {
+            "allocated_bytes": 2851840000,
+            "allocations": 740000,
+            "cohort": 64,
+            "cpu_us": 305199,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 280576,
+            "peak_rss_kib": 2712,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 305207345
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 2851840000,
+            "allocations": 740000,
+            "cohort": 64,
+            "cpu_us": 332083,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 280576,
+            "peak_rss_kib": 4648,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 332090302
+          },
+          "after": {
+            "allocated_bytes": 2795520000,
+            "allocations": 710000,
+            "cohort": 64,
+            "cpu_us": 301199,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 279552,
+            "peak_rss_kib": 2704,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 301212709
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 2795520000,
+            "allocations": 710000,
+            "cohort": 64,
+            "cpu_us": 293519,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 279552,
+            "peak_rss_kib": 2724,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 293525435
+          },
+          "before": {
+            "allocated_bytes": 2851840000,
+            "allocations": 740000,
+            "cohort": 64,
+            "cpu_us": 307226,
+            "failed": 0,
+            "iterations": 10000,
+            "peak_live_delta": 280576,
+            "peak_rss_kib": 2708,
+            "returned_bytes": 2621440000,
+            "successful": 640000,
+            "wall_ns": 307243019
+          }
+        }
+      ]
+    },
+    {
+      "allocation_instrumentation": true,
+      "cohort": 64,
+      "case": "mixed",
+      "iterations": 10000,
+      "summary": {
+        "wall_ns": {
+          "before": 304966428,
+          "after": 292746141,
+          "after_over_before": 0.9525115321291138,
+          "bootstrap_95": [
+            0.9225501617210073,
+            1.0001069636433346
+          ]
+        },
+        "cpu_us": {
+          "before": 304960,
+          "after": 292734,
+          "after_over_before": 0.9525363140238994,
+          "bootstrap_95": [
+            0.9225726751004707,
+            1.0001114746788546
+          ]
+        },
+        "allocations": {
+          "before": 770000,
+          "after": 740000,
+          "after_over_before": 0.961038961038961,
+          "bootstrap_95": [
+            0.961038961038961,
+            0.961038961038961
+          ]
+        },
+        "allocated_bytes": {
+          "before": 2852900000,
+          "after": 2796580000,
+          "after_over_before": 0.9802586841459567,
+          "bootstrap_95": [
+            0.9802586841459567,
+            0.9802586841459567
+          ]
+        },
+        "peak_live_delta": {
+          "before": 280672,
+          "after": 279648,
+          "after_over_before": 0.9963516132710067,
+          "bootstrap_95": [
+            0.9963516132710067,
+            0.9963516132710067
+          ]
+        }
+      },
+      "pairs": [
+        {
+          "before": {
+            "allocated_bytes": 2852900000,
+            "allocations": 770000,
+            "cohort": 64,
+            "cpu_us": 304326,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 280672,
+            "peak_rss_kib": 2724,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 304337760
+          },
+          "after": {
+            "allocated_bytes": 2796580000,
+            "allocations": 740000,
+            "cohort": 64,
+            "cpu_us": 545511,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 279648,
+            "peak_rss_kib": 4668,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 545527494
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 2796580000,
+            "allocations": 740000,
+            "cohort": 64,
+            "cpu_us": 288550,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 279648,
+            "peak_rss_kib": 2724,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 288559295
+          },
+          "before": {
+            "allocated_bytes": 2852900000,
+            "allocations": 770000,
+            "cohort": 64,
+            "cpu_us": 304960,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 280672,
+            "peak_rss_kib": 2724,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 304966428
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 2796580000,
+            "allocations": 740000,
+            "cohort": 64,
+            "cpu_us": 294988,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 279648,
+            "peak_rss_kib": 4504,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 294993731
+          },
+          "before": {
+            "allocated_bytes": 2852900000,
+            "allocations": 770000,
+            "cohort": 64,
+            "cpu_us": 319745,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 280672,
+            "peak_rss_kib": 2724,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 319759015
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 2796580000,
+            "allocations": 740000,
+            "cohort": 64,
+            "cpu_us": 289067,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 279648,
+            "peak_rss_kib": 2724,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 289073088
+          },
+          "before": {
+            "allocated_bytes": 2852900000,
+            "allocations": 770000,
+            "cohort": 64,
+            "cpu_us": 317805,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 280672,
+            "peak_rss_kib": 2712,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 317809801
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 2796580000,
+            "allocations": 740000,
+            "cohort": 64,
+            "cpu_us": 289913,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 279648,
+            "peak_rss_kib": 2704,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 289920549
+          },
+          "before": {
+            "allocated_bytes": 2852900000,
+            "allocations": 770000,
+            "cohort": 64,
+            "cpu_us": 304359,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 280672,
+            "peak_rss_kib": 2720,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 304374844
+          }
+        },
+        {
+          "after": {
+            "allocated_bytes": 2796580000,
+            "allocations": 740000,
+            "cohort": 64,
+            "cpu_us": 305036,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 279648,
+            "peak_rss_kib": 4472,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 305042804
+          },
+          "before": {
+            "allocated_bytes": 2852900000,
+            "allocations": 770000,
+            "cohort": 64,
+            "cpu_us": 305002,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 280672,
+            "peak_rss_kib": 2720,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 305010179
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 2852900000,
+            "allocations": 770000,
+            "cohort": 64,
+            "cpu_us": 303852,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 280672,
+            "peak_rss_kib": 2700,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 303867966
+          },
+          "after": {
+            "allocated_bytes": 2796580000,
+            "allocations": 740000,
+            "cohort": 64,
+            "cpu_us": 290547,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 279648,
+            "peak_rss_kib": 2720,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 290564551
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 2852900000,
+            "allocations": 770000,
+            "cohort": 64,
+            "cpu_us": 317058,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 280672,
+            "peak_rss_kib": 4668,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 317065924
+          },
+          "after": {
+            "allocated_bytes": 2796580000,
+            "allocations": 740000,
+            "cohort": 64,
+            "cpu_us": 292734,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 279648,
+            "peak_rss_kib": 2720,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 292746141
+          }
+        },
+        {
+          "before": {
+            "allocated_bytes": 2852900000,
+            "allocations": 770000,
+            "cohort": 64,
+            "cpu_us": 303329,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 280672,
+            "peak_rss_kib": 2724,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 303331340
+          },
+          "after": {
+            "allocated_bytes": 2796580000,
+            "allocations": 740000,
+            "cohort": 64,
+            "cpu_us": 298674,
+            "failed": 10000,
+            "iterations": 10000,
+            "peak_live_delta": 279648,
+            "peak_rss_kib": 2720,
+            "returned_bytes": 2580480000,
+            "successful": 630000,
+            "wall_ns": 298680117
+          }
+        }
+      ]
+    }
+  ],
+  "before_sha256": "448701152cbae321cdf6a12438b28817c681413987dd4b68ad9caa9638513452",
+  "after_sha256": "fe70df458fc5f527b52d251e3516c1b2d7150091044a614c33f27dfacf59e169",
+  "before-metrics_sha256": "9c93e43b498dff97f312fac7618b7a75c887bba5ea8ae869365dad1af050644d",
+  "after-metrics_sha256": "68f6cb5d5b3eab954f0468481148ec6d0588128bb0b8415857ed3f2c41e370ce"
+}

@@ -4258,6 +4258,67 @@ mod tests {
         assert_eq!(std::fs::read(root.0.join("last")).unwrap(), b"new");
     }
 
+    #[test]
+    fn unrepresentable_path_write_offsets_fail_before_create_or_truncate() {
+        let (root, mut backend) = fs("write-signed-offset-preflight");
+        let existing = FileOperand::from_path("/existing");
+        let missing = FileOperand::from_path("/missing");
+        for offset in [i64::MAX as u64 + 1, u64::MAX - 1] {
+            std::fs::write(root.0.join("existing"), b"preserved").unwrap();
+            let writes = [
+                WriteOp::at(&existing, offset, b"x".as_slice()).with_truncate(),
+                WriteOp::at(&missing, offset, b"x".as_slice()).with_creation(),
+                WriteOp::new(&existing, VfOffset::End, b"!".as_slice()),
+            ];
+            let results = backend.vwrite_impl(&writes).unwrap();
+            assert_eq!(results.len(), writes.len());
+            for result in &results[..2] {
+                let error = result.as_ref().unwrap_err();
+                assert_eq!(error.state(), FailureState::NotAttempted);
+                assert_eq!(error.cause().raw_code(), libc::EOVERFLOW as u32);
+                assert_eq!(error.cause().index(), None);
+                assert!(error.progress().is_none());
+            }
+            assert_eq!(results[2].as_ref().unwrap().offset, 9);
+            assert_eq!(
+                std::fs::read(root.0.join("existing")).unwrap(),
+                b"preserved!"
+            );
+            assert!(!root.0.join("missing").exists());
+        }
+    }
+
+    #[test]
+    fn offset_preflight_preserves_empty_writes_and_append_positioning() {
+        let (root, mut backend) = fs("write-offset-preflight-boundaries");
+        std::fs::write(root.0.join("existing"), b"preserved").unwrap();
+        let existing = FileOperand::from_path("/existing");
+        for offset in [i64::MAX as u64, i64::MAX as u64 + 1, u64::MAX] {
+            let result = backend
+                .vwrite_impl(&[WriteOp::at(&existing, offset, b"".as_slice())])
+                .unwrap()
+                .pop()
+                .unwrap()
+                .unwrap();
+            assert_eq!((result.offset, result.bytes_written), (offset, 0));
+        }
+        let append = backend
+            .open_raw_impl(Path::new("/existing"), libc::O_WRONLY | libc::O_APPEND, 0)
+            .unwrap();
+        let result = backend
+            .vwrite_impl(&[WriteOp::at(&append, u64::MAX, b"!".as_slice())])
+            .unwrap()
+            .pop()
+            .unwrap()
+            .unwrap();
+        assert_eq!((result.offset, result.bytes_written), (9, 1));
+        backend.close_impl(&append).unwrap();
+        assert_eq!(
+            std::fs::read(root.0.join("existing")).unwrap(),
+            b"preserved!"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn short_write_errors_keep_real_kernel_prefixes_and_advance_only_confirmed_cursors() {
@@ -4359,6 +4420,100 @@ mod tests {
                     .iter()
                     .all(Result::is_ok)
             );
+        }
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dependent_descriptor_reads_work_without_spare_file_descriptors() {
+        const CHILD: &str = "VFSI_LOCAL_EXHAUSTED_READ_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let (_root, mut fs) = fs("exhausted-read");
+            write(&mut fs, "/file", b"abcdef");
+            let file = fs
+                .open_raw_impl(Path::new("/file"), libc::O_RDONLY, 0)
+                .unwrap();
+            let mut original = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            assert_eq!(
+                unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut original) },
+                0
+            );
+            let limit = libc::rlimit {
+                rlim_cur: original.rlim_cur.min(64),
+                ..original
+            };
+            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+            let mut held = Vec::new();
+            loop {
+                match std::fs::File::open("/dev/null") {
+                    Ok(file) => held.push(file),
+                    Err(error) => {
+                        assert_eq!(error.raw_os_error(), Some(libc::EMFILE));
+                        break;
+                    }
+                }
+            }
+            let reads = [
+                ReadOp::new(file.clone(), VfOffset::Cur, 2),
+                ReadOp::new(file.clone(), VfOffset::Cur, 2),
+            ];
+            let results = fs.vread_impl(&reads);
+            let tail = fs.read_impl(&ReadOp::new(file.clone(), VfOffset::Cur, 2));
+            drop(held);
+            assert_eq!(
+                unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &original) },
+                0
+            );
+            let results = results.unwrap();
+            assert_eq!(results[0].as_ref().unwrap().data, b"ab");
+            assert_eq!(results[1].as_ref().unwrap().data, b"cd");
+            let tail = tail.unwrap();
+            assert_eq!((tail.offset, tail.data), (4, b"ef".to_vec()));
+            fs.close_impl(&file).unwrap();
+            return;
+        }
+        let test_name = std::thread::current().name().unwrap().to_owned();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test_name])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    #[test]
+    fn finite_forward_alias_copy_stops_at_original_source_eof() {
+        for hard_link in [false, true] {
+            for destination in [4, 6, 12] {
+                for source in [0, 1] {
+                    let (root, mut fs) = fs("finite-forward-alias");
+                    std::fs::write(root.0.join("source"), b"abcd").unwrap();
+                    let target = if hard_link {
+                        std::fs::hard_link(root.0.join("source"), root.0.join("alias")).unwrap();
+                        "/alias"
+                    } else {
+                        "/source"
+                    };
+                    let pair = ExtentPair::new("/source", source, target, destination, Some(8));
+                    let outcomes = fs.vcopy_data_impl(&[pair]).unwrap();
+                    assert!(outcomes[0].is_ok(), "{outcomes:?}");
+                    let mut expected = b"abcd".to_vec();
+                    expected.resize(destination as usize, 0);
+                    expected.extend_from_slice(&b"abcd"[source as usize..]);
+                    assert_eq!(
+                        std::fs::read(root.0.join("source")).unwrap(),
+                        expected,
+                        "hardlink={hard_link}, source={source}, destination={destination}"
+                    );
+                }
+            }
         }
     }
 }

@@ -10,7 +10,7 @@ use std::{fs::File, path::Path, sync::Arc};
 use vfsi_core::VfResult;
 use vfsi_local::{
     LocalBackend,
-    io::{DescriptorIo, Read, Write},
+    io::{DescriptorIo, OwnedRead, Read, Write},
 };
 
 /// Ordered syscall executor for backend implementers.
@@ -20,6 +20,26 @@ pub struct PosixIo;
 impl DescriptorIo for PosixIo {
     fn ordered(&self) -> bool {
         true
+    }
+    fn owned_read_window(&self) -> Option<usize> {
+        // Synchronous pread fills the final output directly and needs no scratch.
+        Some(usize::MAX)
+    }
+    fn read_owned(&mut self, operations: Vec<OwnedRead>) -> Vec<vfsi_core::OpResult<Vec<u8>>> {
+        use std::os::unix::fs::FileExt;
+        operations
+            .into_iter()
+            .map(|mut op| {
+                let count = op
+                    .file
+                    .read_at(&mut op.buffer, op.offset)
+                    .map_err(|error| {
+                        vfsi_core::OpError::failed(vfsi_core::VfError::from_io(None, error), None)
+                    })?;
+                op.buffer.truncate(count);
+                Ok(op.buffer)
+            })
+            .collect()
     }
     fn read(&mut self, operations: &mut [Read<'_>]) -> Vec<vfsi_core::OpResult<usize>> {
         vfsi_local::io::read_ordered(operations)
@@ -182,5 +202,49 @@ mod tests {
         assert_eq!(*results[1].as_ref().unwrap(), 1);
         assert_eq!(first, [7]);
         assert_eq!(second, *b"A");
+    }
+
+    #[test]
+    fn owned_reads_reuse_buffers_and_keep_success_after_a_failed_input() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("file");
+        std::fs::write(&path, b"abcdef").unwrap();
+        let readable = Arc::new(File::open(&path).unwrap());
+        let write_only = Arc::new(File::options().write(true).open(&path).unwrap());
+        let first = vec![0xcc; 3];
+        let first_pointer = first.as_ptr();
+        let tail = vec![0xcc; 8];
+        let tail_pointer = tail.as_ptr();
+        let outcomes = PosixIo.read_owned(vec![
+            OwnedRead {
+                file: Arc::clone(&readable),
+                offset: 1,
+                buffer: first,
+            },
+            OwnedRead {
+                file: write_only,
+                offset: 0,
+                buffer: vec![0xcc; 4],
+            },
+            OwnedRead {
+                file: Arc::clone(&readable),
+                offset: 4,
+                buffer: tail,
+            },
+            OwnedRead {
+                file: readable,
+                offset: 6,
+                buffer: vec![0xcc; 4],
+            },
+        ]);
+        assert_eq!(outcomes.len(), 4);
+        assert_eq!(outcomes[0].as_ref().unwrap(), b"bcd");
+        assert_eq!(outcomes[0].as_ref().unwrap().as_ptr(), first_pointer);
+        let error = outcomes[1].as_ref().unwrap_err();
+        assert_eq!(error.state(), vfsi_core::FailureState::Failed);
+        assert!(error.progress().is_none());
+        assert_eq!(outcomes[2].as_ref().unwrap(), b"ef");
+        assert_eq!(outcomes[2].as_ref().unwrap().as_ptr(), tail_pointer);
+        assert!(outcomes[3].as_ref().unwrap().is_empty());
     }
 }

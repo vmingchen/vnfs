@@ -111,3 +111,11 @@ hashes of the actual measured optimized binaries.
 These cached loopback fixtures do not establish WAN throughput or application
 latency. NFS OPEN-adjacent GETFH safety has a separate wire cost in create/read
 pipelines; these positional-read controls do not erase that cost.
+
+
+## POSIX follow-up
+
+The [post-release POSIX profile](../posix-read-profile-2026-11-09/README.md)
+identifies and measures the direct-owned destination optimization. It compares
+the released VecResult implementation with that optimization, separately from
+the pre-migration comparison above.

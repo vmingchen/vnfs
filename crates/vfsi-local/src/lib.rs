@@ -20,8 +20,10 @@
 //! escapes. This requires Linux 5.6 or newer and a mounted `/proc` filesystem.
 
 use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::fs::{File, FileTimes, OpenOptions};
 use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{
     DirBuilderExt, FileExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink,
 };
@@ -33,7 +35,7 @@ use vfsi_sync::*;
 
 #[cfg(feature = "test-faults")]
 use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
-use vfsi_core::path::{cstring_from_bytes, normalize_bytes, path_bytes, path_from_bytes};
+use vfsi_core::path::{cstring_from_bytes, normalize_bytes, path_bytes};
 
 #[cfg(test)]
 std::thread_local! {
@@ -401,7 +403,7 @@ impl LocalBackend {
             self.cwd.join(path)
         };
         self.root
-            .join(path_from_bytes(&normalize_bytes(path_bytes(&suffix))))
+            .join(OsStr::from_bytes(&normalize_bytes(path_bytes(&suffix))))
     }
 
     /// Resolve `p` (already mapped under the root) to a real path that is
@@ -670,7 +672,7 @@ impl LocalBackend {
                 // and ".." components are clamped), so it can never escape.
                 let stripped = target.strip_prefix("/").unwrap_or(&target);
                 self.root
-                    .join(path_from_bytes(&normalize_bytes(path_bytes(stripped))))
+                    .join(OsStr::from_bytes(&normalize_bytes(path_bytes(stripped))))
             } else {
                 p.parent().unwrap_or(Path::new("")).join(target)
             };
@@ -1648,26 +1650,34 @@ impl LocalBackend {
         if op.length != buffer.len() {
             return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
         }
+        let opened;
         let (file, off, descriptor) = match &op.file {
             FileOperand::Fd(fd) => {
                 let o = self
                     .open_files
                     .get(fd)
                     .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
-                let len = o.file.metadata().map_err(|e| VfError::from_io(0, e))?.len();
+                let len = if op.offset == VfOffset::End {
+                    o.file.metadata().map_err(|e| VfError::from_io(0, e))?.len()
+                } else {
+                    0
+                };
                 let off = self.resolve_offset(&op.file, op.offset, len)?;
-                let f = o.file.try_clone().map_err(|e| VfError::from_io(0, e))?;
-                (f, off, true)
+                (o.file.as_ref(), off, true)
             }
             FileOperand::Path { .. } | FileOperand::Cwd | FileOperand::CwdPath(_) => {
                 let p = self.real_path(&self.tcfile_path(&op.file)?)?;
                 let mut options = OpenOptions::new();
                 options.read(true);
                 Self::protect_create_open(&p, &mut options);
-                let f = options.open(&p).map_err(|e| VfError::from_io(0, e))?;
-                let len = f.metadata().map_err(|e| VfError::from_io(0, e))?.len();
+                opened = options.open(&p).map_err(|e| VfError::from_io(0, e))?;
+                let len = if op.offset == VfOffset::End {
+                    opened.metadata().map_err(|e| VfError::from_io(0, e))?.len()
+                } else {
+                    0
+                };
                 let off = self.resolve_offset(&op.file, op.offset, len)?;
-                (f, off, false)
+                (&opened, off, false)
             }
             FileOperand::Saved => {
                 return Err(VfError::unsupported(0));
@@ -1725,6 +1735,13 @@ impl LocalBackend {
                     VfOffset::At(offset) => {
                         checked_offset(offset, op.data().len() as u64, 0)
                             .map_err(OpError::not_attempted)?;
+                        // FileExt requires a signed native offset. Reject it
+                        // before OPEN can create or truncate the path. Empty
+                        // writes perform no positional syscall.
+                        if !op.data().is_empty() {
+                            i64::try_from(offset)
+                                .map_err(|_| OpError::not_attempted(Self::overflow(0)))?;
+                        }
                     }
                     VfOffset::End => {}
                     _ => {
@@ -1949,35 +1966,25 @@ impl LocalBackend {
         dst_options.write(true).create(true).truncate(false);
         Self::protect_create_open(&dp, &mut dst_options);
         let dst = dst_options.open(&dp).map_err(|e| VfError::from_io(0, e))?;
-        if p.length.is_none() && p.dst_offset > p.src_offset {
+        let mut length = p.length;
+        if p.dst_offset > p.src_offset && length != Some(0) {
             let src_metadata = src.metadata().map_err(|e| VfError::from_io(0, e))?;
             let dst_metadata = dst.metadata().map_err(|e| VfError::from_io(0, e))?;
             if src_metadata.dev() == dst_metadata.dev() && src_metadata.ino() == dst_metadata.ino()
             {
-                // A forward to-EOF copy from the same inode keeps extending
-                // its own source. Reject it before the first write.
-                return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
-            }
-        }
-        if let Some(requested) = p.length.filter(|&length| length > 0) {
-            // A chunked forward copy can overwrite bytes that a later chunk
-            // still needs when source and destination are aliases. Check only
-            // forward-shifted overlapping ranges so ordinary copies do not
-            // pay for extra metadata lookups.
-            let requested_forward_overlap =
-                p.dst_offset > p.src_offset && p.dst_offset - p.src_offset < requested;
-            if requested_forward_overlap {
-                let src_metadata = src.metadata().map_err(|e| VfError::from_io(0, e))?;
-                let actual_length = requested.min(src_metadata.len().saturating_sub(p.src_offset));
-                let actual_forward_overlap = p.dst_offset - p.src_offset < actual_length;
-                if actual_forward_overlap {
-                    let dst_metadata = dst.metadata().map_err(|e| VfError::from_io(0, e))?;
-                    if src_metadata.dev() == dst_metadata.dev()
-                        && src_metadata.ino() == dst_metadata.ino()
-                    {
-                        return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
-                    }
+                let Some(requested) = length else {
+                    // A forward to-EOF alias copy can extend its own source.
+                    return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+                };
+                let available = src_metadata.len().saturating_sub(p.src_offset);
+                let actual = requested.min(available);
+                if p.dst_offset - p.src_offset < actual {
+                    // Do not overwrite bytes that a later chunk still needs.
+                    return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
                 }
+                // A finite alias copy must not consume data or holes created
+                // by its own writes beyond the original source EOF.
+                length = Some(actual);
             }
         }
         let mut so = p.src_offset;
@@ -1985,12 +1992,12 @@ impl LocalBackend {
         let mut copied: u64 = 0;
         let mut buf = Vec::new();
         loop {
-            if let Some(length) = p.length
+            if let Some(length) = length
                 && copied >= length
             {
                 break;
             }
-            let remaining = p.length.map_or(u64::MAX, |l| l - copied);
+            let remaining = length.map_or(u64::MAX, |l| l - copied);
             let chunk_len = remaining.min(1 << 20) as usize;
             buf.resize(chunk_len, 0);
             let n = src
@@ -2138,7 +2145,7 @@ impl HandleBackend for LocalBackend {
         } else {
             self.cwd.join(path)
         };
-        path_from_bytes(&normalize_bytes(path_bytes(&root_rel)))
+        OsString::from_vec(normalize_bytes(path_bytes(&root_rel))).into()
     }
 
     fn open_path_impl(
@@ -2154,7 +2161,7 @@ impl HandleBackend for LocalBackend {
         let resolved = match base {
             VfPathBase::Abs => self
                 .root
-                .join(path_from_bytes(&normalize_bytes(path_bytes(pathname)))),
+                .join(OsStr::from_bytes(&normalize_bytes(path_bytes(pathname)))),
             VfPathBase::Cwd => self.resolve(pathname),
         };
         let p =
