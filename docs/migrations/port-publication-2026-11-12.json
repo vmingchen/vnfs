@@ -1,14 +1,14 @@
 [
   {
     "port": "coreutils",
-    "revision": "b57693b4e743fffb344babff7c82a50d10cd0a50",
+    "revision": "3bd408f4d61f94dc85b67d513f839a3998392c0a",
     "vnfs": "0.0.34",
     "vfsi_c": null,
     "checks": [
       {
         "workflow": "VFSI public package integration",
-        "run": 43149566599,
-        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43149566599",
+        "run": 43152691729,
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43152691729",
         "conclusion": "success"
       }
     ]
