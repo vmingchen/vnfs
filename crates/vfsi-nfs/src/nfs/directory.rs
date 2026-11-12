@@ -25,7 +25,7 @@ pub(super) fn validate_readdir_progress(
 /// READDIR continuation retained across unlocked application callbacks.
 pub(super) struct NfsDirectoryCursor {
     pub(super) fh: NfsFh,
-    pub(super) cookie: u64,
+    pub(super) cookie: DirCookie,
     pub(super) seen_cookies: HashSet<u64>,
     pub(super) buffered: VecDeque<crate::client::DirEntry>,
 }
@@ -66,14 +66,14 @@ pub(super) enum RmTask {
     /// cookie zero so entries skipped by changing directory cookies are found.
     Enter {
         dir: RemoveDir,
-        cookie: u64,
+        cookie: DirCookie,
         seen_cookies: HashSet<u64>,
         pass_changed: bool,
     },
     /// Flush child-directory removals before resuming the parent's scan.
     Continue {
         dir: RemoveDir,
-        cookie: u64,
+        cookie: DirCookie,
         seen_cookies: HashSet<u64>,
         files_removed: bool,
         pass_changed: bool,
@@ -119,11 +119,11 @@ fn one_remove_outcome(results: vfsi_core::VecResult<()>) -> vfsi_core::OpResult<
 /// Advance through the current bounded READDIR pass. A mutation may shift
 /// later cookies, so a complete pass that changed anything is verified once
 /// more from the beginning. Failed entries are not revisited on every page.
-pub(super) fn next_rm_scan(cookie: u64, pass_changed: bool) -> Option<(u64, bool)> {
-    if cookie != 0 {
+pub(super) fn next_rm_scan(cookie: DirCookie, pass_changed: bool) -> Option<(DirCookie, bool)> {
+    if cookie.value != 0 {
         Some((cookie, pass_changed))
     } else if pass_changed {
-        Some((0, false))
+        Some((DirCookie::default(), false))
     } else {
         None
     }
@@ -262,7 +262,6 @@ pub(super) fn append_bounded_walk_page(
     root: &Path,
     dir: &Path,
     masks: AttrMask,
-    ids: &[u32],
     page: &[crate::client::DirEntry],
     options: ListDirOptions,
     entry_count: &mut usize,
@@ -279,7 +278,7 @@ pub(super) fn append_bounded_walk_page(
             masks,
             ..VfAttrs::default()
         };
-        let values = parse_attr_list(ids, &entry.attrs)
+        let values = parse_metadata_attrs(&entry.attrmask, &entry.attrs)
             .map_err(|error| error.with_index(*entry_count).with_context("walk", dir))?;
         apply_attrs(&mut attrs, &values);
         if attrs.ftype == VfType::Directory {
@@ -320,10 +319,10 @@ impl NfsVecFs {
             // A directory argument may itself be a symlink to a directory.
             let dirfh = self.resolve_path(&self.server_path(&current), true)?;
             let mut children = Vec::new();
-            let mut cookie = 0u64;
+            let mut cookie = DirCookie::default();
             let mut seen_cookies = HashSet::new();
             loop {
-                let entries = self
+                let (entries, next_cookie) = self
                     .nfs
                     .readdir(&dirfh, cookie, &ids)
                     .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
@@ -340,17 +339,21 @@ impl NfsVecFs {
                         masks,
                         ..VfAttrs::default()
                     };
-                    let values = parse_attr_list(&ids, &entry.attrs)?;
+                    let values = parse_metadata_attrs(&entry.attrmask, &entry.attrs)?;
                     apply_attrs(&mut attrs, &values);
                     if recursive && attrs.ftype == VfType::Directory {
                         children.push(path);
                     }
                     out.push(attrs);
                 }
-                let next_cookie = entries.last().expect("non-empty READDIR page").cookie;
-                validate_readdir_progress(cookie, next_cookie, &mut seen_cookies, None)?;
+                validate_readdir_progress(
+                    cookie.value,
+                    next_cookie.value,
+                    &mut seen_cookies,
+                    None,
+                )?;
                 cookie = next_cookie;
-                if cookie == 0 {
+                if cookie.value == 0 {
                     break;
                 }
             }
@@ -442,7 +445,7 @@ impl NfsVecFs {
                             Some((cookie, pass_changed)) => stack.push(RmTask::Enter {
                                 dir,
                                 cookie,
-                                seen_cookies: if cookie == 0 && !pass_changed {
+                                seen_cookies: if cookie.value == 0 && !pass_changed {
                                     HashSet::new()
                                 } else {
                                     seen_cookies
@@ -530,7 +533,7 @@ impl NfsVecFs {
                                 root,
                                 is_root: true,
                             },
-                            cookie: 0,
+                            cookie: DirCookie::default(),
                             seen_cookies: HashSet::new(),
                             pass_changed: false,
                         }),
@@ -562,10 +565,16 @@ impl NfsVecFs {
 
     /// Enumerate a directory with `FATTR4_TYPE`, so directories can be
     /// descended into without an extra lookup while files are removed directly.
-    fn readdir_typed(&mut self, fh: &NfsFh, cookie: u64) -> VfResult<Vec<crate::client::DirEntry>> {
+    fn readdir_typed(
+        &mut self,
+        fh: &NfsFh,
+        cookie: DirCookie,
+    ) -> VfResult<crate::client::ReaddirPage> {
         const REMOVE_READDIR_MAX_BYTES: usize = 32 * 1024;
         #[cfg(feature = "test-faults")]
-        self.inject_open_fault(OpenFaultPoint::BeforeRemovePage { cookie })?;
+        self.inject_open_fault(OpenFaultPoint::BeforeRemovePage {
+            cookie: cookie.value,
+        })?;
         self.nfs
             .readdir_bounded(fh, cookie, &[FATTR4_TYPE], REMOVE_READDIR_MAX_BYTES)
             .map_err(|error| vfsi_core::error_from_rpc(error, None))
@@ -577,7 +586,7 @@ impl NfsVecFs {
     fn enter_directory(
         &mut self,
         dir: RemoveDir,
-        cookie: u64,
+        cookie: DirCookie,
         mut seen_cookies: HashSet<u64>,
         pass_changed: bool,
         stack: &mut Vec<RmTask>,
@@ -586,22 +595,25 @@ impl NfsVecFs {
         options: RemoveOptions,
     ) -> RemoveRun<()> {
         roots[dir.root].touch();
-        let entries = match self.readdir_typed(&dir.fh, cookie) {
+        let (entries, next_cookie) = match self.readdir_typed(&dir.fh, cookie) {
             Ok(entries) => entries,
             Err(error)
-                if cookie != 0
+                if cookie.value != 0
                     && pass_changed
-                    && error.status()
-                        == Some(vfsi_core::StatusCode::Nfs(
-                            nfsv41_sys::nfsstat4_NFS4ERR_BAD_COOKIE,
-                        )) =>
+                    && matches!(
+                        error.status(),
+                        Some(vfsi_core::StatusCode::Nfs(
+                            nfsv41_sys::nfsstat4_NFS4ERR_BAD_COOKIE
+                                | nfsv41_sys::nfsstat4_NFS4ERR_NOT_SAME
+                        ))
+                    ) =>
             {
                 // A server may invalidate a READDIR continuation when this
                 // pass removed entries. Start a fresh pass rather than
                 // silently dropping the remaining directory contents.
                 stack.push(RmTask::Enter {
                     dir,
-                    cookie: 0,
+                    cookie: DirCookie::default(),
                     seen_cookies: HashSet::new(),
                     pass_changed: false,
                 });
@@ -630,7 +642,7 @@ impl NfsVecFs {
         };
 
         if entries.is_empty() {
-            match next_rm_scan(0, pass_changed) {
+            match next_rm_scan(DirCookie::default(), pass_changed) {
                 Some((cookie, pass_changed)) => stack.push(RmTask::Enter {
                     dir,
                     cookie,
@@ -641,19 +653,17 @@ impl NfsVecFs {
             }
             return Ok(());
         }
-        let next_cookie = entries.last().map(|entry| entry.cookie).unwrap_or(0);
-        validate_readdir_progress(cookie, next_cookie, &mut seen_cookies, None).map_err(
-            |cause| {
+        validate_readdir_progress(cookie.value, next_cookie.value, &mut seen_cookies, None)
+            .map_err(|cause| {
                 note_read_error(roots, dir.root, cause, options)
                     .err()
                     .unwrap_or(RemoveStop::Root)
-            },
-        )?;
+            })?;
 
         let mut file_names = Vec::new();
         let mut dir_names = Vec::new();
         for entry in entries {
-            let values = parse_attr_list(&[FATTR4_TYPE], &entry.attrs).map_err(|cause| {
+            let values = parse_metadata_attrs(&entry.attrmask, &entry.attrs).map_err(|cause| {
                 note_read_error(roots, dir.root, cause, options)
                     .err()
                     .unwrap_or(RemoveStop::Root)
@@ -689,7 +699,7 @@ impl NfsVecFs {
                     root,
                     is_root: false,
                 },
-                cookie: 0,
+                cookie: DirCookie::default(),
                 seen_cookies: HashSet::new(),
                 pass_changed: false,
             });
@@ -1094,7 +1104,7 @@ impl NfsVecFs {
         };
         let state = |fh| NfsDirectoryCursor {
             fh,
-            cookie: 0,
+            cookie: DirCookie::default(),
             seen_cookies: std::collections::HashSet::new(),
             buffered: VecDeque::new(),
         };
@@ -1180,7 +1190,7 @@ impl NfsVecFs {
         for (&index, result) in child_indices.iter().zip(child_pages) {
             states[index] = Some(result.and_then(|page| {
                 let mut seen_cookies = std::collections::HashSet::new();
-                validate_readdir_progress(0, page.cookie, &mut seen_cookies, None)
+                validate_readdir_progress(0, page.cookie.value, &mut seen_cookies, None)
                     .map_err(|cause| OpError::unknown(cause, None))?;
                 Ok(NfsDirectoryCursor {
                     fh: page.fh,
@@ -1238,8 +1248,13 @@ impl NfsVecFs {
                             error
                         }
                     })?;
-                    validate_readdir_progress(state.cookie, cookie, &mut state.seen_cookies, None)
-                        .map_err(|cause| OpError::unknown(cause, None))?;
+                    validate_readdir_progress(
+                        state.cookie.value,
+                        cookie.value,
+                        &mut state.seen_cookies,
+                        None,
+                    )
+                    .map_err(|cause| OpError::unknown(cause, None))?;
                     state.cookie = cookie;
                     state.buffered = entries.into();
                     Ok(state)
@@ -1263,7 +1278,7 @@ impl NfsVecFs {
                                 masks,
                                 ..Default::default()
                             };
-                            let values = parse_attr_list(&ids, &entry.attrs)
+                            let values = parse_metadata_attrs(&entry.attrmask, &entry.attrs)
                                 .map_err(|cause| OpError::unknown(cause, None))?;
                             apply_attrs(&mut attrs, &values);
                             seeds.push((attrs.ftype == VfType::Directory).then(|| {
@@ -1274,7 +1289,7 @@ impl NfsVecFs {
                             }));
                             output.push(attrs);
                         }
-                        let next = (!state.buffered.is_empty() || state.cookie != 0)
+                        let next = (!state.buffered.is_empty() || state.cookie.value != 0)
                             .then(|| DirPageCursor::new(state));
                         Ok((output, next, seeds))
                     })
@@ -1359,5 +1374,165 @@ mod root_state_tests {
             results[0].as_ref().unwrap_err().state(),
             FailureState::Unknown
         );
+    }
+}
+
+#[cfg(all(test, feature = "test-faults"))]
+mod verifier_tests {
+    use super::*;
+    use crate::rpc::{RpcClient, test_support::readdir_verifier_peer};
+    use std::{net::TcpListener, time::Duration};
+
+    fn fetch(
+        fs: &mut NfsVecFs,
+        mode: &str,
+        cursor: DirPageCursor,
+    ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
+        let masks = AttrMask::MODE | AttrMask::MTIME;
+        if mode == "scalar" {
+            fs.listdir_page_impl(Path::new("/"), masks, Some(cursor), 1, 10, true)
+        } else {
+            let mut pages = vfsi_core::internal::collect_vec_result(
+                fs.vlistdir_pages_nfs(&[Path::new("/")], masks, vec![Some(cursor)], 1, 10, true),
+                1,
+            )?;
+            let (entries, next, _) = pages.remove(0);
+            Ok((entries, next))
+        }
+    }
+
+    #[test]
+    fn live_directory_continuations_keep_verifiers_and_returned_attribute_masks() {
+        let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+            assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+            return;
+        };
+        let minor = std::env::var("VFSI_NFS_MINOR")
+            .unwrap_or_else(|_| "1".into())
+            .parse()
+            .unwrap();
+        for mode in ["scalar", "vector", "child"] {
+            for sparse in [false, true] {
+                let mut fs = NfsVecFs::builder(&server)
+                    .minor_version(Some(minor))
+                    .auto_reconnect(false)
+                    .connect()
+                    .unwrap();
+                let root = fs.nfs.root().clone();
+                let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+                let address = listener.local_addr().unwrap();
+                let peer = readdir_verifier_peer(listener, sparse);
+                let rpc = RpcClient::connect_with_timeouts(
+                    &address.to_string(),
+                    Duration::from_secs(2),
+                    Duration::from_secs(2),
+                )
+                .unwrap();
+                let original = fs.nfs.replace_test_rpc(rpc);
+                let cursor = if mode == "child" {
+                    DirPageCursor::new(NfsChildDirectoryCursor {
+                        parent: root,
+                        name: Box::from(b"child".as_slice()),
+                    })
+                } else {
+                    DirPageCursor::new(NfsDirectoryCursor {
+                        fh: root,
+                        cookie: Default::default(),
+                        seen_cookies: HashSet::new(),
+                        buffered: VecDeque::new(),
+                    })
+                };
+                let result = fetch(&mut fs, mode, cursor).and_then(|(first, next)| {
+                    let (second, next) = fetch(&mut fs, mode, next.expect("first page continues"))?;
+                    assert!(next.is_none(), "EOF must not require a third RPC");
+                    Ok((first, second))
+                });
+                fs.nfs.replace_test_rpc(original);
+                let observed = peer.join().unwrap();
+                fs.shutdown().unwrap();
+                let (first, second) =
+                    result.unwrap_or_else(|error| panic!("{mode}/sparse={sparse}: {error:?}"));
+                assert_eq!(observed, [(0, [0; 8]), (42, [0x7e; 8])]);
+                for (entries, name) in [(first, "one"), (second, "two")] {
+                    assert_eq!(entries.len(), 1);
+                    assert_eq!(entries[0].file.path().unwrap(), Path::new("/").join(name));
+                    assert_eq!(entries[0].returned.contains(AttrMask::MODE), !sparse);
+                    assert!(entries[0].returned.contains(AttrMask::MTIME));
+                    assert_eq!(
+                        (entries[0].mtime_sec, entries[0].mtime_nsec),
+                        (1_700_000_001, 123)
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn live_mutating_scan_restarts_invalid_cookies_with_zero_verifier() {
+        use std::sync::Arc;
+        use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+        let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+            assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+            return;
+        };
+        let minor = std::env::var("VFSI_NFS_MINOR")
+            .unwrap_or_else(|_| "1".into())
+            .parse()
+            .unwrap();
+        let mut fs = NfsVecFs::connect_minor(&server, minor).unwrap();
+        for status in [nfsstat4_NFS4ERR_BAD_COOKIE, nfsstat4_NFS4ERR_NOT_SAME] {
+            for (value, changed, restart) in
+                [(42, true, true), (42, false, false), (0, true, false)]
+            {
+                let fault = Arc::new(FaultScript::one(
+                    OpenFaultPoint::BeforeRemovePage { cookie: value },
+                    VfError::nfs(None, status),
+                ));
+                fs.set_fault_injector(fault.clone());
+                let dir = RemoveDir {
+                    fh: fs.nfs.root().clone(),
+                    parent: None,
+                    name: Box::from([]),
+                    root: 0,
+                    is_root: true,
+                };
+                let mut stack = Vec::new();
+                let mut roots = vec![RemoveRoot::Active];
+                let result = fs.enter_directory(
+                    dir,
+                    DirCookie {
+                        value,
+                        verifier: [7; 8],
+                    },
+                    HashSet::from([42]),
+                    changed,
+                    &mut stack,
+                    &mut HashSet::new(),
+                    &mut roots,
+                    RemoveOptions::new(),
+                );
+                assert!(fault.is_consumed());
+                assert_eq!(result.is_ok(), restart);
+                if restart {
+                    match stack.pop().expect("restart queued") {
+                        RmTask::Enter {
+                            cookie,
+                            seen_cookies,
+                            pass_changed,
+                            ..
+                        } => {
+                            assert_eq!(cookie, DirCookie::default());
+                            assert!(seen_cookies.is_empty() && !pass_changed);
+                        }
+                        _ => panic!("expected a fresh directory scan"),
+                    }
+                } else {
+                    assert!(stack.is_empty());
+                    assert!(
+                        matches!(&roots[0], RemoveRoot::Failed(error) if error.cause().status() == Some(vfsi_core::StatusCode::Nfs(status)))
+                    );
+                }
+            }
+        }
+        fs.shutdown().unwrap();
     }
 }

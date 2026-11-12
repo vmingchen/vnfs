@@ -81,7 +81,7 @@ impl Scan {
         backend: &mut NfsVecFs,
         handle: &NfsFh,
         relative: &[u8],
-        mut first: (Vec<DirEntry>, u64),
+        mut first: (Vec<DirEntry>, DirCookie),
         strategy: Strategy,
     ) {
         loop {
@@ -107,7 +107,7 @@ impl Scan {
                     });
                 }
             }
-            if cookie == 0 {
+            if cookie.value == 0 {
                 return;
             }
             first = {
@@ -131,7 +131,7 @@ impl Scan {
 fn scan(backend: &mut NfsVecFs, root: &NfsFh, strategy: Strategy) -> Scan {
     let mut result = Scan::default();
     let first = {
-        let page_ops = &[(root.clone(), 0)];
+        let page_ops = &[(root.clone(), DirCookie::default())];
         crate::client::collect_rpc_results(
             backend
                 .nfs
@@ -151,7 +151,7 @@ fn scan(backend: &mut NfsVecFs, root: &NfsFh, strategy: Strategy) -> Scan {
         if strategy.handles {
             let ops: Vec<_> = batch
                 .iter()
-                .map(|work| (work.handle.clone().unwrap(), 0))
+                .map(|work| (work.handle.clone().unwrap(), DirCookie::default()))
                 .collect();
             let pages = {
                 let page_ops = &ops;

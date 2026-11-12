@@ -310,7 +310,7 @@ impl HandleBackend for NfsVecFs {
             VfPathBase::Abs => self.server_path(&Path::new("/").join(pathname)),
             VfPathBase::Cwd => self.server_path(pathname),
         };
-        let full = path_from_bytes(&normalize_bytes(path_bytes(&full)));
+        let full = PathBuf::from(OsString::from_vec(normalize_bytes(path_bytes(&full))));
         let create = flags & O_CREAT != 0;
         let excl = flags & O_EXCL != 0;
         // Exclusive creation tests the directory entry itself, including a

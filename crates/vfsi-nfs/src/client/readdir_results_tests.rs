@@ -102,7 +102,10 @@ fn readdir_vectors_preserve_pages_statuses_and_exact_submission_boundaries() {
                     })
                     .collect::<Vec<_>>()
             } else {
-                let ops: Vec<_> = handles.into_iter().map(|fh| (fh, 0)).collect();
+                let ops: Vec<_> = handles
+                    .into_iter()
+                    .map(|fh| (fh, DirCookie::default()))
+                    .collect();
                 client
                     .readdir_pages_bounded(&ops, &[FATTR4_TYPE], 4096)
                     .unwrap()
@@ -127,7 +130,7 @@ fn readdir_vectors_preserve_pages_statuses_and_exact_submission_boundaries() {
                     assert_eq!(entries.len(), 1);
                     assert_eq!(entries[0].name, b"leaf");
                     assert_eq!(entries[0].attrs.len(), 4);
-                    assert_eq!(cookie, 0);
+                    assert_eq!(cookie.value, 0);
                 }
             }
             match phase {
@@ -176,7 +179,7 @@ fn readdir_empty_and_whole_vector_rejection_do_not_dispatch() {
     client.max_ops = 2;
     assert!(
         client
-            .readdir_pages(&[(root.clone(), 0)], &[FATTR4_TYPE])
+            .readdir_pages(&[(root.clone(), DirCookie::default())], &[FATTR4_TYPE])
             .is_err()
     );
     assert!(
@@ -193,4 +196,131 @@ fn readdir_response_budgets_follow_each_actual_wire_wave() {
     assert_eq!(readdir_response_limits(65536, 2, 32768), (8192, 32768));
     assert_eq!(readdir_response_limits(65536, 1, 32768), (8192, 32768));
     assert_eq!(readdir_response_limits(1024, 1, 4096), (256, 1024));
+}
+
+#[test]
+fn filtered_pages_follow_verifiers_and_reject_cycles_and_continuation_failures() {
+    use crate::rpc::{RpcClient, test_support::readdir_filtered_peer};
+    use std::{net::TcpListener, time::Duration};
+    let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+        assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+        return;
+    };
+    let minor = std::env::var("VFSI_NFS_MINOR")
+        .unwrap_or_else(|_| "1".into())
+        .parse()
+        .unwrap();
+    for mode in ["scalar", "vector", "child"] {
+        for outcome in ["success", "cycle", "status"] {
+            let mut client = NfsClient::connect_minor(&server, minor).unwrap();
+            let root = client.root().clone();
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let address = listener.local_addr().unwrap();
+            let peer = readdir_filtered_peer(listener, outcome);
+            let rpc = RpcClient::connect_with_timeouts(
+                &address.to_string(),
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+            )
+            .unwrap();
+            let original = client.replace_test_rpc(rpc);
+            let result = match mode {
+                "scalar" => client
+                    .readdir_bounded(&root, DirCookie::default(), &[FATTR4_TYPE], 4096)
+                    .map_err(|error| {
+                        vfsi_core::OpError::failed(vfsi_core::error_from_rpc(error, None), None)
+                    }),
+                "vector" => client
+                    .readdir_pages_bounded(&[(root, DirCookie::default())], &[FATTR4_TYPE], 4096)
+                    .unwrap()
+                    .remove(0),
+                _ => client
+                    .readdir_children_bounded(&[(root, b"child".to_vec())], &[FATTR4_TYPE], 4096)
+                    .unwrap()
+                    .remove(0)
+                    .map(|page| (page.entries, page.cookie)),
+            };
+            client.replace_test_rpc(original);
+            let observed = peer.join().unwrap();
+            client.shutdown().unwrap();
+            assert_eq!(observed, [(0, [0; 8]), (42, [0x7e; 8])], "{mode}/{outcome}");
+            match outcome {
+                "success" => {
+                    let (entries, cookie) = result.unwrap();
+                    assert_eq!(entries.len(), 1);
+                    assert_eq!(entries[0].name, b"two");
+                    assert_eq!(cookie.value, 0);
+                }
+                "cycle" => assert!(result.unwrap_err().cause().is_transport()),
+                _ => {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.state(), FailureState::Failed);
+                    assert_eq!(
+                        error.cause().status(),
+                        Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_BAD_COOKIE))
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn filtered_continuation_failures_preserve_visible_and_independent_siblings() {
+    use crate::rpc::{RpcClient, test_support::readdir_filtered_peer};
+    use std::{net::TcpListener, time::Duration};
+    let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+        assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+        return;
+    };
+    for outcome in ["siblings-status", "siblings-lost"] {
+        let mut client = NfsClient::connect_minor(&server, 1).unwrap();
+        let root = client.root().clone();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = readdir_filtered_peer(listener, outcome);
+        let rpc = RpcClient::connect_with_timeouts(
+            &address.to_string(),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let original = client.replace_test_rpc(rpc);
+        // The peer serves each filtered sibling independently: an ordinary status
+        // must not suppress the next input, unlike a lost transport reply.
+        let results = client
+            .readdir_pages_bounded(
+                &[
+                    (root.clone(), DirCookie::default()),
+                    (root.clone(), DirCookie::default()),
+                    (root, DirCookie::default()),
+                ],
+                &[FATTR4_TYPE],
+                4096,
+            )
+            .unwrap();
+        client.replace_test_rpc(original);
+        let observed = peer.join().unwrap();
+        client.shutdown().unwrap();
+        let first = results[0].as_ref().unwrap_err();
+        let last = results[2].as_ref().unwrap_err();
+        assert_eq!(results[1].as_ref().unwrap().0[0].name, b"x");
+        assert_eq!(last.state(), FailureState::Failed);
+        if outcome == "siblings-status" {
+            assert_eq!(observed.len(), 3);
+            assert_eq!(first.state(), FailureState::Failed);
+            assert_eq!(
+                last.cause().status(),
+                Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_BAD_COOKIE))
+            );
+        } else {
+            assert_eq!(
+                observed.len(),
+                2,
+                "no continuation dispatched after reply loss"
+            );
+            assert_eq!(first.state(), FailureState::Unknown);
+            assert!(last.cause().is_transport());
+        }
+    }
 }

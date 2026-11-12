@@ -106,7 +106,7 @@ impl NfsVecFs {
 
     /// Connect using explicit protocol, timeout, and authentication options.
     pub fn connect_with_options(host: &str, options: NfsConnectOptions) -> VfResult<NfsVecFs> {
-        let root = path_from_bytes(&normalize_bytes(path_bytes(&options.root)));
+        let root = OsString::from_vec(normalize_bytes(path_bytes(&options.root))).into();
         let connection = ConnectionConfig {
             telemetry: None,
             host: Box::from(host),
@@ -269,9 +269,6 @@ impl NfsVecFs {
         replacement.recovery_policy = self.recovery_policy;
         replacement.auto_reconnect = self.auto_reconnect;
         replacement.cwd = self.cwd.clone();
-        replacement.next_fd = self.next_fd;
-        replacement.open_dirs = self.open_dirs.clone();
-        replacement.dir_owner = self.dir_owner;
         replacement.merged_mode = self.merged_mode;
         replacement.server_copy_stats = self.server_copy_stats;
         replacement.observer = self.observer.clone();

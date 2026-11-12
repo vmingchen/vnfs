@@ -128,7 +128,10 @@ impl NfsMount {
             masks: AttrMask::identity(),
             ..VfAttrs::default()
         }];
-        filesystem.vgetattrs_impl(&mut attrs)?;
+        vfsi_core::internal::collect_vec_result(
+            filesystem.vgetattrs_impl(&mut attrs),
+            attrs.len(),
+        )?;
         vfsi_core::metadata_from_attrs(attrs.into_iter().next().unwrap())
             .fs_obj_id()
             .ok_or_else(|| self.stale())
@@ -533,10 +536,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn wrong_remote_identity_and_connection_overrides_are_rejected() {
+    fn test_mount() -> NfsMount {
         let info = parse_mount(LINE).unwrap();
-        let mount = NfsMount {
+        NfsMount {
             root: info.export.clone(),
             local_path: "/dev/null/missing-mount".into(),
             info,
@@ -548,7 +550,12 @@ mod tests {
                 gid: 0,
                 groups: vec![],
             },
-        };
+        }
+    }
+
+    #[test]
+    fn wrong_remote_identity_and_connection_overrides_are_rejected() {
+        let mount = test_mount();
         assert!(mount.verify_file_id(123).is_ok());
         assert_eq!(
             mount.verify_file_id(124).unwrap_err().raw_code(),
@@ -592,5 +599,45 @@ mod tests {
             );
             assert_eq!(error.path(), Some(mount.local_path.as_path()));
         }
+    }
+    #[cfg(feature = "test-faults")]
+    #[test]
+    fn remote_mount_identity_preserves_getattr_item_failures() {
+        use std::sync::Arc;
+        use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+        let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+            assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+            return;
+        };
+        let minor = std::env::var("VFSI_NFS_MINOR")
+            .unwrap_or_else(|_| "1".into())
+            .parse()
+            .unwrap();
+        let mut filesystem = NfsVecFs::builder(&server)
+            .minor_version(Some(minor))
+            .auto_reconnect(false)
+            .connect()
+            .unwrap();
+        for cause in [
+            VfError::nfs(None, nfsv41_sys::nfsstat4_NFS4ERR_ACCESS),
+            VfError::transport_with_kind(
+                None,
+                vfsi_core::TransportKind::Connection,
+                "identity lookup disconnected",
+            ),
+        ] {
+            let fault = Arc::new(FaultScript::one(
+                OpenFaultPoint::BeforeGetattrDispatch,
+                cause.clone(),
+            ));
+            filesystem.set_fault_injector(fault.clone());
+            let error = test_mount().remote_identity(&mut filesystem).unwrap_err();
+            assert!(fault.is_consumed());
+            assert_eq!(error.status(), cause.status());
+            assert_eq!(error.transport_kind(), cause.transport_kind());
+            assert_eq!(error.message(), cause.message());
+            assert_eq!(error.index(), Some(0));
+        }
+        filesystem.shutdown().unwrap();
     }
 }

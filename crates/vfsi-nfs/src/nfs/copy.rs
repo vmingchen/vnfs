@@ -324,38 +324,26 @@ impl NfsVecFs {
                 Err(error) => output[index] = Some(Err(error)),
             }
         }
-        let copies: Vec<_> = ready
-            .iter()
-            .map(|&index| {
-                let source = &self.open_files[&src[index].as_ref().unwrap().fd().unwrap()];
-                let destination = &self.open_files[&dst[index].as_ref().unwrap().fd().unwrap()];
-                crate::client::CopyOp {
-                    src_fh: source.fh.clone(),
-                    src_stateid: source.stateid,
-                    dst_fh: destination.fh.clone(),
-                    dst_stateid: destination.stateid,
-                    src_offset: pairs[index].src_offset,
-                    dst_offset: pairs[index].dst_offset,
-                    count: pairs[index].length.unwrap_or(0),
-                }
-            })
-            .collect();
         // Identity dependencies retain the existing serial backend semantics;
         // unique OPEN owners let us reuse the admitted handles without reopening.
-        let aliases = copy_pairs_alias(copies.iter().map(|copy| (&copy.src_fh, &copy.dst_fh)));
+        let aliases = copy_pairs_alias(ready.iter().map(|&index| {
+            let source = &self.open_files[&src[index].as_ref().unwrap().fd().unwrap()];
+            let destination = &self.open_files[&dst[index].as_ref().unwrap().fd().unwrap()];
+            (&source.fh, &destination.fh)
+        }));
         if aliases {
             for (position, &index) in ready.iter().enumerate() {
                 self.copy_opened_batch(
                     pairs,
                     &src,
+                    &dst,
                     &ready[position..position + 1],
-                    &copies[position..position + 1],
                     &mut output,
                 );
                 debug_assert!(output[index].is_some());
             }
         } else {
-            self.copy_opened_batch(pairs, &src, &ready, &copies, &mut output);
+            self.copy_opened_batch(pairs, &src, &dst, &ready, &mut output);
         }
         let mut cleanup = Vec::new();
         let mut owners = Vec::new();
@@ -393,8 +381,8 @@ impl NfsVecFs {
         &mut self,
         pairs: &[ExtentPair],
         sources: &[Option<FileOperand>],
+        destinations: &[Option<FileOperand>],
         indices: &[usize],
-        copies: &[crate::client::CopyOp],
         output: &mut [Option<vfsi_core::OpResult<()>>],
     ) {
         use vfsi_core::OpError;
@@ -455,6 +443,25 @@ impl NfsVecFs {
                 Err(error) => output[index] = Some(Err(copy_after_effect(error))),
             }
         }
+        // GETATTR can recover the session and replace every retained stateid.
+        // Snapshot only after that recovery, including each serial alias batch.
+        let copies: Vec<_> = indices
+            .iter()
+            .map(|&index| {
+                let source = &self.open_files[&sources[index].as_ref().unwrap().fd().unwrap()];
+                let destination =
+                    &self.open_files[&destinations[index].as_ref().unwrap().fd().unwrap()];
+                crate::client::CopyOp {
+                    src_fh: source.fh.clone(),
+                    src_stateid: source.stateid,
+                    dst_fh: destination.fh.clone(),
+                    dst_stateid: destination.stateid,
+                    src_offset: pairs[index].src_offset,
+                    dst_offset: pairs[index].dst_offset,
+                    count: pairs[index].length.unwrap_or(0),
+                }
+            })
+            .collect();
         let mut totals = vec![0u64; copies.len()];
         let mut pending: Vec<_> = (0..indices.len())
             .filter(|&position| output[indices[position]].is_none() && lengths[position] != Some(0))
@@ -834,5 +841,98 @@ mod uncached_reply_tests {
             ))
         );
         assert!(!copy_rejection_allows_fallback(&result, 0));
+    }
+}
+
+#[cfg(all(test, feature = "test-faults", feature = "server-copy"))]
+mod copy_metadata_recovery_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use vfsi_core::internal::faults::FaultInjector;
+
+    struct RejectMetadataOnce {
+        calls: AtomicUsize,
+        fail_on: usize,
+    }
+
+    impl FaultInjector for RejectMetadataOnce {
+        fn check(&self, point: &OpenFaultPoint) -> VfResult<()> {
+            if matches!(point, OpenFaultPoint::BeforeGetattrDispatch)
+                && self.calls.fetch_add(1, Ordering::Relaxed) == self.fail_on
+            {
+                return Err(VfError::nfs(None, nfsstat4_NFS4ERR_BADSESSION));
+            }
+            Ok(())
+        }
+    }
+
+    fn copy_after_metadata_recovery(aliases: bool) {
+        let server = std::env::var("VFSI_NFS_SERVER").expect("requires an NFS 4.2 COPY fixture");
+        let name = format!("copy-metadata-recovery-{}-{aliases}", std::process::id());
+        let mut fs = NfsVecFs::connect_with_options(
+            &server,
+            NfsConnectOptions {
+                minorversion: Some(2),
+                client_owner: Some(name.as_bytes().to_vec()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let root = PathBuf::from(format!("/git/{name}"));
+        fs.ensure_dir_impl(&root, 0o755).unwrap();
+        let source = root.join("source");
+        let file = fs
+            .open_raw_impl(&source, libc::O_CREAT | libc::O_TRUNC | libc::O_RDWR, 0o600)
+            .unwrap();
+        fs.write_raw_impl(&file, 0, b"payload").unwrap();
+        fs.close_impl(&file).unwrap();
+        let targets: Vec<_> = (0..if aliases { 2 } else { 1 })
+            .map(|index| root.join(format!("target-{index}")))
+            .collect();
+        let pairs: Vec<_> = targets
+            .iter()
+            .map(|target| ExtentPair::from_os_paths(&source, 0, target, 0, Some(7)))
+            .collect();
+        let injector = Arc::new(RejectMetadataOnce {
+            calls: AtomicUsize::new(0),
+            fail_on: usize::from(aliases),
+        });
+        fs.set_fault_injector(injector.clone());
+        let outcomes = fs.vcopy_data_nfs(&pairs).unwrap();
+        let enabled = fs.server_copy_enabled();
+        let stats = fs.server_copy_stats();
+        let handles = fs.open_files.len();
+        let contents: Vec<_> = targets
+            .iter()
+            .map(|target| {
+                fs.read_file_impl(&FileOperand::from_os_path(target), 16)
+                    .unwrap()
+            })
+            .collect();
+        fs.remove_impl(&root, true).unwrap();
+
+        assert!(
+            injector.calls.load(Ordering::Relaxed) > injector.fail_on + 1,
+            "the rejected metadata query must recover and retry"
+        );
+        assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
+        assert!(enabled, "metadata recovery must not disable server COPY");
+        assert_eq!(stats.fallbacks, 0);
+        assert_eq!(stats.operations, pairs.len() as u64);
+        assert_eq!(stats.requests, if aliases { 2 } else { 1 });
+        assert_eq!(handles, 0, "all admitted owners must close after recovery");
+        assert!(contents.iter().all(|data| data == b"payload"));
+    }
+
+    #[test]
+    #[ignore = "requires live NFSv4.2 server COPY"]
+    fn independent_copy_metadata_recovery_refreshes_stateids() {
+        copy_after_metadata_recovery(false);
+    }
+
+    #[test]
+    #[ignore = "requires live NFSv4.2 server COPY"]
+    fn aliased_copy_metadata_recovery_refreshes_later_pair_stateids() {
+        copy_after_metadata_recovery(true);
     }
 }

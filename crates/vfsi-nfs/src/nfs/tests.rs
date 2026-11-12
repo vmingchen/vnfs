@@ -105,12 +105,20 @@ fn removal_scan_continues_cookies_and_verifies_changed_passes_once() {
     // These are transition-helper assertions, not a simulation of the
     // production remover. A continuation must never restart mid-pass.
     for cookie in [1, 2, 64, u64::MAX] {
+        let cookie = DirCookie {
+            value: cookie,
+            verifier: [7; 8],
+        };
         for changed in [false, true] {
             assert_eq!(next_rm_scan(cookie, changed), Some((cookie, changed)));
         }
     }
-    assert_eq!(next_rm_scan(0, true), Some((0, false)));
-    assert_eq!(next_rm_scan(0, false), None);
+    let eof = DirCookie {
+        value: 0,
+        verifier: [7; 8],
+    };
+    assert_eq!(next_rm_scan(eof, true), Some((DirCookie::default(), false)));
+    assert_eq!(next_rm_scan(eof, false), None);
 }
 
 #[test]
@@ -220,12 +228,20 @@ fn walk_page_decoder_stops_at_entry_and_path_budgets() {
         crate::client::DirEntry {
             name: b"one".to_vec(),
             cookie: 1,
-            attrs: Vec::new(),
+            attrmask: bitmap4 {
+                bitmap4_len: 1,
+                map: [1 << FATTR4_TYPE, 0, 0],
+            },
+            attrs: nfs_ftype4_NF4REG.to_be_bytes().to_vec(),
         },
         crate::client::DirEntry {
             name: b"two".to_vec(),
             cookie: 0,
-            attrs: Vec::new(),
+            attrmask: bitmap4 {
+                bitmap4_len: 1,
+                map: [1 << FATTR4_TYPE, 0, 0],
+            },
+            attrs: nfs_ftype4_NF4REG.to_be_bytes().to_vec(),
         },
     ];
     let mut count = 0;
@@ -241,7 +257,6 @@ fn walk_page_decoder_stops_at_entry_and_path_budgets() {
         Path::new("/root"),
         Path::new("/root"),
         AttrMask::empty(),
-        &[],
         &page,
         options,
         &mut count,
@@ -266,7 +281,6 @@ fn walk_page_decoder_stops_at_entry_and_path_budgets() {
         Path::new("/root"),
         Path::new("/root"),
         AttrMask::empty(),
-        &[],
         &page[..1],
         options,
         &mut count,
@@ -2412,4 +2426,188 @@ fn live_quarantined_identity_reconnects_fresh_and_reopens_exact_retained_objects
     fs.unlink_impl(&saved).unwrap();
     fs.unlink_impl(&path).unwrap();
     fs.shutdown().unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+fn cleanup_test_backend() -> Option<NfsVecFs> {
+    let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+        assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+        return None;
+    };
+    let minor = std::env::var("VFSI_NFS_MINOR")
+        .unwrap_or_else(|_| "1".into())
+        .parse()
+        .unwrap();
+    Some(NfsVecFs::connect_minor(&server, minor).unwrap())
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn live_cleanup_scalar_registration_failure_retains_remote_close() {
+    use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+    let Some(mut fs) = cleanup_test_backend() else {
+        return;
+    };
+    let path = PathBuf::from(format!("/cleanup-register-{}", std::process::id()));
+    let script = Arc::new(FaultScript::new([
+        (
+            OpenFaultPoint::BeforeRegister { index: 0 },
+            VfError::errno(None, libc::EMFILE as u32),
+        ),
+        (
+            OpenFaultPoint::BeforePathClose,
+            VfError::transport(None, "CLOSE unavailable"),
+        ),
+    ]));
+    fs.set_fault_injector(script.clone());
+    let error = fs
+        .open_raw_impl(&path, libc::O_CREAT | libc::O_RDWR, 0o600)
+        .unwrap_err();
+    assert_eq!(error.raw_code(), libc::EMFILE as u32);
+    assert!(script.is_consumed());
+    assert!(fs.open_files.is_empty());
+    let retained = fs.nfs.deferred_path_close_count();
+    fs.set_fault_injector(Arc::new(FaultScript::new([])));
+    fs.unlink_impl(&path).unwrap();
+    fs.shutdown().unwrap();
+    assert_eq!(
+        retained, 1,
+        "failed cleanup must retain its acquired OPEN state"
+    );
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn live_cleanup_lost_close_reply_does_not_block_later_vector_open() {
+    use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+    let Some(mut fs) = cleanup_test_backend() else {
+        return;
+    };
+    let path = PathBuf::from(format!("/cleanup-lost-close-{}", std::process::id()));
+    let file = fs
+        .open_raw_impl(&path, libc::O_CREAT | libc::O_RDWR, 0o600)
+        .unwrap();
+    let fault = Arc::new(FaultScript::one(
+        OpenFaultPoint::AfterCloseReply { index: 0 },
+        VfError::transport(None, "lost CLOSE reply"),
+    ));
+    fs.set_fault_injector(fault.clone());
+    let outcomes = fs.close_temporary_descriptors(vec![file]).unwrap();
+    assert!(outcomes[0].is_err() && fault.is_consumed());
+    assert_eq!(fs.deferred_descriptor_closes.len(), 1);
+    let opened = fs.vopen_raw_impl(&[path.as_path()], &[libc::O_RDONLY], &[0]);
+    assert!(
+        opened.is_ok(),
+        "terminal cleanup status must not poison later opens: {opened:?}"
+    );
+    let file = opened.unwrap().remove(0).unwrap();
+    assert!(fs.deferred_descriptor_closes.is_empty());
+    fs.close_impl(&file).unwrap();
+    fs.unlink_impl(&path).unwrap();
+    fs.shutdown().unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn live_cleanup_descriptor_drain_retires_exact_successes_and_terminal_states() {
+    for terminal in [false, true] {
+        let Some(mut fs) = cleanup_test_backend() else {
+            return;
+        };
+        let paths: Vec<_> = (0..3)
+            .map(|i| {
+                PathBuf::from(format!(
+                    "/cleanup-drain-{}-{terminal}-{i}",
+                    std::process::id()
+                ))
+            })
+            .collect();
+        let files: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                fs.open_raw_impl(path, libc::O_CREAT | libc::O_RDWR, 0o600)
+                    .unwrap()
+            })
+            .collect();
+        let original = fs.open_files[&files[1].fd().unwrap()].fh.clone();
+        let invalid = NfsFh::test_from_bytes(vec![0xff; 32]);
+        if terminal {
+            let open = &fs.open_files[&files[1].fd().unwrap()];
+            fs.nfs.close(&open.fh, &open.stateid).unwrap();
+        } else {
+            fs.open_files.get_mut(&files[1].fd().unwrap()).unwrap().fh = invalid.clone();
+        }
+        for file in files {
+            fs.deferred_descriptor_closes
+                .push(fs.open_files.remove(&file.fd().unwrap()).unwrap());
+        }
+        let result = fs.drain_deferred_descriptor_closes();
+        let retained = fs.deferred_descriptor_closes.len();
+        // Repair the synthetic fault before checking the regression assertions.
+        fs.deferred_descriptor_closes.retain_mut(|open| {
+            if terminal && open.fh == original {
+                return false;
+            }
+            if open.fh == invalid {
+                open.fh = original.clone();
+            }
+            true
+        });
+        fs.drain_deferred_descriptor_closes().unwrap();
+        for path in paths {
+            fs.unlink_impl(&path).unwrap();
+        }
+        fs.shutdown().unwrap();
+        assert_eq!(result.is_ok(), terminal, "{result:?}");
+        assert_eq!(
+            retained,
+            usize::from(!terminal),
+            "only unresolved owners may remain"
+        );
+    }
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn live_cleanup_partial_path_open_failure_retains_failed_batch_cleanup() {
+    use crate::client::{OpenCreate, OpenOp};
+    use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+    let Some(mut fs) = cleanup_test_backend() else {
+        return;
+    };
+    let root = fs.nfs.root().clone();
+    let name = format!("cleanup-open-batch-{}", std::process::id());
+    let dir = fs.nfs.mkdir(&root, &name).unwrap();
+    let (file, state) = fs
+        .nfs
+        .open(
+            &dir,
+            b"file",
+            OPEN4_SHARE_ACCESS_READ,
+            OpenCreate::Unchecked,
+        )
+        .unwrap();
+    fs.nfs.close(&file, &state).unwrap();
+    let ops: Vec<_> = [b"file".as_slice(), b"missing"]
+        .into_iter()
+        .map(|name| OpenOp {
+            dir: dir.clone(),
+            name: name.to_vec(),
+            access: OPEN4_SHARE_ACCESS_READ,
+            create: OpenCreate::NoCreate,
+        })
+        .collect();
+    let fault = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforePathCloseBatch,
+        VfError::transport(None, "cleanup unavailable"),
+    ));
+    fs.set_fault_injector(fault.clone());
+    assert!(fs.nfs.open_many_path(&ops).is_err());
+    assert!(fault.is_consumed());
+    let retained = fs.nfs.deferred_path_close_count();
+    fs.set_fault_injector(Arc::new(FaultScript::new([])));
+    fs.nfs.remove(&dir, "file").unwrap();
+    fs.nfs.remove(&root, &name).unwrap();
+    fs.shutdown().unwrap();
+    assert_eq!(retained, 1);
 }

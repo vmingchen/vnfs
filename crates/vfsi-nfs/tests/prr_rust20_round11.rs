@@ -107,6 +107,63 @@ mod short_merged {
     use nfsv41_sys::OPEN4_SHARE_ACCESS_BOTH;
     use vfsi_nfs::client::{CloseOp, FileRef, NfsClient, OpenCreate, PathReadOp, PathWriteOp};
 
+    #[test]
+    fn path_read_stops_continuations_at_eof_and_keeps_later_siblings() {
+        for close in [false, true] {
+            for size in [0, 3] {
+                let Some((mut client, dir, path, _)) = fixture(&format!("eof-{size}"), close)
+                else {
+                    return;
+                };
+                client.max_response_bytes = 4096;
+                let (file, state) = client
+                    .open(&dir, b"file", OPEN4_SHARE_ACCESS_BOTH, OpenCreate::NoCreate)
+                    .unwrap();
+                client.setattr(&file, None, Some(size)).unwrap();
+                client.close(&file, &state).unwrap();
+                let (sibling, state) = client
+                    .open(
+                        &dir,
+                        b"sibling",
+                        OPEN4_SHARE_ACCESS_BOTH,
+                        OpenCreate::Unchecked,
+                    )
+                    .unwrap();
+                client.write(&sibling, &state, 0, b"sibling").unwrap();
+                client.close(&sibling, &state).unwrap();
+                let mut sibling_path = path[..path.len() - 4].to_vec();
+                sibling_path.extend_from_slice(b"sibling");
+                let ops = [
+                    PathReadOp {
+                        stateid: None,
+                        file: FileRef::Path(path.clone()),
+                        offset: 0,
+                        count: client.read_compound_bytes() * 8,
+                    },
+                    PathReadOp {
+                        stateid: None,
+                        file: FileRef::Path(sibling_path),
+                        offset: 1,
+                        count: 3,
+                    },
+                ];
+                let _ = vfsi_nfs::compound::thread_compound_stats();
+                let outcome = client.readv_path_compound(&ops, close).unwrap();
+                let compounds = vfsi_nfs::compound::thread_compound_stats().0;
+                let (data, eof) = outcome.results[0].as_ref().unwrap();
+                assert_eq!(data.len(), size as usize);
+                assert!(*eof);
+                assert_eq!(outcome.results[1].as_ref().unwrap().0, b"ibl");
+                assert!(
+                    compounds <= 3,
+                    "EOF must stop continuation: {compounds} compounds, close={close}, size={size}"
+                );
+                client.remove(&dir, "sibling").unwrap();
+                cleanup(&mut client, &dir, &path, outcome.opened);
+            }
+        }
+    }
+
     fn fixture(
         kind: &str,
         close: bool,

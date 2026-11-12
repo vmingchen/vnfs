@@ -940,6 +940,7 @@ jobs:
           cargo test -p vfsi-nfs --features "server-copy test-faults" --test nfs -- --test-threads=1
           # These wire-peer regressions require a real negotiated NFS session.
           cargo test -p vfsi-nfs --features "server-copy test-faults" --lib uncached_reply -- --test-threads=1
+          cargo test -p vfsi-nfs --features "server-copy test-faults" --lib copy_metadata_recovery -- --ignored --test-threads=1
       - name: Require server-side COPY through the C ABI
         env:
           VFSI_REQUIRE_SERVER_COPY: 1

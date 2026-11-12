@@ -241,3 +241,77 @@ fn uncached_reply_keeps_merged_read_and_write_inputs_unknown() {
         }
     }
 }
+
+#[test]
+fn live_scalar_write_rejects_invalid_count_and_stability() {
+    for count in [0u32, 2, 3, 4] {
+        for committed in [0u32, 1, 2, 3] {
+            let Some(mut client) = live_client() else {
+                return;
+            };
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let address = listener.local_addr().unwrap();
+            let peer = thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let request = read_record(&mut socket).unwrap();
+                let word = |at| u32::from_be_bytes(request[at..at + 4].try_into().unwrap());
+                let mut at = 24;
+                for _ in 0..2 {
+                    at += 8 + (word(at + 4) as usize).div_ceil(4) * 4;
+                }
+                at += 4 + (word(at) as usize).div_ceil(4) * 4 + 8;
+                assert_eq!(word(at), nfs_opnum4_NFS4_OP_SEQUENCE);
+                let mut payload = Vec::new();
+                for word in [0u32, 0, 3, nfs_opnum4_NFS4_OP_SEQUENCE, 0] {
+                    payload.extend_from_slice(&word.to_be_bytes());
+                }
+                payload.extend_from_slice(&request[at + 4..at + 28]);
+                for word in [
+                    0u32,
+                    0,
+                    0,
+                    nfs_opnum4_NFS4_OP_PUTFH,
+                    0,
+                    nfs_opnum4_NFS4_OP_WRITE,
+                    0,
+                    count,
+                    committed,
+                    0,
+                    0,
+                ] {
+                    payload.extend_from_slice(&word.to_be_bytes());
+                }
+                accepted_reply(&mut socket, &request, &payload);
+            });
+            let rpc = RpcClient::connect_with_timeouts(
+                &address.to_string(),
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+            )
+            .unwrap();
+            let original = std::mem::replace(&mut client.session.rpc, rpc);
+            let result = client.write(
+                &client.root().clone(),
+                &stateid4 {
+                    seqid: 0,
+                    other: [0; 12],
+                },
+                0,
+                b"abc",
+            );
+            client.session.rpc = original;
+            peer.join().unwrap();
+            if count <= 3 && committed == stable_how4_FILE_SYNC4 {
+                assert_eq!(result.unwrap(), (count, committed));
+            } else {
+                assert_eq!(
+                    result.unwrap_err().transport_kind,
+                    Some(vfsi_core::TransportKind::InvalidReply)
+                );
+            }
+        }
+    }
+}

@@ -1,5 +1,31 @@
 use super::*;
 
+fn established_test_session(rpc: RpcClient, slot_seqid: u32) -> Session {
+    Session {
+        rpc,
+        clientid: 0,
+        sessionid: [7; 16],
+        minorversion: 1,
+        slot_seqid,
+        create_session_seqid: 1,
+        session_created: false,
+        owns_clientid: false,
+        poisoned: false,
+        max_requestsize: 4096,
+        max_responsesize: 4096,
+        max_operations: 16,
+        open_owner: OpenOwner {
+            name: Vec::new(),
+            seqid: 0,
+        },
+        path_owner: OpenOwner {
+            name: Vec::new(),
+            seqid: 0,
+        },
+        client_owner: None,
+    }
+}
+
 #[test]
 fn file_review_session_sequence_wraps_on_the_wire_without_panicking() {
     use std::io::{Read, Write};
@@ -62,29 +88,7 @@ fn file_review_session_sequence_wraps_on_the_wire_without_panicking() {
         Duration::from_secs(5),
     )
     .unwrap();
-    let mut session = Session {
-        rpc,
-        clientid: 0,
-        sessionid: [7; 16],
-        minorversion: 1,
-        slot_seqid: u32::MAX - 1,
-        create_session_seqid: 1,
-        session_created: false,
-        owns_clientid: false,
-        poisoned: false,
-        max_requestsize: 4096,
-        max_responsesize: 4096,
-        max_operations: 16,
-        open_owner: OpenOwner {
-            name: Vec::new(),
-            seqid: 0,
-        },
-        path_owner: OpenOwner {
-            name: Vec::new(),
-            seqid: 0,
-        },
-        client_owner: None,
-    };
+    let mut session = established_test_session(rpc, u32::MAX - 1);
     for expected in [u32::MAX, 0, 1, 2] {
         let mut compound = Compound::new();
         let reply = session.compound(&mut compound).unwrap();
@@ -175,4 +179,64 @@ fn rejected_reused_identity_setup_does_not_destroy_original_client() {
     let result = original.compound(&mut probe).unwrap();
     original.expect_all_ok(&result).unwrap();
     original.shutdown().unwrap();
+}
+
+#[test]
+fn session_sequence_reply_identity_must_match_before_advancing() {
+    use crate::rpc::test_support::{accepted_reply, read_record};
+    use std::net::TcpListener;
+    for mismatch in ["session", "sequence", "slot"] {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let request = read_record(&mut socket).unwrap();
+            let mut payload = Vec::new();
+            for word in [0u32, 0, 1, nfs_opnum4_NFS4_OP_SEQUENCE, 0] {
+                payload.extend_from_slice(&word.to_be_bytes());
+            }
+            payload.extend_from_slice(&if mismatch == "session" {
+                [8; 16]
+            } else {
+                [7; 16]
+            });
+            for word in [
+                if mismatch == "sequence" { 18u32 } else { 17 },
+                if mismatch == "slot" { 1 } else { 0 },
+                0,
+                0,
+                0,
+            ] {
+                payload.extend_from_slice(&word.to_be_bytes());
+            }
+            accepted_reply(&mut socket, &request, &payload);
+            assert!(
+                read_record(&mut socket).is_err(),
+                "poisoned session must not send again"
+            );
+        });
+        let rpc = RpcClient::connect_with_timeouts(
+            &address.to_string(),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let mut session = established_test_session(rpc, 17);
+        let error = session
+            .compound(&mut Compound::new())
+            .err()
+            .expect("mismatched SEQUENCE must fail");
+        assert_eq!(
+            error.transport_kind,
+            Some(vfsi_core::TransportKind::InvalidReply)
+        );
+        assert!(session.poisoned);
+        assert_eq!(session.slot_seqid, 17);
+        assert!(session.compound(&mut Compound::new()).is_err());
+        drop(session);
+        peer.join().unwrap();
+    }
 }

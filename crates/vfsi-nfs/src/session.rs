@@ -304,6 +304,19 @@ impl Session {
         // A server may reject an oversized compound before executing
         // SEQUENCE, returning a valid compound result with no per-op results.
         if res.nops() > 0 && res.op_status(0) == nfsstat4_NFS4_OK {
+            // SAFETY: Compound validated this response against the prepended
+            // SEQUENCE opcode; its successful status selects sr_resok4.
+            let sequence = unsafe { res.op(0).nfs_resop4_u.opsequence.SEQUENCE4res_u.sr_resok4 };
+            if sequence.sr_sessionid != self.sessionid
+                || sequence.sr_sequenceid != self.slot_seqid
+                || sequence.sr_slotid != 0
+            {
+                self.poisoned = true;
+                return Err(RpcError::transport_with_kind(
+                    vfsi_core::TransportKind::InvalidReply,
+                    "SEQUENCE reply does not match the submitted session, sequence or slot",
+                ));
+            }
             // RFC 8881 section 2.10.6.1 requires MAX to wrap to zero.
             self.slot_seqid = self.slot_seqid.wrapping_add(1);
         }

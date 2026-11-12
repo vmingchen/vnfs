@@ -180,12 +180,24 @@ const SPECIAL_STATEID: stateid4 = stateid4 {
     other: [0; 12],
 };
 
+/// A READDIR position and the verifier returned with it. Start with Default;
+/// pass returned positions unchanged. A returned value of zero denotes EOF.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DirCookie {
+    pub value: u64,
+    pub verifier: verifier4,
+}
+
+/// One visible page and its continuation position (zero at EOF).
+pub type ReaddirPage = (Vec<DirEntry>, DirCookie);
+
 /// An entry returned by READDIR.
 #[derive(Clone, Debug)]
 pub struct DirEntry {
     pub name: Vec<u8>,
     pub cookie: u64,
-    /// Raw XDR-encoded attribute list, in the order requested.
+    /// The fields actually present in attrs, in increasing attribute-ID order.
+    pub attrmask: bitmap4,
     pub attrs: Vec<u8>,
 }
 
@@ -193,7 +205,7 @@ pub struct DirEntry {
 pub struct ChildListing {
     pub fh: NfsFh,
     pub entries: Vec<DirEntry>,
-    pub cookie: u64,
+    pub cookie: DirCookie,
 }
 
 /// One READ of a batched compound, `[PUTFH, READ]`.
@@ -211,6 +223,9 @@ pub struct WriteOp<'a> {
     pub offset: u64,
     pub data: &'a [u8],
 }
+
+/// Returned field bitmap and its XDR-encoded values.
+pub(crate) type ReturnedAttrs = (bitmap4, Vec<u8>);
 
 /// One GETATTR of a batched compound, `[PUTFH, GETATTR]`.
 pub struct GetattrOp {
@@ -964,6 +979,11 @@ use path_open_cleanup::record_path_open_owners;
 mod session_recovery_tests;
 
 impl NfsClient {
+    #[cfg(test)]
+    pub(crate) fn replace_test_rpc(&mut self, rpc: crate::rpc::RpcClient) -> crate::rpc::RpcClient {
+        std::mem::replace(&mut self.session.rpc, rpc)
+    }
+
     /// Inject one valid positive/zero short response in merged-path tests.
     #[cfg(feature = "test-faults")]
     pub fn test_short_merged_read_once(&mut self, count: usize) {
@@ -1071,7 +1091,7 @@ impl NfsClient {
     fn drain_deferred_path_closes(&mut self) -> RpcResult<()> {
         let mut remaining = std::mem::take(&mut self.deferred_path_closes).into_iter();
         while let Some(close) = remaining.next() {
-            match self.close_unregistered(&close.fh, &close.stateid) {
+            match self.close_cleanup_slot(&close.fh, &close.stateid, OwnerSlot::User) {
                 Ok(()) => {}
                 Err(error)
                     if matches!(
@@ -1974,9 +1994,11 @@ impl NfsClient {
         committed: u32,
         requested: usize,
     ) -> vfsi_core::OpResult<(u32, u32)> {
-        if count as usize > requested || committed > stable_how4_FILE_SYNC4 {
+        // All client WRITE requests use FILE_SYNC4. RFC 8881 section 18.32.3
+        // requires the acknowledgement to provide at least that durability.
+        if count as usize > requested || committed != stable_how4_FILE_SYNC4 {
             Err(vfsi_core::OpError::unknown(
-                vfsi_core::VfError::invalid_reply(None, "invalid NFS WRITE completion"),
+                vfsi_core::VfError::invalid_reply(None, "invalid NFS FILE_SYNC WRITE completion"),
                 None,
             ))
         } else {
@@ -2173,14 +2195,13 @@ impl NfsClient {
                 let timestamp = current_timestamp();
                 let update = verifier_cleanup_setattr(&fh, attrs, post_create_mode, timestamp);
                 if let Err(error) = collect_rpc_results(self.setattr_many(&[update]), 1) {
-                    let close = [CloseOp {
-                        fh: fh.clone(),
-                        stateid,
-                    }];
-                    let _ = match slot {
-                        OwnerSlot::User => self.close_many(&close),
-                        OwnerSlot::Path => self.close_many_path(&close),
-                    };
+                    self.close_open_cleanup(
+                        vec![CloseOp {
+                            fh: fh.clone(),
+                            stateid,
+                        }],
+                        slot,
+                    );
                     return Err(error);
                 }
             }
@@ -2361,7 +2382,7 @@ impl NfsClient {
     pub fn getattr_many_with_bitmap(
         &mut self,
         ops: &[GetattrOp],
-    ) -> vfsi_core::VecResult<(bitmap4, Vec<u8>)> {
+    ) -> vfsi_core::VecResult<ReturnedAttrs> {
         self.fixed_results::<2, _, _>(
             b"vstatfs_impl",
             ops,
@@ -2566,10 +2587,7 @@ impl NfsClient {
                         stateid: *stateid,
                     })
                     .collect();
-                let _ = match slot {
-                    OwnerSlot::User => client.close_many(&closes),
-                    OwnerSlot::Path => client.close_many_path(&closes),
-                };
+                client.close_open_cleanup(closes, slot);
             },
         )?;
         if matches!(slot, OwnerSlot::Path) {
@@ -2601,10 +2619,7 @@ impl NfsClient {
                         stateid: *stateid,
                     })
                     .collect();
-                let _ = match slot {
-                    OwnerSlot::User => self.close_many(&closes),
-                    OwnerSlot::Path => self.close_many_path(&closes),
-                };
+                self.close_open_cleanup(closes, slot);
                 return Err(error);
             }
         }
@@ -3203,14 +3218,10 @@ impl NfsClient {
                             continue;
                         }
                         let received = ok.count as usize;
-                        if received > requested || ok.committed > stable_how4_FILE_SYNC4 {
-                            errors[*caller] = Some(OpError::unknown(
-                                vfsi_core::VfError::invalid_reply(
-                                    None,
-                                    "invalid merged WRITE completion",
-                                ),
-                                None,
-                            ));
+                        if let Err(error) =
+                            Self::validate_write_completion(ok.count, ok.committed, requested)
+                        {
+                            errors[*caller] = Some(error);
                             continue;
                         }
                         if counts[*caller].unwrap_or(0) != part {
@@ -3852,6 +3863,12 @@ impl NfsClient {
                 if failed.is_some() || close_failed.is_some() {
                     break;
                 }
+                // The builder may have left the final input mid-request.
+                // EOF or a per-input failure ends that input, not its siblings.
+                if part_off != 0 && (eof[global] == Some(true) || errors[global].is_some()) {
+                    global += 1;
+                    part_off = 0;
+                }
                 if chunk_start == global && part_off == 0 {
                     failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
                     break;
@@ -3884,12 +3901,24 @@ impl NfsClient {
         &mut self,
         ops: &[PathGetattrOp],
     ) -> vfsi_core::VecResult<Vec<u8>> {
+        self.getattr_path_with_bitmap(ops).map(|results| {
+            results
+                .into_iter()
+                .map(|result| result.map(|(_, bytes)| bytes))
+                .collect()
+        })
+    }
+
+    pub(crate) fn getattr_path_with_bitmap(
+        &mut self,
+        ops: &[PathGetattrOp],
+    ) -> vfsi_core::VecResult<ReturnedAttrs> {
         use vfsi_core::{OpError, VfError, error_from_rpc};
         if !ops.is_empty() {
             self.ensure_usable()
                 .map_err(|error| error_from_rpc(error, None))?;
         }
-        let mut slots: Vec<Option<vfsi_core::OpResult<Vec<u8>>>> =
+        let mut slots: Vec<Option<vfsi_core::OpResult<ReturnedAttrs>>> =
             (0..ops.len()).map(|_| None).collect();
         let per_file = 4;
         let reserve = 16;
@@ -4015,7 +4044,7 @@ impl NfsClient {
             for &(input, start, end) in map.completed_ranges(&report) {
                 let result = (start..end)
                     .find(|&index| res.op(index).resop == nfs_opnum4_NFS4_OP_GETATTR)
-                    .map(|index| res.getattr_bytes(index))
+                    .map(|index| res.getattr_with_bitmap(index))
                     .ok_or_else(|| {
                         OpError::unknown(
                             VfError::invalid_reply(None, "missing completed GETATTR payload"),
@@ -4402,7 +4431,9 @@ impl NfsClient {
         let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         let ok = res.write(2);
-        Ok((ok.count, ok.committed))
+        Self::validate_write_completion(ok.count, ok.committed, data.len()).map_err(|error| {
+            RpcError::transport_with_kind(vfsi_core::TransportKind::InvalidReply, error.to_string())
+        })
     }
 
     /// Copy bytes entirely on an NFSv4.2 server. The source filehandle is
@@ -4499,7 +4530,32 @@ impl NfsClient {
     }
 
     pub(crate) fn close_unregistered(&mut self, fh: &NfsFh, stateid: &stateid4) -> RpcResult<()> {
-        self.close_cleanup_slot(fh, stateid, OwnerSlot::User)
+        let result = self.close_cleanup_slot(fh, stateid, OwnerSlot::User);
+        if result.as_ref().is_err_and(|error| {
+            !matches!(
+                error.status,
+                nfsstat4_NFS4ERR_BAD_STATEID | nfsstat4_NFS4ERR_OLD_STATEID
+            )
+        }) {
+            self.deferred_path_closes.push(CloseOp {
+                fh: fh.clone(),
+                stateid: *stateid,
+            });
+        }
+        result
+    }
+
+    // Preserve the original OPEN/setup error and the path owner's successful
+    // CLOSE sequence accounting. On failure even a partially closed batch is
+    // safe to retain: the drain consumes terminal stateids without replaying OPEN.
+    fn close_open_cleanup(&mut self, closes: Vec<CloseOp>, slot: OwnerSlot) {
+        let result = match slot {
+            OwnerSlot::User => self.close_many(&closes),
+            OwnerSlot::Path => self.close_many_path(&closes),
+        };
+        if result.is_err() {
+            self.deferred_path_closes.extend(closes);
+        }
     }
 
     fn close_cleanup_slot(
@@ -4583,13 +4639,21 @@ impl NfsClient {
     /// GETATTR the requested FATTR4 attributes of `fh`; returns the raw XDR
     /// attribute list in request order.
     pub fn getattr(&mut self, fh: &NfsFh, attrs: &[u32]) -> RpcResult<Vec<u8>> {
+        self.getattr_with_bitmap(fh, attrs).map(|(_, bytes)| bytes)
+    }
+
+    pub(crate) fn getattr_with_bitmap(
+        &mut self,
+        fh: &NfsFh,
+        attrs: &[u32],
+    ) -> RpcResult<ReturnedAttrs> {
         let mut c = Compound::new();
         c.tag(b"getattr");
         c.putfh(&fh.as_nfs_fh());
         c.getattr(attrs);
         let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
-        Ok(res.getattr_bytes(2))
+        Ok(res.getattr_with_bitmap(2))
     }
 
     /// SETATTR mode and/or size on `fh`.
@@ -4659,11 +4723,15 @@ impl NfsClient {
         Ok(())
     }
 
-    /// READDIR `dir` starting at `cookie`; returns entries with names, next
-    /// cookies, and requested attributes. Skips "." and "..".
-    /// READDIR `dir` from `cookie`, requesting the given FATTR4 attributes
-    /// for each entry.
-    pub fn readdir(&mut self, dir: &NfsFh, cookie: u64, attrs: &[u32]) -> RpcResult<Vec<DirEntry>> {
+    /// Read one page from a directory. Use DirCookie::default() initially,
+    /// then pass the returned cookie/verifier together until value is zero.
+    /// Entry attributes are encoded according to each entry's attrmask.
+    pub fn readdir(
+        &mut self,
+        dir: &NfsFh,
+        cookie: DirCookie,
+        attrs: &[u32],
+    ) -> RpcResult<ReaddirPage> {
         self.readdir_bounded(dir, cookie, attrs, usize::MAX)
     }
 
@@ -4673,25 +4741,61 @@ impl NfsClient {
     pub fn readdir_bounded(
         &mut self,
         dir: &NfsFh,
-        cookie: u64,
+        cookie: DirCookie,
         attrs: &[u32],
         max_response_bytes: usize,
-    ) -> RpcResult<Vec<DirEntry>> {
+    ) -> RpcResult<ReaddirPage> {
+        let page = self.readdir_wire_bounded(dir, cookie, attrs, max_response_bytes)?;
+        self.finish_readdir_page(dir, cookie, page, attrs, max_response_bytes)
+    }
+
+    // Dot entries are accepted and filtered, so an empty decoded page is not
+    // necessarily EOF. Consume those pages before exposing a logical page.
+    fn finish_readdir_page(
+        &mut self,
+        dir: &NfsFh,
+        requested: DirCookie,
+        mut page: ReaddirPage,
+        attrs: &[u32],
+        max_response_bytes: usize,
+    ) -> RpcResult<ReaddirPage> {
+        if !page.0.is_empty() || page.1.value == 0 {
+            return Ok(page);
+        }
+        let mut seen = std::collections::HashSet::from([requested.value]);
+        while page.0.is_empty() && page.1.value != 0 {
+            if !seen.insert(page.1.value) {
+                return Err(RpcError::transport("READDIR continuation cookie repeated"));
+            }
+            page = self.readdir_wire_bounded(dir, page.1, attrs, max_response_bytes)?;
+            if page.1.value != 0 && seen.contains(&page.1.value) {
+                return Err(RpcError::transport("READDIR continuation cookie repeated"));
+            }
+        }
+        Ok(page)
+    }
+
+    fn readdir_wire_bounded(
+        &mut self,
+        dir: &NfsFh,
+        cookie: DirCookie,
+        attrs: &[u32],
+        max_response_bytes: usize,
+    ) -> RpcResult<ReaddirPage> {
         let mut c = Compound::new();
         c.tag(b"readdir");
         c.putfh(&dir.as_nfs_fh());
-        let zeroverf: verifier4 = [0; 8];
         let (dircount, maxcount) = self.readdir_limits(1);
         let maxcount = maxcount.min(max_response_bytes.max(4096).min(u32::MAX as usize) as u32);
         let dircount = dircount.min(maxcount / 4).max(1);
-        c.readdir(cookie, &zeroverf, dircount, maxcount, attrs);
+        c.readdir(cookie.value, &cookie.verifier, dircount, maxcount, attrs);
         let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
-        Ok(Self::collect_readdir(res.readdir(2))?.0)
+        Self::collect_readdir(res.readdir(2))
     }
 
     /// Extract the entries and the next cookie from a decoded READDIR reply.
-    fn collect_readdir(ok: &READDIR4resok) -> RpcResult<(Vec<DirEntry>, u64)> {
+    fn collect_readdir(ok: &READDIR4resok) -> RpcResult<ReaddirPage> {
         let mut out = Vec::new();
         let mut cookie = 0u64;
         let mut e = ok.reply.entries;
@@ -4734,6 +4838,7 @@ impl NfsClient {
                 out.push(DirEntry {
                     name,
                     cookie: ent.cookie,
+                    attrmask: ent.attrs.attrmask,
                     attrs,
                 });
             }
@@ -4747,7 +4852,13 @@ impl NfsClient {
                 "READDIR page has no continuation progress",
             ));
         }
-        Ok((out, if ok.reply.eof != 0 { 0 } else { cookie }))
+        Ok((
+            out,
+            DirCookie {
+                value: if ok.reply.eof != 0 { 0 } else { cookie },
+                verifier: ok.cookieverf,
+            },
+        ))
     }
 
     /// Acquire one anchored child identity and bounded first page per input.
@@ -4767,7 +4878,7 @@ impl NfsClient {
         max_page_bytes: usize,
     ) -> vfsi_core::VecResult<ChildListing> {
         let response_bytes = self.read_compound_bytes();
-        self.fixed_results::<4, _, _>(
+        let results = self.fixed_results::<4, _, _>(
             b"readdir_children",
             ops,
             usize::MAX,
@@ -4791,28 +4902,68 @@ impl NfsClient {
                     cookie,
                 })
             },
-        )
+        )?;
+        let mut fatal = results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .find(|error| uncertain_completion(error.cause()))
+            .map(|error| error.cause().clone());
+        Ok(results
+            .into_iter()
+            .map(|result| {
+                result.and_then(|page| {
+                    if !(page.entries.is_empty() && page.cookie.value != 0) {
+                        return Ok(page);
+                    }
+                    if let Some(cause) = &fatal {
+                        return Err(vfsi_core::OpError::failed(cause.clone(), None));
+                    }
+                    let (entries, cookie) = self
+                        .finish_readdir_page(
+                            &page.fh,
+                            DirCookie::default(),
+                            (page.entries, page.cookie),
+                            attrs,
+                            max_page_bytes,
+                        )
+                        .map_err(|error| {
+                            let cause = vfsi_core::error_from_rpc(error, None);
+                            if uncertain_completion(&cause) {
+                                fatal = Some(cause.clone());
+                                vfsi_core::OpError::unknown(cause, None)
+                            } else {
+                                vfsi_core::OpError::failed(cause, None)
+                            }
+                        })?;
+                    Ok(ChildListing {
+                        fh: page.fh,
+                        entries,
+                        cookie,
+                    })
+                })
+            })
+            .collect())
     }
 
     /// Return one page per independent retained directory/cookie input.
     /// A failed input does not discard already decoded pages or healthy siblings.
     pub fn readdir_pages(
         &mut self,
-        ops: &[(NfsFh, u64)],
+        ops: &[(NfsFh, DirCookie)],
         attrs: &[u32],
-    ) -> vfsi_core::VecResult<(Vec<DirEntry>, u64)> {
+    ) -> vfsi_core::VecResult<ReaddirPage> {
         self.readdir_pages_bounded(ops, attrs, usize::MAX)
     }
 
-    /// One bounded wire page per directory; negotiated response limits still apply.
+    /// One visible page per directory; filtered-only wire pages are consumed internally.
     pub(crate) fn readdir_pages_bounded(
         &mut self,
-        ops: &[(NfsFh, u64)],
+        ops: &[(NfsFh, DirCookie)],
         attrs: &[u32],
         max_page_bytes: usize,
-    ) -> vfsi_core::VecResult<(Vec<DirEntry>, u64)> {
+    ) -> vfsi_core::VecResult<ReaddirPage> {
         let response_bytes = self.read_compound_bytes();
-        self.fixed_results::<2, _, _>(
+        let results = self.fixed_results::<2, _, _>(
             b"readdir_pages",
             ops,
             usize::MAX,
@@ -4821,14 +4972,43 @@ impl NfsClient {
                 let (dircount, maxcount) =
                     readdir_response_limits(response_bytes, count, max_page_bytes);
                 compound.putfh(&fh.as_nfs_fh());
-                compound.readdir(*cookie, &[0; 8], dircount, maxcount, attrs);
+                compound.readdir(cookie.value, &cookie.verifier, dircount, maxcount, attrs);
             },
             |reply, local, _| {
                 Self::collect_readdir(reply.readdir(2 + 2 * local)).map_err(|cause| {
                     vfsi_core::OpError::unknown(vfsi_core::error_from_rpc(cause, None), None)
                 })
             },
-        )
+        )?;
+        let mut fatal = results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .find(|error| uncertain_completion(error.cause()))
+            .map(|error| error.cause().clone());
+        Ok(results
+            .into_iter()
+            .zip(ops)
+            .map(|(result, (fh, requested))| {
+                result.and_then(|page| {
+                    if !(page.0.is_empty() && page.1.value != 0) {
+                        return Ok(page);
+                    }
+                    if let Some(cause) = &fatal {
+                        return Err(vfsi_core::OpError::failed(cause.clone(), None));
+                    }
+                    self.finish_readdir_page(fh, *requested, page, attrs, max_page_bytes)
+                        .map_err(|error| {
+                            let cause = vfsi_core::error_from_rpc(error, None);
+                            if uncertain_completion(&cause) {
+                                fatal = Some(cause.clone());
+                                vfsi_core::OpError::unknown(cause, None)
+                            } else {
+                                vfsi_core::OpError::failed(cause, None)
+                            }
+                        })
+                })
+            })
+            .collect())
     }
 
     /// REMOVE `name` from directory `dir`.
@@ -4964,6 +5144,25 @@ mod tests {
         assert!(super::validate_create_mode(Some(0o700), &set).is_ok());
     }
     #[test]
+    fn file_sync_writes_reject_weaker_durability_acknowledgements() {
+        for committed in [stable_how4_UNSTABLE4, stable_how4_DATA_SYNC4] {
+            for count in [0, 2, 4] {
+                let error = NfsClient::validate_write_completion(count, committed, 4)
+                    .expect_err("FILE_SYNC writes cannot acknowledge weaker durability");
+                assert_eq!(error.state(), vfsi_core::FailureState::Unknown);
+                assert_eq!(
+                    error.cause().transport_kind(),
+                    Some(vfsi_core::TransportKind::InvalidReply)
+                );
+            }
+        }
+        assert_eq!(
+            NfsClient::validate_write_completion(2, stable_how4_FILE_SYNC4, 4),
+            Ok((2, stable_how4_FILE_SYNC4))
+        );
+    }
+
+    #[test]
     fn write_completion_validation_keeps_short_counts_and_isolates_malformed_replies() {
         use vfsi_core::FailureState;
         let results = super::completion::decode_fixed::<2, _>(
@@ -4984,9 +5183,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(results[0], Ok((4, stable_how4_FILE_SYNC4)));
-        assert_eq!(results[2], Ok((2, stable_how4_DATA_SYNC4)));
-        assert_eq!(results[4], Ok((0, stable_how4_UNSTABLE4)));
-        for index in [1, 3] {
+        for index in [1, 2, 3, 4] {
             let error = results[index].as_ref().unwrap_err();
             assert_eq!(error.state(), FailureState::Unknown);
             assert!(error.cause().is_transport());
@@ -5346,13 +5543,18 @@ mod tests {
         entry.name.utf8string_val = name.as_mut_ptr().cast();
         let mut reply: nfsv41_sys::READDIR4resok = unsafe { std::mem::zeroed() };
         reply.reply.entries = &mut entry;
+        reply.cookieverf = [5; 8];
         reply.reply.eof = 1;
         let (entries, next) = super::NfsClient::collect_readdir(&reply).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].cookie, 42);
-        assert_eq!(next, 0);
+        assert_eq!(next.value, 0);
+        assert_eq!(next.verifier, [5; 8]);
         reply.reply.eof = 0;
-        assert_eq!(super::NfsClient::collect_readdir(&reply).unwrap().1, 42);
+        assert_eq!(
+            super::NfsClient::collect_readdir(&reply).unwrap().1.value,
+            42
+        );
         reply.reply.entries = std::ptr::null_mut();
         assert!(
             super::NfsClient::collect_readdir(&reply)
@@ -5395,7 +5597,7 @@ mod tests {
 
         let (entries, next) = super::NfsClient::collect_readdir(&reply).unwrap();
         assert_eq!(entries[0].name, name);
-        assert_eq!(next, 0);
+        assert_eq!(next.value, 0);
     }
 
     use proptest::prelude::*;

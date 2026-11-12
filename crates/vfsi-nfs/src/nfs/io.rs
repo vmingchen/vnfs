@@ -84,6 +84,18 @@ pub(super) fn write_all_at<C>(
     Ok(())
 }
 
+// A cursor read observes the actual progress of an earlier read on the same
+// descriptor. Keep all independent inputs in the same compound wave.
+fn independent_read_prefix(reads: &[ReadOp]) -> usize {
+    let mut cursors = std::collections::HashSet::new();
+    reads
+        .iter()
+        .position(|read| {
+            read.offset == VfOffset::Cur && read.file.fd().is_some_and(|fd| !cursors.insert(fd))
+        })
+        .unwrap_or(reads.len())
+}
+
 struct DescriptorReadPlan {
     ops: Vec<crate::client::ReadOp>,
     owners: Vec<usize>,
@@ -148,6 +160,30 @@ impl NfsVecFs {
     /// Selective read recovery keeps successful siblings and resumes only an
     /// unsuccessful input's remaining range. Prefix storage moves on errors.
     pub(super) fn read_results(&mut self, reads: &[ReadOp]) -> VecResult<ReadResult> {
+        if let Some(index) = reads
+            .iter()
+            .position(|read| read.length > isize::MAX as usize)
+        {
+            return Err(VfError::errno(index, libc::EFBIG as u32));
+        }
+        let first_end = independent_read_prefix(reads);
+        if first_end < reads.len() {
+            let mut output = Vec::with_capacity(reads.len());
+            let mut start = 0;
+            while start < reads.len() {
+                let end = start + independent_read_prefix(&reads[start..]);
+                // Finish recovery and publish confirmed cursor progress before
+                // resolving the next dependent input.
+                match self.read_results(&reads[start..end]) {
+                    Ok(results) => output.extend(results),
+                    Err(cause) if start == 0 => return Err(cause),
+                    Err(cause) => output
+                        .extend((start..end).map(|_| Err(OpError::not_attempted(cause.clone())))),
+                }
+                start = end;
+            }
+            return Ok(output);
+        }
         type SavedPrefix = (FailureState, Option<vfsi_core::api::ReadResult>);
         let retryable = |index: usize, error: &OpError| match error.progress() {
             Some(IoProgress::Read(read)) => !read.eof() && read.bytes_read() < reads[index].length,
@@ -828,6 +864,28 @@ impl NfsVecFs {
         {
             return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput));
         }
+        if let Some(index) = reads
+            .iter()
+            .position(|read| read.length > isize::MAX as usize)
+        {
+            return Err(VfError::errno(index, libc::EFBIG as u32));
+        }
+        let first_end = independent_read_prefix(reads);
+        if first_end < reads.len() {
+            let mut output = Vec::with_capacity(reads.len());
+            let mut start = 0;
+            while start < reads.len() {
+                let end = start + independent_read_prefix(&reads[start..]);
+                match self.read_into_results(&reads[start..end], &mut buffers[start..end]) {
+                    Ok(results) => output.extend(results),
+                    Err(cause) if start == 0 => return Err(cause),
+                    Err(cause) => output
+                        .extend((start..end).map(|_| Err(OpError::not_attempted(cause.clone())))),
+                }
+                start = end;
+            }
+            return Ok(output);
+        }
         // Saved progress is only metadata: confirmed bytes stay in the caller's
         // destination while recovery borrows disjoint remaining suffixes.
         type Prefix = (FailureState, u64, usize, bool);
@@ -1481,14 +1539,16 @@ impl NfsVecFs {
         if writes.iter().all(|write| write.file().is_fd()) {
             return self.vwrite_batch_nfs(writes);
         }
-        // An append may alias a later truncating path. Keep the established
+        // Cursor/end/append offsets depend on preceding writes, which can
+        // alias pathname operands. Resolve them at execution time and keep
         // mutation boundaries while retaining every group's outcomes.
         if writes.iter().any(|write| {
-            write
-                .file()
-                .fd()
-                .and_then(|fd| self.open_files.get(&fd))
-                .is_some_and(|open| open.append)
+            matches!(write.offset(), VfOffset::Cur | VfOffset::End)
+                || write
+                    .file()
+                    .fd()
+                    .and_then(|fd| self.open_files.get(&fd))
+                    .is_some_and(|open| open.append)
         }) {
             let mut output = Vec::with_capacity(writes.len());
             for group in path_write_groups(writes) {
@@ -1909,6 +1969,189 @@ mod path_write_tests {
 #[cfg(test)]
 mod descriptor_outcome_tests {
     use super::*;
+
+    #[test]
+    fn independent_cursor_reads_share_a_wave_until_a_descriptor_repeats() {
+        let reads = [
+            ReadOp::from_fd(1, VfOffset::Cur, 2),
+            ReadOp::from_fd(1, VfOffset::At(0), 2),
+            ReadOp::from_fd(2, VfOffset::Cur, 2),
+            ReadOp::from_path("/path", VfOffset::At(0), 2),
+            ReadOp::from_fd(1, VfOffset::Cur, 2),
+        ];
+        assert_eq!(independent_read_prefix(&reads), 4);
+        assert_eq!(independent_read_prefix(&reads[..4]), 4);
+        assert_eq!(independent_read_prefix(&reads[4..]), 1);
+        assert_eq!(independent_read_prefix(&[]), 0);
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[test]
+    fn live_dependent_cursor_reads_publish_progress_before_later_inputs() {
+        use std::sync::Arc;
+        use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+        let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+            assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+            return;
+        };
+        let minor = std::env::var("VFSI_NFS_MINOR")
+            .unwrap_or_else(|_| "1".into())
+            .parse()
+            .unwrap();
+        for mode in ["full", "openwrite", "off"] {
+            for owned in [false, true] {
+                let mut fs = NfsVecFs::connect_minor(&server, minor).unwrap();
+                fs.set_merged_mode(mode);
+                let path = PathBuf::from(format!(
+                    "/vfsi-dependent-read-{}-{mode}-{owned}",
+                    std::process::id()
+                ));
+                let file = fs
+                    .open_raw_impl(&path, libc::O_CREAT | libc::O_TRUNC | libc::O_RDWR, 0o600)
+                    .unwrap();
+                fs.write_raw_impl(&file, 0, b"abcdef").unwrap();
+                // A path and an invalid descriptor between cursor reads exercise
+                // both merged and phased planning without dropping siblings.
+                let reads = [
+                    ReadOp::new(file.clone(), VfOffset::Cur, 2),
+                    ReadOp::at(FileOperand::from_os_path(&path), 4, 2),
+                    ReadOp::at(FileOperand::from_fd(i32::MAX), 0, 2),
+                    ReadOp::new(file.clone(), VfOffset::Cur, 2),
+                    ReadOp::new(file.clone(), VfOffset::Cur, 4),
+                    ReadOp::new(file.clone(), VfOffset::Cur, 2),
+                ];
+                if owned {
+                    let results = fs.read_results(&reads).unwrap();
+                    assert_eq!(results.len(), reads.len());
+                    for (index, offset, expected) in [
+                        (0, 0, b"ab".as_slice()),
+                        (1, 4, b"ef"),
+                        (3, 2, b"cd"),
+                        (4, 4, b"ef"),
+                        (5, 6, b""),
+                    ] {
+                        let result = results[index].as_ref().unwrap();
+                        assert_eq!((result.offset, result.data.as_slice()), (offset, expected));
+                    }
+                    assert!(results[4].as_ref().unwrap().eof);
+                    assert!(results[5].as_ref().unwrap().eof);
+                    assert_eq!(
+                        results[2].as_ref().unwrap_err().state(),
+                        FailureState::NotAttempted
+                    );
+                } else {
+                    let mut storage: Vec<_> =
+                        reads.iter().map(|read| vec![99; read.length]).collect();
+                    let mut buffers: Vec<_> = storage.iter_mut().map(Vec::as_mut_slice).collect();
+                    let results = fs.read_into_results(&reads, &mut buffers).unwrap();
+                    assert_eq!(results.len(), reads.len());
+                    for (index, offset, expected) in [
+                        (0, 0, b"ab".as_slice()),
+                        (1, 4, b"ef"),
+                        (3, 2, b"cd"),
+                        (4, 4, b"ef"),
+                        (5, 6, b""),
+                    ] {
+                        let result = results[index].as_ref().unwrap();
+                        assert_eq!((result.offset, result.bytes_read), (offset, expected.len()));
+                        assert_eq!(&storage[index][..result.bytes_read], expected);
+                    }
+                    assert!(results[4].as_ref().unwrap().eof);
+                    assert!(results[5].as_ref().unwrap().eof);
+                    assert_eq!(
+                        results[2].as_ref().unwrap_err().state(),
+                        FailureState::NotAttempted
+                    );
+                }
+                assert_eq!(fs.open_files[&file.fd().unwrap()].cur_offset, 6);
+                fs.seek_raw_impl(&file, 0, vfsi_core::SeekFrom::Set)
+                    .unwrap();
+                let script = Arc::new(FaultScript::one(
+                    OpenFaultPoint::BeforeReadRepair { index: 0 },
+                    VfError::errno(None, libc::EACCES as u32),
+                ));
+                fs.set_fault_injector(script.clone());
+                fs.test_short_read_for_request_once(0, 1);
+                let dependent = [
+                    ReadOp::new(file.clone(), VfOffset::Cur, 2),
+                    ReadOp::new(file.clone(), VfOffset::Cur, 2),
+                ];
+                if owned {
+                    let results = fs.read_results(&dependent).unwrap();
+                    let error = results[0].as_ref().unwrap_err();
+                    assert_eq!(error.state(), FailureState::Failed);
+                    let Some(IoProgress::Read(prefix)) = error.progress() else {
+                        panic!("missing confirmed read prefix")
+                    };
+                    assert_eq!(prefix.data().unwrap(), b"a");
+                    let second = results[1].as_ref().unwrap();
+                    assert_eq!(
+                        (second.offset, second.data.as_slice()),
+                        (1, b"bc".as_slice())
+                    );
+                } else {
+                    let mut first = [99; 2];
+                    let mut second = [99; 2];
+                    let results = fs
+                        .read_into_results(&dependent, &mut [&mut first, &mut second])
+                        .unwrap();
+                    let error = results[0].as_ref().unwrap_err();
+                    assert_eq!(error.state(), FailureState::Failed);
+                    let Some(IoProgress::Read(prefix)) = error.progress() else {
+                        panic!("missing confirmed read prefix")
+                    };
+                    assert_eq!(prefix.bytes_read(), 1);
+                    assert_eq!(first[0], b"a"[0]);
+                    assert_eq!((results[1].as_ref().unwrap().offset, second), (1, *b"bc"));
+                }
+                assert!(script.is_consumed());
+                assert_eq!(fs.open_files[&file.fd().unwrap()].cur_offset, 3);
+                fs.seek_raw_impl(&file, 0, vfsi_core::SeekFrom::Set)
+                    .unwrap();
+                let recover = Arc::new(FaultScript::one(
+                    OpenFaultPoint::BeforeReadRepair { index: 0 },
+                    VfError::transport(None, "injected cursor read repair disconnect"),
+                ));
+                fs.set_fault_injector(recover.clone());
+                fs.test_short_read_for_request_once(0, 1);
+                if owned {
+                    let results = fs.read_results(&dependent).unwrap();
+                    assert_eq!(results[0].as_ref().unwrap().data, b"ab");
+                    let second = results[1].as_ref().unwrap();
+                    assert_eq!(
+                        (second.offset, second.data.as_slice()),
+                        (2, b"cd".as_slice())
+                    );
+                } else {
+                    let mut first = [99; 2];
+                    let mut second = [99; 2];
+                    let results = fs
+                        .read_into_results(&dependent, &mut [&mut first, &mut second])
+                        .unwrap();
+                    assert_eq!(results[0].as_ref().unwrap().bytes_read, 2);
+                    assert_eq!(first, *b"ab");
+                    assert_eq!((results[1].as_ref().unwrap().offset, second), (2, *b"cd"));
+                }
+                assert!(recover.is_consumed());
+                assert_eq!(fs.open_files[&file.fd().unwrap()].cur_offset, 4);
+                // Positional reads on the same object remain independent and
+                // retain the normal single-compound fast path.
+                let _ = crate::compound::thread_compound_stats();
+                let results = fs
+                    .read_results(&[
+                        ReadOp::at(file.clone(), 0, 2),
+                        ReadOp::at(file.clone(), 2, 2),
+                    ])
+                    .unwrap();
+                assert!(results.iter().all(Result::is_ok));
+                assert_eq!(crate::compound::thread_compound_stats().0, 1);
+                assert_eq!(fs.open_files[&file.fd().unwrap()].cur_offset, 4);
+                fs.close_impl(&file).unwrap();
+                fs.remove_impl(&path, false).unwrap();
+                fs.shutdown().unwrap();
+            }
+        }
+    }
 
     #[test]
     fn chunk_failure_merging_retains_first_cause_and_any_uncertainty() {
@@ -2879,6 +3122,58 @@ mod phased_write_tests {
             );
             assert_eq!(fs.read_raw_impl(&last, 0, 8).unwrap(), b"last");
             fs.remove_impl(Path::new(&directory), true).unwrap();
+        }
+    }
+    #[test]
+    fn live_mixed_cursor_writes_observe_earlier_writes_in_every_mode() {
+        let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+            assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+            return;
+        };
+        let minor = std::env::var("VFSI_NFS_MINOR")
+            .unwrap_or_else(|_| "1".into())
+            .parse()
+            .unwrap();
+        for mode in ["full", "openwrite", "off"] {
+            for offset in [VfOffset::Cur, VfOffset::End] {
+                let mut fs = NfsVecFs::connect_minor(&server, minor).unwrap();
+                fs.set_merged_mode(mode);
+                let directory = PathBuf::from(format!(
+                    "/mixed-dynamic-{}-{mode}-{offset:?}",
+                    std::process::id()
+                ));
+                fs.ensure_dir_impl(&directory, 0o755).unwrap();
+                let path = directory.join("target");
+                let file = fs
+                    .open_raw_impl(&path, libc::O_CREAT | libc::O_TRUNC | libc::O_RDWR, 0o600)
+                    .unwrap();
+                let side = FileOperand::from_os_path(&directory.join("side"));
+                let bad = FileOperand::from_fd(i32::MAX);
+                let writes = [
+                    WriteOp::new(&file, offset, b"a".as_slice()),
+                    WriteOp::at(&side, 0, b"side".as_slice()).with_creation(),
+                    WriteOp::at(&bad, 0, b"bad".as_slice()),
+                    WriteOp::new(&file, offset, b"b".as_slice()),
+                ];
+                let results = fs.write_results(&writes).unwrap();
+                assert_eq!(results.len(), 4);
+                assert!(results[2].is_err());
+                assert_eq!(results[0].as_ref().unwrap().offset, 0);
+                assert_eq!(
+                    results[3].as_ref().unwrap().offset,
+                    1,
+                    "mode={mode}, offset={offset:?}"
+                );
+                assert_eq!(fs.read_raw_impl(&file, 0, 16).unwrap(), b"ab");
+                assert_eq!(fs.read_raw_impl(&side, 0, 16).unwrap(), b"side");
+                assert_eq!(
+                    fs.open_files[&file.fd().unwrap()].cur_offset,
+                    if offset == VfOffset::Cur { 2 } else { 0 }
+                );
+                fs.close_impl(&file).unwrap();
+                fs.remove_impl(&directory, true).unwrap();
+                fs.shutdown().unwrap();
+            }
         }
     }
 }

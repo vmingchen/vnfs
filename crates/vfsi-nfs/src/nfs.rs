@@ -12,7 +12,10 @@
 // bindgen emits lowercase constants (e.g. nfs_ftype4_NF4DIR) matched here.
 #![allow(non_upper_case_globals)]
 
+use crate::client::DirCookie;
 use std::collections::VecDeque;
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,

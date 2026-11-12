@@ -81,6 +81,37 @@ pub(super) fn request_mask_to_attr_list(masks: &AttrMask) -> Vec<u32> {
     ids
 }
 
+/// Decode the fields actually returned by the server, without a heap allocation.
+pub(super) fn parse_returned_attrs(bitmap: &bitmap4, list: &[u8]) -> VfResult<AttrValues> {
+    if bitmap.bitmap4_len as usize > bitmap.map.len() {
+        return Err(attr_decode_error());
+    }
+    let mut ids = [0; FULL_ATTR_IDS.len()];
+    let mut count = 0;
+    for (word, &bits) in bitmap.map[..bitmap.bitmap4_len as usize].iter().enumerate() {
+        let mut bits = bits;
+        while bits != 0 {
+            let bit = bits.trailing_zeros();
+            let id = word as u32 * 32 + bit;
+            if !FULL_ATTR_IDS.contains(&id) {
+                return Err(attr_decode_error());
+            }
+            ids[count] = id;
+            count += 1;
+            bits &= bits - 1;
+        }
+    }
+    parse_attr_list(&ids[..count], list)
+}
+
+pub(super) fn parse_metadata_attrs(bitmap: &bitmap4, list: &[u8]) -> VfResult<AttrValues> {
+    let values = parse_returned_attrs(bitmap, list)?;
+    if values.ftype.is_none() {
+        return Err(attr_decode_error());
+    }
+    Ok(values)
+}
+
 /// Parse a raw GETATTR attribute list encoded for the given ids (in id order).
 pub(super) fn parse_attr_list(ids: &[u32], list: &[u8]) -> VfResult<AttrValues> {
     let mut v = AttrValues::default();
@@ -155,7 +186,7 @@ pub(super) fn parse_attr_list(ids: &[u32], list: &[u8]) -> VfResult<AttrValues> 
                 (v.ctime_sec, v.ctime_nsec) = read_nfstime(list, &mut off)?;
                 AttrMask::CTIME
             }
-            _ => unreachable!(),
+            _ => return Err(attr_decode_error()),
         };
         v.present.insert(field);
     }
@@ -632,6 +663,13 @@ impl NfsVecFs {
         if attrs.is_empty() {
             return Ok(Vec::new());
         }
+        #[cfg(feature = "test-faults")]
+        if let Err(cause) = self.inject_open_fault(OpenFaultPoint::BeforeGetattrDispatch) {
+            return Ok(attrs
+                .iter()
+                .map(|_| Err(OpError::not_attempted(cause.clone())))
+                .collect());
+        }
         let mut slots: Vec<Option<vfsi_core::OpResult<()>>> =
             (0..attrs.len()).map(|_| None).collect();
         let mut ops = Vec::with_capacity(attrs.len());
@@ -658,7 +696,7 @@ impl NfsVecFs {
                 Err(error) => slots[index] = Some(Err(OpError::not_attempted(error))),
             }
         }
-        let results = match self.nfs.getattr_path_compound(&ops) {
+        let results = match self.nfs.getattr_path_with_bitmap(&ops) {
             Ok(results) => results,
             Err(error) => {
                 for index in indices {
@@ -672,10 +710,10 @@ impl NfsVecFs {
         };
 
         let mut fallback = Vec::new();
-        for ((index, op), result) in indices.into_iter().zip(ops).zip(results) {
+        for (index, result) in indices.into_iter().zip(results) {
             let operation = result
-                .and_then(|list| {
-                    parse_attr_list(&op.attrs, &list)
+                .and_then(|(bitmap, list)| {
+                    parse_metadata_attrs(&bitmap, &list)
                         .map_err(|error| vfsi_core::OpError::failed(error, None))
                 })
                 .and_then(|values| {
@@ -766,9 +804,9 @@ impl NfsVecFs {
         }
         match self.nfs.getattr_many_with_bitmap(&ops) {
             Ok(results) => {
-                for ((index, op), result) in indices.into_iter().zip(ops).zip(results) {
-                    outcomes[index] = Some(result.and_then(|(_, bytes)| {
-                        parse_attr_list(&op.attrs, &bytes)
+                for (index, result) in indices.into_iter().zip(results) {
+                    outcomes[index] = Some(result.and_then(|(bitmap, bytes)| {
+                        parse_metadata_attrs(&bitmap, &bytes)
                             .map(|values| apply_attrs(&mut attrs[index], &values))
                             .map_err(|error| OpError::failed(error, None))
                     }));
@@ -802,23 +840,27 @@ impl NfsVecFs {
             .resolve_follow(&path)
             .map_err(|e| e.with_index(index))?;
         let ids = request_mask_to_attr_list(&a.masks);
-        let list = self
+        let (bitmap, list) = self
             .nfs
-            .getattr(&fh, &ids)
+            .getattr_with_bitmap(&fh, &ids)
             .map_err(|e| vfsi_core::error_from_rpc(e, index))?;
-        let v = parse_attr_list(&ids, &list)?;
+        let v = parse_metadata_attrs(&bitmap, &list)?;
         apply_attrs(a, &v);
         Ok(())
     }
 
     /// The size in bytes of `fh`.
     pub(super) fn file_size(&mut self, fh: &NfsFh) -> VfResult<u64> {
-        let list = self
+        let (bitmap, list) = self
             .nfs
-            .getattr(fh, &[FATTR4_SIZE])
+            .getattr_with_bitmap(fh, &[FATTR4_SIZE])
             .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
-        let mut off = 0;
-        read_u64(&list, &mut off)
+        let values = parse_returned_attrs(&bitmap, &list)?;
+        if values.present.contains(AttrMask::SIZE) {
+            Ok(values.size)
+        } else {
+            Err(VfError::unsupported(0))
+        }
     }
 }
 
@@ -1161,5 +1203,147 @@ mod tests {
         backend
             .remove_paths_impl(&[Path::new(&root)], true)
             .unwrap();
+    }
+    #[test]
+    fn live_metadata_uses_returned_fields_for_sparse_attribute_replies() {
+        use crate::rpc::{
+            RpcClient,
+            test_support::{
+                accepted_reply, compound_operations, read_record, successful_sequence_reply,
+            },
+        };
+        use std::{net::TcpListener, thread, time::Duration};
+        let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+            assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+            return;
+        };
+        let minor = std::env::var("VFSI_NFS_MINOR")
+            .unwrap_or_else(|_| "1".into())
+            .parse()
+            .unwrap();
+        for phase in ["merged", "phased", "scalar"] {
+            for omit_type in [false, true] {
+                let mut fs = NfsVecFs::builder(&server)
+                    .minor_version(Some(minor))
+                    .auto_reconnect(false)
+                    .connect()
+                    .unwrap();
+                let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+                let address = listener.local_addr().unwrap();
+                let peer = thread::spawn(move || {
+                    let (mut socket, _) = listener.accept().unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut requests = 0;
+                    while let Ok(request) = read_record(&mut socket) {
+                        requests += 1;
+                        assert!(requests <= 4);
+                        let ops = compound_operations(&request);
+                        let word = |at| u32::from_be_bytes(ops[at..at + 4].try_into().unwrap());
+                        let second = word(36);
+                        let at = if second == nfs_opnum4_NFS4_OP_PUTFH {
+                            44 + (word(40) as usize).div_ceil(4) * 4
+                        } else {
+                            assert_eq!(second, nfs_opnum4_NFS4_OP_PUTROOTFH);
+                            40
+                        };
+                        assert_eq!(word(at), nfs_opnum4_NFS4_OP_GETATTR);
+                        let nwords = word(at + 4) as usize;
+                        let time =
+                            nwords > 1 && word(at + 12) & (1 << (FATTR4_TIME_MODIFY - 32)) != 0;
+                        let mut payload = successful_sequence_reply(&request, 3);
+                        for value in [second, 0, nfs_opnum4_NFS4_OP_GETATTR, 0] {
+                            payload.extend_from_slice(&value.to_be_bytes());
+                        }
+                        let mut attrs = Vec::new();
+                        let type_bit = if omit_type && time {
+                            0
+                        } else {
+                            attrs.extend_from_slice(&nfs_ftype4_NF4DIR.to_be_bytes());
+                            1 << FATTR4_TYPE
+                        };
+                        if time {
+                            for value in [2u32, type_bit, 1 << (FATTR4_TIME_MODIFY - 32)] {
+                                payload.extend_from_slice(&value.to_be_bytes());
+                            }
+                            attrs.extend_from_slice(&1_700_000_001_i64.to_be_bytes());
+                            attrs.extend_from_slice(&123_u32.to_be_bytes());
+                        } else {
+                            for value in [1u32, type_bit] {
+                                payload.extend_from_slice(&value.to_be_bytes());
+                            }
+                        }
+                        payload.extend_from_slice(&(attrs.len() as u32).to_be_bytes());
+                        payload.extend_from_slice(&attrs);
+                        accepted_reply(&mut socket, &request, &payload);
+                        if time {
+                            break;
+                        }
+                    }
+                    requests
+                });
+                let rpc = RpcClient::connect_with_timeouts(
+                    &address.to_string(),
+                    Duration::from_secs(2),
+                    Duration::from_secs(2),
+                )
+                .unwrap();
+                let original = fs.nfs.replace_test_rpc(rpc);
+                let mut attrs = [VfAttrs {
+                    file: FileOperand::from_path("/"),
+                    masks: AttrMask::MODE | AttrMask::MTIME,
+                    ..Default::default()
+                }];
+                let result = match phase {
+                    "merged" => vfsi_core::internal::collect_vec_result(
+                        fs.getattrsv_impl(&mut attrs, false),
+                        1,
+                    )
+                    .map(|_| ()),
+                    "phased" => vfsi_core::internal::collect_vec_result(
+                        fs.getattr_phased_results(&mut attrs, false),
+                        1,
+                    )
+                    .map(|_| ()),
+                    _ => fs.stat_one_following(0, &mut attrs[0]),
+                };
+                fs.nfs.replace_test_rpc(original);
+                assert!(peer.join().unwrap() > 0);
+                fs.shutdown().unwrap();
+                if omit_type {
+                    let error = result.expect_err("metadata must not invent an omitted TYPE");
+                    assert_eq!(
+                        error.transport_kind(),
+                        Some(vfsi_core::TransportKind::InvalidReply)
+                    );
+                    continue;
+                }
+                result.unwrap_or_else(|error| panic!("{phase}: {error:?}"));
+                assert_eq!(attrs[0].ftype, VfType::Directory);
+                assert!(!attrs[0].returned.contains(AttrMask::MODE));
+                assert!(attrs[0].returned.contains(AttrMask::MTIME));
+                assert_eq!(
+                    (attrs[0].mtime_sec, attrs[0].mtime_nsec),
+                    (1_700_000_001, 123)
+                );
+            }
+        }
+    }
+    #[test]
+    fn returned_attribute_bitmaps_reject_unknown_ids_without_panicking() {
+        for (len, map) in [(1, [1, 0, 0]), (3, [0, 0, 1u32 << 31]), (4, [0, 0, 0])] {
+            assert!(
+                parse_returned_attrs(
+                    &bitmap4 {
+                        bitmap4_len: len,
+                        map
+                    },
+                    &[]
+                )
+                .is_err()
+            );
+        }
+        assert!(parse_attr_list(&[u32::MAX], &[]).is_err());
     }
 }

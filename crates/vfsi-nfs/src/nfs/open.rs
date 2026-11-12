@@ -74,17 +74,33 @@ impl NfsVecFs {
                 stateid: open.stateid,
             })
             .collect();
-        match self.nfs.close_many(&operations) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                let first_unconfirmed = if error.is_transport() {
-                    0
-                } else {
-                    error.op_index.min(pending.len())
-                };
-                self.deferred_descriptor_closes
-                    .extend(pending.into_iter().skip(first_unconfirmed));
-                Err(vfsi_core::error_from_rpc(error, None))
+        match self.nfs.close_descriptors(&operations) {
+            Ok(outcomes) if outcomes.len() == pending.len() => {
+                let mut first_error = None;
+                for (open, outcome) in pending.into_iter().zip(outcomes) {
+                    if let Err(error) = outcome {
+                        // A lost reply can leave an already-closed state in the
+                        // queue. Its terminal status is a cleanup completion.
+                        if matches!(
+                            error.cause().status(),
+                            Some(vfsi_core::StatusCode::Nfs(
+                                nfsstat4_NFS4ERR_BAD_STATEID | nfsstat4_NFS4ERR_OLD_STATEID
+                            ))
+                        ) {
+                            continue;
+                        }
+                        first_error.get_or_insert_with(|| error.into_cause());
+                        self.deferred_descriptor_closes.push(open);
+                    }
+                }
+                first_error.map_or(Ok(()), Err)
+            }
+            result => {
+                self.deferred_descriptor_closes.extend(pending);
+                Err(match result {
+                    Err(error) => error,
+                    Ok(_) => VfError::invalid_reply(None, "invalid deferred CLOSE outcome count"),
+                })
             }
         }
     }

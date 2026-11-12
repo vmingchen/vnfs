@@ -23,7 +23,7 @@ pub(super) fn namespace_path(cwd: &Path, path: &Path) -> PathBuf {
     } else {
         cwd.join(path)
     };
-    path_from_bytes(&normalize_bytes(path_bytes(&namespace_relative)))
+    OsString::from_vec(normalize_bytes(path_bytes(&namespace_relative))).into()
 }
 
 /// Export-root path used for NFS resolution.
