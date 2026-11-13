@@ -33,28 +33,29 @@ def main():
         host = host[1:-1]
     for mode, expected_outcomes in SCENARIO_OUTCOMES.items():
         proxy = NfsOutcomeProxy((host, int(port)))
-        env = dict(
-            os.environ,
-            VFSI_OUTCOME_FAULT=mode,
-            VFSI_OUTCOME_VERIFY_SERVER=args.server,
-            VFSI_OUTCOME_MINOR=args.minor,
-        )
-        with tempfile.TemporaryFile(mode="w+") as errors:
-            command = (
-                [args.consumer, args.library, "nfs", proxy.endpoint, args.minor]
-                if args.adapter == "c"
-                else ([sys.executable] if args.adapter == "python" else [])
-                + [args.consumer, proxy.endpoint, args.minor]
+        child = None
+        try:
+            env = dict(
+                os.environ,
+                VFSI_OUTCOME_FAULT=mode,
+                VFSI_OUTCOME_VERIFY_SERVER=args.server,
+                VFSI_OUTCOME_MINOR=args.minor,
             )
-            child = subprocess.Popen(
-                command,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=errors,
-                text=True,
-                env=env,
-            )
-            try:
+            with tempfile.TemporaryFile(mode="w+") as errors:
+                command = (
+                    [args.consumer, args.library, "nfs", proxy.endpoint, args.minor]
+                    if args.adapter == "c"
+                    else ([sys.executable] if args.adapter == "python" else [])
+                    + [args.consumer, proxy.endpoint, args.minor]
+                )
+                child = subprocess.Popen(
+                    command,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=errors,
+                    text=True,
+                    env=env,
+                )
                 assert select.select([child.stdout], [], [], 20)[
                     0
                 ], "consumer readiness timeout"
@@ -112,10 +113,13 @@ def main():
                     % (args.adapter, args.minor, mode, proxy.writes),
                     flush=True,
                 )
+        finally:
+            try:
+                if child is not None:
+                    if child.poll() is None:
+                        child.kill()
+                    child.communicate()
             finally:
-                if child.poll() is None:
-                    child.kill()
-                child.communicate()
                 proxy.close()
 
     if args.output:

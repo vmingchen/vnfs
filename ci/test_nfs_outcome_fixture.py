@@ -1,6 +1,9 @@
 """Server-independent checks of the shared fault fixture's wire transformations."""
 
 import socket
+import subprocess
+import sys
+from pathlib import Path
 import unittest
 
 from nfs_outcome_fixture import (
@@ -19,6 +22,33 @@ from nfs_outcome_fixture import (
     word,
     words,
 )
+
+
+class ConsumerStartupTests(unittest.TestCase):
+    def test_missing_consumer_exits_without_leaking_proxy_thread(self):
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                str(Path(__file__).with_name("test-io-outcomes.py")),
+                "--adapter",
+                "rust",
+                "--consumer",
+                "/definitely-missing-vfsi-consumer",
+                "--minor",
+                "1",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            _, errors = child.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.communicate()
+            self.fail("missing consumer left the proxy thread running")
+        self.assertNotEqual(child.returncode, 0)
+        self.assertIn("FileNotFoundError", errors)
 
 
 def request():
