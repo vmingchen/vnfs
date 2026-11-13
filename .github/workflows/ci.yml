@@ -31,6 +31,8 @@ jobs:
         run: sudo sysctl -w kernel.io_uring_disabled=0
       - name: Real ring batching and public VFSI contracts
         run: ./scripts/test-ci-local.sh uring
+      - name: Require poisoning, confirmed progress, and retained ownership
+        run: ci/test-uring-outcomes.sh
 
   nfs-adversarial:
     runs-on: ubuntu-26.04
@@ -227,6 +229,10 @@ jobs:
                 -o /tmp/vfsi-packaged-c-smoke
               LD_LIBRARY_PATH="$CARGO_TARGET_DIR/debug" \
                 /tmp/vfsi-packaged-c-smoke /tmp/vfsi-packaged-c-root
+              # Compile the standalone consumer using the packaged loader and
+              # declarations; require real old-library/POSIX fallback as well.
+              ci/test-c-outcomes.sh --library "$CARGO_TARGET_DIR/debug/libvfsi_c.so" \
+                --include "$archive/include" --consumer-source "$archive/tests/io-outcomes.c"
             fi
           done <"$package_list"
       - name: Test frozen du benchmark tooling
@@ -780,6 +786,14 @@ jobs:
           LD_LIBRARY_PATH=target/debug /tmp/vfsi-smoke --nfs 127.0.0.1 '${{ matrix.minor-version }}'
           VFSI_NFS_SERVER=127.0.0.1 VFSI_NFS_MINOR='${{ matrix.minor-version }}' \
             ci/test-c-nfs.sh
+          ci/test-c-outcomes.sh --library "$PWD/target/debug/libvfsi_c.so" \
+            --server 127.0.0.1:2049 --minor '${{ matrix.minor-version }}' \
+            --output /tmp/c-outcomes-${{ matrix.minor-version }}.json
+          cargo build -p vfsi-nfs --example io-outcome-consumer
+          python3 ci/test-io-outcomes.py --adapter rust \
+            --consumer target/debug/examples/io-outcome-consumer \
+            --server 127.0.0.1:2049 --minor '${{ matrix.minor-version }}' \
+            --output /tmp/rust-outcomes-${{ matrix.minor-version }}.json
       - name: Run required Python/fsspec coverage against NFS
         env:
           VFSI_NFS_REQUIRED: 1
@@ -791,6 +805,10 @@ jobs:
           .venv/bin/pip install -e adapters/vfsi-fsspec
           cd adapters/nfs4fs
           ../../.venv/bin/maturin develop
+          ../../.venv/bin/python ../../ci/test-io-outcomes.py --adapter python \
+            --consumer ../../ci/python-outcome-consumer.py \
+            --server 127.0.0.1:2049 --minor '${{ matrix.minor-version }}' \
+            --output /tmp/python-outcomes-${{ matrix.minor-version }}.json
           sudo mkdir -p /mnt/vnfs-ci-python-mount /mnt/vnfs-ci-python-mount-ro
           sudo mount -t nfs4 -o vers=4.${{ matrix.minor-version }},proto=tcp,sec=sys,port=2049 127.0.0.1:/ /mnt/vnfs-ci-python-mount
           sudo mount -t nfs4 -o ro,vers=4.${{ matrix.minor-version }},proto=tcp,sec=sys,port=2049 127.0.0.1:/ /mnt/vnfs-ci-python-mount-ro

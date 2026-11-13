@@ -65,6 +65,33 @@ class BackendLibraryCoverageTests(unittest.TestCase):
                 self.assert_library_suite(body, "vfsi-" + backend, "test-faults")
 
 
+class OutcomeConformanceTests(unittest.TestCase):
+    root = Path(__file__).resolve().parents[1]
+
+    def test_packaged_consumer_and_real_legacy_fallback_are_required(self):
+        workflow = (self.root / ".github/workflows/ci.yml").read_text()
+        self.assertIn('--include "$archive/include" --consumer-source "$archive/tests/io-outcomes.c"', workflow)
+        runner = (self.root / "ci/test-c-outcomes.sh").read_text()
+        self.assertIn("https://static.crates.io/crates/vfsi-c/vfsi-c-0.3.11.crate", runner)
+        self.assertIn("sha256sum -c -", runner)
+        self.assertIn("--registry-only", runner)
+        self.assertIn('"$legacy_library" legacy "$work/files"', runner)
+        self.assertIn('"$legacy_library" posix "$work/files"', runner)
+        self.assertIn('"$work/no-such-library.so" posix "$work/files"', runner)
+
+    def test_both_live_versions_require_all_three_adapters_and_kernel_rows(self):
+        workflow = (self.root / ".github/workflows/ci.yml").read_text()
+        body = re.search(r"^  nfs-integration:\n(.*?)(?=^  [\w-]+:|\Z)",
+                         workflow, re.M | re.S)[1]
+        self.assertIn("minor-version: [1, 2]", body)
+        self.assertIn("ci/test-c-outcomes.sh", body)
+        self.assertIn("--adapter rust", body)
+        self.assertIn("--adapter python", body)
+        self.assertIn("cargo build -p vfsi-nfs --example io-outcome-consumer", body)
+        self.assertNotIn("continue-on-error", body)
+        self.assertIn("run: ci/test-uring-outcomes.sh", workflow)
+
+
 class ArchiveVerificationTests(unittest.TestCase):
     def test_reextracted_crates_refresh_source_mtimes_for_cargos_cache(self):
         workflow = Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml"
