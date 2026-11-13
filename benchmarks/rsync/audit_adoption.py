@@ -88,6 +88,9 @@ def audit(root, fixture_path, output):
         raise FileExistsError("audit output must be a new file: " + str(output))
     result = json.loads((root / "results.json").read_text())
     assert result["verified"] is True
+    for row in result["transfers"]:
+        if row["scenario"] != "interrupted":
+            assert row["wire"], "missing capture for completed transfer"
     assert adoption.scan.sha(root / "runner-snapshot.py") == result["runner_sha256"]
     original = adoption.scan.fingerprint(fixture_path / "tree")
     assert original["identity_sha256"] == result["fixture"]["identity_sha256"]
@@ -192,6 +195,7 @@ def audit(root, fixture_path, output):
             if method == "vfsi":
                 assert row["wire"]["rpc_calls"] == 273
     assert len(result["scans"]) == len(scans) == 4
+    assert decoded == 40, decoded
     assert adoption.scan.fingerprint(fixture_path / "tree") == original
     proof = dict(
         verified=True,

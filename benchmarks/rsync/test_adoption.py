@@ -1,6 +1,8 @@
 """Pure fixture and manifest checks; real transfers are a separate required gate."""
 
 import argparse
+import json
+import os
 import importlib.util
 from pathlib import Path
 import tempfile
@@ -18,6 +20,98 @@ spec.loader.exec_module(adoption)
 
 
 class AdoptionTests(unittest.TestCase):
+    def test_prepare_relative_paths_find_downloaded_headers(self):
+        class PreparedHeaders(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory() as temp:
+            original = Path.cwd()
+            os.chdir(temp)
+            try:
+
+                def snapshot(checkout, revision, output, name):
+                    source = (output / (name + "-source")).resolve()
+                    source.mkdir()
+                    return source, {}
+
+                def headers(command, *, cwd, env, **unused):
+                    release = Path(env["VFSI_BUILD_DIR"])
+                    if not release.is_absolute():
+                        release = cwd / release
+                    archive = (
+                        release
+                        / ("vfsi-c-" + adoption.SDK)
+                        / ("vfsi-c-" + adoption.SDK + ".crate")
+                    )
+                    archive.parent.mkdir(parents=True)
+                    archive.write_bytes(b"headers")
+
+                def verify(path):
+                    self.assertEqual(path.read_bytes(), b"headers")
+                    raise PreparedHeaders
+
+                with patch.object(
+                    adoption.development, "snapshot", side_effect=snapshot
+                ), patch.object(
+                    adoption.subprocess, "run", side_effect=headers
+                ), patch.object(
+                    adoption.scan, "sha", side_effect=verify
+                ):
+                    with self.assertRaises(PreparedHeaders):
+                        adoption.prepare(
+                            argparse.Namespace(
+                                output=Path("build"),
+                                target_dir=Path("cache"),
+                                checkout=Path("checkout"),
+                            )
+                        )
+            finally:
+                os.chdir(original)
+
+    def test_capture_startup_interrupt_reaps_the_child(self):
+        real_popen = subprocess.Popen
+        children = []
+
+        def launch(*args, **kwargs):
+            child = real_popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"], **kwargs
+            )
+            children.append(child)
+            return child
+
+        with tempfile.TemporaryDirectory() as temp:
+            try:
+                with patch.object(
+                    adoption.subprocess, "Popen", side_effect=launch
+                ), patch.object(
+                    adoption.time, "sleep", side_effect=SystemExit("interrupted")
+                ):
+                    with self.assertRaises(SystemExit):
+                        adoption.start_capture("unused", Path(temp) / "trial")
+                self.assertIsNotNone(
+                    children[0].poll(), "capture child survived startup interruption"
+                )
+            finally:
+                for child in children:
+                    if child.poll() is None:
+                        child.kill()
+                    child.wait()
+
+    def test_audit_requires_capture_for_completed_transfer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "results.json").write_text(
+                json.dumps(
+                    {
+                        "verified": True,
+                        "transfers": [{"scenario": "create", "wire": None}],
+                    }
+                )
+            )
+            with self.assertRaisesRegex(AssertionError, "missing capture"):
+                audit_adoption.audit(root, root, root / "proof.json")
+            self.assertFalse((root / "proof.json").exists())
+
     def test_independent_recipe_counts_match_the_frozen_workload(self):
         import hashlib
 

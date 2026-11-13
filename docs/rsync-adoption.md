@@ -7,6 +7,13 @@ issue far fewer RPCs. These are captured correctness trials, not timing medians.
 
 ## Inputs and method
 
+Measurements used the runner at commit 98fd81c with absolute preparation paths.
+The evidence bundle retains that exact `runner-snapshot.py` and its recorded
+SHA-256. Subsequent review fixes affect preparation path resolution, interrupted
+capture startup cleanup, and audit strictness; they do not change these measured
+trials or rewrite their provenance.
+
+
 - Port: 7f4f8f87a58510acfcc71fc28c3461138327b848.
 - Stock upstream: ea645201fefbba7f6b6b22b621856dba3c01cdd3, the port’s upstream base.
 - SDK: checksum-pinned published vfsi-c 0.3.18, registry dependencies only; vfsi-core/sync/local/posix/smb 0.2.1 and vfsi-nfs 0.2.3.

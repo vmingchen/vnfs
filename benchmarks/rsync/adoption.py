@@ -36,6 +36,9 @@ SDK_SHA = "a8cdd7c5e57b3d46dc42fe7603b1180c44ea1e5ad95e185f71596531bb7b472c"
 
 
 def prepare(args):
+    args.output = args.output.resolve()
+    args.target_dir = args.target_dir.resolve()
+    args.checkout = args.checkout.resolve()
     args.output.mkdir(parents=True, exist_ok=False)
     port, port_evidence = development.snapshot(args.checkout, PORT, args.output, "port")
     stock, stock_evidence = development.snapshot(
@@ -273,14 +276,17 @@ def start_capture(interface, stem):
             stdout=subprocess.DEVNULL,
             stderr=log,
         )
-    deadline = time.monotonic() + 10
-    while "listening on" not in capture_log.read_text():
-        if process.poll() is not None or time.monotonic() > deadline:
-            process.kill()
-            process.wait()
-            raise RuntimeError("capture failed to start")
-        time.sleep(0.02)
-    return process
+    try:
+        deadline = time.monotonic() + 10
+        while "listening on" not in capture_log.read_text():
+            if process.poll() is not None or time.monotonic() > deadline:
+                raise RuntimeError("capture failed to start")
+            time.sleep(0.02)
+        return process
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
 
 
 def finish_capture(process, stem):
