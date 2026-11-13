@@ -1,0 +1,2080 @@
+{
+  "provenance": {
+    "schema_version": 1,
+    "port": {
+      "revision": "7f4f8f87a58510acfcc71fc28c3461138327b848",
+      "archive_sha256": "ab6bc6557d39328c223775885535785fafe66e74466b889d60a09d87179bf561"
+    },
+    "stock": {
+      "revision": "ea645201fefbba7f6b6b22b621856dba3c01cdd3",
+      "archive_sha256": "62e685f2d103cec5642cd824fce6322ae9b14b7a69ab125793348f7cb5715117"
+    },
+    "sdk": "0.3.18",
+    "sdk_archive_sha256": "a8cdd7c5e57b3d46dc42fe7603b1180c44ea1e5ad95e185f71596531bb7b472c",
+    "sdk_lock_sha256": "5730270aa51f21cf3e4c7dccb11e7e8a8ca5e95ee03a0f8579f323e7e2c8c892",
+    "versions": {
+      "libntirpc-sys": "0.3.6",
+      "nfsv41-sys": "0.1.16",
+      "vfsi-c": "0.3.18",
+      "vfsi-core": "0.2.1",
+      "vfsi-local": "0.2.1",
+      "vfsi-nfs": "0.2.3",
+      "vfsi-posix": "0.2.1",
+      "vfsi-smb": "0.2.1",
+      "vfsi-sync": "0.2.1"
+    },
+    "configure_flags": [
+      "--disable-md2man",
+      "--disable-xxhash",
+      "--disable-zstd",
+      "--disable-lz4",
+      "--disable-idn"
+    ],
+    "binary": "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+    "stock_binary": "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+    "library": "/tmp/vfsi-rsync-adoption-20261112-build/sdk/lib/libvfsi_c.so",
+    "binary_sha256": "985d47b0c7b084237bca2158d3519eb52484370e76605228dd6035281e95c5b4",
+    "stock_binary_sha256": "2e090f28f5cfc04a6321ef8ef67e5e42d15d6ddd1036f727c83927fa8292d5e0",
+    "library_sha256": "ffaf493415f8a6b1360ebed29aa714fd9762d5c8fde3392a832336101c88fb46",
+    "compiler": "cc (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+    "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11) (built from a source tarball)\nbinary: rustc\ncommit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\ncommit-date: 2026-02-11\nhost: aarch64-unknown-linux-gnu\nrelease: 1.93.1\nLLVM version: 21.1.8\n"
+  },
+  "fixture": {
+    "schema_version": 1,
+    "branches": 6,
+    "depth": 4,
+    "files_per_directory": 8,
+    "file_bytes": 128,
+    "payload_sha256": "b2169d4d0046ec4f9ea3c11ea8f2a2581c9c786b4acc3344cdf47af85974f242",
+    "identity_sha256": "8b054ac6860c86a6c98ddf06e659262a719d758191185e70ddcf5267419a0853",
+    "directories": 1555,
+    "regular_files": 12440,
+    "logical_file_bytes": 1592320,
+    "allocated_bytes": 57323520,
+    "symlinks": 0,
+    "hard_link_aliases": 0
+  },
+  "old_library_sha256": "4d1ec2e1f2c96ed9864f1d65563315b15184273140dc9213a3d37e9109061f82",
+  "regimes": {
+    "native": {
+      "added_one_way_us": 0,
+      "ping_rtt_median_ms": 0.053,
+      "ping_raw": "PING 169.254.241.1 (169.254.241.1) 56(84) bytes of data.\n64 bytes from 169.254.241.1: icmp_seq=1 ttl=64 time=0.078 ms\n64 bytes from 169.254.241.1: icmp_seq=2 ttl=64 time=0.009 ms\n64 bytes from 169.254.241.1: icmp_seq=3 ttl=64 time=0.008 ms\n64 bytes from 169.254.241.1: icmp_seq=4 ttl=64 time=0.058 ms\n64 bytes from 169.254.241.1: icmp_seq=5 ttl=64 time=0.066 ms\n64 bytes from 169.254.241.1: icmp_seq=6 ttl=64 time=0.068 ms\n64 bytes from 169.254.241.1: icmp_seq=7 ttl=64 time=0.053 ms\n64 bytes from 169.254.241.1: icmp_seq=8 ttl=64 time=0.047 ms\n64 bytes from 169.254.241.1: icmp_seq=9 ttl=64 time=0.040 ms\n\n--- 169.254.241.1 ping statistics ---\n9 packets transmitted, 9 received, 0% packet loss, time 705ms\nrtt min/avg/max/mdev = 0.008/0.047/0.078/0.023 ms\n",
+      "host_qdisc": [
+        {
+          "kind": "noqueue",
+          "handle": "0:",
+          "root": true,
+          "refcnt": 2,
+          "options": {},
+          "bytes": 0,
+          "packets": 0,
+          "drops": 0,
+          "overlimits": 0,
+          "requeues": 0,
+          "backlog": 0,
+          "qlen": 0
+        }
+      ],
+      "client_qdisc": [
+        {
+          "kind": "noqueue",
+          "handle": "0:",
+          "root": true,
+          "refcnt": 2,
+          "options": {},
+          "bytes": 0,
+          "packets": 0,
+          "drops": 0,
+          "overlimits": 0,
+          "requeues": 0,
+          "backlog": 0,
+          "qlen": 0
+        }
+      ]
+    },
+    "added-1ms-rtt": {
+      "added_one_way_us": 500,
+      "ping_rtt_median_ms": 1.14,
+      "ping_raw": "PING 169.254.241.1 (169.254.241.1) 56(84) bytes of data.\n64 bytes from 169.254.241.1: icmp_seq=1 ttl=64 time=1.14 ms\n64 bytes from 169.254.241.1: icmp_seq=2 ttl=64 time=1.03 ms\n64 bytes from 169.254.241.1: icmp_seq=3 ttl=64 time=1.03 ms\n64 bytes from 169.254.241.1: icmp_seq=4 ttl=64 time=1.15 ms\n64 bytes from 169.254.241.1: icmp_seq=5 ttl=64 time=1.18 ms\n64 bytes from 169.254.241.1: icmp_seq=6 ttl=64 time=1.18 ms\n64 bytes from 169.254.241.1: icmp_seq=7 ttl=64 time=1.15 ms\n64 bytes from 169.254.241.1: icmp_seq=8 ttl=64 time=1.09 ms\n64 bytes from 169.254.241.1: icmp_seq=9 ttl=64 time=1.14 ms\n\n--- 169.254.241.1 ping statistics ---\n9 packets transmitted, 9 received, 0% packet loss, time 741ms\nrtt min/avg/max/mdev = 1.027/1.119/1.183/0.055 ms\n",
+      "host_qdisc": [
+        {
+          "kind": "netem",
+          "handle": "804f:",
+          "root": true,
+          "refcnt": 5,
+          "options": {
+            "limit": 1000,
+            "delay": {
+              "delay": 0.0005,
+              "jitter": 0,
+              "correlation": 0
+            },
+            "seed": 6466009163324801988,
+            "ecn": false,
+            "gap": 0
+          },
+          "bytes": 882,
+          "packets": 9,
+          "drops": 0,
+          "overlimits": 0,
+          "requeues": 0,
+          "backlog": 0,
+          "qlen": 0
+        }
+      ],
+      "client_qdisc": [
+        {
+          "kind": "netem",
+          "handle": "8050:",
+          "root": true,
+          "refcnt": 5,
+          "options": {
+            "limit": 1000,
+            "delay": {
+              "delay": 0.0005,
+              "jitter": 0,
+              "correlation": 0
+            },
+            "seed": 5229220768559133161,
+            "ecn": false,
+            "gap": 0
+          },
+          "bytes": 882,
+          "packets": 9,
+          "drops": 0,
+          "overlimits": 0,
+          "requeues": 0,
+          "backlog": 0,
+          "qlen": 0
+        }
+      ]
+    }
+  },
+  "scans": [
+    {
+      "scenario": "scan",
+      "method": "kernel",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--dry-run",
+        "tree/",
+        "/tmp/vfsi-rsync-scan-6440bbu4/destination/"
+      ],
+      "status": 0,
+      "elapsed_ns": 1801564791,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 4668,
+        "unique_rpc_calls": 4668,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 4668
+        },
+        "request_opcodes": {
+          "53": 4668,
+          "22": 4668,
+          "3": 1556,
+          "9": 3113,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1555
+        },
+        "pcap_sha256": "98de74d2707ec521042e80e90cc91251a838843c5bacc5f0742c949503a7ad08"
+      },
+      "manifest_sha256": "4c9a6e948e0b05f6ebca67d318bd10556c502ca6939773453d3abfea6cdeb69d",
+      "entries": 1,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "regime": "native"
+    },
+    {
+      "scenario": "scan",
+      "method": "vfsi",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--dry-run",
+        "tree/",
+        "/tmp/vfsi-rsync-scan-8wmps_ex/destination/"
+      ],
+      "status": 0,
+      "elapsed_ns": 215020940,
+      "traced_entries": 13994,
+      "wire": {
+        "rpc_calls": 273,
+        "unique_rpc_calls": 273,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 273
+        },
+        "request_opcodes": {
+          "53": 269,
+          "22": 1560,
+          "3": 2,
+          "9": 6,
+          "15": 1561,
+          "10": 1557,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1555,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "754dedb4fd836894cd404daa9a2d6ae537d6c6faadccdf5bed969247d365e71b"
+      },
+      "manifest_sha256": "4c9a6e948e0b05f6ebca67d318bd10556c502ca6939773453d3abfea6cdeb69d",
+      "entries": 1,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "regime": "native"
+    },
+    {
+      "scenario": "scan",
+      "method": "kernel",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--dry-run",
+        "tree/",
+        "/tmp/vfsi-rsync-scan-f3lyktg4/destination/"
+      ],
+      "status": 0,
+      "elapsed_ns": 5981719710,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 4668,
+        "unique_rpc_calls": 4668,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 4668
+        },
+        "request_opcodes": {
+          "53": 4668,
+          "22": 4668,
+          "3": 1556,
+          "9": 3113,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1555
+        },
+        "pcap_sha256": "041dbab2a5cd2c4701e5b2091eee2295761342c3d648009d2691883c6d5d58dc"
+      },
+      "manifest_sha256": "4c9a6e948e0b05f6ebca67d318bd10556c502ca6939773453d3abfea6cdeb69d",
+      "entries": 1,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "regime": "added-1ms-rtt"
+    },
+    {
+      "scenario": "scan",
+      "method": "vfsi",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--dry-run",
+        "tree/",
+        "/tmp/vfsi-rsync-scan-zwqzgm3e/destination/"
+      ],
+      "status": 0,
+      "elapsed_ns": 674630598,
+      "traced_entries": 13994,
+      "wire": {
+        "rpc_calls": 273,
+        "unique_rpc_calls": 273,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 273
+        },
+        "request_opcodes": {
+          "53": 269,
+          "22": 1560,
+          "3": 2,
+          "9": 6,
+          "15": 1561,
+          "10": 1557,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1555,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "b6c04353d884f2c192da59bb01bb49a03055e05da689f2680ec676ea3caf6ee3"
+      },
+      "manifest_sha256": "4c9a6e948e0b05f6ebca67d318bd10556c502ca6939773453d3abfea6cdeb69d",
+      "entries": 1,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "regime": "added-1ms-rtt"
+    }
+  ],
+  "transfers": [
+    {
+      "scenario": "create",
+      "method": "stock",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-fzrz5o93/stock/"
+      ],
+      "status": 0,
+      "elapsed_ns": 11747008638,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 41988,
+        "unique_rpc_calls": 41988,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 41988
+        },
+        "request_opcodes": {
+          "53": 41988,
+          "22": 41988,
+          "3": 13996,
+          "9": 27993,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1555,
+          "18": 12440,
+          "25": 12440,
+          "4": 12440
+        },
+        "pcap_sha256": "23036dc60c1651297b3d922e8f12c93aa8e226a710cc608cece59bbf266ba319"
+      },
+      "manifest_sha256": "3ace1a369011956a16242680bbad367eb5e81eb36c5a0447080c392138250275",
+      "entries": 13995,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "regime": "native"
+    },
+    {
+      "scenario": "create",
+      "method": "vfsi",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-fzrz5o93/vfsi/"
+      ],
+      "status": 0,
+      "elapsed_ns": 13247872830,
+      "traced_entries": 13994,
+      "wire": {
+        "rpc_calls": 53141,
+        "unique_rpc_calls": 53141,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 53141
+        },
+        "request_opcodes": {
+          "53": 53137,
+          "22": 54428,
+          "3": 13996,
+          "9": 40434,
+          "15": 15558,
+          "10": 15551,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1555,
+          "18": 12440,
+          "25": 12440,
+          "4": 12440,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "9166b6819be75322b96d318e30a1d2a41df6bf401d92e39de3a939abea0d10bc"
+      },
+      "manifest_sha256": "3ace1a369011956a16242680bbad367eb5e81eb36c5a0447080c392138250275",
+      "entries": 13995,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "regime": "native"
+    },
+    {
+      "scenario": "update",
+      "method": "stock",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-fzrz5o93/stock/"
+      ],
+      "status": 0,
+      "elapsed_ns": 1344938711,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 4674,
+        "unique_rpc_calls": 4674,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 4674
+        },
+        "request_opcodes": {
+          "53": 4674,
+          "22": 4674,
+          "3": 1558,
+          "9": 3117,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1555,
+          "18": 2,
+          "25": 2,
+          "4": 2
+        },
+        "pcap_sha256": "40b792db3574d2f322ae5dbbb8a5965e1a8bc2cd683bfdb7596023d86e8a76c7"
+      },
+      "manifest_sha256": "f37d845ff1e6aff3890f8db3512ac1093e3cd19fef421b8ff87dcbd5987a316a",
+      "entries": 13996,
+      "stdout_sha256": "26692fab33db8c50ad0fd78ccb3bff19fdd4060f6dd9e74f84cd8a766891104c",
+      "stdout_lines": 3,
+      "regime": "native"
+    },
+    {
+      "scenario": "update",
+      "method": "vfsi",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-fzrz5o93/vfsi/"
+      ],
+      "status": 0,
+      "elapsed_ns": 474763173,
+      "traced_entries": 13995,
+      "wire": {
+        "rpc_calls": 281,
+        "unique_rpc_calls": 281,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 281
+        },
+        "request_opcodes": {
+          "53": 277,
+          "22": 1568,
+          "3": 4,
+          "9": 12,
+          "15": 1566,
+          "10": 1559,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1555,
+          "18": 2,
+          "25": 2,
+          "4": 2,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "50787cb62706347d62dbfd25d2e6c50ecd6139a2106906f386b8ee2a0b67d133"
+      },
+      "manifest_sha256": "f37d845ff1e6aff3890f8db3512ac1093e3cd19fef421b8ff87dcbd5987a316a",
+      "entries": 13996,
+      "stdout_sha256": "26692fab33db8c50ad0fd78ccb3bff19fdd4060f6dd9e74f84cd8a766891104c",
+      "stdout_lines": 3,
+      "regime": "native"
+    },
+    {
+      "scenario": "delete",
+      "method": "stock",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-fzrz5o93/stock/"
+      ],
+      "status": 0,
+      "elapsed_ns": 1218902689,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 4665,
+        "unique_rpc_calls": 4665,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 4665
+        },
+        "request_opcodes": {
+          "53": 4665,
+          "22": 4665,
+          "3": 1555,
+          "9": 3111,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1554
+        },
+        "pcap_sha256": "73c4964c268448ee61261b32d213c9a16d0deca76994dbd5a00b69f952e1ce9e"
+      },
+      "manifest_sha256": "d1a680f64dcbe2534b1fba4163552b0b93dc243b3607321c4295e6ce3dd4580b",
+      "entries": 13986,
+      "stdout_sha256": "616cd8a615bb9a2958ef56a15e5a88542f822e0e5dbafdb2783838f2448ea455",
+      "stdout_lines": 14,
+      "regime": "native"
+    },
+    {
+      "scenario": "delete",
+      "method": "vfsi",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-fzrz5o93/vfsi/"
+      ],
+      "status": 0,
+      "elapsed_ns": 270250304,
+      "traced_entries": 13985,
+      "wire": {
+        "rpc_calls": 273,
+        "unique_rpc_calls": 273,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 273
+        },
+        "request_opcodes": {
+          "53": 269,
+          "22": 1559,
+          "3": 2,
+          "9": 6,
+          "15": 1563,
+          "10": 1556,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1554,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "9829ae72223ad6aa6f8eb047f4578c39aeeffbf6bd54f23a211dccfd4fc5fb04"
+      },
+      "manifest_sha256": "d1a680f64dcbe2534b1fba4163552b0b93dc243b3607321c4295e6ce3dd4580b",
+      "entries": 13986,
+      "stdout_sha256": "616cd8a615bb9a2958ef56a15e5a88542f822e0e5dbafdb2783838f2448ea455",
+      "stdout_lines": 14,
+      "regime": "native"
+    },
+    {
+      "scenario": "excludes",
+      "method": "stock",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "--exclude=skip/",
+        "--exclude=*.skip",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-fzrz5o93/stock/"
+      ],
+      "status": 0,
+      "elapsed_ns": 1203351937,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 4668,
+        "unique_rpc_calls": 4668,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 4668
+        },
+        "request_opcodes": {
+          "53": 4668,
+          "22": 4668,
+          "3": 1556,
+          "9": 3113,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1554,
+          "18": 1,
+          "25": 1,
+          "4": 1
+        },
+        "pcap_sha256": "307132153a0411ece635adc8793cd9859870005de3c2069c70856fb5c6c6224e"
+      },
+      "manifest_sha256": "29fb4136d5ca5cf9ecfa961df7e5580b1a56684c9564112962d15a031c26fcfb",
+      "entries": 13987,
+      "stdout_sha256": "3c4cf1fcad88df04e0a8e53614b6b41adfa9d7d92aad83eb3972423151b9bfb0",
+      "stdout_lines": 2,
+      "regime": "native"
+    },
+    {
+      "scenario": "excludes",
+      "method": "vfsi",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "--exclude=skip/",
+        "--exclude=*.skip",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-fzrz5o93/vfsi/"
+      ],
+      "status": 0,
+      "elapsed_ns": 270080179,
+      "traced_entries": 13988,
+      "wire": {
+        "rpc_calls": 277,
+        "unique_rpc_calls": 277,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 277
+        },
+        "request_opcodes": {
+          "53": 273,
+          "22": 1563,
+          "3": 3,
+          "9": 9,
+          "15": 1564,
+          "10": 1557,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1554,
+          "18": 1,
+          "25": 1,
+          "4": 1,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "61a15e2fc2d38d21436c7b97e3c2ff40df2a9ea1c85163640437a4b24d7670ec"
+      },
+      "manifest_sha256": "29fb4136d5ca5cf9ecfa961df7e5580b1a56684c9564112962d15a031c26fcfb",
+      "entries": 13987,
+      "stdout_sha256": "3c4cf1fcad88df04e0a8e53614b6b41adfa9d7d92aad83eb3972423151b9bfb0",
+      "stdout_lines": 2,
+      "regime": "native"
+    },
+    {
+      "scenario": "symlinks",
+      "method": "stock",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-fzrz5o93/stock/"
+      ],
+      "status": 0,
+      "elapsed_ns": 1168021087,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 4676,
+        "unique_rpc_calls": 4676,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 4676
+        },
+        "request_opcodes": {
+          "53": 4676,
+          "22": 4676,
+          "3": 1558,
+          "9": 3117,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1555,
+          "27": 2,
+          "18": 2,
+          "25": 2,
+          "4": 2
+        },
+        "pcap_sha256": "311aa3927eba5ffe36affaa0e5e66734112c1e7e7398bd92d70f84ecba89dcdd"
+      },
+      "manifest_sha256": "db63490dbcc9b5b4308706f1f7cbfc2b0a052f58d7e0ed78dbd8ff8f43591007",
+      "entries": 13992,
+      "stdout_sha256": "5eb8edd26e9c522c8c583fdbdcde64c5b7b8bbda8bf7c90d1c9ff290ad9a16ed",
+      "stdout_lines": 6,
+      "regime": "native"
+    },
+    {
+      "scenario": "symlinks",
+      "method": "vfsi",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-fzrz5o93/vfsi/"
+      ],
+      "status": 0,
+      "elapsed_ns": 297961674,
+      "traced_entries": 13991,
+      "wire": {
+        "rpc_calls": 287,
+        "unique_rpc_calls": 287,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 287
+        },
+        "request_opcodes": {
+          "53": 283,
+          "22": 1574,
+          "3": 5,
+          "9": 16,
+          "15": 1569,
+          "10": 1562,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1555,
+          "27": 2,
+          "18": 2,
+          "25": 2,
+          "4": 2,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "2511d2b10afc1cbf1e1e32ca31cc66478d47927578e0bdbefc4b0178f1e4c226"
+      },
+      "manifest_sha256": "db63490dbcc9b5b4308706f1f7cbfc2b0a052f58d7e0ed78dbd8ff8f43591007",
+      "entries": 13992,
+      "stdout_sha256": "5eb8edd26e9c522c8c583fdbdcde64c5b7b8bbda8bf7c90d1c9ff290ad9a16ed",
+      "stdout_lines": 6,
+      "regime": "native"
+    },
+    {
+      "scenario": "partial-failure",
+      "method": "stock",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-fzrz5o93/stock/"
+      ],
+      "status": 23,
+      "elapsed_ns": 1394975977,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 4674,
+        "unique_rpc_calls": 4674,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 4674
+        },
+        "request_opcodes": {
+          "53": 4674,
+          "22": 4674,
+          "3": 1558,
+          "9": 3116,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1555,
+          "27": 2,
+          "18": 2,
+          "25": 1,
+          "4": 1
+        },
+        "pcap_sha256": "b402d78a5dd487938d612e1e20af6480f1a414d933f93b7efbea33160f7633f6"
+      },
+      "manifest_sha256": "ab1e760b5510406a7a9326d20106c3eed40a0d82fce20bbb324b1ddd9f309c7c",
+      "entries": 13993,
+      "stdout_sha256": "01877f5e04d7efa29101d14000f5a46487b99c6508ce510afb0dc0d417f1f279",
+      "stdout_lines": 2,
+      "regime": "native"
+    },
+    {
+      "scenario": "partial-failure",
+      "method": "vfsi",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-fzrz5o93/vfsi/"
+      ],
+      "status": 23,
+      "elapsed_ns": 452469859,
+      "traced_entries": 13993,
+      "wire": {
+        "rpc_calls": 283,
+        "unique_rpc_calls": 283,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 283
+        },
+        "request_opcodes": {
+          "53": 279,
+          "22": 1570,
+          "3": 4,
+          "9": 13,
+          "15": 1568,
+          "10": 1561,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1555,
+          "27": 2,
+          "18": 2,
+          "25": 1,
+          "4": 1,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "4abf5084ecda041e31dd86e49c15c59d14a1ac8f444b22559d8469feae5e8b42"
+      },
+      "manifest_sha256": "ab1e760b5510406a7a9326d20106c3eed40a0d82fce20bbb324b1ddd9f309c7c",
+      "entries": 13993,
+      "stdout_sha256": "01877f5e04d7efa29101d14000f5a46487b99c6508ce510afb0dc0d417f1f279",
+      "stdout_lines": 2,
+      "regime": "native"
+    },
+    {
+      "scenario": "fallback",
+      "method": "stock",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "fallback/",
+        "/tmp/vfsi-rsync-adoption-fzrz5o93/fallback-stock/"
+      ],
+      "status": 0,
+      "elapsed_ns": 156449816,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 16,
+        "unique_rpc_calls": 16,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 16
+        },
+        "request_opcodes": {
+          "53": 16,
+          "22": 16,
+          "3": 5,
+          "9": 11,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 2,
+          "27": 1,
+          "18": 2,
+          "25": 2,
+          "4": 2
+        },
+        "pcap_sha256": "94ce41337f030e6b8691c88dbefa9697ed4559461b9a63536ca8295707b0e457"
+      },
+      "manifest_sha256": "755ff1b1846a6bcc648b7a94a32689afa38b98b7b217a7179bf44da65ab7d332",
+      "entries": 5,
+      "stdout_sha256": "2959f5e12c3646bfc37d0ae5232e6d0fa558c865a0a3418e3afcbcc671254df0",
+      "stdout_lines": 4,
+      "regime": "native"
+    },
+    {
+      "scenario": "fallback",
+      "method": "old-library",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "fallback/",
+        "/tmp/vfsi-rsync-adoption-fzrz5o93/fallback-old-library/"
+      ],
+      "status": 0,
+      "elapsed_ns": 48648721,
+      "traced_entries": 4,
+      "wire": {
+        "rpc_calls": 31,
+        "unique_rpc_calls": 31,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 31
+        },
+        "request_opcodes": {
+          "53": 27,
+          "22": 23,
+          "3": 5,
+          "9": 18,
+          "15": 18,
+          "10": 10,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 2,
+          "27": 1,
+          "44": 1,
+          "57": 1,
+          "18": 2,
+          "25": 2,
+          "4": 2
+        },
+        "pcap_sha256": "176ea8a95e4e3fd7cef343f73a1a8121360b5bc8517fd714c3c43cdf8c0e933c"
+      },
+      "manifest_sha256": "755ff1b1846a6bcc648b7a94a32689afa38b98b7b217a7179bf44da65ab7d332",
+      "entries": 5,
+      "stdout_sha256": "723b28ef5f5d0b437e4c7552f39aa12e20339c7fb78188fa0873e09ae10f98be",
+      "stdout_lines": 5,
+      "regime": "native"
+    },
+    {
+      "scenario": "fallback",
+      "method": "missing-library",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "fallback/",
+        "/tmp/vfsi-rsync-adoption-fzrz5o93/fallback-missing-library/"
+      ],
+      "status": 0,
+      "elapsed_ns": 32642134,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 16,
+        "unique_rpc_calls": 16,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 16
+        },
+        "request_opcodes": {
+          "53": 16,
+          "22": 16,
+          "3": 5,
+          "9": 11,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 2,
+          "27": 1,
+          "18": 2,
+          "25": 2,
+          "4": 2
+        },
+        "pcap_sha256": "cfae38b420388e0b8d7274748c848130c901ed63f6d82aedc69a92a713bcd063"
+      },
+      "manifest_sha256": "755ff1b1846a6bcc648b7a94a32689afa38b98b7b217a7179bf44da65ab7d332",
+      "entries": 5,
+      "stdout_sha256": "723b28ef5f5d0b437e4c7552f39aa12e20339c7fb78188fa0873e09ae10f98be",
+      "stdout_lines": 5,
+      "regime": "native"
+    },
+    {
+      "scenario": "fallback",
+      "method": "unsupported",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--hard-links",
+        "fallback/",
+        "/tmp/vfsi-rsync-adoption-fzrz5o93/fallback-unsupported/"
+      ],
+      "status": 0,
+      "elapsed_ns": 32750675,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 16,
+        "unique_rpc_calls": 16,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 16
+        },
+        "request_opcodes": {
+          "53": 16,
+          "22": 16,
+          "3": 5,
+          "9": 11,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 2,
+          "27": 1,
+          "18": 2,
+          "25": 2,
+          "4": 2
+        },
+        "pcap_sha256": "a7ea32c8594f9186dbc43af17a2115ab744bdfd0be47f8d00ae7f50aa6046097"
+      },
+      "manifest_sha256": "755ff1b1846a6bcc648b7a94a32689afa38b98b7b217a7179bf44da65ab7d332",
+      "entries": 5,
+      "stdout_sha256": "723b28ef5f5d0b437e4c7552f39aa12e20339c7fb78188fa0873e09ae10f98be",
+      "stdout_lines": 5,
+      "regime": "native"
+    },
+    {
+      "scenario": "interrupted",
+      "method": "stock",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--partial",
+        "--bwlimit=64",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-fzrz5o93/resume-stock/"
+      ],
+      "status": 20,
+      "elapsed_ns": 5145643576,
+      "traced_entries": 0,
+      "wire": null,
+      "manifest_sha256": "304f7fb367d211cb523e7a504963dbe7b0b175a502fe34373027b97d5c85aa81",
+      "entries": 130,
+      "stdout_sha256": "64b92e31f65c44c877bcabf2ae00fc9d0358603ab1efeb902d404b46a04f5733",
+      "stdout_lines": 2,
+      "regime": "native"
+    },
+    {
+      "scenario": "resumed",
+      "method": "stock",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--partial",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-fzrz5o93/resume-stock/"
+      ],
+      "status": 0,
+      "elapsed_ns": 11003026396,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 41998,
+        "unique_rpc_calls": 41998,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 41998
+        },
+        "request_opcodes": {
+          "53": 41998,
+          "22": 41998,
+          "3": 13993,
+          "9": 27987,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1555,
+          "27": 2,
+          "18": 12437,
+          "25": 12454,
+          "4": 12437
+        },
+        "pcap_sha256": "5eb39eac1eccd393c3d4c34cacd4473ed27856383ba16e3b3795988fb994195a"
+      },
+      "manifest_sha256": "c863766617d0847772b388e91c7f19172559f6f75d83d81efaae8ebcabb25506",
+      "entries": 13994,
+      "stdout_sha256": "0012e7a10beb13ebd75703b85b0f60480204200c9f2ba898de09d20441049ece",
+      "stdout_lines": 13901,
+      "regime": "native"
+    },
+    {
+      "scenario": "interrupted",
+      "method": "vfsi",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--partial",
+        "--bwlimit=64",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-fzrz5o93/resume-vfsi/"
+      ],
+      "status": 20,
+      "elapsed_ns": 5276691402,
+      "traced_entries": 1201,
+      "wire": null,
+      "manifest_sha256": "304f7fb367d211cb523e7a504963dbe7b0b175a502fe34373027b97d5c85aa81",
+      "entries": 130,
+      "stdout_sha256": "64b92e31f65c44c877bcabf2ae00fc9d0358603ab1efeb902d404b46a04f5733",
+      "stdout_lines": 2,
+      "regime": "native"
+    },
+    {
+      "scenario": "resumed",
+      "method": "vfsi",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--partial",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-fzrz5o93/resume-vfsi/"
+      ],
+      "status": 0,
+      "elapsed_ns": 13364089383,
+      "traced_entries": 13993,
+      "wire": {
+        "rpc_calls": 53150,
+        "unique_rpc_calls": 53150,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 53150
+        },
+        "request_opcodes": {
+          "53": 53146,
+          "22": 54437,
+          "3": 13993,
+          "9": 40427,
+          "15": 15557,
+          "10": 15550,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1555,
+          "27": 2,
+          "18": 12437,
+          "25": 12454,
+          "4": 12437,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "d074a6323064bb275853acd127aeb440f51cf0dd002f1f1bed9550fdb57984a0"
+      },
+      "manifest_sha256": "c863766617d0847772b388e91c7f19172559f6f75d83d81efaae8ebcabb25506",
+      "entries": 13994,
+      "stdout_sha256": "0012e7a10beb13ebd75703b85b0f60480204200c9f2ba898de09d20441049ece",
+      "stdout_lines": 13901,
+      "regime": "native"
+    },
+    {
+      "scenario": "create",
+      "method": "stock",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-vz_e5doy/stock/"
+      ],
+      "status": 0,
+      "elapsed_ns": 54879922270,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 41989,
+        "unique_rpc_calls": 41989,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 41989
+        },
+        "request_opcodes": {
+          "53": 41989,
+          "22": 41989,
+          "3": 13996,
+          "9": 27994,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1555,
+          "18": 12440,
+          "25": 12440,
+          "4": 12440
+        },
+        "pcap_sha256": "068024a4bfdcb0b7cf83067c13944b61ff2658a3fdbe0662ad95092513d64b58"
+      },
+      "manifest_sha256": "3ace1a369011956a16242680bbad367eb5e81eb36c5a0447080c392138250275",
+      "entries": 13995,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "regime": "added-1ms-rtt"
+    },
+    {
+      "scenario": "create",
+      "method": "vfsi",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-vz_e5doy/vfsi/"
+      ],
+      "status": 0,
+      "elapsed_ns": 69665610217,
+      "traced_entries": 13994,
+      "wire": {
+        "rpc_calls": 53143,
+        "unique_rpc_calls": 53143,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 53143
+        },
+        "request_opcodes": {
+          "53": 53139,
+          "22": 54430,
+          "3": 13996,
+          "9": 40436,
+          "15": 15558,
+          "10": 15551,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1555,
+          "18": 12440,
+          "25": 12440,
+          "4": 12440,
+          "46": 1,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "d85cbd9acdb65b3535f382795880f1b393b7e62611062859d286e8baa29d0262"
+      },
+      "manifest_sha256": "3ace1a369011956a16242680bbad367eb5e81eb36c5a0447080c392138250275",
+      "entries": 13995,
+      "stdout_sha256": "783c47a2335e49dc25bfa6761d5b8b3f369f5fa75e847720e76ff9f5b56a3460",
+      "stdout_lines": 13995,
+      "regime": "added-1ms-rtt"
+    },
+    {
+      "scenario": "update",
+      "method": "stock",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-vz_e5doy/stock/"
+      ],
+      "status": 0,
+      "elapsed_ns": 5985658429,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 4674,
+        "unique_rpc_calls": 4674,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 4674
+        },
+        "request_opcodes": {
+          "53": 4674,
+          "22": 4674,
+          "3": 1558,
+          "9": 3117,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1555,
+          "18": 2,
+          "25": 2,
+          "4": 2
+        },
+        "pcap_sha256": "530c191d12da8755dd7ab7a150445f4523485b5bb18b7d15b764ef5ae851ab09"
+      },
+      "manifest_sha256": "f37d845ff1e6aff3890f8db3512ac1093e3cd19fef421b8ff87dcbd5987a316a",
+      "entries": 13996,
+      "stdout_sha256": "26692fab33db8c50ad0fd78ccb3bff19fdd4060f6dd9e74f84cd8a766891104c",
+      "stdout_lines": 3,
+      "regime": "added-1ms-rtt"
+    },
+    {
+      "scenario": "update",
+      "method": "vfsi",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-vz_e5doy/vfsi/"
+      ],
+      "status": 0,
+      "elapsed_ns": 634894361,
+      "traced_entries": 13995,
+      "wire": {
+        "rpc_calls": 281,
+        "unique_rpc_calls": 281,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 281
+        },
+        "request_opcodes": {
+          "53": 277,
+          "22": 1568,
+          "3": 4,
+          "9": 12,
+          "15": 1566,
+          "10": 1559,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1555,
+          "18": 2,
+          "25": 2,
+          "4": 2,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "f48aec4ca65bc6cb3fd28cf30b346ff7cb7720596272635266f1368a76180000"
+      },
+      "manifest_sha256": "f37d845ff1e6aff3890f8db3512ac1093e3cd19fef421b8ff87dcbd5987a316a",
+      "entries": 13996,
+      "stdout_sha256": "26692fab33db8c50ad0fd78ccb3bff19fdd4060f6dd9e74f84cd8a766891104c",
+      "stdout_lines": 3,
+      "regime": "added-1ms-rtt"
+    },
+    {
+      "scenario": "delete",
+      "method": "stock",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-vz_e5doy/stock/"
+      ],
+      "status": 0,
+      "elapsed_ns": 6073398925,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 4665,
+        "unique_rpc_calls": 4665,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 4665
+        },
+        "request_opcodes": {
+          "53": 4665,
+          "22": 4665,
+          "3": 1555,
+          "9": 3111,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1554
+        },
+        "pcap_sha256": "ad4cb6341b5ff3ed9ae10794b68ef6e6a12c771504aa1134f04d12dbb6c709ac"
+      },
+      "manifest_sha256": "d1a680f64dcbe2534b1fba4163552b0b93dc243b3607321c4295e6ce3dd4580b",
+      "entries": 13986,
+      "stdout_sha256": "616cd8a615bb9a2958ef56a15e5a88542f822e0e5dbafdb2783838f2448ea455",
+      "stdout_lines": 14,
+      "regime": "added-1ms-rtt"
+    },
+    {
+      "scenario": "delete",
+      "method": "vfsi",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-vz_e5doy/vfsi/"
+      ],
+      "status": 0,
+      "elapsed_ns": 531054445,
+      "traced_entries": 13985,
+      "wire": {
+        "rpc_calls": 273,
+        "unique_rpc_calls": 273,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 273
+        },
+        "request_opcodes": {
+          "53": 269,
+          "22": 1559,
+          "3": 2,
+          "9": 6,
+          "15": 1563,
+          "10": 1556,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1554,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "c43ec7aa8f3bab0b1635f046107bd6b2178a411b182f43e31f118518fe359df9"
+      },
+      "manifest_sha256": "d1a680f64dcbe2534b1fba4163552b0b93dc243b3607321c4295e6ce3dd4580b",
+      "entries": 13986,
+      "stdout_sha256": "616cd8a615bb9a2958ef56a15e5a88542f822e0e5dbafdb2783838f2448ea455",
+      "stdout_lines": 14,
+      "regime": "added-1ms-rtt"
+    },
+    {
+      "scenario": "excludes",
+      "method": "stock",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "--exclude=skip/",
+        "--exclude=*.skip",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-vz_e5doy/stock/"
+      ],
+      "status": 0,
+      "elapsed_ns": 6016585016,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 4668,
+        "unique_rpc_calls": 4668,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 4668
+        },
+        "request_opcodes": {
+          "53": 4668,
+          "22": 4668,
+          "3": 1556,
+          "9": 3113,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1554,
+          "18": 1,
+          "25": 1,
+          "4": 1
+        },
+        "pcap_sha256": "f879c736451a148f97037cfda8819a770072ee63fc4bbd0dd557eb18300f7484"
+      },
+      "manifest_sha256": "29fb4136d5ca5cf9ecfa961df7e5580b1a56684c9564112962d15a031c26fcfb",
+      "entries": 13987,
+      "stdout_sha256": "3c4cf1fcad88df04e0a8e53614b6b41adfa9d7d92aad83eb3972423151b9bfb0",
+      "stdout_lines": 2,
+      "regime": "added-1ms-rtt"
+    },
+    {
+      "scenario": "excludes",
+      "method": "vfsi",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "--exclude=skip/",
+        "--exclude=*.skip",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-vz_e5doy/vfsi/"
+      ],
+      "status": 0,
+      "elapsed_ns": 565910084,
+      "traced_entries": 13988,
+      "wire": {
+        "rpc_calls": 277,
+        "unique_rpc_calls": 277,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 277
+        },
+        "request_opcodes": {
+          "53": 273,
+          "22": 1563,
+          "3": 3,
+          "9": 9,
+          "15": 1564,
+          "10": 1557,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1554,
+          "18": 1,
+          "25": 1,
+          "4": 1,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "b9af8255b05d871603b95476f8cc91379c30f1006d05f6b9435b191d60c3110b"
+      },
+      "manifest_sha256": "29fb4136d5ca5cf9ecfa961df7e5580b1a56684c9564112962d15a031c26fcfb",
+      "entries": 13987,
+      "stdout_sha256": "3c4cf1fcad88df04e0a8e53614b6b41adfa9d7d92aad83eb3972423151b9bfb0",
+      "stdout_lines": 2,
+      "regime": "added-1ms-rtt"
+    },
+    {
+      "scenario": "symlinks",
+      "method": "stock",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-vz_e5doy/stock/"
+      ],
+      "status": 0,
+      "elapsed_ns": 5883998770,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 4676,
+        "unique_rpc_calls": 4676,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 4676
+        },
+        "request_opcodes": {
+          "53": 4676,
+          "22": 4676,
+          "3": 1558,
+          "9": 3117,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1555,
+          "27": 2,
+          "18": 2,
+          "25": 2,
+          "4": 2
+        },
+        "pcap_sha256": "2c02e5c5b250766d3f49ca2d5187470be012a82602038cf4878b28a3a6ba291f"
+      },
+      "manifest_sha256": "db63490dbcc9b5b4308706f1f7cbfc2b0a052f58d7e0ed78dbd8ff8f43591007",
+      "entries": 13992,
+      "stdout_sha256": "5eb8edd26e9c522c8c583fdbdcde64c5b7b8bbda8bf7c90d1c9ff290ad9a16ed",
+      "stdout_lines": 6,
+      "regime": "added-1ms-rtt"
+    },
+    {
+      "scenario": "symlinks",
+      "method": "vfsi",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-vz_e5doy/vfsi/"
+      ],
+      "status": 0,
+      "elapsed_ns": 569083635,
+      "traced_entries": 13991,
+      "wire": {
+        "rpc_calls": 287,
+        "unique_rpc_calls": 287,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 287
+        },
+        "request_opcodes": {
+          "53": 283,
+          "22": 1574,
+          "3": 5,
+          "9": 16,
+          "15": 1569,
+          "10": 1562,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1555,
+          "27": 2,
+          "18": 2,
+          "25": 2,
+          "4": 2,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "0569646eb60cabd7c54d7053797b1929fe0163aaf61c9f0216f9f0e7a532fc3a"
+      },
+      "manifest_sha256": "db63490dbcc9b5b4308706f1f7cbfc2b0a052f58d7e0ed78dbd8ff8f43591007",
+      "entries": 13992,
+      "stdout_sha256": "5eb8edd26e9c522c8c583fdbdcde64c5b7b8bbda8bf7c90d1c9ff290ad9a16ed",
+      "stdout_lines": 6,
+      "regime": "added-1ms-rtt"
+    },
+    {
+      "scenario": "partial-failure",
+      "method": "stock",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-vz_e5doy/stock/"
+      ],
+      "status": 23,
+      "elapsed_ns": 6699604762,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 4674,
+        "unique_rpc_calls": 4674,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 4674
+        },
+        "request_opcodes": {
+          "53": 4674,
+          "22": 4674,
+          "3": 1558,
+          "9": 3116,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1555,
+          "27": 2,
+          "18": 2,
+          "25": 1,
+          "4": 1
+        },
+        "pcap_sha256": "9ecea6264afbb1ca8791bf381b4d714696a920dbe252c4fdf183e808f2c9151e"
+      },
+      "manifest_sha256": "ab1e760b5510406a7a9326d20106c3eed40a0d82fce20bbb324b1ddd9f309c7c",
+      "entries": 13993,
+      "stdout_sha256": "01877f5e04d7efa29101d14000f5a46487b99c6508ce510afb0dc0d417f1f279",
+      "stdout_lines": 2,
+      "regime": "added-1ms-rtt"
+    },
+    {
+      "scenario": "partial-failure",
+      "method": "vfsi",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-vz_e5doy/vfsi/"
+      ],
+      "status": 23,
+      "elapsed_ns": 917286527,
+      "traced_entries": 13993,
+      "wire": {
+        "rpc_calls": 283,
+        "unique_rpc_calls": 283,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 283
+        },
+        "request_opcodes": {
+          "53": 279,
+          "22": 1570,
+          "3": 4,
+          "9": 13,
+          "15": 1568,
+          "10": 1561,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1555,
+          "27": 2,
+          "18": 2,
+          "25": 1,
+          "4": 1,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "b270c4db9acf3a344813604fa3fa8fe06436e9e4d45f70506bbc103a1e7be54d"
+      },
+      "manifest_sha256": "ab1e760b5510406a7a9326d20106c3eed40a0d82fce20bbb324b1ddd9f309c7c",
+      "entries": 13993,
+      "stdout_sha256": "01877f5e04d7efa29101d14000f5a46487b99c6508ce510afb0dc0d417f1f279",
+      "stdout_lines": 2,
+      "regime": "added-1ms-rtt"
+    },
+    {
+      "scenario": "fallback",
+      "method": "stock",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "fallback/",
+        "/tmp/vfsi-rsync-adoption-vz_e5doy/fallback-stock/"
+      ],
+      "status": 0,
+      "elapsed_ns": 44754458,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 16,
+        "unique_rpc_calls": 16,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 16
+        },
+        "request_opcodes": {
+          "53": 16,
+          "22": 16,
+          "3": 5,
+          "9": 11,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 2,
+          "27": 1,
+          "18": 2,
+          "25": 2,
+          "4": 2
+        },
+        "pcap_sha256": "e586458fab2e532faf49a13334225ddaf9afbc10453cb73b057daff368d2ec32"
+      },
+      "manifest_sha256": "755ff1b1846a6bcc648b7a94a32689afa38b98b7b217a7179bf44da65ab7d332",
+      "entries": 5,
+      "stdout_sha256": "2959f5e12c3646bfc37d0ae5232e6d0fa558c865a0a3418e3afcbcc671254df0",
+      "stdout_lines": 4,
+      "regime": "added-1ms-rtt"
+    },
+    {
+      "scenario": "fallback",
+      "method": "old-library",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "fallback/",
+        "/tmp/vfsi-rsync-adoption-vz_e5doy/fallback-old-library/"
+      ],
+      "status": 0,
+      "elapsed_ns": 235097908,
+      "traced_entries": 4,
+      "wire": {
+        "rpc_calls": 31,
+        "unique_rpc_calls": 31,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 31
+        },
+        "request_opcodes": {
+          "53": 27,
+          "22": 23,
+          "3": 5,
+          "9": 18,
+          "15": 18,
+          "10": 10,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 2,
+          "27": 1,
+          "44": 1,
+          "57": 1,
+          "18": 2,
+          "25": 2,
+          "4": 2
+        },
+        "pcap_sha256": "64319b218043efe6de1a656b13a57834f1b51262bb52534abd2671f3ffb44cfd"
+      },
+      "manifest_sha256": "755ff1b1846a6bcc648b7a94a32689afa38b98b7b217a7179bf44da65ab7d332",
+      "entries": 5,
+      "stdout_sha256": "723b28ef5f5d0b437e4c7552f39aa12e20339c7fb78188fa0873e09ae10f98be",
+      "stdout_lines": 5,
+      "regime": "added-1ms-rtt"
+    },
+    {
+      "scenario": "fallback",
+      "method": "missing-library",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "fallback/",
+        "/tmp/vfsi-rsync-adoption-vz_e5doy/fallback-missing-library/"
+      ],
+      "status": 0,
+      "elapsed_ns": 64956724,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 16,
+        "unique_rpc_calls": 16,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 16
+        },
+        "request_opcodes": {
+          "53": 16,
+          "22": 16,
+          "3": 5,
+          "9": 11,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 2,
+          "27": 1,
+          "18": 2,
+          "25": 2,
+          "4": 2
+        },
+        "pcap_sha256": "3ec2b22c9856b6aee0d429a9edf8ebdb063ad2dd9581056fbd624a67c3f446c9"
+      },
+      "manifest_sha256": "755ff1b1846a6bcc648b7a94a32689afa38b98b7b217a7179bf44da65ab7d332",
+      "entries": 5,
+      "stdout_sha256": "723b28ef5f5d0b437e4c7552f39aa12e20339c7fb78188fa0873e09ae10f98be",
+      "stdout_lines": 5,
+      "regime": "added-1ms-rtt"
+    },
+    {
+      "scenario": "fallback",
+      "method": "unsupported",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--hard-links",
+        "fallback/",
+        "/tmp/vfsi-rsync-adoption-vz_e5doy/fallback-unsupported/"
+      ],
+      "status": 0,
+      "elapsed_ns": 193349625,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 16,
+        "unique_rpc_calls": 16,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 16
+        },
+        "request_opcodes": {
+          "53": 16,
+          "22": 16,
+          "3": 5,
+          "9": 11,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 2,
+          "27": 1,
+          "18": 2,
+          "25": 2,
+          "4": 2
+        },
+        "pcap_sha256": "2a8e3fd20b5e658ea23bb4548f932f75bf9889d35a72e32edca13ebe6c43a081"
+      },
+      "manifest_sha256": "755ff1b1846a6bcc648b7a94a32689afa38b98b7b217a7179bf44da65ab7d332",
+      "entries": 5,
+      "stdout_sha256": "723b28ef5f5d0b437e4c7552f39aa12e20339c7fb78188fa0873e09ae10f98be",
+      "stdout_lines": 5,
+      "regime": "added-1ms-rtt"
+    },
+    {
+      "scenario": "interrupted",
+      "method": "stock",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--partial",
+        "--bwlimit=64",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-vz_e5doy/resume-stock/"
+      ],
+      "status": 20,
+      "elapsed_ns": 5491274336,
+      "traced_entries": 0,
+      "wire": null,
+      "manifest_sha256": "304f7fb367d211cb523e7a504963dbe7b0b175a502fe34373027b97d5c85aa81",
+      "entries": 130,
+      "stdout_sha256": "64b92e31f65c44c877bcabf2ae00fc9d0358603ab1efeb902d404b46a04f5733",
+      "stdout_lines": 2,
+      "regime": "added-1ms-rtt"
+    },
+    {
+      "scenario": "resumed",
+      "method": "stock",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--partial",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-vz_e5doy/resume-stock/"
+      ],
+      "status": 0,
+      "elapsed_ns": 55228957955,
+      "traced_entries": 0,
+      "wire": {
+        "rpc_calls": 41999,
+        "unique_rpc_calls": 41999,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 41999
+        },
+        "request_opcodes": {
+          "53": 41999,
+          "22": 41999,
+          "3": 13993,
+          "9": 27988,
+          "15": 1,
+          "10": 1,
+          "46": 1,
+          "26": 1555,
+          "27": 2,
+          "18": 12437,
+          "25": 12454,
+          "4": 12437
+        },
+        "pcap_sha256": "b3faf9cefd625f4b3c1b4def701c79aab3281f0faeb4c55f051697268e060c29"
+      },
+      "manifest_sha256": "c863766617d0847772b388e91c7f19172559f6f75d83d81efaae8ebcabb25506",
+      "entries": 13994,
+      "stdout_sha256": "0012e7a10beb13ebd75703b85b0f60480204200c9f2ba898de09d20441049ece",
+      "stdout_lines": 13901,
+      "regime": "added-1ms-rtt"
+    },
+    {
+      "scenario": "interrupted",
+      "method": "vfsi",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--partial",
+        "--bwlimit=64",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-vz_e5doy/resume-vfsi/"
+      ],
+      "status": 20,
+      "elapsed_ns": 5275800024,
+      "traced_entries": 1201,
+      "wire": null,
+      "manifest_sha256": "304f7fb367d211cb523e7a504963dbe7b0b175a502fe34373027b97d5c85aa81",
+      "entries": 130,
+      "stdout_sha256": "64b92e31f65c44c877bcabf2ae00fc9d0358603ab1efeb902d404b46a04f5733",
+      "stdout_lines": 2,
+      "regime": "added-1ms-rtt"
+    },
+    {
+      "scenario": "resumed",
+      "method": "vfsi",
+      "command": [
+        "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+        "-ai",
+        "--out-format=%i %n%L",
+        "--partial",
+        "--delete",
+        "tree/",
+        "/tmp/vfsi-rsync-adoption-vz_e5doy/resume-vfsi/"
+      ],
+      "status": 0,
+      "elapsed_ns": 69608946058,
+      "traced_entries": 13993,
+      "wire": {
+        "rpc_calls": 53152,
+        "unique_rpc_calls": 53152,
+        "repeated_xids": 0,
+        "retransmitted_rpc_frames": 0,
+        "procedures": {
+          "1": 53152
+        },
+        "request_opcodes": {
+          "53": 53148,
+          "22": 54439,
+          "3": 13993,
+          "9": 40429,
+          "15": 15557,
+          "10": 15550,
+          "42": 1,
+          "43": 1,
+          "58": 1,
+          "24": 3,
+          "32": 2,
+          "26": 1555,
+          "27": 2,
+          "18": 12437,
+          "25": 12454,
+          "4": 12437,
+          "46": 1,
+          "44": 1,
+          "57": 1
+        },
+        "pcap_sha256": "f8452e63d6571c18ea48151ee1b03029cfa2074ce5b18fca1d921bd629902102"
+      },
+      "manifest_sha256": "c863766617d0847772b388e91c7f19172559f6f75d83d81efaae8ebcabb25506",
+      "entries": 13994,
+      "stdout_sha256": "0012e7a10beb13ebd75703b85b0f60480204200c9f2ba898de09d20441049ece",
+      "stdout_lines": 13901,
+      "regime": "added-1ms-rtt"
+    }
+  ],
+  "verified": true,
+  "runner_sha256": "ba0061eab1e0c5590b4e46e9b4b105be0440bfc9e5db9fc9e0fb353cbec93ee0"
+}

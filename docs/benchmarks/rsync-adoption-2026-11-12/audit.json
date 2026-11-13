@@ -1,0 +1,9 @@
+{
+  "verified": true,
+  "transfer_trials": 40,
+  "scan_trials": 4,
+  "independently_decoded_captures": 40,
+  "destination_recipes_verified": true,
+  "source_identity_unchanged": "8b054ac6860c86a6c98ddf06e659262a719d758191185e70ddcf5267419a0853",
+  "results_sha256": "5cc0c9a06a6c78d20ead09d61cd897b3e322878922eb470f6b85b5bd9cd196e1"
+}

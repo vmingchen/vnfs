@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "port": {
+    "revision": "7f4f8f87a58510acfcc71fc28c3461138327b848",
+    "archive_sha256": "ab6bc6557d39328c223775885535785fafe66e74466b889d60a09d87179bf561"
+  },
+  "stock": {
+    "revision": "ea645201fefbba7f6b6b22b621856dba3c01cdd3",
+    "archive_sha256": "62e685f2d103cec5642cd824fce6322ae9b14b7a69ab125793348f7cb5715117"
+  },
+  "sdk": "0.3.18",
+  "sdk_archive_sha256": "a8cdd7c5e57b3d46dc42fe7603b1180c44ea1e5ad95e185f71596531bb7b472c",
+  "sdk_lock_sha256": "5730270aa51f21cf3e4c7dccb11e7e8a8ca5e95ee03a0f8579f323e7e2c8c892",
+  "versions": {
+    "libntirpc-sys": "0.3.6",
+    "nfsv41-sys": "0.1.16",
+    "vfsi-c": "0.3.18",
+    "vfsi-core": "0.2.1",
+    "vfsi-local": "0.2.1",
+    "vfsi-nfs": "0.2.3",
+    "vfsi-posix": "0.2.1",
+    "vfsi-smb": "0.2.1",
+    "vfsi-sync": "0.2.1"
+  },
+  "configure_flags": [
+    "--disable-md2man",
+    "--disable-xxhash",
+    "--disable-zstd",
+    "--disable-lz4",
+    "--disable-idn"
+  ],
+  "binary": "/tmp/vfsi-rsync-adoption-20261112-build/port-source/rsync",
+  "stock_binary": "/tmp/vfsi-rsync-adoption-20261112-build/stock-source/rsync",
+  "library": "/tmp/vfsi-rsync-adoption-20261112-build/sdk/lib/libvfsi_c.so",
+  "binary_sha256": "985d47b0c7b084237bca2158d3519eb52484370e76605228dd6035281e95c5b4",
+  "stock_binary_sha256": "2e090f28f5cfc04a6321ef8ef67e5e42d15d6ddd1036f727c83927fa8292d5e0",
+  "library_sha256": "ffaf493415f8a6b1360ebed29aa714fd9762d5c8fde3392a832336101c88fb46",
+  "compiler": "cc (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+  "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11) (built from a source tarball)\nbinary: rustc\ncommit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\ncommit-date: 2026-02-11\nhost: aarch64-unknown-linux-gnu\nrelease: 1.93.1\nLLVM version: 21.1.8\n"
+}

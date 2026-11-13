@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "branches": 6,
+  "depth": 4,
+  "files_per_directory": 8,
+  "file_bytes": 128,
+  "payload_sha256": "b2169d4d0046ec4f9ea3c11ea8f2a2581c9c786b4acc3344cdf47af85974f242",
+  "identity_sha256": "8b054ac6860c86a6c98ddf06e659262a719d758191185e70ddcf5267419a0853",
+  "directories": 1555,
+  "regular_files": 12440,
+  "logical_file_bytes": 1592320,
+  "allocated_bytes": 57323520,
+  "symlinks": 0,
+  "hard_link_aliases": 0
+}

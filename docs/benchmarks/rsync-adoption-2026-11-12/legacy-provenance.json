@@ -1,0 +1,20 @@
+{
+  "crate": "vfsi-c",
+  "version": "0.3.11",
+  "rust_sources_match_published_archive": true,
+  "archive_sha256": "5f4a4af41f88b3f2ade313b38825c9120ae3ed2a8ded6180a058ecd6f556871b",
+  "library_sha256": "4d1ec2e1f2c96ed9864f1d65563315b15184273140dc9213a3d37e9109061f82",
+  "manifest_note": "Local cache pins vnfs exactly =0.0.27; the published manifest permits 0.0.27.",
+  "versions": {
+    "libntirpc-sys": "0.3.3",
+    "nfsv41-sys": "0.1.14",
+    "vfsi-c": "0.3.11",
+    "vfsi-core": "0.1.15",
+    "vfsi-local": "0.1.14",
+    "vfsi-nfs": "0.1.15",
+    "vfsi-posix": "0.1.5",
+    "vfsi-smb": "0.1.13",
+    "vfsi-sync": "0.1.16",
+    "vnfs": "0.0.27"
+  }
+}

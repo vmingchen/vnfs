@@ -17,3 +17,9 @@ the complete reproduction command. Run tests with:
     python3 -m unittest discover -s benchmarks/rsync
 
 Never replace the published inputs or weaken their gates to run development.
+
+For published SDK 0.3.18 real transfers, use adoption.py with the exact frozen
+port and its stock upstream base. It covers updates, deletion, excludes,
+symlinks, partial failures, interruption/resume, legacy/POSIX fallback and the
+273-RPC scan regression. audit_adoption.py independently checks the recorded
+recipes, manifests and wire captures. See ../../docs/rsync-adoption.md.

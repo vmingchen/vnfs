@@ -36,6 +36,10 @@ synthetic protocol reply, not a claim that the server ran out of disk.
 For uncached, real server effects intentionally exceed reported knowledge:
 the readback sees bytes, while the failed input reports zero confirmed bytes.
 Wire logs assert exact request counts and suffix offsets.
+The successful SEQUENCE followed by an uncached error on the next operation
+matches the cached-reply representation specified in
+[RFC 8881 section 2.10.6.1.3](https://www.rfc-editor.org/rfc/rfc8881.html#section-2.10.6.1.3).
+It intentionally allows later independent requests to use the advanced slot.
 
 Cleanup belongs to the original handle/backend, including after Unknown.
 Verification uses a fresh handle instead of treating the uncertain original
