@@ -3,6 +3,22 @@
 This project follows [Semantic Versioning](https://semver.org/) for the
 `nfs4fs` package. Rust crate and C ABI versions are tracked independently.
 
+## 2026-11-14 — coordinated maintenance patches
+
+Coordinated patches: vnfs 0.0.35; vfsi-nfs 0.2.4; vfsi-core/vfsi-sync,
+local/POSIX/io_uring/SMB backends 0.2.2; nfsv41-sys 0.1.17; vfsi-c 0.3.19.
+Python patches: nfs4fs 0.3.15, vfsi-fsspec 0.1.15, vsmb/vsmbfs 0.1.9.
+C ABI remains v3.
+
+- Retain Python parallel-open cleanup ownership across cancellation, failed
+  submission, interrupted shutdown, and late worker completion.
+- Reject recursive-copy destination aliases using filesystem object identities.
+- Keep NFS hard-link and rename operands on their final directory-entry route;
+  apply path symlink policies only to path-based attribute updates.
+- Validate SMB response commands before accepting EOF, directory termination,
+  optional-info fallback, or server-side COPY results.
+- Harden pinned-port compatibility checks and adoption benchmark audit tooling.
+
 ## 2026-11-12 — coordinated maintenance patches
 
 Coordinated patches: vnfs 0.0.34; vfsi-nfs 0.2.3; vfsi-core/vfsi-sync,
