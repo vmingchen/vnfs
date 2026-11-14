@@ -853,6 +853,40 @@ class EcosystemBaselineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'exactly one'):
             retarget(manifest, self.root)
 
+    def test_relative_port_target_directory_survives_disposable_checkout(self):
+        import runpy
+        from unittest.mock import patch
+        main = runpy.run_path(str(self.repo / 'ci/ports/check-rust.py'))['main']
+        previous = Path.cwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, previous)
+
+        def run(command, *args, **kwargs):
+            # The gate's local wrapper passes commands as positional arguments;
+            # its final parity checks pass a list directly.
+            command = [command, *args] if isinstance(command, str) else list(command)
+            cwd = Path(kwargs.get('cwd', self.root))
+            if command[:2] == ['git', 'checkout']:
+                (cwd / 'Cargo.toml').write_text('vnfs = { version = "0.0.29", features = ["posix"] }\n')
+            if command[:2] == ['cargo', 'metadata']:
+                return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
+                    'packages': [{'name': 'vnfs', 'manifest_path': str(self.root / 'crates/vnfs/Cargo.toml')}]
+                }).encode())
+            if command[:2] == ['cargo', 'build']:
+                binary = cwd / kwargs['env']['CARGO_TARGET_DIR'] / 'debug/find'
+                binary.parent.mkdir(parents=True)
+                binary.write_text('fake binary')
+            if len(command) > 1 and str(command[0]).endswith('/debug/find'):
+                if not Path(command[0]).is_file():
+                    raise FileNotFoundError(command[0])
+            return subprocess.CompletedProcess(command, 0, stdout=b'parity\n')
+
+        with patch.dict(os.environ, CARGO_TARGET_DIR='cache'), patch.object(
+            sys, 'argv', ['check-rust.py', 'unused', 'a' * 40, 'findutils']
+        ), patch.object(subprocess, 'run', side_effect=run):
+            main()
+        self.assertTrue((self.root / 'cache/debug/find').is_file())
+
 
 class PortWorkflowTriggerTests(unittest.TestCase):
     def test_relevant_pushes_are_not_limited_to_main(self):

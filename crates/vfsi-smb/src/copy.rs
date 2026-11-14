@@ -74,6 +74,15 @@ fn copy_rejected_before_progress(error: &SmbError, copied: u64) -> bool {
         && error.kind() == SmbErrorKind::Unsupported
 }
 
+fn copy_frame_response(
+    frame: &smb2::client::Frame,
+    dst_id: FileId,
+    chunks: &[CopyChunk],
+) -> Result<CopyChunkOutcome, (VfError, bool)> {
+    require_command(frame, Command::Ioctl, 0).map_err(|cause| (cause, false))?;
+    copy_response(frame.header.status, &frame.body, dst_id, chunks)
+}
+
 fn copy_response(
     status: NtStatus,
     body: &[u8],
@@ -319,7 +328,7 @@ impl SmbVecFs {
                 Some(self.tree.tree_id),
             ))
             .map_err(|error| (smb_error(error, None), false))?;
-        copy_response(frame.header.status, &frame.body, dst_id, chunks)
+        copy_frame_response(&frame, dst_id, chunks)
     }
 
     // None means a known rejection before any copy bytes, never lost progress.
@@ -617,6 +626,38 @@ mod copy_results_tests {
         }
         .pack(&mut body);
         body.into_inner()
+    }
+
+    #[test]
+    fn wrong_command_copy_replies_never_authorize_fallback() {
+        let id = FileId {
+            persistent: 11,
+            volatile: 22,
+        };
+        let chunks = [CopyChunk::new(0, 0, 4)];
+        for status in [
+            NtStatus::SUCCESS,
+            NtStatus::NOT_SUPPORTED,
+            NtStatus::INVALID_DEVICE_REQUEST,
+        ] {
+            let mut header = smb2::msg::header::Header::new_request(Command::Read);
+            header.status = status;
+            let mut frame = smb2::client::Frame {
+                header,
+                body: response(id, 1, 0, 4),
+                raw: Vec::new(),
+            };
+            let (cause, fallback) = copy_frame_response(&frame, id, &chunks).unwrap_err();
+            assert_eq!(
+                cause.transport_kind(),
+                Some(vfsi_core::TransportKind::InvalidReply)
+            );
+            assert!(!fallback);
+            frame.header.command = Command::Ioctl;
+            if status == NtStatus::SUCCESS {
+                assert!(copy_frame_response(&frame, id, &chunks).is_ok());
+            }
+        }
     }
 
     #[test]

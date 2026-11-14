@@ -163,12 +163,16 @@ pub fn vsetattrs_typed_default<F: VectorBackend + ?Sized>(
 ) -> vfsi_core::VecResult<()> {
     use vfsi_core::OpError;
     let mut slots = (0..updates.len()).map(|_| None).collect::<Vec<_>>();
+    // Final-symlink policy applies to paths, never to an already-open object.
+    let effective_follow = |op: &SetAttrsOp<Target<'_, FileOperand>>| {
+        op.follow_final_symlink() || matches!(op.target(), Target::File(_))
+    };
     let mut start = 0;
     while start < updates.len() {
-        let follow = updates[start].follow_final_symlink();
+        let follow = effective_follow(&updates[start]);
         let count = updates[start..]
             .iter()
-            .take_while(|op| op.follow_final_symlink() == follow)
+            .take_while(|op| effective_follow(op) == follow)
             .count();
         let mut attrs = Vec::with_capacity(count);
         let mut indices = Vec::with_capacity(count);

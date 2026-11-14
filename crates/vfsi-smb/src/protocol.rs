@@ -634,12 +634,7 @@ pub(super) async fn concurrent_compound_read_inner(
     // A missing CLOSE does not invalidate the already-validated READ slot.
     // Still return a structural error, carrying those confirmed bytes.
     let data = match operation_responses.into_iter().next() {
-        Some(Ok(response)) if response.header.status == NtStatus::END_OF_FILE => Ok(Vec::new()),
-        Some(Ok(response)) => require_status(&response, Command::Read, 0).and_then(|()| {
-            ReadResponse::unpack(&mut ReadCursor::new(&response.body))
-                .map_err(|error| smb_error(error, 0))
-                .and_then(|response| checked_read_data(response.data, length, 0))
-        }),
+        Some(Ok(response)) => decode_read_response(&response, length, 0),
         Some(Err(error)) => Err(smb_error(error, 0)),
         None => Err(cardinality_error
             .clone()
@@ -849,12 +844,27 @@ pub(super) fn checked_read_data(
     Ok(data)
 }
 
+pub(super) fn decode_read_response(
+    frame: &smb2::client::Frame,
+    requested: usize,
+    index: usize,
+) -> VfResult<Vec<u8>> {
+    require_command(frame, Command::Read, index)?;
+    if frame.header.status == NtStatus::END_OF_FILE {
+        return Ok(Vec::new());
+    }
+    require_status(frame, Command::Read, index)?;
+    let response = ReadResponse::unpack(&mut ReadCursor::new(&frame.body))
+        .map_err(|error| smb_error(error, index))?;
+    checked_read_data(response.data, requested, index)
+}
+
 pub(super) fn credit_charge(bytes: usize) -> u16 {
     let charge = bytes.max(1).div_ceil(65_536);
     u16::try_from(charge).unwrap_or(u16::MAX).max(1)
 }
 
-pub(super) fn require_status(
+pub(super) fn require_command(
     frame: &smb2::client::Frame,
     command: Command,
     index: usize,
@@ -868,6 +878,15 @@ pub(super) fn require_status(
             ),
         ));
     }
+    Ok(())
+}
+
+pub(super) fn require_status(
+    frame: &smb2::client::Frame,
+    command: Command,
+    index: usize,
+) -> VfResult<()> {
+    require_command(frame, command, index)?;
     if frame.header.status == NtStatus::SUCCESS {
         Ok(())
     } else {

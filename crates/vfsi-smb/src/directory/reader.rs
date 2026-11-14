@@ -152,6 +152,7 @@ impl DirectoryReader {
         );
         let path = if self.names_supported {
             let frame = &frames[1];
+            require_command(frame, Command::QueryInfo, 0)?;
             if matches!(
                 frame.header.status,
                 NtStatus::INVALID_INFO_CLASS
@@ -201,6 +202,7 @@ impl DirectoryReader {
                 .execute(Command::QueryDirectory, &request, Some(self.tree.tree_id))
                 .await
                 .map_err(|error| smb_error(error, 0))?;
+            require_command(&frame, Command::QueryDirectory, 0)?;
             if frame.header.status == NtStatus::NO_MORE_FILES {
                 // Keep the handle for final-page metadata probes. The caller
                 // closes it after projection (or Drop closes it on failure).

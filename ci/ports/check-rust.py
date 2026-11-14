@@ -25,8 +25,8 @@ def main():
     if port not in {'coreutils', 'findutils'} or not re.fullmatch(r'[0-9a-f]{40}', revision):
         raise ValueError('expected a supported port and full revision')
     root = Path.cwd().resolve()
-    env = dict(os.environ, CARGO_TARGET_DIR=os.environ.get(
-        'CARGO_TARGET_DIR', str(root / 'target/ports' / port)))
+    target = Path(os.environ.get('CARGO_TARGET_DIR', str(root / 'target/ports' / port))).resolve()
+    env = dict(os.environ, CARGO_TARGET_DIR=str(target))
     with tempfile.TemporaryDirectory(prefix=f'vfsi-port-{port}-', dir=os.getenv('RUNNER_TEMP')) as tmp:
         checkout = Path(tmp)
         def run(*args, **kwargs):

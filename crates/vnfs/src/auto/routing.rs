@@ -168,6 +168,41 @@ impl Auto {
         }
     }
 
+    /// Link and rename address the final directory entry, not its symlink
+    /// target. Keep ordinary direct routes fast and preserve the kernel policy
+    /// for symlink ancestors, mountpoints, and special terminal operands.
+    pub(super) fn resolve_entry(&self, path: &Path, mounts: &MountTable) -> Resolved {
+        let resolved = self.resolve(path, mounts);
+        if matches!(&resolved.route, Route::Nfs(_)) {
+            return resolved;
+        }
+        let Some(host) = self.host_path(path) else {
+            return resolved;
+        };
+        if !mounts
+            .eligible
+            .iter()
+            .any(|mount| host.starts_with(&mount.mount_point))
+            || !fs::symlink_metadata(&host).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return resolved;
+        }
+        let Some(name) = path.file_name() else {
+            return resolved;
+        };
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("/"));
+        let mut parent = self.resolve(parent, mounts);
+        if matches!(&parent.route, Route::Nfs(_)) {
+            parent.path.push(name);
+            parent
+        } else {
+            resolved
+        }
+    }
+
     pub(super) fn connection(&self, spec: &MountSpec) -> Option<NfsConnection> {
         let credentials = AuthSysIdentity::current()?;
         if let Ok(cache) = self.connections.lock()

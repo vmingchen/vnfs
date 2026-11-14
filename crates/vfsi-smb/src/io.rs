@@ -62,7 +62,7 @@ impl SmbVecFs {
                 remaining_bytes: 0,
                 read_channel_info: Vec::new(),
             };
-            let result = (|| -> VfResult<Option<Vec<u8>>> {
+            let result = (|| -> VfResult<Vec<u8>> {
                 let frame = self
                     .runtime
                     .block_on(self.client.connection_mut().execute_with_credits(
@@ -72,17 +72,10 @@ impl SmbVecFs {
                         CreditCharge(credit_charge(chunk as usize)),
                     ))
                     .map_err(|error| smb_error(error, 0))?;
-                if frame.header.status == NtStatus::END_OF_FILE {
-                    return Ok(None);
-                }
-                require_status(&frame, Command::Read, 0)?;
-                let response = ReadResponse::unpack(&mut ReadCursor::new(&frame.body))
-                    .map_err(|error| smb_error(error, 0))?;
-                checked_read_data(response.data, chunk as usize, 0).map(Some)
+                decode_read_response(&frame, chunk as usize, 0)
             })();
             let response = match result {
-                Ok(Some(response)) => response,
-                Ok(None) => break,
+                Ok(response) => response,
                 Err(cause) => {
                     return Err(read_wire_error(
                         cause,

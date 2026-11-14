@@ -406,6 +406,45 @@ fn request_deadline_applies_to_the_initial_negotiate() {
 }
 
 #[test]
+fn read_eof_replies_require_the_matching_read_command() {
+    let eof = write_test_frame(Command::Read, NtStatus::END_OF_FILE, None);
+    assert!(decode_read_response(&eof, 8, 3).unwrap().is_empty());
+    for command in [Command::Write, Command::Close, Command::QueryInfo] {
+        for status in [NtStatus::END_OF_FILE, NtStatus::SUCCESS] {
+            let frame = write_test_frame(command, status, None);
+            let error = decode_read_response(&frame, 8, 3).unwrap_err();
+            assert_eq!(error.index(), Some(3));
+            assert_eq!(
+                error.transport_kind(),
+                Some(vfsi_core::TransportKind::InvalidReply)
+            );
+        }
+    }
+}
+
+#[test]
+fn directory_special_statuses_require_the_matching_response_command() {
+    for expected in [Command::QueryDirectory, Command::QueryInfo] {
+        for status in [
+            NtStatus::NO_MORE_FILES,
+            NtStatus::INVALID_INFO_CLASS,
+            NtStatus::NOT_SUPPORTED,
+            NtStatus::INVALID_PARAMETER,
+        ] {
+            let valid = write_test_frame(expected, status, None);
+            require_command(&valid, expected, 2).unwrap();
+            let wrong = write_test_frame(Command::Read, status, None);
+            let error = require_command(&wrong, expected, 2).unwrap_err();
+            assert_eq!(error.index(), Some(2));
+            assert_eq!(
+                error.transport_kind(),
+                Some(vfsi_core::TransportKind::InvalidReply)
+            );
+        }
+    }
+}
+
+#[test]
 fn oversized_read_responses_are_rejected_with_invalid_reply_classification() {
     for (data, requested, index) in [(vec![1, 2, 3], 2, 0), (vec![4, 5, 6, 7], 3, 2)] {
         let mut body = smb2::pack::WriteCursor::new();
@@ -1755,6 +1794,30 @@ fn live_setattrs_isolates_unsupported_missing_and_closed_inputs() {
         nofollow[1].as_ref().unwrap_err().state(),
         FailureState::NotAttempted
     );
+    let typed = fs
+        .vsetattrs_impl(&[
+            SetAttrsOp::new(vfsi_core::Target::Path(paths[1].as_path()))
+                .len(1)
+                .with_follow_final_symlink(false),
+            SetAttrsOp::file(&files[0])
+                .len(0)
+                .with_follow_final_symlink(false),
+            SetAttrsOp::file(&files[2])
+                .len(2)
+                .with_follow_final_symlink(false),
+            SetAttrsOp::new(vfsi_core::Target::Path(paths[1].as_path())).len(4),
+        ])
+        .unwrap();
+    assert_eq!(typed.len(), 4);
+    assert_eq!(
+        typed[0].as_ref().unwrap_err().state(),
+        FailureState::NotAttempted
+    );
+    assert!(typed[0].as_ref().unwrap_err().cause().kind() == std::io::ErrorKind::Unsupported);
+    assert!(typed[1..].iter().all(Result::is_ok));
+    assert_eq!(fs.read_raw_impl(&files[0], 0, 8).unwrap(), b"");
+    assert_eq!(fs.read_raw_impl(&files[1], 0, 8).unwrap(), b"orig");
+    assert_eq!(fs.read_raw_impl(&files[2], 0, 8).unwrap(), b"or");
     assert!(fs.vclose_impl(&files).unwrap().iter().all(Result::is_ok));
     let closed = fs.vsetattrs_raw_impl(&updates[..1]).unwrap();
     assert_eq!(

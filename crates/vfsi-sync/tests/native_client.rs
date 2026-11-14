@@ -986,7 +986,7 @@ fn shared_attribute_ops_preserve_all_fields_at_the_raw_backend_boundary() {
     .unwrap();
     assert_eq!(concrete.calls.len(), 2);
     for (follow, attrs) in &concrete.calls {
-        assert!(!follow);
+        assert!(*follow, "opened-object updates ignore path symlink policy");
         assert_eq!(attrs.len(), 1);
         let attrs = &attrs[0];
         assert_eq!(attrs.file, file);
@@ -1025,6 +1025,42 @@ fn shared_attribute_ops_preserve_all_fields_at_the_raw_backend_boundary() {
     assert_eq!(
         backend.queries[2],
         (false, FileOperand::from_path("/link"), AttrMask::MODE)
+    );
+}
+
+#[test]
+fn handle_attribute_updates_ignore_path_symlink_policy_without_splitting_batches() {
+    use vfsi_sync::backend::helpers::vsetattrs_typed_default;
+    let file = FileOperand::from_fd(7);
+    let path = std::path::Path::new("/link");
+    let ops = [
+        SetAttrsOp::new(Target::Path(path))
+            .len(1)
+            .with_follow_final_symlink(false),
+        SetAttrsOp::file(&file)
+            .len(2)
+            .with_follow_final_symlink(false),
+        SetAttrsOp::new(Target::Path(path)).len(3),
+        SetAttrsOp::file(&file).len(4),
+    ];
+    let mut backend = AttrsBackend {
+        failure: Some((1, VfError::unsupported(None))),
+        ..Default::default()
+    };
+    let outcomes = vsetattrs_typed_default(&mut backend, &ops).unwrap();
+    assert_eq!(outcomes.len(), ops.len());
+    assert_eq!(
+        outcomes[0].as_ref().unwrap_err().state(),
+        vfsi_core::FailureState::NotAttempted
+    );
+    assert!(outcomes[1..].iter().all(Result::is_ok));
+    assert_eq!(
+        backend
+            .calls
+            .iter()
+            .map(|(follow, attrs)| (*follow, attrs.iter().map(|a| a.size).collect::<Vec<_>>()))
+            .collect::<Vec<_>>(),
+        [(false, vec![1]), (true, vec![2, 3, 4])]
     );
 }
 

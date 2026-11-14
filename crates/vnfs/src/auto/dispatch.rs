@@ -192,11 +192,11 @@ impl Auto {
         let mounts = read_mounts(false);
         let sources: Vec<_> = pairs
             .iter()
-            .map(|(source, _)| self.resolve(source.as_ref(), &mounts))
+            .map(|(source, _)| self.resolve_entry(source.as_ref(), &mounts))
             .collect();
         let links: Vec<_> = pairs
             .iter()
-            .map(|(_, link)| self.resolve(link.as_ref(), &mounts))
+            .map(|(_, link)| self.resolve_entry(link.as_ref(), &mounts))
             .collect();
         let mut output = Vec::with_capacity(pairs.len());
         let mut start = 0;
@@ -1463,11 +1463,11 @@ impl Auto {
         let mounts = read_mounts(false);
         let sources: Vec<_> = pairs
             .iter()
-            .map(|(from, _)| self.resolve(from.as_ref(), &mounts))
+            .map(|(from, _)| self.resolve_entry(from.as_ref(), &mounts))
             .collect();
         let targets: Vec<_> = pairs
             .iter()
-            .map(|(_, to)| self.resolve(to.as_ref(), &mounts))
+            .map(|(_, to)| self.resolve_entry(to.as_ref(), &mounts))
             .collect();
         let mut slots = (0..pairs.len()).map(|_| None).collect::<Vec<_>>();
         for (index, (source, target)) in sources.iter().zip(&targets).enumerate() {

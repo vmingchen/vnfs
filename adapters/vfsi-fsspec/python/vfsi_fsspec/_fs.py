@@ -910,34 +910,50 @@ class _ClientPool:
             self._next_client += len(paths)
             owners = [(start + index) % pool_size for index in range(len(paths))]
 
+        opened = [None] * len(paths)
+        abandoned = False
+
         def open_one(index):
             owner = owners[index]
             client = self._clients[owner]
             with self._client_locks[owner]:
                 native_fd = client.open(paths[index], modes[index])
                 try:
-                    token = self._register(owner, native_fd)
+                    with self._lock:
+                        token = self._register(owner, native_fd)
+                        if abandoned:
+                            # Shutdown may itself have been interrupted. Late
+                            # successes still retain explicit cleanup ownership.
+                            self._deferred_close.add(token)
+                        else:
+                            opened[index] = token
                 except BaseException:
                     try:
                         client.close(native_fd)
                     except BaseException:
                         pass
                     raise
-            return index, token
 
-        opened = [None] * len(paths)
         failures = []
-        with ThreadPoolExecutor(max_workers=min(len(paths), pool_size)) as executor:
-            futures = [executor.submit(open_one, index) for index in range(len(paths))]
-            for future in as_completed(futures):
-                try:
-                    index, token = future.result()
-                except BaseException as error:
-                    failures.append(error)
-                else:
-                    opened[index] = token
+        futures = []
+        try:
+            with ThreadPoolExecutor(max_workers=min(len(paths), pool_size)) as executor:
+                for index in range(len(paths)):
+                    futures.append(executor.submit(open_one, index))
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except BaseException as error:
+                        failures.append(error)
+        except BaseException as error:
+            # Even executor shutdown can be interrupted before workers finish.
+            failures.insert(0, error)
 
         if failures:
+            # Atomically stop accepting ownership from workers before inspecting
+            # the slots. Each success belongs either here or to deferred cleanup.
+            with self._lock:
+                abandoned = True
             by_owner = {}
             for token in opened:
                 if token is not None:

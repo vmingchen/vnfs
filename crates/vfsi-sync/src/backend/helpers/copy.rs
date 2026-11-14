@@ -136,6 +136,13 @@ pub fn copy_tree_batches_with_pages<F: VectorBackend + ?Sized>(
             std::io::ErrorKind::InvalidInput,
         )));
     }
+    let identity = |attrs: &VfAttrs| {
+        attrs
+            .returned
+            .contains(AttrMask::identity())
+            .then_some((attrs.fs_id, attrs.fileid))
+    };
+    let source_identity = identity(&backend.stat_impl(source).map_err(&map_error)?);
     let directory_mode = if backend
         .capabilities()
         .contains(Capabilities::POSIX_METADATA)
@@ -148,6 +155,23 @@ pub fn copy_tree_batches_with_pages<F: VectorBackend + ?Sized>(
     backend
         .ensure_dir_impl(destination, directory_mode)
         .map_err(&map_error)?;
+    let destination_identity = identity(&backend.stat_impl(destination).map_err(&map_error)?);
+    if source_identity.is_some() && source_identity == destination_identity {
+        return Err(map_error(VfError::from_kind(
+            0,
+            std::io::ErrorKind::InvalidInput,
+        )));
+    }
+    // A lexical alias may resolve to any depth inside the source. Reuse
+    // identities from the existing pages to stop before consuming our output,
+    // without a metadata request per entry. Earlier siblings can be copied.
+    // Identityless backends retain the lexical guard above; concurrent namespace
+    // replacement is not a snapshot or confinement guarantee.
+    let masks = if destination_identity.is_some() {
+        masks | AttrMask::identity()
+    } else {
+        masks
+    };
     let mut pending = vec![(source.to_path_buf(), destination.to_path_buf(), None)];
     let mut copies = Vec::with_capacity(32);
     while let Some((source, destination, mut cursor)) = pending.pop() {
@@ -177,6 +201,14 @@ pub fn copy_tree_batches_with_pages<F: VectorBackend + ?Sized>(
                         copies.clear();
                     }
                     if entry.ftype == VfType::Directory {
+                        if destination_identity.is_some()
+                            && identity(&entry) == destination_identity
+                        {
+                            return Err(map_error(VfError::from_kind(
+                                0,
+                                std::io::ErrorKind::InvalidInput,
+                            )));
+                        }
                         backend
                             .ensure_dir_impl(&destination_child, directory_mode)
                             .map_err(&map_error)?;

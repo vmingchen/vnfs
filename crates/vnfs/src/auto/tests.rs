@@ -1255,6 +1255,86 @@ fn live_file_bind_mount_uses_covering_mount() {
 
 #[test]
 #[ignore = "requires VFSI_AUTO_TEST_MOUNT pointing to a direct NFS mount"]
+fn live_entry_mutations_keep_final_symlinks_on_their_parent_route() {
+    let mount = PathBuf::from(std::env::var("VFSI_AUTO_TEST_MOUNT").expect("mount fixture"));
+    let fixture = tempfile::Builder::new()
+        .prefix(".vfsi-entry-routing-")
+        .tempdir_in(&mount)
+        .unwrap();
+    let root = fixture.path();
+    std::fs::write(root.join("target"), b"keep").unwrap();
+    std::fs::write(root.join("regular"), b"replacement").unwrap();
+    std::os::unix::fs::symlink("target", root.join("link")).unwrap();
+    std::os::unix::fs::symlink("target", root.join("replace-link")).unwrap();
+    let client = Auto::new("/").unwrap();
+    require_live_direct_route(&client, root);
+    let resolved = client.resolve(root, &routing::read_mounts(false));
+    let Route::Nfs(connection) = resolved.route else {
+        panic!("direct route required")
+    };
+    let remote = &connection.client;
+    let base = resolved.path;
+    struct Cleanup<'a>(&'a vfsi_sync::FsClient<vfsi_nfs::NfsVecFs>, PathBuf);
+    impl Drop for Cleanup<'_> {
+        fn drop(&mut self) {
+            let _ = self.0.remove_dir_all(&self.1);
+        }
+    }
+    // Use direct cleanup even on assertion failure: kernel negative dentries
+    // do not observe names created through direct protocol operations.
+    let _cleanup = Cleanup(remote, base.clone());
+
+    let outcomes = client
+        .vhardlink(&[
+            (root.join("link"), root.join("linked")),
+            (root.join("regular"), root.join("regular-linked")),
+        ])
+        .unwrap();
+    assert!(outcomes[1].is_ok(), "a healthy sibling must still succeed");
+    assert!(
+        outcomes[0].is_ok(),
+        "same-mount symlink link failed: {:?}",
+        outcomes[0]
+    );
+    assert!(
+        remote
+            .symlink_attrs(base.join("linked"))
+            .unwrap()
+            .is_symlink()
+    );
+    assert_eq!(
+        remote.read_link(base.join("linked")).unwrap(),
+        Path::new("target")
+    );
+
+    let outcomes = client
+        .vrename(
+            &[
+                (root.join("link"), root.join("moved")),
+                (root.join("regular"), root.join("replace-link")),
+            ],
+            crate::RenameMode::Replace,
+        )
+        .unwrap();
+    assert!(
+        outcomes.iter().all(Result::is_ok),
+        "same-mount entry renames failed: {outcomes:?}"
+    );
+    assert!(
+        remote
+            .symlink_attrs(base.join("moved"))
+            .unwrap()
+            .is_symlink()
+    );
+    assert_eq!(
+        remote.read(base.join("replace-link")).unwrap(),
+        b"replacement"
+    );
+    assert_eq!(remote.read(base.join("target")).unwrap(), b"keep");
+}
+
+#[test]
+#[ignore = "requires VFSI_AUTO_TEST_MOUNT pointing to a direct NFS mount"]
 fn live_mount_alias_clients_share_identity_and_cross_routes_never_use_kernel_copy() {
     let mount =
         PathBuf::from(std::env::var("VFSI_AUTO_TEST_MOUNT").expect("mount fixture is required"));

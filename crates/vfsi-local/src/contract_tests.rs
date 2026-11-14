@@ -2808,6 +2808,66 @@ mod tests {
     }
 
     #[test]
+    fn recursive_copy_rejects_aliases_into_any_source_depth_without_consuming_output() {
+        for (alias_target, destination) in [
+            ("source", "/alias"),
+            ("source", "/alias/new"),
+            ("source/sub", "/alias/new"),
+        ] {
+            let (root, mut backend) = fs("copy-alias-loop");
+            std::fs::create_dir_all(root.0.join("source/sub")).unwrap();
+            std::os::unix::fs::symlink(alias_target, root.0.join("alias")).unwrap();
+            let mut pages = 0;
+            let result = vfsi_sync::backend::helpers::copy_tree_batches_with_pages(
+                &mut backend,
+                Path::new("/source"),
+                Path::new(destination),
+                false,
+                AttrMask::MODE,
+                |backend, path, masks, cursor| {
+                    pages += 1;
+                    // Bound the reproducer even if the alias guard regresses.
+                    if pages > 4 {
+                        return Err(VfError::errno(0, libc::ELOOP as u32));
+                    }
+                    let mut results = vfsi_core::internal::collect_vec_result(
+                        backend.vlistdir_pages_impl(
+                            &[path],
+                            masks,
+                            vec![cursor],
+                            256,
+                            usize::MAX,
+                            true,
+                        ),
+                        1,
+                    )?;
+                    Ok(results.pop().unwrap())
+                },
+                |_, _| panic!("empty source directories contain no files"),
+                std::convert::identity,
+            );
+            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+            assert!(pages <= 2, "the traversal must never enumerate its output");
+        }
+    }
+
+    #[test]
+    fn recursive_copy_preserves_unrelated_destination_aliases() {
+        let (root, mut backend) = fs("copy-benign-alias");
+        std::fs::create_dir_all(root.0.join("source/sub")).unwrap();
+        std::fs::write(root.0.join("source/sub/file"), b"payload").unwrap();
+        std::fs::create_dir(root.0.join("external")).unwrap();
+        std::os::unix::fs::symlink("external", root.0.join("alias")).unwrap();
+        backend
+            .copy_tree_impl(Path::new("/source"), Path::new("/alias/new"), false, false)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(root.0.join("external/new/sub/file")).unwrap(),
+            b"payload"
+        );
+    }
+
+    #[test]
     fn recursive_copy_allows_existing_ancestor_destinations() {
         for destination in ["/parent", "/"] {
             let (root, mut backend) = fs("copy-ancestor");
