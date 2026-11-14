@@ -139,13 +139,13 @@ pub(super) enum RemoveRoot {
 
 impl RemoveRoot {
     fn touch(&mut self) {
-        match self {
-            Self::Pending => *self = Self::Active,
+        *self = match std::mem::replace(self, Self::Active) {
+            Self::Pending => Self::Active,
             Self::Failed(error) if error.state() == vfsi_core::FailureState::NotAttempted => {
-                *error = vfsi_core::OpError::failed(error.cause().clone(), None);
+                Self::Failed(vfsi_core::OpError::failed(error.into_cause(), None))
             }
-            _ => {}
-        }
+            state => state,
+        };
     }
 
     fn complete(&mut self) {

@@ -84,7 +84,7 @@ impl<F: HandleBackend> SharedBackend<F> {
     /// and before the last `Arc` is released, so exclusive extraction is the
     /// final point at which those requests can still be reported and retried.
     pub(super) fn into_backend(mut self) -> Result<F, Self> {
-        let (error, callbacks) = {
+        let (failed_cleanup, callbacks) = {
             let backend = self
                 .backend
                 .get_mut()
@@ -96,24 +96,24 @@ impl<F: HandleBackend> SharedBackend<F> {
                 .get_mut()
                 .unwrap_or_else(|poison| poison.into_inner());
             let mut failed = Vec::new();
-            let mut first = None;
+            let mut failed_cleanup = false;
             for close in std::mem::take(pending) {
                 if let Err(error) = (close.close)(backend, &close.target) {
-                    record_cleanup_error(&self.diagnostics, error.clone());
-                    first.get_or_insert(error);
+                    record_cleanup_error(&self.diagnostics, error);
+                    failed_cleanup = true;
                     failed.push(close);
                 }
             }
             pending.extend(failed);
             self.has_pending
                 .store(!pending.is_empty(), Ordering::Release);
-            (first, backend.take_notifications())
+            (failed_cleanup, backend.take_notifications())
         };
 
         for callback in callbacks {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
         }
-        if error.is_some() {
+        if failed_cleanup {
             return Err(self);
         }
         Ok(self

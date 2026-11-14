@@ -467,8 +467,11 @@ pub fn vec_result_slots<T>(
                 ))
             })
             .collect(),
-        Err(cause) => (0..expected)
-            .map(|_| Err(OpError::not_attempted(cause.clone())))
+        // repeat_n moves its final element, including the singleton case.
+        // The standard-error cutover replaces the remaining group clones with
+        // explicit source sharing; accepted input identity stays in the slots.
+        Err(cause) => std::iter::repeat_n(cause, expected)
+            .map(|cause| Err(OpError::not_attempted(cause)))
             .collect(),
     }
 }

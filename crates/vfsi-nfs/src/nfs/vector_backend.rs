@@ -355,16 +355,16 @@ impl VectorBackend for NfsVecFs {
             let refs: Vec<&FileOperand> = files.iter().collect();
             let resolved = self.resolve_files_nfs(&refs, true)?;
             let mut level: Vec<(NfsFh, PathBuf, usize)> = Vec::with_capacity(level_paths.len());
-            for (i, r) in resolved.iter().enumerate() {
+            for (i, r) in resolved.into_iter().enumerate() {
                 let owner = level_owners[i];
                 match r {
-                    Ok((fh, ftype)) if *ftype == nfs_ftype4_NF4DIR => {
-                        level.push((fh.clone(), level_paths[i].clone(), owner));
+                    Ok((fh, ftype)) if ftype == nfs_ftype4_NF4DIR => {
+                        level.push((fh, level_paths[i].clone(), owner));
                     }
                     Ok((_, _)) => {
                         return Err(VfError::errno(owner, nfsstat4_NFS4ERR_NOTDIR));
                     }
-                    Err(error) => return Err(error.cause().clone().with_index(owner)),
+                    Err(error) => return Err(error.into_cause().with_index(owner)),
                 }
             }
             // First pages for all directories in one compound.
