@@ -1,5 +1,57 @@
 # Release build-time baseline
 
+## 2026-11-14 coordinated maintenance patches
+
+All ten Rust/C crates and four Python distributions use clean source `e39cbbcde72749000ab03f71a78f7ed2cdcb1fdc`.
+Publication followed [canonical CI](https://github.com/vmingchen/vnfs/actions/runs/43606210967) and the
+[exact four-port/ABI gate](https://github.com/vmingchen/vnfs/actions/runs/43606210980). C ABI remains v3.
+Registry digests and publication provenance are retained in the
+[Rust ledger](migrations/rust-publication-2026-11-14.json) and
+[Python ledger](migrations/python-publication-2026-11-14.json).
+
+Locked Cargo publication reused the existing target cache with two build jobs.
+Command times include packaging, verification, upload and index visibility;
+they are not isolated compiler timings.
+
+| Crate | Complete publish command |
+|---|---:|
+| nfsv41-sys 0.1.17 | 8.363s |
+| vfsi-core 0.2.2 | 4.483s |
+| vfsi-sync 0.2.2 | 3.834s |
+| vfsi-local 0.2.2 | 4.058s |
+| vfsi-posix 0.2.2 | 2.800s |
+| vfsi-uring 0.2.2 | 3.068s |
+| vfsi-nfs 0.2.4 | 14.244s |
+| vfsi-smb 0.2.2 | 10.228s |
+| vnfs 0.0.35 | 10.960s |
+| vfsi-c 0.3.19 | 19.746s |
+
+Python workflow wall times include queueing, builds, installed-wheel checks,
+security checks, publication and applicable GSS integration. Per-job and
+per-step durations are in the Python ledger.
+
+| Python release | Complete workflow wall time |
+|---|---:|
+| [vfsi-fsspec 0.1.15](https://github.com/vmingchen/vnfs/actions/runs/43607173112) | 65s |
+| [vsmb 0.1.9](https://github.com/vmingchen/vnfs/actions/runs/43607174497) | 246s |
+| [vsmbfs 0.1.9](https://github.com/vmingchen/vnfs/actions/runs/43607564594) | 67s |
+| [nfs4fs 0.3.15](https://github.com/vmingchen/vnfs/actions/runs/43607275582) | 1365s |
+
+Local release preparation passed the smoke and full server-independent Rust
+runners. The same production code had also passed live NFSv4.1/v4.2 Auto
+routing and guest-SMB regression suites immediately before the version-only
+commit. All four registry-only application ports passed local checks and
+their current-head CI workflows; exact revisions and run links are in the
+[port ledger](migrations/port-publication-2026-11-14.json).
+
+A fresh ARM64 environment installed all four Python packages from PyPI.
+The published NFS and SMB wheels passed batched write/read checks against
+live local servers outside the source checkout.
+
+Redundant tag-triggered CI copies were cancelled only after canonical
+same-commit CI passed. Release workflows were retained. Existing build
+profiles and caches were reused; these are warm-cache publication timings.
+
 ## 2026-11-12 coordinated maintenance patches
 
 All Rust/C archives and Python distributions use clean source `4cc234dcd278686278f8194801fa475caa4c3f9e`.

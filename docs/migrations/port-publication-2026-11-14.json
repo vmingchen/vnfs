@@ -1,0 +1,154 @@
+[
+  {
+    "port": "coreutils",
+    "revision": "bc4383aa7272e877613fc0f2cce4c9fc4de06318",
+    "vnfs": "0.0.35",
+    "vfsi_c": null,
+    "checks": [
+      {
+        "workflow": "VFSI public package integration",
+        "run": 43610053870,
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43610053870",
+        "conclusion": "success"
+      },
+      {
+        "workflow": "FreeBSD",
+        "run": 43610053993,
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43610053993",
+        "conclusion": "success"
+      },
+      {
+        "workflow": "Devcontainer",
+        "run": 43610053821,
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43610053821",
+        "conclusion": "success"
+      },
+      {
+        "workflow": "Fuzzing",
+        "run": 43610053894,
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43610053894",
+        "conclusion": "success"
+      },
+      {
+        "workflow": "WSL2",
+        "run": 43610054001,
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43610054001",
+        "conclusion": "success"
+      },
+      {
+        "workflow": "GnuTests",
+        "run": 43610053960,
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43610053960",
+        "conclusion": "success"
+      },
+      {
+        "workflow": "OpenBSD",
+        "run": 43610053878,
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43610053878",
+        "conclusion": "success"
+      },
+      {
+        "workflow": "Code Quality",
+        "run": 43610054053,
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43610054053",
+        "conclusion": "success"
+      },
+      {
+        "workflow": "Android",
+        "run": 43610053851,
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43610053851",
+        "conclusion": "success"
+      },
+      {
+        "workflow": "L10n (Localization)",
+        "run": 43610053892,
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43610053892",
+        "conclusion": "success"
+      },
+      {
+        "workflow": "make",
+        "run": 43610053846,
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43610053846",
+        "conclusion": "success"
+      },
+      {
+        "workflow": "CICD",
+        "run": 43610053876,
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43610053876",
+        "conclusion": "success"
+      }
+    ]
+  },
+  {
+    "port": "findutils",
+    "revision": "76aa4345c42cd9f70ccba3200a6b58339eef4a26",
+    "vnfs": "0.0.35",
+    "vfsi_c": null,
+    "checks": [
+      {
+        "workflow": "VFSI public package integration",
+        "run": 43610293914,
+        "url": "https://github.com/vfsi/vfsi-port-findutils/actions/runs/43610293914",
+        "conclusion": "success"
+      },
+      {
+        "workflow": "External-testsuites",
+        "run": 43610293851,
+        "url": "https://github.com/vfsi/vfsi-port-findutils/actions/runs/43610293851",
+        "conclusion": "success"
+      },
+      {
+        "workflow": "Basic CI",
+        "run": 43610293853,
+        "url": "https://github.com/vfsi/vfsi-port-findutils/actions/runs/43610293853",
+        "conclusion": "success"
+      }
+    ]
+  },
+  {
+    "port": "git",
+    "revision": "b76079cec0d5a0988cd3882e1784ca0665f6df6a",
+    "vnfs": "0.0.35",
+    "vfsi_c": "0.3.19",
+    "checks": [
+      {
+        "workflow": "Coverity",
+        "run": 43607728048,
+        "url": "https://github.com/vfsi/vfsi-port-git/actions/runs/43607728048",
+        "conclusion": "skipped"
+      },
+      {
+        "workflow": "git-l10n",
+        "run": 43607728065,
+        "url": "https://github.com/vfsi/vfsi-port-git/actions/runs/43607728065",
+        "conclusion": "skipped"
+      },
+      {
+        "workflow": "Test VFSI public package integration",
+        "run": 43607728116,
+        "url": "https://github.com/vfsi/vfsi-port-git/actions/runs/43607728116",
+        "conclusion": "success"
+      },
+      {
+        "workflow": "CI",
+        "run": 43607728135,
+        "url": "https://github.com/vfsi/vfsi-port-git/actions/runs/43607728135",
+        "conclusion": "success"
+      }
+    ]
+  },
+  {
+    "port": "rsync",
+    "revision": "11630dad78294eedb23a76d92ba91cd32c77cb1c",
+    "vnfs": "0.0.35",
+    "vfsi_c": "0.3.19",
+    "checks": [
+      {
+        "workflow": "Test VFSI public package integration",
+        "run": 43607731530,
+        "url": "https://github.com/vfsi/vfsi-port-rsync/actions/runs/43607731530",
+        "conclusion": "success"
+      }
+    ]
+  }
+]
