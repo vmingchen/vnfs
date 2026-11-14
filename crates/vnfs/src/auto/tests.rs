@@ -132,7 +132,7 @@ fn child_seeds_recheck_routing_and_keep_owner_validation() {
     let seed = vfsi_sync::DirPageCursor::new(RoutedChildDirectoryCursor(saved));
     let other = Auto::new(root.path()).unwrap();
     assert_eq!(
-        {
+        ({
             let page_inputs: &[&Path] = &[Path::new("/dir")];
             vfsi_core::internal::collect_vec_result(
                 other.read_dir_pages_with_fields(
@@ -148,8 +148,9 @@ fn child_seeds_recheck_routing_and_keep_owner_validation() {
         }
         .err()
         .unwrap()
-        .raw_code(),
-        libc::EINVAL as u32
+        .cause())
+        .kind(),
+        std::io::ErrorKind::InvalidInput
     );
 }
 
@@ -192,7 +193,9 @@ fn live_retained_directory_cursor_rechecks_filesystem_credentials() {
         .vmkdir(&[crate::MkDirOp::new(&path, 0o700)])
         .and_then(|outcomes| {
             let count = outcomes.len();
-            vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+            vfsi_core::internal::collect_vec_result(Ok(outcomes), count)
+                .map(|_| ())
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .unwrap();
     remote.write(path.join("first"), b"private").unwrap();
@@ -286,10 +289,13 @@ fn live_retained_directory_cursor_rechecks_filesystem_credentials() {
                 .as_ref()
                 .err()
                 .expect("stale credentials must reject the page");
-            assert_eq!(error.cause().raw_code(), libc::EACCES as u32);
-            assert_eq!(error.cause().index(), None);
+            assert_eq!(crate::test_native_code(error.cause()), libc::EACCES as u32);
+
             assert_eq!(error.state(), vfsi_core::FailureState::NotAttempted);
-            assert_eq!(error.cause().path(), Some(path.as_path()));
+            assert_eq!(
+                vfsi_core::internal::errors::path(error.cause()),
+                Some(path.as_path())
+            );
             assert_eq!(after, before, "reject before any retained-identity RPC");
         } else {
             assert_eq!(result.unwrap()[0].as_ref().unwrap().0.entries.len(), 1);
@@ -317,7 +323,7 @@ fn routed_pages_enforce_public_budgets_and_pin_cursor_ownership() {
     let error = client
         .read_dirs_with_options(&["/dir"], ListDirOptions::new().with_max_path_bytes(11))
         .unwrap_err();
-    assert_eq!(error.kind(), crate::ErrorKind::FileTooLarge);
+    assert_eq!(error.cause().kind(), crate::ErrorKind::FileTooLarge);
     assert_eq!(error.index(), Some(0));
     let cursor = {
         let page_inputs: &[&Path] = &[Path::new("/dir")];
@@ -339,7 +345,7 @@ fn routed_pages_enforce_public_budgets_and_pin_cursor_ownership() {
     .unwrap();
     let other = Auto::new(root.path()).unwrap();
     assert_eq!(
-        {
+        ({
             let page_inputs: &[&Path] = &[Path::new("/dir")];
             vfsi_core::internal::collect_vec_result(
                 other.read_dir_pages_with_fields(
@@ -355,8 +361,9 @@ fn routed_pages_enforce_public_budgets_and_pin_cursor_ownership() {
         }
         .err()
         .unwrap()
-        .raw_code(),
-        libc::EINVAL as u32
+        .cause())
+        .kind(),
+        std::io::ErrorKind::InvalidInput
     );
     let cursor = {
         let page_inputs: &[&Path] = &[Path::new("/dir")];
@@ -377,7 +384,7 @@ fn routed_pages_enforce_public_budgets_and_pin_cursor_ownership() {
     .1
     .unwrap();
     assert_eq!(
-        {
+        ({
             let page_inputs: &[&Path] = &[Path::new("/other")];
             vfsi_core::internal::collect_vec_result(
                 client.read_dir_pages_with_fields(
@@ -393,8 +400,9 @@ fn routed_pages_enforce_public_budgets_and_pin_cursor_ownership() {
         }
         .err()
         .unwrap()
-        .raw_code(),
-        libc::EINVAL as u32
+        .cause())
+        .kind(),
+        std::io::ErrorKind::InvalidInput
     );
     let cursor = {
         let page_inputs: &[&Path] = &[Path::new("/dir")];
@@ -631,7 +639,7 @@ fn local_paths_stay_mounted_and_open_file_roundtrips() {
             crate::ReadOptions::default(),
         )
         .unwrap_err();
-    assert_eq!(error.raw_code(), libc::EFBIG as u32);
+    assert_eq!(crate::test_native_code(error.cause()), libc::EFBIG as u32);
     assert_eq!(
         tiny.read_batch(
             [crate::ReadOp::range(&tiny_file, 0, 3)],
@@ -653,7 +661,7 @@ fn local_paths_stay_mounted_and_open_file_roundtrips() {
             crate::ReadOptions::default(),
         )
         .unwrap_err();
-    assert_eq!(error.raw_code(), libc::EFBIG as u32);
+    assert_eq!(crate::test_native_code(error.cause()), libc::EFBIG as u32);
     client.close_files(files).unwrap();
     fs::remove_dir_all(root).unwrap();
 }
@@ -697,11 +705,17 @@ fn strict_write_all_collection_retains_healthy_effects_around_local_rejection() 
         assert_eq!(first, b"changedl");
         assert_eq!(error.index(), Some(1));
         assert_eq!(
-            error.raw_code(),
+            crate::test_native_code(error.cause()),
             if closed { libc::EBADF } else { libc::EOVERFLOW } as u32
         );
-        assert_eq!(error.operation(), Some("vwrite_native"));
-        assert_eq!(error.path(), Some(Path::new("/second")));
+        assert_eq!(
+            vfsi_core::internal::errors::operation(error.cause()),
+            Some("vwrite_native")
+        );
+        assert_eq!(
+            vfsi_core::internal::errors::path(error.cause()),
+            Some(Path::new("/second"))
+        );
     }
     fs::remove_dir_all(root).unwrap();
 }
@@ -946,6 +960,7 @@ fn live_changed_auto_limits_apply_to_cached_connections_and_open_handles() {
                     Default::default()
                 )
                 .unwrap_err()
+                .cause()
                 .kind(),
             crate::ErrorKind::FileTooLarge
         );
@@ -1045,15 +1060,21 @@ fn live_write_allv_isolates_invalid_later_requests_across_routes() {
         assert_eq!(second, b"original");
         assert_eq!(error.index(), Some(1));
         assert_eq!(
-            error.raw_code(),
+            crate::test_native_code(error.cause()),
             if invalid == 0 {
                 libc::EOVERFLOW
             } else {
                 libc::EBADF
             } as u32
         );
-        assert_eq!(error.operation(), Some("vwrite_native"));
-        assert_eq!(error.path(), Some(failed_path.as_path()));
+        assert_eq!(
+            vfsi_core::internal::errors::operation(error.cause()),
+            Some("vwrite_native")
+        );
+        assert_eq!(
+            vfsi_core::internal::errors::path(error.cause()),
+            Some(failed_path.as_path())
+        );
     }
 }
 
@@ -1201,16 +1222,28 @@ fn live_directory_open_errors_report_application_operands() {
     }
     let error = fs.open_dirs(&[&first, &missing]).unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.path(), Some(missing.as_path()));
-    assert_eq!(error.operation(), Some("vopen_dirs"));
-    assert_eq!(error.kind(), crate::ErrorKind::NotFound);
+    assert_eq!(
+        vfsi_core::internal::errors::path(error.cause()),
+        Some(missing.as_path())
+    );
+    assert_eq!(
+        vfsi_core::internal::errors::operation(error.cause()),
+        Some("vopen_dirs")
+    );
+    assert_eq!(error.cause().kind(), crate::ErrorKind::NotFound);
     fs.drain_cleanup().unwrap();
 
     let error = fs.open_dirs(&[&file]).unwrap_err();
     assert_eq!(error.index(), Some(0));
-    assert_eq!(error.path(), Some(file.as_path()));
-    assert_eq!(error.operation(), Some("vopen_dirs"));
-    assert_eq!(error.kind(), crate::ErrorKind::NotADirectory);
+    assert_eq!(
+        vfsi_core::internal::errors::path(error.cause()),
+        Some(file.as_path())
+    );
+    assert_eq!(
+        vfsi_core::internal::errors::operation(error.cause()),
+        Some("vopen_dirs")
+    );
+    assert_eq!(error.cause().kind(), crate::ErrorKind::NotADirectory);
     assert_eq!(std::fs::read(&file).unwrap(), b"keep");
     fs.open_dirs(&[&first]).unwrap().remove(0).close().unwrap();
 }
@@ -1357,22 +1390,27 @@ fn live_mount_alias_clients_share_identity_and_cross_routes_never_use_kernel_cop
         client
             .copies_all(&[(&source, &destination)], crate::CopyOptions::default())
             .unwrap_err()
+            .cause()
             .kind()
             == std::io::ErrorKind::Unsupported
     );
     assert!(!destination.exists());
     assert_eq!(
-        client
-            .hardlinks_all(&[(&source, &destination)])
-            .unwrap_err()
-            .raw_code(),
+        crate::test_native_code(
+            client
+                .hardlinks_all(&[(&source, &destination)])
+                .unwrap_err()
+                .cause()
+        ),
         libc::EXDEV as u32
     );
     assert_eq!(
-        client
-            .renames_all(&[(&source, &destination)], Default::default())
-            .unwrap_err()
-            .raw_code(),
+        crate::test_native_code(
+            client
+                .renames_all(&[(&source, &destination)], Default::default())
+                .unwrap_err()
+                .cause()
+        ),
         libc::EXDEV as u32
     );
     client.remove_file(&source).unwrap();
@@ -1499,7 +1537,7 @@ fn live_remove_continues_after_errors_across_routes() {
             .unwrap();
         assert_eq!(outcomes.len(), 3);
         let error = outcomes[0].as_ref().unwrap_err();
-        assert_eq!(error.cause().index(), None);
+
         assert_eq!(error.cause().kind(), std::io::ErrorKind::DirectoryNotEmpty);
         assert_eq!(error.state(), vfsi_core::FailureState::Failed);
         if continue_on_error {
@@ -1548,7 +1586,10 @@ fn live_remove_keeps_each_route_error_without_replay() {
         .unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeRemoveType { index: 0 },
-        VfError::transport(0, "injected removal transport failure"),
+        vfsi_core::internal::errors::transport(
+            vfsi_core::TransportKind::Other,
+            "injected removal transport failure",
+        ),
     ));
     backend.set_fault_injector(script.clone());
     client.connections.lock().unwrap().insert(
@@ -1574,9 +1615,8 @@ fn live_remove_keeps_each_route_error_without_replay() {
     assert_eq!(local_error.state(), vfsi_core::FailureState::NotAttempted);
     assert_eq!(local_error.cause().kind(), std::io::ErrorKind::Unsupported);
     let remote_error = outcomes[1].as_ref().unwrap_err();
-    assert!(remote_error.cause().is_transport());
+    assert!(vfsi_core::transport_kind(remote_error.cause()).is_some());
     assert_eq!(remote_error.state(), vfsi_core::FailureState::NotAttempted);
-    assert_eq!(remote_error.cause().index(), None);
     assert!(script.is_consumed());
     assert_eq!(client.read(&remote_file).unwrap(), b"keep");
     assert_eq!(fs::read(&local_file).unwrap(), b"keep");
@@ -1682,7 +1722,10 @@ fn live_directory_open_results_keep_siblings_across_route_cohorts() {
             2 => {
                 let error = result.err().unwrap();
                 assert_eq!(error.cause().kind(), crate::ErrorKind::NotFound);
-                assert_eq!(error.cause().path(), Some(public[index]));
+                assert_eq!(
+                    vfsi_core::internal::errors::path(error.cause()),
+                    Some(public[index])
+                );
             }
             _ => {
                 let dir = result.unwrap();

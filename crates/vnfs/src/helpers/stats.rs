@@ -13,24 +13,27 @@ pub struct TreeStats {
 }
 impl TreeStats {
     fn add(&mut self, metadata: &crate::Attrs) -> Result<()> {
-        let count = match metadata.file_type() {
-            FileType::Regular => {
-                self.file_bytes = self
-                    .file_bytes
-                    .checked_add(metadata.len().ok_or_else(|| crate::Error::unsupported(0))?)
-                    .ok_or_else(overflow)?;
-                &mut self.files
-            }
-            FileType::Directory => &mut self.directories,
-            FileType::Symlink => &mut self.symlinks,
-            _ => &mut self.other,
-        };
+        let count =
+            match metadata.file_type() {
+                FileType::Regular => {
+                    self.file_bytes =
+                        self.file_bytes
+                            .checked_add(metadata.len().ok_or_else(|| {
+                                std::io::Error::from(std::io::ErrorKind::Unsupported)
+                            })?)
+                            .ok_or_else(overflow)?;
+                    &mut self.files
+                }
+                FileType::Directory => &mut self.directories,
+                FileType::Symlink => &mut self.symlinks,
+                _ => &mut self.other,
+            };
         *count = count.checked_add(1).ok_or_else(overflow)?;
         Ok(())
     }
 }
 fn overflow() -> crate::Error {
-    crate::Error::errno(0, libc::EOVERFLOW as u32)
+    std::io::Error::from_raw_os_error(libc::EOVERFLOW)
 }
 /// Fold bounded directory pages without collecting a tree or issuing per-entry stat.
 /// `options` supplies depth/entry/path budgets; recursive visiting is enabled.
@@ -52,26 +55,26 @@ pub fn tree_stats(
     let mut stats = TreeStats::default();
     stats.add(&metadata)?;
     if metadata.is_dir() {
-        let completion = fs.listdirs_all(
-            &[root],
-            options.with_recursive(true).with_fields(fields),
-            |index, page| {
-                if index != 0 {
-                    return Err(crate::Error::transport_with_kind(
-                        None,
-                        crate::TransportKind::InvalidReply,
-                        "tree_stats: invalid root index",
-                    ));
-                }
-                for entry in page.entries {
-                    stats.add(entry.attrs())?;
-                }
-                Ok(std::ops::ControlFlow::Continue(()))
-            },
-        )?;
+        let completion = fs
+            .listdirs_all(
+                &[root],
+                options.with_recursive(true).with_fields(fields),
+                |index, page| {
+                    if index != 0 {
+                        return Err(vfsi_core::internal::errors::transport(
+                            crate::TransportKind::InvalidReply,
+                            "tree_stats: invalid root index",
+                        ));
+                    }
+                    for entry in page.entries {
+                        stats.add(entry.attrs())?;
+                    }
+                    Ok(std::ops::ControlFlow::Continue(()))
+                },
+            )
+            .map_err(vfsi_core::IndexedError::into_cause)?;
         if completion.len() != 1 || completion[0] != crate::TraversalCompletion::Complete {
-            return Err(crate::Error::transport_with_kind(
-                None,
+            return Err(vfsi_core::internal::errors::transport(
                 crate::TransportKind::InvalidReply,
                 "tree_stats: incomplete traversal",
             ));

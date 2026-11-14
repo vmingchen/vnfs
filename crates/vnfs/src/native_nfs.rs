@@ -27,7 +27,7 @@ impl TryFrom<Option<u32>> for NfsVersion {
             None => Ok(Self::Auto),
             Some(1) => Ok(Self::V4_1),
             Some(2) => Ok(Self::V4_2),
-            _ => Err(crate::Error::from_kind(0, std::io::ErrorKind::InvalidInput)),
+            _ => Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
         }
     }
 }
@@ -158,8 +158,11 @@ impl NfsBuilder {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            Err(crate::Error::errno(0, libc::EOPNOTSUPP as u32)
-                .with_context("from_mount requires Linux", path.as_ref()))
+            Err(vfsi_core::internal::errors::with_context(
+                std::io::Error::from_raw_os_error(libc::EOPNOTSUPP),
+                "from_mount requires Linux",
+                path.as_ref(),
+            ))
         }
     }
 
@@ -257,8 +260,11 @@ impl NfsBuilder {
     #[cfg(target_os = "linux")]
     pub fn connect_session(mut self) -> VfResult<crate::nfs::mount::NfsMountSession> {
         let mount = self.mount.take().ok_or_else(|| {
-            crate::Error::from_kind(0, std::io::ErrorKind::InvalidInput)
-                .with_context("connect_session requires a discovered mount", Path::new(""))
+            vfsi_core::internal::errors::with_context(
+                std::io::Error::from(std::io::ErrorKind::InvalidInput),
+                "connect_session requires a discovered mount",
+                Path::new(""),
+            )
         })?;
         let fs = self.connect()?;
         Ok(crate::nfs::mount::NfsMountSession::from_connected(
@@ -428,14 +434,18 @@ mod mount_tests {
         assert!(fs.attrs("/").unwrap().is_dir());
         let results = [
             fs.create("/.mount-forbidden").map(|_| ()),
-            fs.write_files(&[("/.mount-forbidden", b"forbidden")]),
+            fs.write_files(&[("/.mount-forbidden", b"forbidden")])
+                .map_err(vfsi_core::IndexedError::into_cause),
             fs.create_dir("/.mount-forbidden"),
             fs.remove_file("/marker"),
             fs.remove_dir_all("/child"),
             fs.rename("/marker", "/.other-forbidden"),
         ];
         for result in results {
-            assert_eq!(result.unwrap_err().raw_code(), libc::EROFS as u32);
+            assert_eq!(
+                crate::test_native_code(&result.unwrap_err()),
+                libc::EROFS as u32
+            );
         }
         assert_eq!(
             fs.read_batch(

@@ -12,7 +12,9 @@ fn stream_read(
     use vfsi_core::{FailureState, IoProgress, OpError};
     let invalid = || {
         OpError::unknown(
-            Error::invalid_reply(None, "invalid stream read data, offset or progress"),
+            vfsi_core::internal::errors::invalid_reply(
+                "invalid stream read data, offset or progress",
+            ),
             None,
         )
     };
@@ -87,7 +89,7 @@ pub fn stream_cohorts<F: Vfsi, P: AsRef<Path>>(
     }
     let memory = fs.limits().max_read_bytes();
     if memory == 0 {
-        return Err(Error::errno(None, libc::EFBIG as u32));
+        return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
     }
     let chunk = options.chunk_size().min(memory);
     let capacity = (memory / chunk).clamp(1, 32);
@@ -115,7 +117,9 @@ pub fn stream_cohorts<F: Vfsi, P: AsRef<Path>>(
                 Err(error) => {
                     output[base + local] = Err(if error.progress().is_some() {
                         OpError::unknown(
-                            Error::invalid_reply(None, "stream OPEN contains byte progress"),
+                            vfsi_core::internal::errors::invalid_reply(
+                                "stream OPEN contains byte progress",
+                            ),
                             None,
                         )
                     } else {
@@ -158,7 +162,7 @@ pub fn stream_cohorts<F: Vfsi, P: AsRef<Path>>(
                 let Some(next) = offset.checked_add(data.len() as u64) else {
                     stream_error(
                         &mut output[index],
-                        OpError::failed(Error::errno(None, libc::EOVERFLOW as u32), None),
+                        OpError::failed(std::io::Error::from_raw_os_error(libc::EOVERFLOW), None),
                         offset,
                     );
                     break;
@@ -231,7 +235,9 @@ pub fn stream_cohorts<F: Vfsi, P: AsRef<Path>>(
                 if let Err(error) = result {
                     let error = if error.progress().is_some() {
                         OpError::unknown(
-                            Error::invalid_reply(None, "stream CLOSE contains byte progress"),
+                            vfsi_core::internal::errors::invalid_reply(
+                                "stream CLOSE contains byte progress",
+                            ),
                             None,
                         )
                     } else {
@@ -256,7 +262,9 @@ fn directory_error(
     use vfsi_core::{FailureState, OpError};
     if error.progress().is_some() {
         error = OpError::unknown(
-            Error::invalid_reply(None, "directory traversal cannot report byte progress"),
+            vfsi_core::internal::errors::invalid_reply(
+                "directory traversal cannot report byte progress",
+            ),
             None,
         );
     } else if started && error.state() == FailureState::NotAttempted {
@@ -370,7 +378,9 @@ pub fn visit_directory_pages<P: AsRef<Path>, C: Into<ListDirControl>>(
                     Err(error) => {
                         let error = std::mem::replace(
                             error,
-                            OpError::not_attempted(Error::unsupported(None)),
+                            OpError::not_attempted(std::io::Error::from(
+                                std::io::ErrorKind::Unsupported,
+                            )),
                         );
                         let attempted = error.state() != FailureState::NotAttempted;
                         directory_error(&mut completed[*index], started[*index], error);
@@ -385,7 +395,7 @@ pub fn visit_directory_pages<P: AsRef<Path>, C: Into<ListDirControl>>(
                 }
                 let (mut page, next, seeds) = result.expect("failed page roots were filtered");
                 let malformed = |message| {
-                    OpError::unknown(Error::invalid_reply(None, message), None)
+                    OpError::unknown(vfsi_core::internal::errors::invalid_reply(message), None)
                         .with_context("vlistdirs", &path)
                 };
                 if page.path != path
@@ -431,7 +441,14 @@ pub fn visit_directory_pages<P: AsRef<Path>, C: Into<ListDirControl>>(
                     directory_error(
                         &mut completed[index],
                         true,
-                        OpError::failed(cause.with_context("vector traversal", &path), None),
+                        OpError::failed(
+                            vfsi_core::internal::errors::with_context(
+                                cause,
+                                "vector traversal",
+                                &path,
+                            ),
+                            None,
+                        ),
                     );
                     continue;
                 }
@@ -440,7 +457,11 @@ pub fn visit_directory_pages<P: AsRef<Path>, C: Into<ListDirControl>>(
                 let mut accepted = 0;
                 for entry in &page.entries {
                     if let Err(cause) = budget.charge(entry.path()) {
-                        page_error = Some(cause.with_context("vector traversal", entry.path()));
+                        page_error = Some(vfsi_core::internal::errors::with_context(
+                            cause,
+                            "vector traversal",
+                            entry.path(),
+                        ));
                         break;
                     }
                     accepted += 1;
@@ -453,12 +474,12 @@ pub fn visit_directory_pages<P: AsRef<Path>, C: Into<ListDirControl>>(
                         ));
                     }
                 }
-                if let Some(cause) = &page_error {
+                if page_error.is_some() {
                     if accepted == 0 {
                         directory_error(
                             &mut completed[index],
                             true,
-                            OpError::failed(cause.clone(), None),
+                            OpError::failed(page_error.take().unwrap(), None),
                         );
                         continue;
                     }
@@ -487,8 +508,11 @@ pub fn visit_directory_pages<P: AsRef<Path>, C: Into<ListDirControl>>(
                             &mut completed[index],
                             true,
                             OpError::failed(
-                                Error::from_kind(None, std::io::ErrorKind::InvalidInput)
-                                    .with_context("vlistdirs prune", path),
+                                vfsi_core::internal::errors::with_context(
+                                    std::io::Error::from(std::io::ErrorKind::InvalidInput),
+                                    "vlistdirs prune",
+                                    path,
+                                ),
                                 None,
                             ),
                         );
@@ -502,8 +526,11 @@ pub fn visit_directory_pages<P: AsRef<Path>, C: Into<ListDirControl>>(
                             &mut completed[index],
                             true,
                             OpError::failed(
-                                Error::errno(None, libc::EFBIG as u32)
-                                    .with_context("visit_dirs", &candidates[0].1),
+                                vfsi_core::internal::errors::with_context(
+                                    std::io::Error::from_raw_os_error(libc::EFBIG),
+                                    "visit_dirs",
+                                    &candidates[0].1,
+                                ),
                                 None,
                             ),
                         );
@@ -626,10 +653,11 @@ pub(crate) fn read_backend<'a, F: crate::backend::VectorBackend + 'static>(
 // operation name through application errors. Preserve status, index, and path.
 #[doc(hidden)]
 pub fn public_write_error(error: vfsi_core::api::Error) -> vfsi_core::api::Error {
-    if error.operation() == Some("vwrite_all_native")
-        && let Some(path) = error.path().map(std::path::Path::to_path_buf)
+    if vfsi_core::internal::errors::operation(&(error)) == Some("vwrite_all_native")
+        && let Some(path) =
+            vfsi_core::internal::errors::path(&(error)).map(std::path::Path::to_path_buf)
     {
-        error.with_context("vwrite_native", path)
+        vfsi_core::internal::errors::with_context(error, "vwrite_native", path)
     } else {
         error
     }
@@ -643,8 +671,10 @@ pub fn public_write_results<T>(result: vfsi_core::VecResult<T>) -> vfsi_core::Ve
             .into_iter()
             .map(|outcome| {
                 outcome.map_err(|error| {
-                    if error.cause().operation() == Some("vwrite_all_native")
-                        && let Some(path) = error.cause().path().map(std::path::Path::to_path_buf)
+                    if vfsi_core::internal::errors::operation(error.cause())
+                        == Some("vwrite_all_native")
+                        && let Some(path) = vfsi_core::internal::errors::path(error.cause())
+                            .map(std::path::Path::to_path_buf)
                     {
                         error.with_context("vwrite_native", path)
                     } else {
@@ -776,7 +806,7 @@ mod traversal_tests {
         peak: Arc<AtomicUsize>,
         options: ListDirOptions,
         callback: impl FnMut(usize, crate::DirectoryListing) -> Result<std::ops::ControlFlow<()>>,
-    ) -> Result<Vec<crate::TraversalCompletion>> {
+    ) -> std::result::Result<Vec<crate::TraversalCompletion>, vfsi_core::IndexedError> {
         {
             let visit_roots = &["/tree"];
             vfsi_core::internal::collect_vec_result(
@@ -869,7 +899,7 @@ mod traversal_tests {
                             callbacks += 1;
                             match outcome {
                                 0 => Ok(std::ops::ControlFlow::Break(())),
-                                1 => Err(vfsi_core::api::Error::errno(0, libc::EIO as u32)),
+                                1 => Err(std::io::Error::from_raw_os_error(libc::EIO)),
                                 _ => Ok(std::ops::ControlFlow::Continue(())),
                             }
                         },
@@ -879,11 +909,20 @@ mod traversal_tests {
             };
             match outcome {
                 0 => assert_eq!(result.unwrap(), [crate::TraversalCompletion::Stopped]),
-                1 => assert_eq!(result.unwrap_err().raw_code(), libc::EIO as u32),
+                1 => assert_eq!(
+                    vfsi_core::internal::errors::to_errno(result.unwrap_err().cause()) as u32,
+                    libc::EIO as u32
+                ),
                 _ => {
                     let error = result.unwrap_err();
-                    assert_eq!(error.raw_code(), libc::EFBIG as u32);
-                    assert_eq!(error.path(), Some(Path::new("/tree/entry-2")));
+                    assert_eq!(
+                        vfsi_core::internal::errors::to_errno(error.cause()),
+                        libc::EFBIG
+                    );
+                    assert_eq!(
+                        vfsi_core::internal::errors::path(error.cause()),
+                        Some(Path::new("/tree/entry-2"))
+                    );
                     if outcome == 3 {
                         assert!(live_budget_page);
                     }
@@ -959,7 +998,10 @@ mod admission_tests {
     fn walk(
         depth: usize,
         mut callback: impl FnMut(usize, DirectoryListing) -> Result<ListDirControl>,
-    ) -> (Result<Vec<TraversalCompletion>>, Vec<Vec<PathBuf>>) {
+    ) -> (
+        std::result::Result<Vec<TraversalCompletion>, vfsi_core::IndexedError>,
+        Vec<Vec<PathBuf>>,
+    ) {
         let waves = RefCell::new(Vec::new());
         let result = {
             let visit_roots = &["/tree"];
@@ -1075,7 +1117,7 @@ mod admission_tests {
                 calls += 1;
                 match mode {
                     0 => Ok(ListDirControl::Stop),
-                    1 => Err(Error::errno(7, libc::ECANCELED as u32)),
+                    1 => Err(std::io::Error::from_raw_os_error(libc::ECANCELED)),
                     2 => Ok(ListDirControl::Prune(
                         page.entries
                             .iter()
@@ -1094,8 +1136,14 @@ mod admission_tests {
                     assert_eq!(result.unwrap(), [TraversalCompletion::Complete]);
                     assert_eq!(calls, 2);
                 }
-                3 => assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput),
-                _ => assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::FileTooLarge),
+                3 => assert_eq!(
+                    result.unwrap_err().cause().kind(),
+                    std::io::ErrorKind::InvalidInput
+                ),
+                _ => assert_eq!(
+                    result.unwrap_err().cause().kind(),
+                    std::io::ErrorKind::FileTooLarge
+                ),
             }
         }
     }

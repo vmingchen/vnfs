@@ -61,9 +61,9 @@ impl NfsVecFs {
             | FileOperand::CwdPath(path) => Ok(self.server_path(path)),
             FileOperand::Cwd => Ok(self.server_path(Path::new(""))),
             FileOperand::Fd(_) | FileOperand::Saved => {
-                Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput))
+                Err(std::io::Error::from(std::io::ErrorKind::InvalidInput))
             }
-            _ => Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
+            _ => Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
         }
     }
 
@@ -89,7 +89,11 @@ impl NfsVecFs {
                     self.open_files
                         .get(&fd)
                         .map(|open| (open.fh.clone(), 0))
-                        .ok_or_else(|| OpError::not_attempted(VfError::errno(None, ERR_EBADF))),
+                        .ok_or_else(|| {
+                            OpError::not_attempted(std::io::Error::from_raw_os_error(
+                                (ERR_EBADF) as i32,
+                            ))
+                        }),
                 );
                 continue;
             }
@@ -110,7 +114,9 @@ impl NfsVecFs {
                     .or_default()
                     .push((index, name.to_vec())),
                 Err(_) => {
-                    out[index] = Some(Err(OpError::not_attempted(VfError::errno(None, ERR_NOENT))))
+                    out[index] = Some(Err(OpError::not_attempted(
+                        std::io::Error::from_raw_os_error((ERR_NOENT) as i32),
+                    )))
                 }
             }
         }
@@ -118,12 +124,16 @@ impl NfsVecFs {
             let dirfh = match self.resolve_path(&path_from_bytes(&dir), true) {
                 Ok(fh) => fh,
                 Err(error) => {
-                    for (index, _) in entries {
-                        out[index] = Some(Err(if error.is_transport() {
-                            OpError::unknown(error.clone(), None)
-                        } else {
-                            OpError::failed(error.clone(), None)
-                        }));
+                    {
+                        let causes = vfsi_core::internal::errors::fanout(error, (entries).len());
+                        for ((index, _), error) in (entries).into_iter().zip(causes) {
+                            out[index] =
+                                Some(Err(if vfsi_core::transport_kind(&(error)).is_some() {
+                                    OpError::unknown(error, None)
+                                } else {
+                                    OpError::failed(error, None)
+                                }));
+                        }
                     }
                     continue;
                 }
@@ -134,9 +144,8 @@ impl NfsVecFs {
                 .collect();
             let results = match self.nfs.lookup_getattr_many(&ops) {
                 Ok(results) => results,
-                Err(error) => entries
-                    .iter()
-                    .map(|_| Err(OpError::not_attempted(error.clone())))
+                Err(error) => vfsi_core::internal::errors::fanout(error, entries.len())
+                    .map(|error| Err(OpError::not_attempted(error)))
                     .collect(),
             };
             for ((index, _), result) in entries.into_iter().zip(results) {
@@ -148,7 +157,7 @@ impl NfsVecFs {
                         self.resolve_path_and_type(&path, true)
                     })
                     .map_err(|error| {
-                        if error.is_transport() {
+                        if vfsi_core::transport_kind(&(error)).is_some() {
                             OpError::unknown(error, None)
                         } else {
                             OpError::failed(error, None)
@@ -162,7 +171,9 @@ impl NfsVecFs {
             .map(|slot| {
                 slot.unwrap_or_else(|| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "missing path resolution result"),
+                        vfsi_core::internal::errors::invalid_reply(
+                            "missing path resolution result",
+                        ),
                         None,
                     ))
                 })
@@ -193,17 +204,17 @@ impl NfsVecFs {
                     indices.push(index);
                 }
                 Err(_) => {
-                    slots[index] =
-                        Some(Err(OpError::not_attempted(VfError::errno(None, ERR_NOENT))))
+                    slots[index] = Some(Err(OpError::not_attempted(
+                        std::io::Error::from_raw_os_error((ERR_NOENT) as i32),
+                    )))
                 }
             }
         }
         let refs: Vec<_> = files.iter().collect();
         let results = match self.resolve_files_nfs(&refs, true) {
             Ok(results) => results,
-            Err(cause) => refs
-                .iter()
-                .map(|_| Err(OpError::not_attempted(cause.clone())))
+            Err(cause) => vfsi_core::internal::errors::fanout(cause, refs.len())
+                .map(|cause| Err(OpError::not_attempted(cause)))
                 .collect(),
         };
         for ((index, name), result) in indices.into_iter().zip(names).zip(results) {
@@ -212,7 +223,9 @@ impl NfsVecFs {
                     Ok((fh, name))
                 } else {
                     Err(OpError::failed(
-                        VfError::nfs(None, nfsstat4_NFS4ERR_NOTDIR),
+                        vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                            nfsstat4_NFS4ERR_NOTDIR,
+                        )),
                         None,
                     ))
                 }
@@ -223,7 +236,9 @@ impl NfsVecFs {
             .map(|slot| {
                 slot.unwrap_or_else(|| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "missing destination-parent outcome"),
+                        vfsi_core::internal::errors::invalid_reply(
+                            "missing destination-parent outcome",
+                        ),
                         None,
                     ))
                 })
@@ -245,7 +260,7 @@ impl NfsVecFs {
         } else {
             self.nfs
                 .resolve(&normalize_bytes(path_bytes(&path)))
-                .map_err(|error| vfsi_core::error_from_rpc(error, 0))
+                .map_err(vfsi_core::internal::errors::from_rpc)
         }
     }
 
@@ -273,7 +288,9 @@ impl NfsVecFs {
         let mut hops = 0usize;
         loop {
             if hops > 40 {
-                return Err(VfError::errno(0, nfsstat4_NFS4ERR_IO)); // symlink loop
+                return Err(std::io::Error::from_raw_os_error(
+                    (nfsstat4_NFS4ERR_IO) as i32,
+                )); // symlink loop
             }
             match self.nfs.resolve(&path) {
                 Ok(fh) => {
@@ -283,7 +300,7 @@ impl NfsVecFs {
                     let attrs = self
                         .nfs
                         .getattr(&fh, &[FATTR4_TYPE])
-                        .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
+                        .map_err(vfsi_core::internal::errors::from_rpc)?;
                     let is_symlink = type_is_symlink(&attrs)?;
                     let ftype = u32::from_be_bytes(attrs[0..4].try_into().unwrap());
                     if !is_symlink {
@@ -292,7 +309,7 @@ impl NfsVecFs {
                     let target = self
                         .nfs
                         .readlink(&fh)
-                        .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
+                        .map_err(vfsi_core::internal::errors::from_rpc)?;
                     path = self.resolve_target(&path, &target);
                     hops += 1;
                 }
@@ -301,7 +318,7 @@ impl NfsVecFs {
                     // by component, following each link we encounter.
                     let comps = components_bytes(&path);
                     if comps.is_empty() {
-                        return Err(vfsi_core::error_from_rpc(e, 0));
+                        return Err(vfsi_core::internal::errors::from_rpc(e));
                     }
                     let mut cur_fh = self.nfs.root().clone();
                     let mut consumed: Vec<u8> = Vec::new();
@@ -311,13 +328,13 @@ impl NfsVecFs {
                         let (child, ftype) = self
                             .nfs
                             .lookup_getattr(&cur_fh, comp)
-                            .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
+                            .map_err(vfsi_core::internal::errors::from_rpc)?;
                         let full_comp = join_path_bytes(&consumed, comp);
                         if ftype == nfs_ftype4_NF4LNK && (follow_final || !is_last) {
                             let target = self
                                 .nfs
                                 .readlink(&child)
-                                .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
+                                .map_err(vfsi_core::internal::errors::from_rpc)?;
                             let mut rest = Vec::new();
                             for (j, r) in comps.iter().enumerate().skip(i + 1) {
                                 if j > i + 1 {
@@ -341,11 +358,11 @@ impl NfsVecFs {
                         consumed = full_comp;
                     }
                     if !followed {
-                        return Err(vfsi_core::error_from_rpc(e, 0));
+                        return Err(vfsi_core::internal::errors::from_rpc(e));
                     }
                     hops += 1;
                 }
-                Err(e) => return Err(vfsi_core::error_from_rpc(e, 0)),
+                Err(e) => return Err(vfsi_core::internal::errors::from_rpc(e)),
             }
         }
     }
@@ -356,7 +373,7 @@ impl NfsVecFs {
                 .open_files
                 .get(fd)
                 .map(|o| o.fh.clone())
-                .ok_or_else(|| VfError::errno(0, ERR_EBADF)),
+                .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32)),
             FileOperand::Path { .. } | FileOperand::Cwd | FileOperand::CwdPath(_) => {
                 let path = self.server_vf_path(f)?;
                 if follow {
@@ -365,8 +382,12 @@ impl NfsVecFs {
                     self.resolve_path(&path, false)
                 }
             }
-            FileOperand::Saved => Err(VfError::errno(0, nfsstat4_NFS4ERR_INVAL)),
-            _ => Err(VfError::errno(0, nfsstat4_NFS4ERR_INVAL)),
+            FileOperand::Saved => Err(std::io::Error::from_raw_os_error(
+                (nfsstat4_NFS4ERR_INVAL) as i32,
+            )),
+            _ => Err(std::io::Error::from_raw_os_error(
+                (nfsstat4_NFS4ERR_INVAL) as i32,
+            )),
         }
     }
 
@@ -406,14 +427,18 @@ impl NfsVecFs {
             let abs_path = path_from_bytes(&abs);
             let st = match self.lstat_impl(&abs_path) {
                 Ok(s) => s,
-                Err(e) if e.raw_code() == ERR_NOENT => return Ok(path_from_bytes(&current)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(path_from_bytes(&current));
+                }
                 Err(e) => return Err(e),
             };
             if st.ftype != VfType::Symlink {
                 return Ok(path_from_bytes(&current));
             }
             if hops >= 40 {
-                return Err(VfError::errno(0, nfsstat4_NFS4ERR_IO)); // symlink loop
+                return Err(std::io::Error::from_raw_os_error(
+                    (nfsstat4_NFS4ERR_IO) as i32,
+                )); // symlink loop
             }
             let target = self.readlink_raw_impl(&abs_path)?;
             current = self.resolve_target(&current, &target);
@@ -456,8 +481,12 @@ impl NfsVecFs {
             let (results, repair) = match self.nfs.rename_path_results(&prepared[start..], true) {
                 Ok(result) => result,
                 Err(cause) => {
-                    for &index in &indices[start..] {
-                        slots[index] = Some(Err(OpError::not_attempted(cause.clone())));
+                    {
+                        let causes =
+                            vfsi_core::internal::errors::fanout(cause, indices[start..].len());
+                        for (&index, cause) in indices[start..].iter().zip(causes) {
+                            slots[index] = Some(Err(OpError::not_attempted(cause)));
+                        }
                     }
                     break;
                 }
@@ -476,7 +505,7 @@ impl NfsVecFs {
             // parent. An ordinary failed rename must never be issued again.
             if point.failed_op == nfs_opnum4_NFS4_OP_RENAME
                 && failure.as_ref().err().is_some_and(|error| {
-                    error.cause().status()
+                    vfsi_core::native_status(error.cause())
                         == Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_NOTDIR))
                 })
             {
@@ -504,7 +533,7 @@ impl NfsVecFs {
                     }
                 }),
                 Ok(_) => Err(OpError::unknown(
-                    VfError::invalid_reply(None, "invalid rename repair count"),
+                    vfsi_core::internal::errors::invalid_reply("invalid rename repair count"),
                     None,
                 )),
                 Err(cause) => Err(OpError::failed(cause, None)),
@@ -516,7 +545,7 @@ impl NfsVecFs {
             .map(|slot| {
                 slot.unwrap_or_else(|| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "missing rename outcome"),
+                        vfsi_core::internal::errors::invalid_reply("missing rename outcome"),
                         None,
                     ))
                 })
@@ -530,14 +559,23 @@ impl NfsVecFs {
         pairs: &[(FileOperand, FileOperand)],
     ) -> vfsi_core::VecResult<()> {
         use vfsi_core::OpError;
-        let mut cache = std::collections::HashMap::<Box<[u8]>, VfResult<NfsFh>>::new();
+        let mut cache = std::collections::HashMap::<
+            Box<[u8]>,
+            Result<NfsFh, std::sync::Arc<std::io::Error>>,
+        >::new();
         fn parent(
             fs: &mut NfsVecFs,
-            cache: &mut std::collections::HashMap<Box<[u8]>, VfResult<NfsFh>>,
+            cache: &mut std::collections::HashMap<
+                Box<[u8]>,
+                Result<NfsFh, std::sync::Arc<std::io::Error>>,
+            >,
             path: &[u8],
         ) -> VfResult<NfsFh> {
             if let Some(result) = cache.get(path) {
-                return result.clone();
+                return result
+                    .as_ref()
+                    .cloned()
+                    .map_err(vfsi_core::internal::errors::from_shared);
             }
             let result = fs
                 .resolve_path_and_type(&path_from_bytes(path), true)
@@ -545,10 +583,17 @@ impl NfsVecFs {
                     if kind == nfs_ftype4_NF4DIR {
                         Ok(fh)
                     } else {
-                        Err(VfError::nfs(None, nfsstat4_NFS4ERR_NOTDIR))
+                        Err(vfsi_core::internal::errors::from_status(
+                            vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_NOTDIR),
+                        ))
                     }
                 });
-            cache.insert(path.into(), result.clone());
+            let cached = result.map_err(vfsi_core::internal::errors::shared_source);
+            let result = cached
+                .as_ref()
+                .cloned()
+                .map_err(vfsi_core::internal::errors::from_shared);
+            cache.insert(path.into(), cached);
             result
         }
         let mut slots = (0..pairs.len()).map(|_| None).collect::<Vec<_>>();
@@ -559,9 +604,9 @@ impl NfsVecFs {
                 let source = self.server_vf_path(src)?;
                 let destination = self.server_vf_path(dst)?;
                 let (sdir, oldname) = split_path_bytes(path_bytes(&source))
-                    .map_err(|_| VfError::errno(None, ERR_NOENT))?;
+                    .map_err(|_| std::io::Error::from_raw_os_error((ERR_NOENT) as i32))?;
                 let (ddir, newname) = split_path_bytes(path_bytes(&destination))
-                    .map_err(|_| VfError::errno(None, ERR_NOENT))?;
+                    .map_err(|_| std::io::Error::from_raw_os_error((ERR_NOENT) as i32))?;
                 Ok(crate::client::RenameOp {
                     srcdir: parent(self, &mut cache, sdir)?,
                     oldname: oldname.to_vec(),
@@ -579,9 +624,8 @@ impl NfsVecFs {
         }
         let results = match self.nfs.rename_many(&ops) {
             Ok(results) => results,
-            Err(cause) => ops
-                .iter()
-                .map(|_| Err(OpError::not_attempted(cause.clone())))
+            Err(cause) => vfsi_core::internal::errors::fanout(cause, ops.len())
+                .map(|cause| Err(OpError::not_attempted(cause)))
                 .collect(),
         };
         for (index, result) in indices.into_iter().zip(results) {
@@ -592,7 +636,7 @@ impl NfsVecFs {
             .map(|slot| {
                 slot.unwrap_or_else(|| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "missing phased rename outcome"),
+                        vfsi_core::internal::errors::invalid_reply("missing phased rename outcome"),
                         None,
                     ))
                 })
@@ -620,8 +664,12 @@ impl NfsVecFs {
             let (results, repair) = match self.nfs.remove_path_results(&paths[start..], true) {
                 Ok(results) => results,
                 Err(cause) => {
-                    for &index in &indices[start..] {
-                        slots[index] = Some(Err(OpError::not_attempted(cause.clone())));
+                    {
+                        let causes =
+                            vfsi_core::internal::errors::fanout(cause, indices[start..].len());
+                        for (&index, cause) in indices[start..].iter().zip(causes) {
+                            slots[index] = Some(Err(OpError::not_attempted(cause)));
+                        }
                     }
                     break;
                 }
@@ -638,10 +686,10 @@ impl NfsVecFs {
             let failure = results.next().expect("repair retains failed REMOVE");
             let path = &paths[start + point.input];
             let repairable = point.failed_op != nfs_opnum4_NFS4_OP_REMOVE
-                || failure
-                    .as_ref()
-                    .err()
-                    .is_some_and(|error| error.cause().raw_code() == nfsstat4_NFS4ERR_SYMLINK)
+                || failure.as_ref().err().is_some_and(|error| {
+                    vfsi_core::native_status(error.cause())
+                        == Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_SYMLINK))
+                })
                 || split_path_bytes(path).ok().is_some_and(|(parent, _)| {
                     self.resolve_path_and_type(&path_from_bytes(parent), false)
                         .is_ok_and(|(_, kind)| kind == nfs_ftype4_NF4LNK)
@@ -656,15 +704,18 @@ impl NfsVecFs {
             // together so a symlink ancestor does not degrade into singleton RPCs.
             let remaining = &files[index..];
             let outcomes = self.removev_phased(remaining).unwrap_or_else(|cause| {
-                remaining
-                    .iter()
-                    .map(|_| Err(OpError::not_attempted(cause.clone())))
+                vfsi_core::internal::errors::fanout(cause, remaining.len())
+                    .map(|cause| Err(OpError::not_attempted(cause)))
                     .collect()
             });
             if outcomes.len() != remaining.len() {
-                let cause = VfError::invalid_reply(None, "invalid REMOVE repair count");
-                for slot in &mut slots[index..] {
-                    *slot = Some(Err(OpError::unknown(cause.clone(), None)));
+                let cause =
+                    vfsi_core::internal::errors::invalid_reply("invalid REMOVE repair count");
+                {
+                    let causes = vfsi_core::internal::errors::fanout(cause, slots[index..].len());
+                    for (slot, cause) in slots[index..].iter_mut().zip(causes) {
+                        *slot = Some(Err(OpError::unknown(cause, None)));
+                    }
                 }
             } else {
                 for (offset, result) in outcomes.into_iter().enumerate() {
@@ -697,7 +748,7 @@ impl NfsVecFs {
         for (index, file) in files.iter().enumerate() {
             let request = self.server_vf_path(file).and_then(|path| {
                 let (parent, name) = split_path_bytes(path_bytes(&path))
-                    .map_err(|_| VfError::errno(None, ERR_NOENT))?;
+                    .map_err(|_| std::io::Error::from_raw_os_error((ERR_NOENT) as i32))?;
                 Ok((Box::<[u8]>::from(parent), name.to_vec()))
             });
             match request {
@@ -712,13 +763,18 @@ impl NfsVecFs {
                     if kind == nfs_ftype4_NF4DIR {
                         Ok(handle)
                     } else {
-                        Err(VfError::nfs(None, nfsstat4_NFS4ERR_NOTDIR))
+                        Err(vfsi_core::internal::errors::from_status(
+                            vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_NOTDIR),
+                        ))
                     }
                 }) {
                 Ok(parent) => parent,
                 Err(cause) => {
-                    for (index, _) in entries {
-                        slots[index] = Some(Err(OpError::not_attempted(cause.clone())));
+                    {
+                        let causes = vfsi_core::internal::errors::fanout(cause, (entries).len());
+                        for ((index, _), cause) in (entries).into_iter().zip(causes) {
+                            slots[index] = Some(Err(OpError::not_attempted(cause)));
+                        }
                     }
                     continue;
                 }
@@ -728,9 +784,8 @@ impl NfsVecFs {
                 .nfs
                 .remove_many(&parent, &names)
                 .unwrap_or_else(|cause| {
-                    names
-                        .iter()
-                        .map(|_| Err(OpError::not_attempted(cause.clone())))
+                    vfsi_core::internal::errors::fanout(cause, names.len())
+                        .map(|cause| Err(OpError::not_attempted(cause)))
                         .collect()
                 });
             for ((index, _), result) in entries.into_iter().zip(results) {

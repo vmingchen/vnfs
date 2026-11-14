@@ -209,7 +209,7 @@ impl<F: VectorBackend> FsClient<F> {
                 if let VfOffset::At(offset) = offset {
                     offset
                         .checked_add(request.data().len() as u64)
-                        .ok_or_else(|| VfError::errno(None, libc::EOVERFLOW as u32))?;
+                        .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
                 }
                 file.raw()
             });
@@ -241,18 +241,15 @@ impl<F: VectorBackend> FsClient<F> {
             let outcomes = self.lock()?.vwrite_impl(&writes);
             match outcomes {
                 Err(cause) if rejected.is_empty() => {
-                    return Err(with_indexed_context(cause, "vwrite_native", |index| {
-                        paths.get(index).copied()
-                    }));
+                    return Err(cause);
                 }
-                Err(cause) => writes
-                    .iter()
-                    .map(|_| Err(OpError::not_attempted(cause.clone())))
+                Err(cause) => vfsi_core::internal::errors::fanout(cause, writes.len())
+                    .map(|cause| Err(OpError::not_attempted(cause)))
                     .collect(),
                 Ok(mut outcomes) if outcomes.len() <= writes.len() => {
                     outcomes.resize_with(writes.len(), || {
                         Err(OpError::unknown(
-                            VfError::invalid_reply(None, "missing write outcome"),
+                            vfsi_core::internal::errors::invalid_reply("missing write outcome"),
                             None,
                         ))
                     });
@@ -268,6 +265,7 @@ impl<F: VectorBackend> FsClient<F> {
                                         std::slice::from_ref(request),
                                         std::slice::from_ref(&result),
                                     )
+                                    .map_err(vfsi_core::IndexedError::into_cause)
                                     .map_err(|cause| OpError::unknown(cause, None))?;
                                     Ok(write_result(result))
                                 })
@@ -279,8 +277,7 @@ impl<F: VectorBackend> FsClient<F> {
                     .iter()
                     .map(|_| {
                         Err(OpError::unknown(
-                            VfError::invalid_reply(
-                                None,
+                            vfsi_core::internal::errors::invalid_reply(
                                 "write backend returned too many outcomes",
                             ),
                             None,
@@ -337,20 +334,20 @@ impl<F: VectorBackend> FsClient<F> {
         use vfsi_core::{FailureState, OpError};
         let mut prepared = Vec::with_capacity(requests.len());
         let mut raw_files = Vec::with_capacity(requests.len());
-        let mut failures = vec![None; requests.len()];
+        let mut failures: Vec<Option<OpError>> = (0..requests.len()).map(|_| None).collect();
         for (index, request) in requests.iter().map(project).enumerate() {
             let valid = (|| {
                 self.validate_owner(request.file(), index)?;
                 let raw = request.file().raw()?;
                 let VfOffset::At(offset) = request.offset() else {
-                    return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+                    return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
                 };
                 let offset = if request.file().append && !request.data().is_empty() {
                     0 // supplied positions are ignored for append
                 } else {
                     offset
                         .checked_add(request.data().len() as u64)
-                        .ok_or_else(|| VfError::errno(None, libc::EOVERFLOW as u32))?;
+                        .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
                     offset
                 };
                 Ok((raw, offset))
@@ -496,7 +493,7 @@ impl<F: VectorBackend> FsClient<F> {
             let outcomes = match self.vwrite_native(&wave) {
                 Ok(outcomes) => outcomes,
                 Err(cause) => {
-                    stopped = Some(cause);
+                    stopped = Some(vfsi_core::internal::errors::shared_source(cause));
                     break;
                 }
             };
@@ -510,7 +507,7 @@ impl<F: VectorBackend> FsClient<F> {
                     Ok(result) if result.bytes_written == 0 => {
                         failures[index] = Some(add_write_prefix(
                             OpError::failed(
-                                VfError::from_kind(None, std::io::ErrorKind::WriteZero),
+                                std::io::Error::from(std::io::ErrorKind::WriteZero),
                                 None,
                             ),
                             totals[index],
@@ -531,8 +528,7 @@ impl<F: VectorBackend> FsClient<F> {
                                 None => {
                                     failures[index] = Some(add_write_prefix(
                                         OpError::unknown(
-                                            VfError::invalid_reply(
-                                                None,
+                                            vfsi_core::internal::errors::invalid_reply(
                                                 "append completion offset cannot be represented",
                                             ),
                                             None,
@@ -547,9 +543,9 @@ impl<F: VectorBackend> FsClient<F> {
                 }
                 if failures[index].is_some() || totals[index] == request.data().len() {
                     let blocked = failures[index]
-                        .as_ref()
+                        .as_mut()
                         .filter(|error| error.state() == FailureState::Unknown)
-                        .map(|error| error.cause().clone());
+                        .map(vfsi_core::internal::errors::share_op_cause);
                     finish_write_dependencies(
                         index,
                         blocked.as_ref(),
@@ -576,12 +572,14 @@ impl<F: VectorBackend> FsClient<F> {
                     return Err(error.with_context("vwrite_all_native", request.file().path()));
                 }
                 if totals[index] != request.data().len() {
-                    let cause = stopped.clone().unwrap_or_else(|| {
-                        VfError::invalid_reply(
-                            None,
-                            "complete-write dependency graph did not finish",
-                        )
-                    });
+                    let cause = stopped
+                        .as_ref()
+                        .map(vfsi_core::internal::errors::from_shared)
+                        .unwrap_or_else(|| {
+                            vfsi_core::internal::errors::invalid_reply(
+                                "complete-write dependency graph did not finish",
+                            )
+                        });
                     return Err(add_write_prefix(
                         OpError::not_attempted(cause),
                         totals[index],
@@ -615,7 +613,7 @@ fn validate_write_error(
         error
     } else {
         OpError::unknown(
-            VfError::invalid_reply(None, "invalid write failure progress"),
+            vfsi_core::internal::errors::invalid_reply("invalid write failure progress"),
             None,
         )
     }
@@ -626,7 +624,7 @@ fn validate_write_error(
 // later overlapping write, so cancel only that node's dependency descendants.
 fn finish_write_dependencies(
     index: usize,
-    blocked: Option<&VfError>,
+    blocked: Option<&Arc<std::io::Error>>,
     successors: &mut [WriteSuccessors],
     remaining: &mut [usize],
     failures: &mut [Option<vfsi_core::OpError>],
@@ -642,7 +640,9 @@ fn finish_write_dependencies(
             if failures[next].is_some() {
                 continue;
             }
-            failures[next] = Some(vfsi_core::OpError::not_attempted(cause.clone()));
+            failures[next] = Some(vfsi_core::OpError::not_attempted(
+                vfsi_core::internal::errors::from_shared(cause),
+            ));
             let mut edges = std::mem::take(&mut successors[next]);
             pending.extend(edges.take());
         }

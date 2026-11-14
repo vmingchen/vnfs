@@ -208,7 +208,7 @@ impl<'a, F> SetAttrsOp<super::Target<'a, F>> {
     ///
     /// ```no_run
     /// use vfsi_core::api::{SetAttrsOp, Vfsi, VfsiExt};
-    /// # fn example<F: Vfsi>(fs: &F, file: &F::File) -> vfsi_core::api::Result<()> {
+    /// # fn example<F: Vfsi>(fs: &F, file: &F::File) -> std::result::Result<(), vfsi_core::IndexedError> {
     /// fs.setattrs_all(&[SetAttrsOp::file(file).len(1024)])?;
     /// # Ok(())
     /// # }

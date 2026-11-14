@@ -27,7 +27,7 @@ pub fn check(fs: &impl Vfsi, base: &str) {
         assert_eq!(results.len(), roots.len());
         assert!(results[0].is_ok(), "{mode:?}: {:?}", results[0]);
         let error = results[1].as_ref().unwrap_err();
-        assert_eq!(error.cause().index(), None);
+
         assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
         assert!(results[2].is_ok(), "{mode:?}: {:?}", results[2]);
         for root in [&roots[0], &roots[2]] {

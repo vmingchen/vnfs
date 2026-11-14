@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::Arc;
 use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
-use vfsi_core::{FailureState, OpError, VfError};
+use vfsi_core::{FailureState, OpError};
 
 #[test]
 fn setattr_vectors_preserve_status_and_submission_boundaries_without_replay() {
@@ -83,8 +83,7 @@ fn setattr_vectors_preserve_status_and_submission_boundaries_without_replay() {
             let fault = point.map(|point| {
                 Arc::new(FaultScript::one(
                     point,
-                    VfError::transport_with_kind(
-                        None,
+                    vfsi_core::internal::errors::transport(
                         vfsi_core::TransportKind::Timeout,
                         "selected SETATTR unavailable",
                     ),
@@ -125,7 +124,7 @@ fn setattr_vectors_preserve_status_and_submission_boundaries_without_replay() {
                         if index == 1 {
                             let error = result.as_ref().unwrap_err();
                             assert_eq!(error.state(), FailureState::Failed);
-                            assert_eq!(error.cause().index(), None);
+                            let _: &std::io::Error = error.cause();
                         } else {
                             assert!(result.is_ok());
                         }
@@ -152,10 +151,10 @@ fn setattr_vectors_preserve_status_and_submission_boundaries_without_replay() {
                         };
                         assert_eq!(error.state(), expected, "{paths}/{phase}/{index}");
                         assert_eq!(
-                            error.cause().transport_kind(),
+                            vfsi_core::transport_kind(error.cause()),
                             Some(vfsi_core::TransportKind::Timeout)
                         );
-                        assert_eq!(error.cause().index(), None);
+                        let _: &std::io::Error = error.cause();
                         assert!(error.progress().is_none());
                     }
                     assert_eq!(compounds, if phase == "before" { 1 } else { 2 });
@@ -189,7 +188,9 @@ fn legacy_setattr_rpc_collection_preserves_status_and_transport_classification()
         Ok(vec![
             Ok(()),
             Err(OpError::failed(
-                VfError::nfs(None, nfsstat4_NFS4ERR_ACCESS),
+                vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                    nfsstat4_NFS4ERR_ACCESS,
+                )),
                 None,
             )),
             Ok(()),
@@ -200,8 +201,7 @@ fn legacy_setattr_rpc_collection_preserves_status_and_transport_classification()
     assert_eq!(error.op_index, 1);
     assert_eq!(error.status, nfsstat4_NFS4ERR_ACCESS);
     let error = collect_rpc_results::<()>(
-        Err(VfError::transport_with_kind(
-            None,
+        Err(vfsi_core::internal::errors::transport(
             vfsi_core::TransportKind::Auth,
             "authentication failed",
         )),
@@ -227,7 +227,7 @@ fn setattr_pre_dispatch_errors_keep_their_original_domain() {
     for path in [false, true] {
         let fault = Arc::new(FaultScript::one(
             OpenFaultPoint::BeforeSetattrCompound { first: 0 },
-            VfError::errno(None, libc::EACCES as u32),
+            std::io::Error::from_raw_os_error(libc::EACCES),
         ));
         client.set_fault_injector(fault.clone());
         let _ = crate::compound::thread_compound_stats();
@@ -259,11 +259,11 @@ fn setattr_pre_dispatch_errors_keep_their_original_domain() {
         };
         assert!(fault.is_consumed());
         assert_eq!(
-            cause.domain(),
-            VfError::errno(None, libc::EACCES as u32).domain()
+            vfsi_core::native_status(&cause),
+            Some(vfsi_core::StatusCode::Errno(libc::EACCES as u32))
         );
-        assert_eq!(cause.raw_code(), libc::EACCES as u32);
-        assert_eq!(cause.index(), None);
+        assert_eq!(crate::test_native_code(&(cause)), libc::EACCES as u32);
+        let _: &std::io::Error = &cause;
         assert_eq!(crate::compound::thread_compound_stats().0, 0);
     }
 }

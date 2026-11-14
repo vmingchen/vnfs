@@ -128,8 +128,8 @@ impl<T, D, O: From<u64>, P: Default> WriteRequest<T, D, O, P> {
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp, WriteOptions};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
-    /// let file = fs.create("/output")?;
+    /// # fn example(fs: &impl Vfsi) -> std::result::Result<(), vfsi_core::IndexedError> {
+    /// let file = fs.create("/output").map_err(vfsi_core::IndexedError::unattributed)?;
     /// let result = fs.write_batch(&[WriteOp::at(&file, 0, b"hello")], WriteOptions::new().with_write_all(true));
     /// let close = fs.close_files(vec![file]);
     /// result?;

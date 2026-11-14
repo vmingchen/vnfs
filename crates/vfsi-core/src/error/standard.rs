@@ -322,3 +322,55 @@ pub fn fanout(error: io::Error, count: usize) -> impl ExactSizeIterator<Item = i
         ),
     })
 }
+
+/// Standard-I/O collectors retry Interrupted. Once progress is delivered or
+/// completion is uncertain, retain the original cause without permitting replay.
+pub fn suppress_interrupted(error: io::Error) -> io::Error {
+    if error.kind() != io::ErrorKind::Interrupted {
+        return error;
+    }
+    io::Error::other(Context {
+        native: native_status(&error),
+        transport: transport_kind(&error),
+        source: Some(error),
+        ..Context::default()
+    })
+}
+
+/// Retain one original for an explicitly shared failure group.
+pub fn shared_source(error: io::Error) -> Arc<io::Error> {
+    match error
+        .get_ref()
+        .and_then(|e| e.downcast_ref::<SharedCause>())
+    {
+        Some(shared) => shared.source.clone(),
+        None => Arc::new(error),
+    }
+}
+
+/// One owned slot cause referring to an explicitly retained original.
+pub fn from_shared(source: &Arc<io::Error>) -> io::Error {
+    io::Error::new(
+        source.kind(),
+        SharedCause {
+            native: native_status(source),
+            transport: transport_kind(source),
+            source: source.clone(),
+        },
+    )
+}
+
+/// Transfer an owned cause into a failure group while retaining this owner's
+/// diagnostic. This is explicit source sharing, not lossy cloning of a borrow.
+pub fn share_in_place(error: &mut io::Error) -> Arc<io::Error> {
+    if let Some(shared) = error
+        .get_ref()
+        .and_then(|e| e.downcast_ref::<SharedCause>())
+    {
+        return shared.source.clone();
+    }
+    let original = std::mem::replace(error, io::ErrorKind::Other.into());
+    let shared = shared_source(original);
+    *error = from_shared(&shared);
+    shared
+}

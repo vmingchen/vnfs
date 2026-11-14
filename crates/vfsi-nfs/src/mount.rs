@@ -8,7 +8,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use vfsi_sync::backend::VectorBackend;
 
-use vfsi_core::{AttrMask, FileOperand, VfAttrs, VfError, VfResult};
+use vfsi_core::{AttrMask, FileOperand, VfAttrs, VfResult};
 
 use crate::{NfsAuth, NfsVecFs};
 
@@ -41,16 +41,24 @@ pub struct NfsMount {
 impl NfsMount {
     pub fn discover(path: impl AsRef<Path>) -> VfResult<Self> {
         if !path.as_ref().is_absolute() {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)
-                .with_context("mount path must be absolute", path.as_ref()));
+            return Err(vfsi_core::internal::errors::with_context(
+                std::io::Error::from(std::io::ErrorKind::InvalidInput),
+                "mount path must be absolute",
+                path.as_ref(),
+            ));
         }
         let path = fs::canonicalize(path.as_ref()).map_err(|error| {
-            VfError::from_io(0, error).with_context("from_mount", path.as_ref())
+            vfsi_core::internal::errors::with_context(error, "from_mount", path.as_ref())
         })?;
-        let metadata = fs::metadata(&path)
-            .map_err(|error| VfError::from_io(0, error).with_context("from_mount", &path))?;
+        let metadata = fs::metadata(&path).map_err(|error| {
+            vfsi_core::internal::errors::with_context(error, "from_mount", &path)
+        })?;
         if !metadata.is_dir() {
-            return Err(VfError::errno(0, libc::ENOTDIR as u32).with_context("from_mount", &path));
+            return Err(vfsi_core::internal::errors::with_context(
+                std::io::Error::from_raw_os_error(libc::ENOTDIR),
+                "from_mount",
+                &path,
+            ));
         }
         let id = path_mount_id(&path).ok_or_else(|| unsupported(&path))?;
         let table = fs::read("/proc/self/mountinfo").map_err(|_| unsupported(&path))?;
@@ -114,7 +122,7 @@ impl NfsMount {
 
     pub(crate) fn check_credentials(&self) -> VfResult<()> {
         if AuthSysIdentity::current().as_ref() != Some(&self.credentials) {
-            return Err(VfError::errno(0, libc::EACCES as u32));
+            return Err(std::io::Error::from_raw_os_error(libc::EACCES));
         }
         Ok(())
     }
@@ -128,10 +136,8 @@ impl NfsMount {
             masks: AttrMask::identity(),
             ..VfAttrs::default()
         }];
-        vfsi_core::internal::collect_vec_result(
-            filesystem.vgetattrs_impl(&mut attrs),
-            attrs.len(),
-        )?;
+        vfsi_core::internal::collect_vec_result(filesystem.vgetattrs_impl(&mut attrs), attrs.len())
+            .map_err(vfsi_core::IndexedError::into_cause)?;
         vfsi_core::metadata_from_attrs(attrs.into_iter().next().unwrap())
             .fs_obj_id()
             .ok_or_else(|| self.stale())
@@ -163,8 +169,11 @@ impl NfsMount {
             || options.minorversion != Some(self.minor_version())
             || options.authentication != NfsAuth::AuthSys
         {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)
-                .with_context("conflicting mount connection options", &self.local_path));
+            return Err(vfsi_core::internal::errors::with_context(
+                std::io::Error::from(std::io::ErrorKind::InvalidInput),
+                "conflicting mount connection options",
+                &self.local_path,
+            ));
         }
         if self.resolved_root.is_some() {
             self.check_credentials()
@@ -195,16 +204,18 @@ impl NfsMount {
         }
     }
 
-    fn stale(&self) -> VfError {
-        VfError::errno(0, libc::ESTALE as u32).with_context(
+    fn stale(&self) -> std::io::Error {
+        vfsi_core::internal::errors::with_context(
+            std::io::Error::from_raw_os_error(libc::ESTALE),
             "mount directory identity changed or remote root differs",
             &self.local_path,
         )
     }
 }
 
-fn unsupported(path: &Path) -> VfError {
-    VfError::errno(0, libc::EOPNOTSUPP as u32).with_context(
+fn unsupported(path: &Path) -> std::io::Error {
+    vfsi_core::internal::errors::with_context(
+        std::io::Error::from_raw_os_error(libc::EOPNOTSUPP),
         "from_mount requires an unambiguous NFSv4.1/4.2 TCP sec=sys mount without nested mounts",
         path,
     )
@@ -529,8 +540,8 @@ mod tests {
     fn relative_mount_paths_are_rejected_before_resolution() {
         for path in ["", ".", "data", "../data"] {
             assert_eq!(
-                NfsMount::discover(path).unwrap_err().raw_code(),
-                libc::EINVAL as u32,
+                NfsMount::discover(path).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidInput,
                 "{path:?}"
             );
         }
@@ -558,7 +569,7 @@ mod tests {
         let mount = test_mount();
         assert!(mount.verify_file_id(123).is_ok());
         assert_eq!(
-            mount.verify_file_id(124).unwrap_err().raw_code(),
+            crate::test_native_code(&(mount.verify_file_id(124).unwrap_err())),
             libc::ESTALE as u32
         );
         let mut matching = crate::NfsConnectOptions::default();
@@ -568,10 +579,9 @@ mod tests {
         // Matching options reach local identity validation; option conflicts
         // must instead fail with EINVAL before checking this stale mount.
         assert_eq!(
-            mount
-                .validate_options(mount.host(), &matching)
-                .unwrap_err()
-                .raw_code(),
+            crate::test_native_code(
+                &(mount.validate_options(mount.host(), &matching).unwrap_err())
+            ),
             libc::ESTALE as u32
         );
         let mut conflicts = vec![("different-server", matching.clone())];
@@ -592,12 +602,15 @@ mod tests {
         }
         for (host, options) in conflicts {
             let error = mount.validate_options(host, &options).unwrap_err();
-            assert_eq!(error.raw_code(), libc::EINVAL as u32);
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
             assert_eq!(
-                error.operation(),
+                vfsi_core::internal::errors::operation(&(error)),
                 Some("conflicting mount connection options")
             );
-            assert_eq!(error.path(), Some(mount.local_path.as_path()));
+            assert_eq!(
+                vfsi_core::internal::errors::path(&(error)),
+                Some(mount.local_path.as_path())
+            );
         }
     }
     #[cfg(feature = "test-faults")]
@@ -619,24 +632,33 @@ mod tests {
             .connect()
             .unwrap();
         for cause in [
-            VfError::nfs(None, nfsv41_sys::nfsstat4_NFS4ERR_ACCESS),
-            VfError::transport_with_kind(
-                None,
+            vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                nfsv41_sys::nfsstat4_NFS4ERR_ACCESS,
+            )),
+            vfsi_core::internal::errors::transport(
                 vfsi_core::TransportKind::Connection,
                 "identity lookup disconnected",
             ),
         ] {
+            let expected = (
+                vfsi_core::native_status(&cause),
+                vfsi_core::transport_kind(&cause),
+                vfsi_core::internal::errors::message(&cause).map(str::to_owned),
+            );
             let fault = Arc::new(FaultScript::one(
                 OpenFaultPoint::BeforeGetattrDispatch,
-                cause.clone(),
+                cause,
             ));
             filesystem.set_fault_injector(fault.clone());
             let error = test_mount().remote_identity(&mut filesystem).unwrap_err();
             assert!(fault.is_consumed());
-            assert_eq!(error.status(), cause.status());
-            assert_eq!(error.transport_kind(), cause.transport_kind());
-            assert_eq!(error.message(), cause.message());
-            assert_eq!(error.index(), Some(0));
+            assert_eq!(vfsi_core::native_status(&(error)), expected.0);
+            assert_eq!(vfsi_core::transport_kind(&(error)), expected.1);
+            assert_eq!(
+                vfsi_core::internal::errors::message(&(error)),
+                expected.2.as_deref()
+            );
+            let _: &std::io::Error = &error;
         }
         filesystem.shutdown().unwrap();
     }

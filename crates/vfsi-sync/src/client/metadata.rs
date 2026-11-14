@@ -67,37 +67,34 @@ impl<F: HandleBackend> FsClient<F> {
                 .iter()
                 .map(|_| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "too many synchronization outcomes"),
+                        vfsi_core::internal::errors::invalid_reply(
+                            "too many synchronization outcomes",
+                        ),
                         None,
                     ))
                 })
                 .collect(),
             Err(error) => {
-                let error = if error.index().is_some_and(|index| index >= raw.len()) {
-                    VfError::invalid_reply(None, "fsync backend returned an invalid error index")
-                } else {
-                    error
-                };
                 if rejected.is_empty() {
-                    return Err(with_indexed_context(error, "vfsync", |index| {
-                        projected.get(index).map(|file| file.path.as_path())
-                    }));
+                    return Err(error);
                 }
-                raw.iter()
-                    .map(|_| Err(OpError::not_attempted(error.clone())))
+                vfsi_core::internal::errors::fanout(error, raw.len())
+                    .map(|error| Err(OpError::not_attempted(error)))
                     .collect()
             }
         };
         outcomes.resize_with(raw.len(), || {
             Err(OpError::unknown(
-                VfError::invalid_reply(None, "missing synchronization outcome"),
+                vfsi_core::internal::errors::invalid_reply("missing synchronization outcome"),
                 None,
             ))
         });
         let results = outcomes.into_iter().zip(projected).map(|(result, file)| {
             let result = match result {
                 Err(error) if error.progress().is_some() => Err(OpError::unknown(
-                    VfError::invalid_reply(None, "synchronization cannot report I/O byte progress"),
+                    vfsi_core::internal::errors::invalid_reply(
+                        "synchronization cannot report I/O byte progress",
+                    ),
                     None,
                 )),
                 result => result,
@@ -154,7 +151,9 @@ impl<F: HandleBackend> FsClient<F> {
                     let raw = self
                         .validate_owner(file, index)
                         .and_then(|()| file.raw().cloned())
-                        .map_err(|error| error.with_context("vstatfs", &file.path));
+                        .map_err(|error| {
+                            vfsi_core::internal::errors::with_context(error, "vstatfs", &file.path)
+                        });
                     (raw, file.path.as_path())
                 }
             };
@@ -178,7 +177,9 @@ impl<F: HandleBackend> FsClient<F> {
                                 .next()
                                 .unwrap_or_else(|| {
                                     Err(OpError::unknown(
-                                        VfError::invalid_reply(None, "missing statfs outcome"),
+                                        vfsi_core::internal::errors::invalid_reply(
+                                            "missing statfs outcome",
+                                        ),
                                         None,
                                     ))
                                 })
@@ -189,8 +190,7 @@ impl<F: HandleBackend> FsClient<F> {
                 Ok(_) => {
                     for (local, &index) in indices.iter().enumerate() {
                         output[index] = Some(Err(OpError::unknown(
-                            VfError::invalid_reply(
-                                None,
+                            vfsi_core::internal::errors::invalid_reply(
                                 "statfs backend returned too many outcomes",
                             ),
                             None,
@@ -199,9 +199,14 @@ impl<F: HandleBackend> FsClient<F> {
                     }
                 }
                 Err(error) => {
-                    for (local, &index) in indices.iter().enumerate() {
-                        output[index] = Some(Err(OpError::not_attempted(error.clone())
-                            .with_context("vstatfs", paths[local])));
+                    for ((local, &index), error) in indices
+                        .iter()
+                        .enumerate()
+                        .zip(vfsi_core::internal::errors::fanout(error, indices.len()))
+                    {
+                        output[index] = Some(Err(
+                            OpError::not_attempted(error).with_context("vstatfs", paths[local])
+                        ));
                     }
                 }
             }
@@ -283,9 +288,10 @@ impl<F: HandleBackend> FsClient<F> {
                 );
                 let results = match result {
                     Ok(results) => results,
-                    Err(cause) => (0..count)
-                        .map(|offset| {
-                            Err(OpError::not_attempted(cause.clone())
+                    Err(cause) => vfsi_core::internal::errors::fanout(cause, count)
+                        .enumerate()
+                        .map(|(offset, cause)| {
+                            Err(OpError::not_attempted(cause)
                                 .with_context("vsetattrs", paths[start + offset]))
                         })
                         .collect(),
@@ -344,7 +350,13 @@ impl<F: VectorBackend> FsClient<F> {
                 Target::File(file) => (
                     self.validate_owner(file, index)
                         .and_then(|()| file.raw().cloned())
-                        .map_err(|error| error.with_context("vgetattrs", &file.path)),
+                        .map_err(|error| {
+                            vfsi_core::internal::errors::with_context(
+                                error,
+                                "vgetattrs",
+                                &file.path,
+                            )
+                        }),
                     file.path.as_path(),
                     true,
                 ),
@@ -387,8 +399,7 @@ impl<F: VectorBackend> FsClient<F> {
                                     .next()
                                     .unwrap_or_else(|| {
                                         Err(OpError::unknown(
-                                            VfError::invalid_reply(
-                                                None,
+                                            vfsi_core::internal::errors::invalid_reply(
                                                 "missing metadata outcome",
                                             ),
                                             None,
@@ -401,16 +412,22 @@ impl<F: VectorBackend> FsClient<F> {
                     Ok(_) => {
                         for path in &paths[start..end] {
                             statuses.push(Err(OpError::unknown(
-                                VfError::invalid_reply(None, "too many metadata outcomes"),
+                                vfsi_core::internal::errors::invalid_reply(
+                                    "too many metadata outcomes",
+                                ),
                                 None,
                             )
                             .with_context("vgetattrs", *path)));
                         }
                     }
                     Err(error) => {
-                        for path in &paths[start..end] {
-                            statuses.push(Err(OpError::not_attempted(error.clone())
-                                .with_context("vgetattrs", *path)));
+                        for (path, error) in paths[start..end]
+                            .iter()
+                            .zip(vfsi_core::internal::errors::fanout(error, end - start))
+                        {
+                            statuses.push(Err(
+                                OpError::not_attempted(error).with_context("vgetattrs", *path)
+                            ));
                         }
                     }
                 }

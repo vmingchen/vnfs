@@ -23,7 +23,7 @@ pub fn run(fs: &impl Vfsi, fresh_root: &str) -> vnfs::Result<Vec<Vec<u8>>> {
     })();
     let cleanup = fs.remove_dir_all(fresh_root);
     // Preserve an operation error, but report cleanup failure after successful I/O.
-    let contents = result?;
+    let contents = result.map_err(vnfs::error::IndexedError::into_cause)?;
     cleanup?;
     Ok(contents)
 }

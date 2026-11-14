@@ -55,11 +55,8 @@ impl<F: VectorBackend> FsClient<F> {
                 }
                 rejected.push((
                     index,
-                    OpError::not_attempted(VfError::from_kind(
-                        None,
-                        std::io::ErrorKind::InvalidInput,
-                    ))
-                    .with_context("vmkdir", path),
+                    OpError::not_attempted(std::io::Error::from(std::io::ErrorKind::InvalidInput))
+                        .with_context("vmkdir", path),
                 ));
             } else {
                 if !rejected.is_empty() {
@@ -80,13 +77,9 @@ impl<F: VectorBackend> FsClient<F> {
         let active_paths: Vec<_> = indices.iter().map(|&index| paths[index]).collect();
         let result = match result {
             Ok(result) => Ok(result),
-            Err(cause) => {
-                let cause = link_error(cause, &active_paths, "vmkdir");
-                Ok(raw
-                    .iter()
-                    .map(|_| Err(OpError::not_attempted(cause.clone())))
-                    .collect())
-            }
+            Err(cause) => Ok(vfsi_core::internal::errors::fanout(cause, raw.len())
+                .map(|cause| Err(OpError::not_attempted(cause)))
+                .collect()),
         };
         let outcomes = namespace_results(result, &active_paths, "vmkdir")?;
         let mut slots = (0..paths.len()).map(|_| None).collect::<Vec<_>>();
@@ -181,17 +174,17 @@ pub(super) fn namespace_results<T>(
     operation: &'static str,
 ) -> vfsi_core::VecResult<T> {
     use vfsi_core::OpError;
-    let mut outcomes = result.map_err(|error| link_error(error, paths, operation))?;
+    let mut outcomes = result?;
     if outcomes.len() > paths.len() {
-        let cause = VfError::invalid_reply(None, format!("too many {operation} outcomes"));
-        outcomes = paths
-            .iter()
-            .map(|_| Err(OpError::unknown(cause.clone(), None)))
+        let cause =
+            vfsi_core::internal::errors::invalid_reply(format!("too many {operation} outcomes"));
+        outcomes = vfsi_core::internal::errors::fanout(cause, paths.len())
+            .map(|cause| Err(OpError::unknown(cause, None)))
             .collect();
     }
     outcomes.resize_with(paths.len(), || {
         Err(OpError::unknown(
-            VfError::invalid_reply(None, format!("missing {operation} outcome")),
+            vfsi_core::internal::errors::invalid_reply(format!("missing {operation} outcome")),
             None,
         ))
     });
@@ -202,10 +195,9 @@ pub(super) fn namespace_results<T>(
             result.map_err(|error| {
                 let error = if error.progress().is_some() {
                     OpError::unknown(
-                        VfError::invalid_reply(
-                            None,
-                            format!("{operation} cannot report I/O byte progress"),
-                        ),
+                        vfsi_core::internal::errors::invalid_reply(format!(
+                            "{operation} cannot report I/O byte progress"
+                        )),
                         None,
                     )
                 } else {

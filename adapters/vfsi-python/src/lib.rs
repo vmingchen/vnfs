@@ -21,10 +21,10 @@ use pyo3::types::{PyBytes, PyDict, PyString};
 use vfsi_core::{ERR_ACCES, ERR_NOENT};
 
 use vfsi_core::{
-    AttrMask, Capabilities, ExtentPair, FileOperand, ReadOp, ReadResult, SeekFrom,
+    AttrMask, Capabilities, ExtentPair, FileOperand, IndexedError, ReadOp, ReadResult, SeekFrom,
     VF_CAP_HARDLINKS, VF_CAP_LSTAT, VF_CAP_NON_UTF8_PATHS, VF_CAP_POSIX_METADATA,
-    VF_CAP_SERVER_COPY, VF_CAP_SYMLINKS, VF_ERR_UNSUPPORTED, VfAttrs, VfError, VfOffset, VfType,
-    WriteOp, WriteResult,
+    VF_CAP_SERVER_COPY, VF_CAP_SYMLINKS, VF_ERR_UNSUPPORTED, VfAttrs, VfOffset, VfType, WriteOp,
+    WriteResult,
 };
 #[cfg(feature = "dummy")]
 use vfsi_local::LocalBackend;
@@ -49,18 +49,18 @@ fn rpc_stats() -> (u64, u64) {
 }
 
 /// Complete failures retained until Python exception construction.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct ErrorMap(HashMap<usize, VfError>);
+#[derive(Debug, Default)]
+struct ErrorMap(HashMap<usize, std::io::Error>);
 impl ErrorMap {
     fn new() -> Self {
         Self::default()
     }
-    fn insert(&mut self, index: usize, error: VfError) -> Option<VfError> {
-        self.0.insert(index, error.with_index(index))
+    fn insert(&mut self, index: usize, error: std::io::Error) -> Option<std::io::Error> {
+        self.0.insert(index, error)
     }
 }
 impl std::ops::Deref for ErrorMap {
-    type Target = HashMap<usize, VfError>;
+    type Target = HashMap<usize, std::io::Error>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -71,8 +71,8 @@ impl std::ops::DerefMut for ErrorMap {
     }
 }
 impl IntoIterator for ErrorMap {
-    type Item = (usize, VfError);
-    type IntoIter = std::collections::hash_map::IntoIter<usize, VfError>;
+    type Item = (usize, std::io::Error);
+    type IntoIter = std::collections::hash_map::IntoIter<usize, std::io::Error>;
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
     }
@@ -84,7 +84,7 @@ impl<'py> IntoPyObject<'py> for ErrorMap {
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         let result = PyDict::new(py);
         for (index, error) in self {
-            result.set_item(index, to_py_err(error, None).value(py))?;
+            result.set_item(index, to_py_err(error, None, Some(index)).value(py))?;
         }
         Ok(result)
     }
@@ -94,11 +94,28 @@ impl<'py> IntoPyObject<'py> for ErrorMap {
 fn error_codes(errors: &ErrorMap) -> HashMap<usize, u32> {
     errors
         .iter()
-        .map(|(&i, error)| (i, error.raw_code()))
+        .map(|(&i, error)| {
+            let code = if error
+                .get_ref()
+                .is_some_and(|payload| payload.is::<SameFile>())
+            {
+                ERR_SAME_FILE
+            } else {
+                match vfsi_core::native_status(error) {
+                    Some(
+                        vfsi_core::StatusCode::Errno(code)
+                        | vfsi_core::StatusCode::Nfs(code)
+                        | vfsi_core::StatusCode::Smb(code),
+                    ) => code,
+                    _ => vfsi_core::internal::errors::to_errno(error) as u32,
+                }
+            };
+            (i, code)
+        })
         .collect()
 }
 /// Per-index attribute results plus failures.
-type AttrsManyResult = Result<(Vec<Option<VfAttrs>>, ErrorMap), VfError>;
+type AttrsManyResult = Result<(Vec<Option<VfAttrs>>, ErrorMap), IndexedError>;
 /// Per-index attribute dicts (None on failure) plus failures.
 type StatManyResult = (Vec<Option<Py<PyDict>>>, ErrorMap);
 /// Per-index byte reads (None on failure) plus failures.
@@ -107,17 +124,32 @@ type ReadManyResult = (Vec<Option<Vec<u8>>>, ErrorMap);
 type CopyManyResult = (Vec<Option<u64>>, ErrorMap);
 const ERR_SAME_FILE: u32 = u32::MAX - 2;
 
+// Adapter-only wire sentinel. It is not an OS errno or protocol status.
+#[derive(Debug)]
+struct SameFile;
+impl std::fmt::Display for SameFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("source and destination are the same file")
+    }
+}
+impl std::error::Error for SameFile {}
+fn same_file_error() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, SameFile)
+}
+
 /// Map a vector-listing error back to the caller's original input positions.
 /// Transport failures without a trustworthy backend index remain unattributed.
 fn remap_aggregate_listdir_error(
-    error: VfError,
+    error: IndexedError,
     unique_to_original: &[usize],
     paths: &[PathBuf],
-) -> (VfError, Option<usize>) {
+) -> (IndexedError, Option<usize>) {
     let error = remap_subset_error(error, unique_to_original);
     match error.index() {
         Some(index) if index >= paths.len() => (
-            VfError::invalid_reply(None, "invalid original listing error index"),
+            IndexedError::unattributed(vfsi_core::internal::errors::invalid_reply(
+                "invalid original listing error index",
+            )),
             None,
         ),
         index => (error, index),
@@ -132,7 +164,7 @@ fn validate_aggregate_listdir_prefix(
     paths: &[PathBuf],
     max_entries: usize,
     max_path_bytes: usize,
-) -> vfsi_core::VfResult<()> {
+) -> Result<(), IndexedError> {
     let mut budget = vfsi_core::internal::TraversalBudget::new(max_entries, max_path_bytes);
     for (index, path) in paths.iter().enumerate() {
         let mut overflow = false;
@@ -145,9 +177,12 @@ fn validate_aggregate_listdir_prefix(
                 !overflow
             },
         )
-        .map_err(|error| error.map_index(|_| index))?;
+        .map_err(|cause| IndexedError::at(index, cause))?;
         if overflow {
-            return Err(VfError::errno(index, libc::EFBIG as u32));
+            return Err(IndexedError::at(
+                index,
+                std::io::Error::from_raw_os_error(libc::EFBIG),
+            ));
         }
     }
     Ok(())
@@ -158,7 +193,7 @@ fn aggregate_listdirs(
     paths: &[PathBuf],
     max_entries: usize,
     max_path_bytes: usize,
-) -> vfsi_core::VfResult<Vec<Vec<VfAttrs>>> {
+) -> Result<Vec<Vec<VfAttrs>>, IndexedError> {
     let mut unique_paths = Vec::new();
     let mut unique_to_original = Vec::new();
     let mut unique_index_by_dir = HashMap::new();
@@ -195,12 +230,14 @@ fn aggregate_listdirs(
         },
     );
     if invalid_directory {
-        return Err(VfError::transport(None, "invalid vlistdirs directory"));
+        return Err(IndexedError::unattributed(
+            vfsi_core::internal::errors::invalid_reply("invalid vlistdirs directory"),
+        ));
     }
     if let Err(error) = result {
         let (error, index) = remap_aggregate_listdir_error(error, &unique_to_original, paths);
         // Never replay an ambiguous transport failure, even if it is indexed.
-        if !error.is_transport()
+        if vfsi_core::transport_kind(error.cause()).is_none()
             && let Some(index) = index
         {
             validate_aggregate_listdir_prefix(fs, &paths[..index], max_entries, max_path_bytes)?;
@@ -211,7 +248,10 @@ fn aggregate_listdirs(
         validate_aggregate_listdir_prefix(fs, paths, max_entries, max_path_bytes)?;
         // A concurrent shrink can make the second observation fit. The first
         // vector was interrupted, so its partial groups still cannot be used.
-        return Err(VfError::errno(index, libc::EFBIG as u32));
+        return Err(IndexedError::at(
+            index,
+            std::io::Error::from_raw_os_error(libc::EFBIG),
+        ));
     }
 
     // Complete unique listings are charged again in original request order,
@@ -227,9 +267,9 @@ fn aggregate_listdirs(
             &groups[first]
         };
         for entry in entries {
-            budget
-                .charge_paths(entry.file.path())
-                .map_err(|_| VfError::errno(index, libc::EFBIG as u32))?;
+            budget.charge_paths(entry.file.path()).map_err(|_| {
+                IndexedError::at(index, std::io::Error::from_raw_os_error(libc::EFBIG))
+            })?;
         }
         // Transfer each unique listing once. Only repeated operands require
         // independent copies, after charging their caller-visible budget.
@@ -292,42 +332,42 @@ fn lock_err<T>(_: std::sync::PoisonError<T>) -> PyErr {
 
 /// Preserve unsupported diagnostics; retain errno-compatible Python exceptions
 /// for other filesystem errors.
-fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
+fn to_py_err(e: std::io::Error, path: Option<&Path>, index: Option<usize>) -> PyErr {
     use std::io::ErrorKind as K;
-    let path = path.or_else(|| e.path());
+    let path = path.or_else(|| vfsi_core::internal::errors::path(&e));
     let filename = path.map(|p| p.as_os_str().to_os_string());
     let mut diagnostic = e.to_string();
     if let Some(source) = std::error::Error::source(&e) {
         diagnostic.push_str(&format!(": {source}"));
     }
     // This private copy sentinel is translated by the fsspec boundary.
-    let errno = if e.status() == Some(vfsi_core::StatusCode::Errno(ERR_SAME_FILE)) {
+    let errno = if e.get_ref().is_some_and(|payload| payload.is::<SameFile>()) {
         i64::from(ERR_SAME_FILE)
     } else {
-        i64::from(e.to_errno())
+        i64::from(vfsi_core::internal::errors::to_errno(&e))
     };
     let args = (errno, diagnostic.clone(), filename);
     let error = match e.kind() {
         K::Unsupported => {
-            if let Some(path) = path.filter(|p| Some(*p) != e.path()) {
+            if let Some(path) = path.filter(|p| Some(*p) != vfsi_core::internal::errors::path(&e)) {
                 diagnostic.push_str(&format!(": '{}'", path.display()));
             }
             PyNotImplementedError::new_err(diagnostic)
         }
         K::TimedOut => pyo3::exceptions::PyTimeoutError::new_err(args),
         K::PermissionDenied => PyPermissionError::new_err(args),
-        _ if e.transport_kind() == Some(vfsi_core::TransportKind::InvalidReply) => {
+        _ if vfsi_core::transport_kind(&e) == Some(vfsi_core::TransportKind::InvalidReply) => {
             PyOSError::new_err(args)
         }
-        _ if e.is_transport() => PyConnectionError::new_err(args),
+        _ if vfsi_core::transport_kind(&e).is_some() => PyConnectionError::new_err(args),
         _ => PyOSError::new_err(args),
     };
     Python::attach(|py| {
         let value = error.value(py);
-        if let Some(index) = e.index() {
+        if let Some(index) = index {
             let _ = value.setattr("index", index);
         }
-        if let Some(kind) = e.transport_kind() {
+        if let Some(kind) = vfsi_core::transport_kind(&e) {
             let _ = value.setattr(
                 "transport_kind",
                 match kind {
@@ -339,8 +379,14 @@ fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
                 },
             );
         }
-        if let Some(status) = e.status() {
-            let _ = value.setattr("status_code", e.raw_code());
+        if let Some(status) = vfsi_core::native_status(&e) {
+            let code = match status {
+                vfsi_core::StatusCode::Errno(code)
+                | vfsi_core::StatusCode::Nfs(code)
+                | vfsi_core::StatusCode::Smb(code) => code,
+                _ => 0,
+            };
+            let _ = value.setattr("status_code", code);
             let _ = value.setattr(
                 "status_domain",
                 match status {
@@ -351,7 +397,7 @@ fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
                 },
             );
         }
-        if let Some(operation) = e.operation() {
+        if let Some(operation) = vfsi_core::internal::errors::operation(&e) {
             let _ = value.setattr("operation", operation);
         }
     });
@@ -359,12 +405,17 @@ fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
 }
 
 /// Attach the failing operation's path to an error from a batched call.
-fn map_err_with_path(e: VfError, paths: &[PathBuf]) -> PyErr {
-    let path = e
-        .index()
+fn map_err_with_path(error: IndexedError, paths: &[PathBuf]) -> PyErr {
+    let (index, cause) = error.into_parts();
+    let path = index
         .and_then(|index| paths.get(index))
         .map(PathBuf::as_path);
-    to_py_err(e, path)
+    to_py_err(cause, path, index)
+}
+
+fn to_py_indexed(error: IndexedError, path: Option<&Path>) -> PyErr {
+    let (index, cause) = error.into_parts();
+    to_py_err(cause, path, index)
 }
 
 /// Project the existing Rust operation error, retaining completion knowledge.
@@ -375,7 +426,7 @@ fn operation_exception(
 ) -> PyResult<Py<PyAny>> {
     use vfsi_core::{FailureState, IoProgress};
     let (cause, state, progress) = error.into_parts();
-    let error = to_py_err(cause.with_index(index), None);
+    let error = to_py_err(cause, None, Some(index));
     let value = error.value(py);
     value.setattr(
         "failure_state",
@@ -542,8 +593,8 @@ fn descriptor(operation: &str, file: &FileOperand) -> PyResult<i64> {
 }
 
 fn file_operand_from_fd(fd: i64) -> PyResult<FileOperand> {
-    let fd =
-        i32::try_from(fd).map_err(|_| to_py_err(VfError::errno(0, libc::EBADF as u32), None))?;
+    let fd = i32::try_from(fd)
+        .map_err(|_| to_py_err(std::io::Error::from_raw_os_error(libc::EBADF), None, None))?;
     Ok(FileOperand::from_fd(fd))
 }
 
@@ -674,11 +725,13 @@ fn attrs_to_dict(py: Python<'_>, a: &VfAttrs) -> PyResult<Py<PyDict>> {
 
 /// Restore the caller's positions after a vector has been filtered or expanded.
 /// Missing or out-of-range backend indices cannot be remapped reliably.
-fn remap_subset_error(error: VfError, positions: &[usize]) -> VfError {
+fn remap_subset_error(error: IndexedError, positions: &[usize]) -> IndexedError {
     match error.index() {
         Some(index) => match positions.get(index) {
-            Some(&original) => error.with_index(original),
-            None => VfError::invalid_reply(None, "invalid subset backend error index"),
+            Some(&original) => error.map_index(|_| original),
+            None => IndexedError::unattributed(vfsi_core::internal::errors::invalid_reply(
+                "invalid subset backend error index",
+            )),
         },
         None => error,
     }
@@ -708,11 +761,11 @@ fn attrs_many_impl(
         fs.vgetattrs_impl(&mut attrs)
     } else {
         fs.vgetattrs_nofollow_impl(&mut attrs)
-    }?;
+    }
+    .map_err(IndexedError::unattributed)?;
     if outcomes.len() != paths.len() {
-        return Err(VfError::invalid_reply(
-            None,
-            "invalid metadata outcome count",
+        return Err(IndexedError::unattributed(
+            vfsi_core::internal::errors::invalid_reply("invalid metadata outcome count"),
         ));
     }
     let mut values = Vec::with_capacity(paths.len());
@@ -721,9 +774,9 @@ fn attrs_many_impl(
         match outcome {
             Ok(()) => values.push(Some(attrs)),
             Err(error) => {
-                let cause = error.into_cause().with_index(index);
-                if cause.is_transport() {
-                    return Err(cause);
+                let cause = error.into_cause();
+                if vfsi_core::transport_kind(&cause).is_some() {
+                    return Err(IndexedError::at(index, cause));
                 }
                 values.push(None);
                 errors.insert(index, cause);
@@ -751,7 +804,9 @@ fn read_all_outcomes_impl(
             .iter()
             .map(|_| {
                 Err(vfsi_core::OpError::unknown(
-                    VfError::invalid_reply(None, "whole-file backend returned wrong outcome count"),
+                    vfsi_core::internal::errors::invalid_reply(
+                        "whole-file backend returned wrong outcome count",
+                    ),
                     None,
                 ))
             })
@@ -782,7 +837,9 @@ fn read_all_outcomes_impl(
                 outcome
             } else {
                 Err(vfsi_core::OpError::unknown(
-                    VfError::invalid_reply(None, "invalid whole-file progress or budget"),
+                    vfsi_core::internal::errors::invalid_reply(
+                        "invalid whole-file progress or budget",
+                    ),
                     None,
                 ))
             }
@@ -796,17 +853,18 @@ fn read_allv_impl(
     fs: &mut dyn BindingBackend,
     paths: &[PathBuf],
     max_total_bytes: usize,
-) -> Result<ReadManyResult, VfError> {
-    let outcomes = read_all_outcomes_impl(fs, paths, max_total_bytes)?;
+) -> Result<ReadManyResult, IndexedError> {
+    let outcomes =
+        read_all_outcomes_impl(fs, paths, max_total_bytes).map_err(IndexedError::unattributed)?;
     let mut results = Vec::with_capacity(paths.len());
     let mut errors = ErrorMap::new();
     for (index, outcome) in outcomes.into_iter().enumerate() {
         match outcome {
             Ok(data) => results.push(Some(data)),
             Err(error) => {
-                let cause = error.into_cause().with_index(index);
-                if cause.is_transport() {
-                    return Err(cause);
+                let cause = error.into_cause();
+                if vfsi_core::transport_kind(&cause).is_some() {
+                    return Err(IndexedError::at(index, cause));
                 }
                 results.push(None);
                 errors.insert(index, cause);
@@ -826,18 +884,18 @@ fn validate_directory_results(
     entries: &[VfAttrs],
     max_entries: usize,
     max_path_bytes: usize,
-) -> Result<(), VfError> {
+) -> Result<(), std::io::Error> {
     if entries.len() > max_entries {
-        return Err(VfError::errno(max_entries, libc::EFBIG as u32));
+        return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
     }
     let mut path_bytes = 0usize;
-    for (index, entry) in entries.iter().enumerate() {
+    for entry in entries {
         let bytes = entry.file.path().map_or(0, |path| path.as_os_str().len());
         path_bytes = path_bytes
             .checked_add(bytes)
-            .ok_or_else(|| VfError::errno(index, libc::EFBIG as u32))?;
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EFBIG))?;
         if path_bytes > max_path_bytes {
-            return Err(VfError::errno(index, libc::EFBIG as u32));
+            return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
         }
     }
     Ok(())
@@ -925,8 +983,8 @@ fn discover_mount(py: Python<'_>, path: PathBuf) -> PyResult<MountConfiguration>
 }
 
 #[cfg(all(feature = "nfs", target_os = "linux"))]
-fn mount_error(error: VfError, path: &Path) -> PyErr {
-    to_py_err(error, Some(path))
+fn mount_error(error: std::io::Error, path: &Path) -> PyErr {
+    to_py_err(error, Some(path), None)
 }
 
 /// One vectorized filesystem client behind a mutex.
@@ -1027,13 +1085,15 @@ impl NfsClient {
                         .map(vfsi_core::WriteOp::borrowed)
                         .collect::<Vec<_>>(),
                 )
-                .map_err(|error| to_py_err(error, None))?;
+                .map_err(|error| to_py_err(error, None, None))?;
             if outcomes.len() != ops.len() {
                 return Ok(ops
                     .iter()
                     .map(|_| {
                         Err(vfsi_core::OpError::unknown(
-                            VfError::invalid_reply(None, "invalid write outcome count"),
+                            vfsi_core::internal::errors::invalid_reply(
+                                "invalid write outcome count",
+                            ),
                             None,
                         ))
                     })
@@ -1061,7 +1121,9 @@ impl NfsClient {
                                 .is_none()
                         {
                             return Ok(Err(vfsi_core::OpError::unknown(
-                                VfError::invalid_reply(None, "invalid write completion"),
+                                vfsi_core::internal::errors::invalid_reply(
+                                    "invalid write completion",
+                                ),
                                 None,
                             )));
                         }
@@ -1078,7 +1140,9 @@ impl NfsClient {
                         };
                         if !valid {
                             return Ok(Err(vfsi_core::OpError::unknown(
-                                VfError::invalid_reply(None, "invalid write failure progress"),
+                                vfsi_core::internal::errors::invalid_reply(
+                                    "invalid write failure progress",
+                                ),
                                 None,
                             )));
                         }
@@ -1108,15 +1172,15 @@ impl NfsClient {
             .map(|((fd, offset), length)| Ok(ReadOp::at(file_operand_from_fd(fd)?, offset, length)))
             .collect::<PyResult<_>>()?;
         self.with_fs(py, move |fs| {
-            let outcomes = fs.vread_impl(&ops).map_err(|error| to_py_err(error, None))?;
+            let outcomes = fs.vread_impl(&ops).map_err(|error| to_py_err(error, None, None))?;
             if outcomes.len() != ops.len() {
-                return Ok(ops.iter().map(|_| Err(vfsi_core::OpError::unknown(VfError::invalid_reply(None, "invalid read outcome count"), None))).collect());
+                return Ok(ops.iter().map(|_| Err(vfsi_core::OpError::unknown(vfsi_core::internal::errors::invalid_reply("invalid read outcome count"), None))).collect());
             }
             let outcomes = outcomes.into_iter().enumerate().map(|(index, outcome)| match outcome {
                 Ok(read) => {
                     if validate_read_completion("preadv", index, &ops[index], &read).is_err()
                         || (ops[index].length != 0 && read.data.is_empty() && !read.eof) {
-                        return Ok(Err(vfsi_core::OpError::unknown(VfError::invalid_reply(None, "invalid read completion"), None)));
+                        return Ok(Err(vfsi_core::OpError::unknown(vfsi_core::internal::errors::invalid_reply("invalid read completion"), None)));
                     }
                     Ok(Ok(read))
                 },
@@ -1128,7 +1192,7 @@ impl NfsClient {
                             && read.bytes_read() <= ops[index].length,
                         _ => false,
                     };
-                    if !valid { return Ok(Err(vfsi_core::OpError::unknown(VfError::invalid_reply(None, "invalid read failure progress"), None))); }
+                    if !valid { return Ok(Err(vfsi_core::OpError::unknown(vfsi_core::internal::errors::invalid_reply("invalid read failure progress"), None))); }
                     Ok(Err(error))
                 }
             }).collect::<PyResult<Vec<_>>>()?;
@@ -1260,7 +1324,7 @@ impl NfsClient {
                         if let Some(config) = &mount_config {
                             return mount_error(e, config.spec.local_path());
                         }
-                        to_py_err(e, Some(Path::new(host)))
+                        to_py_err(e, Some(Path::new(host)), None)
                     })?;
                     #[cfg(target_os = "linux")]
                     if let Some(config) = &mount_config {
@@ -1288,7 +1352,7 @@ impl NfsClient {
                         SmbVecFs::connect_with_options(
                             host, share, username, password, domain, options,
                         )
-                        .map_err(|e| to_py_err(e, Some(Path::new(host))))?,
+                        .map_err(|e| to_py_err(e, Some(Path::new(host)), None))?,
                     ) as Box<dyn BindingBackend + Send>
                 }
                 #[cfg(feature = "dummy")]
@@ -1395,7 +1459,7 @@ impl NfsClient {
                 fs.vgetattrs_impl(std::slice::from_mut(&mut a)),
                 1,
             )
-            .map_err(|e| to_py_err(e, Some(path.as_path())))?;
+            .map_err(|e| to_py_err(e.into_cause(), Some(path.as_path()), None))?;
             Ok(a)
         })?;
         attrs_to_dict(py, &a)
@@ -1413,7 +1477,7 @@ impl NfsClient {
                 fs.vgetattrs_nofollow_impl(std::slice::from_mut(&mut a)),
                 1,
             )
-            .map_err(|e| to_py_err(e, Some(path.as_path())))?;
+            .map_err(|e| to_py_err(e.into_cause(), Some(path.as_path()), None))?;
             Ok(a)
         })?;
         attrs_to_dict(py, &a)
@@ -1443,7 +1507,7 @@ impl NfsClient {
             });
             let f = fs
                 .open_raw_impl(&path, flags, permissions)
-                .map_err(|e| to_py_err(e, Some(path.as_path())))?;
+                .map_err(|e| to_py_err(e, Some(path.as_path()), None))?;
             let fd = descriptor("open", &f)?;
             self.remember_open_flags([(fd, flags)])?;
             Ok(fd)
@@ -1453,7 +1517,7 @@ impl NfsClient {
     fn close(&self, py: Python<'_>, fd: i64) -> PyResult<()> {
         self.with_fs(py, move |fs| {
             let file = file_operand_from_fd(fd)?;
-            fs.close_impl(&file).map_err(|e| to_py_err(e, None))?;
+            fs.close_impl(&file).map_err(|e| to_py_err(e, None, None))?;
             self.forget_closed([fd])
         })
     }
@@ -1462,13 +1526,12 @@ impl NfsClient {
     fn read(&self, py: Python<'_>, fd: i64, length: usize) -> PyResult<Vec<u8>> {
         self.with_fs(py, move |fs| {
             let op = ReadOp::new(file_operand_from_fd(fd)?, VfOffset::Cur, length);
-            let r = fs
-                .vread_impl(std::slice::from_ref(&op))
-                .and_then(|outcomes| {
-                    let count = outcomes.len();
-                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
-                })
-                .map_err(|e| to_py_err(e, None))?;
+            let r = vfsi_core::internal::collect_vec_result(
+                fs.vread_impl(std::slice::from_ref(&op)),
+                1,
+            )
+            .map_err(IndexedError::into_cause)
+            .map_err(|e| to_py_err(e, None, None))?;
             Ok(one_read_result("read", &op, r)?.data)
         })
     }
@@ -1477,13 +1540,12 @@ impl NfsClient {
     fn write(&self, py: Python<'_>, fd: i64, data: Vec<u8>) -> PyResult<usize> {
         self.with_fs(py, move |fs| {
             let op = WriteOp::new(file_operand_from_fd(fd)?, VfOffset::Cur, data);
-            let w = fs
-                .vwrite_impl(std::slice::from_ref(&op.borrowed()))
-                .and_then(|outcomes| {
-                    let count = outcomes.len();
-                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
-                })
-                .map_err(|e| to_py_err(e, None))?;
+            let w = vfsi_core::internal::collect_vec_result(
+                fs.vwrite_impl(std::slice::from_ref(&op.borrowed())),
+                1,
+            )
+            .map_err(IndexedError::into_cause)
+            .map_err(|e| to_py_err(e, None, None))?;
             Ok(one_write_result("write", &op, w, false)?.bytes_written)
         })
     }
@@ -1495,13 +1557,12 @@ impl NfsClient {
     fn write_positioned(&self, py: Python<'_>, fd: i64, data: Vec<u8>) -> PyResult<(usize, u64)> {
         self.with_fs(py, move |fs| {
             let op = WriteOp::new(file_operand_from_fd(fd)?, VfOffset::Cur, data);
-            let w = fs
-                .vwrite_impl(std::slice::from_ref(&op.borrowed()))
-                .and_then(|outcomes| {
-                    let count = outcomes.len();
-                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
-                })
-                .map_err(|e| to_py_err(e, None))?;
+            let w = vfsi_core::internal::collect_vec_result(
+                fs.vwrite_impl(std::slice::from_ref(&op.borrowed())),
+                1,
+            )
+            .map_err(IndexedError::into_cause)
+            .map_err(|e| to_py_err(e, None, None))?;
             let w = one_write_result("write_positioned", &op, w, false)?;
             let position = w
                 .offset
@@ -1515,13 +1576,12 @@ impl NfsClient {
     fn pread(&self, py: Python<'_>, fd: i64, length: usize, offset: u64) -> PyResult<Vec<u8>> {
         self.with_fs(py, move |fs| {
             let op = ReadOp::new(file_operand_from_fd(fd)?, VfOffset::At(offset), length);
-            let r = fs
-                .vread_impl(std::slice::from_ref(&op))
-                .and_then(|outcomes| {
-                    let count = outcomes.len();
-                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
-                })
-                .map_err(|e| to_py_err(e, None))?;
+            let r = vfsi_core::internal::collect_vec_result(
+                fs.vread_impl(std::slice::from_ref(&op)),
+                1,
+            )
+            .map_err(IndexedError::into_cause)
+            .map_err(|e| to_py_err(e, None, None))?;
             Ok(one_read_result("pread", &op, r)?.data)
         })
     }
@@ -1530,13 +1590,12 @@ impl NfsClient {
     fn pwrite(&self, py: Python<'_>, fd: i64, data: Vec<u8>, offset: u64) -> PyResult<usize> {
         self.with_fs(py, move |fs| {
             let op = WriteOp::new(file_operand_from_fd(fd)?, VfOffset::At(offset), data);
-            let w = fs
-                .vwrite_impl(std::slice::from_ref(&op.borrowed()))
-                .and_then(|outcomes| {
-                    let count = outcomes.len();
-                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
-                })
-                .map_err(|e| to_py_err(e, None))?;
+            let w = vfsi_core::internal::collect_vec_result(
+                fs.vwrite_impl(std::slice::from_ref(&op.borrowed())),
+                1,
+            )
+            .map_err(IndexedError::into_cause)
+            .map_err(|e| to_py_err(e, None, None))?;
             let append = self.append_fds.lock().map_err(lock_err)?.contains(&fd);
             Ok(one_write_result("pwrite", &op, w, append)?.bytes_written)
         })
@@ -1553,7 +1612,7 @@ impl NfsClient {
         self.with_fs(py, move |fs| {
             let file = file_operand_from_fd(fd)?;
             fs.seek_raw_impl(&file, offset, whence)
-                .map_err(|e| to_py_err(e, None))
+                .map_err(|e| to_py_err(e, None, None))
         })
     }
 
@@ -1568,7 +1627,7 @@ impl NfsClient {
                 fs.vgetattrs_impl(std::slice::from_mut(&mut a)),
                 1,
             )
-            .map_err(|e| to_py_err(e, None))?;
+            .map_err(|e| to_py_err(e.into_cause(), None, None))?;
             Ok(a)
         })?;
         attrs_to_dict(py, &a)
@@ -1588,7 +1647,7 @@ impl NfsClient {
             .collect::<PyResult<_>>()?;
         let attrs = self.with_fs(py, move |fs| {
             vfsi_core::internal::collect_vec_result(fs.vgetattrs_impl(&mut attrs), attrs.len())
-                .map_err(|e| to_py_err(e, None))?;
+                .map_err(|e| to_py_indexed(e, None))?;
             Ok(attrs)
         })?;
         attrs.iter().map(|attrs| attrs_to_dict(py, attrs)).collect()
@@ -1632,9 +1691,9 @@ impl NfsClient {
             match outcome {
                 Ok(read) => results[index] = Some(read.data),
                 Err(error) => {
-                    let cause = error.into_cause().with_index(index);
-                    if cause.is_transport() {
-                        return Err(to_py_err(cause, None));
+                    let cause = error.into_cause();
+                    if vfsi_core::transport_kind(&cause).is_some() {
+                        return Err(to_py_err(cause, None, Some(index)));
                     }
                     errors.insert(index, cause);
                 }
@@ -1682,7 +1741,7 @@ impl NfsClient {
                     .map(|write| write.bytes_written)
                     .collect()
             })
-            .map_err(|error| to_py_err(error, None))
+            .map_err(|error| to_py_indexed(error, None))
     }
 
     /// Independent append outcomes. Successful slots contain (count, end).
@@ -1736,7 +1795,7 @@ impl NfsClient {
                     })
                     .collect()
             })
-            .map_err(|error| to_py_err(error, None))
+            .map_err(|error| to_py_indexed(error, None))
     }
 
     fn truncate(&self, py: Python<'_>, path: PathBuf, size: u64) -> PyResult<()> {
@@ -1752,7 +1811,7 @@ impl NfsClient {
                 1,
             )
             .map(|_| ())
-            .map_err(|e| to_py_err(e, Some(path.as_path())))
+            .map_err(|e| to_py_err(e.into_cause(), Some(path.as_path()), None))
         })
     }
 
@@ -1772,7 +1831,7 @@ impl NfsClient {
                 1,
             )
             .map(|_| ())
-            .map_err(|e| to_py_err(e, None))
+            .map_err(|e| to_py_err(e.into_cause(), None, None))
         })
     }
 
@@ -1795,7 +1854,7 @@ impl NfsClient {
                 1,
             )
             .map(|_| ())
-            .map_err(|e| to_py_err(e, Some(path.as_path())))
+            .map_err(|e| to_py_err(e.into_cause(), Some(path.as_path()), None))
         })
     }
 
@@ -1812,14 +1871,14 @@ impl NfsClient {
                 1,
             )
             .map(|_| ())
-            .map_err(|e| to_py_err(e, Some(path.as_path())))
+            .map_err(|e| to_py_err(e.into_cause(), Some(path.as_path()), None))
         })
     }
 
     fn mkdir(&self, py: Python<'_>, path: PathBuf, mode: u32) -> PyResult<()> {
         self.with_fs(py, move |fs| {
             fs.mkdir_raw_impl(&path, mode)
-                .map_err(|e| to_py_err(e, Some(path.as_path())))
+                .map_err(|e| to_py_err(e, Some(path.as_path()), None))
         })
     }
 
@@ -1827,14 +1886,14 @@ impl NfsClient {
     fn ensure_dir(&self, py: Python<'_>, path: PathBuf, mode: u32) -> PyResult<()> {
         self.with_fs(py, move |fs| {
             fs.ensure_dir_impl(&path, mode)
-                .map_err(|e| to_py_err(e, Some(path.as_path())))
+                .map_err(|e| to_py_err(e, Some(path.as_path()), None))
         })
     }
 
     fn symlink(&self, py: Python<'_>, target: PathBuf, path: PathBuf) -> PyResult<()> {
         self.with_fs(py, move |fs| {
             fs.symlink_raw_impl(&target, &path)
-                .map_err(|e| to_py_err(e, Some(path.as_path())))
+                .map_err(|e| to_py_err(e, Some(path.as_path()), None))
         })
     }
 
@@ -1842,7 +1901,7 @@ impl NfsClient {
         let target = self.with_fs(py, move |fs| {
             fs.readlink_raw_impl(&path)
                 .map(|bytes| vfsi_core::path::path_from_bytes(&bytes))
-                .map_err(|e| to_py_err(e, Some(path.as_path())))
+                .map_err(|e| to_py_err(e, Some(path.as_path()), None))
         })?;
         Ok(target.as_os_str().into_pyobject(py)?.unbind())
     }
@@ -1854,7 +1913,7 @@ impl NfsClient {
                 1,
             )
             .map(|_| ())
-            .map_err(|e| to_py_err(e, Some(dst.as_path())))
+            .map_err(|e| to_py_err(e.into_cause(), Some(dst.as_path()), None))
         })
     }
 
@@ -1866,7 +1925,7 @@ impl NfsClient {
     fn chdir(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
         self.with_fs(py, move |fs| {
             fs.chdir(&path)
-                .map_err(|e| to_py_err(e, Some(path.as_path())))
+                .map_err(|e| to_py_err(e, Some(path.as_path()), None))
         })
     }
 
@@ -1877,7 +1936,7 @@ impl NfsClient {
     /// maps an index to its exception.
     fn stat_many(&self, py: Python<'_>, paths: Vec<PathBuf>) -> PyResult<StatManyResult> {
         let (attrs, errors) = self.with_fs(py, move |fs| {
-            attrs_many_impl(fs, &paths, full_mask(), true).map_err(|e| to_py_err(e, None))
+            attrs_many_impl(fs, &paths, full_mask(), true).map_err(|e| to_py_indexed(e, None))
         })?;
         let mut out = Vec::with_capacity(attrs.len());
         for a in attrs {
@@ -1893,7 +1952,7 @@ impl NfsClient {
     fn lstat_many(&self, py: Python<'_>, paths: Vec<PathBuf>) -> PyResult<StatManyResult> {
         let (attrs, errors) = self.with_fs(py, move |fs| {
             let follow = !fs.capabilities().contains(Capabilities::LSTAT);
-            attrs_many_impl(fs, &paths, full_mask(), follow).map_err(|e| to_py_err(e, None))
+            attrs_many_impl(fs, &paths, full_mask(), follow).map_err(|e| to_py_indexed(e, None))
         })?;
         let mut out = Vec::with_capacity(attrs.len());
         for a in attrs {
@@ -1910,14 +1969,14 @@ impl NfsClient {
     fn exists_many(&self, py: Python<'_>, paths: Vec<PathBuf>) -> PyResult<Vec<bool>> {
         self.with_fs(py, move |fs| {
             let follow = !fs.capabilities().contains(Capabilities::LSTAT);
-            let (attrs, errors) = attrs_many_impl(fs, &paths, AttrMask::stat(), follow)
-                .map_err(|e| to_py_err(e, None))?;
-            let mut first_err: Option<VfError> = None;
+            let (attrs, mut errors) = attrs_many_impl(fs, &paths, AttrMask::stat(), follow)
+                .map_err(|e| to_py_indexed(e, None))?;
+            let mut first_err: Option<(usize, std::io::Error)> = None;
             let mut out = Vec::with_capacity(paths.len());
             for (i, a) in attrs.iter().enumerate() {
-                if let Some(err) = errors.get(&i) {
+                if let Some(err) = errors.remove(&i) {
                     if err.kind() != std::io::ErrorKind::NotFound && first_err.is_none() {
-                        first_err = Some(err.clone());
+                        first_err = Some((i, err));
                     }
                     out.push(false);
                 } else {
@@ -1925,7 +1984,11 @@ impl NfsClient {
                 }
             }
             match first_err {
-                Some(e) => Err(to_py_err(e, None)),
+                Some((index, cause)) => Err(to_py_err(
+                    cause,
+                    paths.get(index).map(PathBuf::as_path),
+                    Some(index),
+                )),
                 None => Ok(out),
             }
         })
@@ -1966,7 +2029,7 @@ impl NfsClient {
             let need_sizes = ends.iter().any(Option::is_none);
             if need_sizes {
                 let (attrs, errs) = attrs_many_impl(fs, &paths, AttrMask::SIZE, true)
-                    .map_err(|e| to_py_err(e, None))?;
+                    .map_err(|e| to_py_indexed(e, None))?;
                 errors = errs;
                 for (i, a) in attrs.iter().enumerate() {
                     if let Some(a) = a {
@@ -2006,7 +2069,7 @@ impl NfsClient {
                     .collect::<PyResult<Vec<_>>>()?;
                 let outcomes = fs
                     .vread_impl(&ops)
-                    .map_err(|error| to_py_err(remap_subset_error(error, &remaining), None))?;
+                    .map_err(|error| to_py_err(error, None, None))?;
                 if outcomes.len() != ops.len() {
                     return Err(contract_error("read_many", "invalid vector outcome count"));
                 }
@@ -2023,16 +2086,19 @@ impl NfsClient {
                             if progress[index] < lengths[index] && !read.eof {
                                 if no_progress {
                                     results[index] = None;
-                                    errors.insert(index, VfError::errno(index, libc::EIO as u32));
+                                    errors.insert(
+                                        index,
+                                        std::io::Error::from_raw_os_error(libc::EIO),
+                                    );
                                 } else {
                                     remaining.push(index);
                                 }
                             }
                         }
                         Err(error) => {
-                            let cause = error.into_cause().with_index(index);
-                            if cause.is_transport() {
-                                return Err(to_py_err(cause, None));
+                            let cause = error.into_cause();
+                            if vfsi_core::transport_kind(&cause).is_some() {
+                                return Err(to_py_err(cause, None, Some(index)));
                             }
                             errors.insert(index, cause);
                             results[index] = None;
@@ -2056,7 +2122,7 @@ impl NfsClient {
             .unwrap_or(self.read_all_max_total_bytes)
             .min(self.read_all_max_total_bytes);
         let outcomes = self.with_fs(py, move |fs| {
-            read_all_outcomes_impl(fs, &paths, limit).map_err(|error| to_py_err(error, None))
+            read_all_outcomes_impl(fs, &paths, limit).map_err(|error| to_py_err(error, None, None))
         })?;
         Python::attach(|py| {
             outcomes
@@ -2082,7 +2148,7 @@ impl NfsClient {
             .unwrap_or(self.read_all_max_total_bytes)
             .min(self.read_all_max_total_bytes);
         self.with_fs(py, move |fs| {
-            read_allv_impl(fs, &paths, max_total_bytes).map_err(|e| to_py_err(e, None))
+            read_allv_impl(fs, &paths, max_total_bytes).map_err(|e| to_py_indexed(e, None))
         })
     }
 
@@ -2110,17 +2176,15 @@ impl NfsClient {
             })
             .collect();
         self.with_fs(py, move |fs| {
-            let res = fs
-                .vwrite_impl(
+            let res = vfsi_core::internal::collect_vec_result(
+                fs.vwrite_impl(
                     &ops.iter()
                         .map(vfsi_core::WriteOp::borrowed)
                         .collect::<Vec<_>>(),
-                )
-                .and_then(|outcomes| {
-                    let count = outcomes.len();
-                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
-                })
-                .map_err(|e| map_err_with_path(e, &paths))?;
+                ),
+                ops.len(),
+            )
+            .map_err(|e| map_err_with_path(e, &paths))?;
             let res = validate_write_results("write_many", &ops, res, |_| false)?;
             Ok(res.into_iter().map(|r| r.bytes_written).collect())
         })
@@ -2226,7 +2290,7 @@ impl NfsClient {
             } else {
                 fs.vclose_impl(&files)
             }
-            .map_err(|cause| to_py_err(cause, None))?;
+            .map_err(|cause| to_py_err(cause, None, None))?;
             if outcomes.len() != files.len() {
                 return Err(contract_error(
                     "close_many",
@@ -2256,9 +2320,8 @@ impl NfsClient {
                 .nth(index)
                 .unwrap()
                 .unwrap_err()
-                .into_cause()
-                .with_index(index);
-            let error = to_py_err(cause, None);
+                .into_cause();
+            let error = to_py_err(cause, None, Some(index));
             Python::attach(|py| {
                 let _ = error.value(py).setattr("_closed_indices", closed);
             });
@@ -2284,9 +2347,9 @@ impl NfsClient {
         let entries = self.with_fs(py, move |fs| {
             let entries = fs
                 .listdir_impl(&path, full_mask(), max_entries.saturating_add(1), false)
-                .map_err(|e| to_py_err(e, Some(path.as_path())))?;
+                .map_err(|e| to_py_err(e, Some(path.as_path()), None))?;
             validate_directory_results(&entries, max_entries, max_path_bytes)
-                .map_err(|e| to_py_err(e, Some(path.as_path())))?;
+                .map_err(|e| to_py_err(e, Some(path.as_path()), None))?;
             Ok(entries)
         })?;
         entries.iter().map(|e| attrs_to_dict(py, e)).collect()
@@ -2319,11 +2382,11 @@ impl NfsClient {
                 // operation so NFS can resolve and READDIR siblings together.
                 aggregate_listdirs(fs, &paths, max_entries, max_path_bytes).map_err(|error| {
                     let path = error.index().and_then(|index| paths.get(index));
-                    to_py_err(error, path.map(PathBuf::as_path))
+                    to_py_indexed(error, path.map(PathBuf::as_path))
                 })
             } else {
                 let mut groups = Vec::with_capacity(paths.len());
-                for p in &paths {
+                for (index, p) in paths.iter().enumerate() {
                     let entries = if recursive {
                         let mut no_sort = |_dir: &Path, _attrs: &mut Vec<VfAttrs>| {};
                         fs.walk_with_options_impl(
@@ -2336,16 +2399,16 @@ impl NfsClient {
                                 .with_max_depth(checked_depth(max_depth)?),
                             &mut no_sort,
                         )
-                        .map_err(|e| to_py_err(e, Some(p.as_path())))?
+                        .map_err(|e| to_py_err(e, Some(p.as_path()), Some(index)))?
                         .into_iter()
                         .flat_map(|entry| entry.entries)
                         .collect()
                     } else {
                         let entries = fs
                             .listdir_impl(p, full_mask(), max_entries.saturating_add(1), false)
-                            .map_err(|e| to_py_err(e, Some(p.as_path())))?;
+                            .map_err(|e| to_py_err(e, Some(p.as_path()), Some(index)))?;
                         validate_directory_results(&entries, max_entries, max_path_bytes)
-                            .map_err(|e| to_py_err(e, Some(p.as_path())))?;
+                            .map_err(|e| to_py_err(e, Some(p.as_path()), Some(index)))?;
                         entries
                     };
                     if aggregate {
@@ -2404,7 +2467,7 @@ impl NfsClient {
                 }
             };
             fs.walk_with_options_impl(&root, full_mask(), options, &mut sort_fn)
-                .map_err(|e| to_py_err(e, Some(root.as_path())))
+                .map_err(|e| to_py_err(e, Some(root.as_path()), None))
         })?;
         let mut out = Vec::with_capacity(tree.len());
         for w in tree {
@@ -2446,7 +2509,7 @@ impl NfsClient {
                         .index()
                         .and_then(|index| pairs.get(index))
                         .map(|(source, _)| source.as_path());
-                    to_py_err(e, path)
+                    to_py_indexed(e, path)
                 })
         })
     }
@@ -2472,7 +2535,7 @@ impl NfsClient {
             // requests rejected by the allocation budget move to extent copy.
             let (mut data, read_errors) =
                 read_allv_impl(fs, &sources, copy_fast_path_budget(max_total_bytes))
-                    .map_err(|e| to_py_err(e, None))?;
+                    .map_err(|e| to_py_indexed(e, None))?;
             let mut oversized = Vec::new();
             for (index, err_no) in read_errors {
                 if err_no.kind() == std::io::ErrorKind::FileTooLarge {
@@ -2489,7 +2552,7 @@ impl NfsClient {
                 if sources[index] == dests[index] {
                     data[index] = None;
                     oversized.retain(|&candidate| candidate != index);
-                    errors.insert(index, VfError::errno(index, ERR_SAME_FILE));
+                    errors.insert(index, same_file_error());
                 }
             }
 
@@ -2555,21 +2618,22 @@ impl NfsClient {
                     .iter()
                     .flat_map(|&index| [index, index])
                     .collect();
-                let (attrs, identity_errors) =
-                    attrs_many_impl(fs, &identity_paths, AttrMask::stat(), true)
-                        .map_err(|e| to_py_err(remap_subset_error(e, &identity_positions), None))?;
+                let (attrs, mut identity_errors) =
+                    attrs_many_impl(fs, &identity_paths, AttrMask::stat(), true).map_err(|e| {
+                        to_py_indexed(remap_subset_error(e, &identity_positions), None)
+                    })?;
                 for (pair_index, &index) in existing_candidates.iter().enumerate() {
                     // An absent destination cannot alias its source. Other
                     // identity failures must stop this pair before a truncating
                     // WRITE rather than silently bypass the alias check.
-                    let identity_error = identity_errors.get(&(2 * pair_index)).or_else(|| {
+                    let identity_error = identity_errors.remove(&(2 * pair_index)).or_else(|| {
                         identity_errors
-                            .get(&(2 * pair_index + 1))
+                            .remove(&(2 * pair_index + 1))
                             .filter(|error| error.kind() != std::io::ErrorKind::NotFound)
                     });
                     if let Some(code) = identity_error {
                         data[index] = None;
-                        errors.insert(index, code.clone());
+                        errors.insert(index, code);
                         continue;
                     }
                     let source = attrs[2 * pair_index].as_ref();
@@ -2579,7 +2643,7 @@ impl NfsClient {
                         && fs_obj_id(source) == fs_obj_id(destination)
                     {
                         data[index] = None;
-                        errors.insert(index, VfError::errno(index, ERR_SAME_FILE));
+                        errors.insert(index, same_file_error());
                     }
                 }
             }
@@ -2600,7 +2664,7 @@ impl NfsClient {
                     .collect();
                 let outcomes = fs
                     .vwrite_impl(&ops.iter().map(WriteOp::borrowed).collect::<Vec<_>>())
-                    .map_err(|error| to_py_err(remap_subset_error(error, &write_indices), None))?;
+                    .map_err(|error| to_py_err(error, None, None))?;
                 if outcomes.len() != ops.len() {
                     return Err(contract_error(
                         "copy_many",
@@ -2621,13 +2685,13 @@ impl NfsClient {
                             if result.bytes_written == op.data().len() {
                                 copied[index] = Some(result.bytes_written as u64);
                             } else {
-                                errors.insert(index, VfError::errno(index, libc::EIO as u32));
+                                errors.insert(index, std::io::Error::from_raw_os_error(libc::EIO));
                             }
                         }
                         Err(error) => {
-                            let cause = error.into_cause().with_index(index);
-                            if cause.is_transport() {
-                                return Err(to_py_err(cause, None));
+                            let cause = error.into_cause();
+                            if vfsi_core::transport_kind(&cause).is_some() {
+                                return Err(to_py_err(cause, None, Some(index)));
                             }
                             errors.insert(index, cause);
                         }
@@ -2644,7 +2708,7 @@ impl NfsClient {
                 .collect();
             let identity_mask = AttrMask::SIZE | AttrMask::identity();
             let (attrs, stat_errors) = attrs_many_impl(fs, &oversized_sources, identity_mask, true)
-                .map_err(|e| to_py_err(remap_subset_error(e, &oversized), None))?;
+                .map_err(|e| to_py_indexed(remap_subset_error(e, &oversized), None))?;
             for (subset_index, err_no) in stat_errors {
                 errors.insert(oversized[subset_index], err_no);
             }
@@ -2671,7 +2735,7 @@ impl NfsClient {
                     .collect();
                 let (dest_attrs, dest_errors) =
                     attrs_many_impl(fs, &candidate_dests, AttrMask::identity(), true).map_err(
-                        |e| to_py_err(remap_subset_error(e, &identity_candidates), None),
+                        |e| to_py_indexed(remap_subset_error(e, &identity_candidates), None),
                     )?;
                 for (subset_index, err_no) in dest_errors {
                     if err_no.kind() != std::io::ErrorKind::NotFound {
@@ -2685,7 +2749,7 @@ impl NfsClient {
                         fs_obj_id(&attrs).is_some_and(|id| source_ids.get(&index) == Some(&id))
                     }) {
                         sizes[index] = None;
-                        errors.insert(index, VfError::errno(index, ERR_SAME_FILE));
+                        errors.insert(index, same_file_error());
                     }
                 }
             }
@@ -2719,10 +2783,13 @@ impl NfsClient {
                     .collect();
                 let outcomes = fs
                     .vcopy_impl(&ops, vfsi_core::CopyOptions::new())
-                    .map_err(|cause| to_py_err(remap_subset_error(cause, &remaining), None))?;
+                    .map_err(|cause| to_py_err(cause, None, None))?;
                 if outcomes.len() != remaining.len() {
                     return Err(to_py_err(
-                        VfError::invalid_reply(None, "copy outcome count differs from requests"),
+                        vfsi_core::internal::errors::invalid_reply(
+                            "copy outcome count differs from requests",
+                        ),
+                        None,
                         None,
                     ));
                 }
@@ -2738,9 +2805,9 @@ impl NfsClient {
                             }
                         }
                         Err(error) => {
-                            let cause = error.into_cause().with_index(index);
-                            if cause.is_transport() {
-                                return Err(to_py_err(cause, None));
+                            let cause = error.into_cause();
+                            if vfsi_core::transport_kind(&cause).is_some() {
+                                return Err(to_py_err(cause, None, Some(index)));
                             }
                             errors.insert(index, cause);
                         }
@@ -2763,7 +2830,7 @@ impl NfsClient {
     ) -> PyResult<()> {
         self.with_fs(py, move |fs| {
             fs.copy_tree_impl(&src, &dst, symlinks, false)
-                .map_err(|e| to_py_err(e, Some(src.as_path())))
+                .map_err(|e| to_py_err(e, Some(src.as_path()), None))
         })
     }
 
@@ -2984,27 +3051,52 @@ mod tests {
     fn referral_exceptions_preserve_diagnostics_paths_and_optional_indices() {
         Python::initialize();
         Python::attach(|py| {
-            for source in [
-                VfError::nfs(7, 10019).with_context("vread", "/referred/file"),
-                VfError::smb(7, 0xc000_0257).with_context("vremove", "/referred/file"),
-                VfError::unsupported(0).with_context(
-                    "SMB DFS referrals are unsupported; connect directly to the destination server/share",
-                    "namespace",
-                ),
-                vfsi_core::error_from_rpc(vfsi_core::RpcError::op(0, 10019), None),
-            ] {
-                let index = source.index();
-                let diagnostic = source.to_string();
-                let error = to_py_err(source, Some(Path::new("/caller-path")));
-                assert!(error.is_instance_of::<PyNotImplementedError>(py));
-                let message = error.value(py).str().unwrap().to_string();
-                for text in [diagnostic.as_str(), "unsupported", "connect directly", "/caller-path"] {
-                    assert!(message.contains(text), "missing {text:?}: {message}");
-                }
-                if let Some(index) = index {
-                    assert_eq!(error.value(py).getattr("index").unwrap().extract::<usize>().unwrap(), index);
-                } else {
-                    assert!(!error.value(py).hasattr("index").unwrap());
+            for index in [None, Some(0usize), Some(7)] {
+                for source in [
+                    vfsi_core::internal::errors::with_context(
+                        vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(10019)),
+                        "vread",
+                        "/referred/file",
+                    ),
+                    vfsi_core::internal::errors::with_context(
+                        vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Smb(
+                            0xc000_0257,
+                        )),
+                        "vremove",
+                        "/referred/file",
+                    ),
+                    vfsi_core::internal::errors::with_context(
+                        std::io::Error::from(std::io::ErrorKind::Unsupported),
+                        "SMB DFS referrals are unsupported; connect directly to the destination server/share",
+                        "namespace",
+                    ),
+                    vfsi_core::internal::errors::from_rpc(vfsi_core::RpcError::op(0, 10019)),
+                ] {
+                    let diagnostic = source.to_string();
+                    let error = to_py_err(source, Some(Path::new("/caller-path")), index);
+                    assert!(error.is_instance_of::<PyNotImplementedError>(py));
+                    let message = error.value(py).str().unwrap().to_string();
+                    for text in [
+                        diagnostic.as_str(),
+                        "unsupported",
+                        "connect directly",
+                        "/caller-path",
+                    ] {
+                        assert!(message.contains(text), "missing {text:?}: {message}");
+                    }
+                    if let Some(index) = index {
+                        assert_eq!(
+                            error
+                                .value(py)
+                                .getattr("index")
+                                .unwrap()
+                                .extract::<usize>()
+                                .unwrap(),
+                            index
+                        );
+                    } else {
+                        assert!(!error.value(py).hasattr("index").unwrap());
+                    }
                 }
             }
         });
@@ -3015,14 +3107,22 @@ mod tests {
         Python::initialize();
         Python::attach(|py| {
             let path = Path::new("/file");
-            let source = VfError::unsupported(2).with_context("vsetattrs", path);
-            let error = to_py_err(source, Some(path));
+            let source = vfsi_core::internal::errors::with_context(
+                std::io::Error::from(std::io::ErrorKind::Unsupported),
+                "vsetattrs",
+                path,
+            );
+            let error = to_py_err(source, Some(path), None);
             assert!(error.is_instance_of::<PyNotImplementedError>(py));
             let message = error.value(py).str().unwrap().to_string();
             assert!(message.contains("vsetattrs"));
             assert_eq!(message.matches("/file").count(), 1);
 
-            let missing = to_py_err(VfError::nfs(2, ERR_NOENT), Some(path));
+            let missing = to_py_err(
+                vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(ERR_NOENT)),
+                Some(path),
+                None,
+            );
             assert!(missing.is_instance_of::<PyFileNotFoundError>(py));
             assert_eq!(
                 missing
@@ -3044,10 +3144,17 @@ mod tests {
             );
 
             // A coincident raw errno is not an NFS referral.
-            let ordinary = to_py_err(VfError::errno(2, 10019), Some(path));
+            let ordinary = to_py_err(std::io::Error::from_raw_os_error(10019), Some(path), None);
             assert!(ordinary.is_instance_of::<PyOSError>(py));
             assert!(!ordinary.is_instance_of::<PyNotImplementedError>(py));
-            let transport = to_py_err(VfError::transport(None, "connection lost"), Some(path));
+            let transport = to_py_err(
+                vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "connection lost",
+                ),
+                Some(path),
+                None,
+            );
             assert!(transport.is_instance_of::<PyConnectionError>(py));
             assert!(
                 transport
@@ -3191,7 +3298,7 @@ mod aggregate_listdir_error_tests {
     #[derive(Default)]
     struct ListingBackend {
         pages: Vec<(PathBuf, VfAttrs)>,
-        error: Option<VfError>,
+        error: Option<IndexedError>,
         vector_entries: usize,
         scalar_entries: usize,
         visits: Vec<PathBuf>,
@@ -3266,10 +3373,7 @@ mod aggregate_listdir_error_tests {
             modes: &[u32],
         ) -> vfsi_sync::VecResult<vfsi_sync::FileOperand> {
             if paths.len() != flags.len() || paths.len() != modes.len() {
-                return Err(vfsi_sync::VfError::from_kind(
-                    None,
-                    std::io::ErrorKind::InvalidInput,
-                ));
+                return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
             }
             Ok(paths
                 .iter()
@@ -3277,7 +3381,7 @@ mod aggregate_listdir_error_tests {
                 .zip(modes)
                 .map(|((path, flags), mode)| {
                     self.open_raw_impl(path, *flags, *mode).map_err(|cause| {
-                        if cause.is_transport() {
+                        if vfsi_core::transport_kind(&cause).is_some() {
                             vfsi_sync::OpError::unknown(cause, None)
                         } else {
                             vfsi_sync::OpError::failed(cause, None)
@@ -3297,13 +3401,13 @@ mod aggregate_listdir_error_tests {
             _: usize,
             _: bool,
             callback: &mut dyn FnMut(&VfAttrs, &Path) -> bool,
-        ) -> vfsi_core::VfResult<()> {
+        ) -> Result<(), IndexedError> {
             assert_eq!(
                 dirs.iter().copied().collect::<HashSet<_>>().len(),
                 dirs.len()
             );
-            if let Some(error) = &self.error {
-                return Err(error.clone());
+            if let Some(error) = self.error.take() {
+                return Err(error);
             }
             for (directory, entry) in &self.pages {
                 self.vector_entries += 1;
@@ -3381,8 +3485,8 @@ mod aggregate_listdir_error_tests {
         };
         let error = aggregate_listdirs(&mut backend, &paths, 2, 100).unwrap_err();
         assert_eq!(
-            (error.raw_code(), error.index()),
-            (libc::EFBIG as u32, Some(0))
+            (error.cause().raw_os_error(), error.index()),
+            (Some(libc::EFBIG), Some(0))
         );
         assert_eq!(backend.vector_entries, 3);
         assert_eq!(backend.scalar_entries, 3);
@@ -3398,8 +3502,8 @@ mod aggregate_listdir_error_tests {
         };
         let error = aggregate_listdirs(&mut backend, &paths, 100, 1).unwrap_err();
         assert_eq!(
-            (error.raw_code(), error.index()),
-            (libc::EFBIG as u32, Some(0))
+            (error.cause().raw_os_error(), error.index()),
+            (Some(libc::EFBIG), Some(0))
         );
         assert_eq!(backend.vector_entries, 1);
         assert_eq!(backend.scalar_entries, 1);
@@ -3411,11 +3515,23 @@ mod aggregate_listdir_error_tests {
         let paths = vec!["/a".into(), "/b".into()];
         for index in [None, Some(1)] {
             let mut backend = ListingBackend {
-                error: Some(VfError::transport(index, "connection lost")),
+                error: Some(match index {
+                    Some(index) => IndexedError::at(
+                        index,
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
+                            "connection lost",
+                        ),
+                    ),
+                    None => IndexedError::unattributed(vfsi_core::internal::errors::transport(
+                        vfsi_core::TransportKind::Other,
+                        "connection lost",
+                    )),
+                }),
                 ..Default::default()
             };
             let error = aggregate_listdirs(&mut backend, &paths, 100, 100).unwrap_err();
-            assert!(error.is_transport());
+            assert!(vfsi_core::transport_kind(error.cause()).is_some());
             assert_eq!(error.index(), index);
             assert!(backend.visits.is_empty());
         }
@@ -3426,17 +3542,20 @@ mod aggregate_listdir_error_tests {
         let paths = vec!["/a".into(), "/a".into(), "/b".into()];
         for index in [2, 99] {
             for source in [
-                VfError::errno(index, libc::ENOENT as u32),
-                VfError::transport(index, "connection lost"),
+                std::io::Error::from_raw_os_error(libc::ENOENT),
+                vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "connection lost",
+                ),
             ] {
                 let mut backend = ListingBackend {
-                    error: Some(source),
+                    error: Some(IndexedError::at(index, source)),
                     ..Default::default()
                 };
                 let error = aggregate_listdirs(&mut backend, &paths, 100, 100).unwrap_err();
                 assert_eq!(error.index(), None);
                 assert_eq!(
-                    error.transport_kind(),
+                    vfsi_core::transport_kind(error.cause()),
                     Some(vfsi_core::TransportKind::InvalidReply)
                 );
                 assert!(
@@ -3457,8 +3576,8 @@ mod aggregate_listdir_error_tests {
         };
         let error = aggregate_listdirs(&mut backend, &paths, 1, 100).unwrap_err();
         assert_eq!(
-            (error.raw_code(), error.index()),
-            (libc::EFBIG as u32, Some(0))
+            (error.cause().raw_os_error(), error.index()),
+            (Some(libc::EFBIG), Some(0))
         );
         assert_eq!(backend.vector_entries, 2);
         assert_eq!(backend.visits, paths);
@@ -3467,9 +3586,13 @@ mod aggregate_listdir_error_tests {
     #[test]
     fn unattributed_transport_error_does_not_name_first_input_path() {
         let paths = vec![PathBuf::from("/first"), PathBuf::from("/second")];
-        let error = VfError::transport(None, "connection lost");
+        let error = vfsi_core::internal::errors::transport(
+            vfsi_core::TransportKind::Other,
+            "connection lost",
+        );
 
-        let (error, index) = remap_aggregate_listdir_error(error, &[0, 1], &paths);
+        let (error, index) =
+            remap_aggregate_listdir_error(IndexedError::unattributed(error), &[0, 1], &paths);
 
         assert_eq!(error.index(), None);
         assert_eq!(index, None);

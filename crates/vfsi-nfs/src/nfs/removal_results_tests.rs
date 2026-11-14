@@ -18,8 +18,8 @@ impl FaultInjector for SelectedRemoveFault {
                 let selected = first_name == b"fault";
                 *self.active.lock().unwrap() = selected;
                 if selected && !self.after {
-                    return Err(VfError::transport(
-                        None,
+                    return Err(vfsi_core::internal::errors::transport(
+                        vfsi_core::TransportKind::Other,
                         "selected REMOVE rejected before dispatch",
                     ));
                 }
@@ -27,7 +27,10 @@ impl FaultInjector for SelectedRemoveFault {
             OpenFaultPoint::AfterRemoveCompoundReply { .. }
                 if self.after && std::mem::take(&mut *self.active.lock().unwrap()) =>
             {
-                return Err(VfError::transport(None, "selected REMOVE reply lost"));
+                return Err(vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "selected REMOVE reply lost",
+                ));
             }
             _ => {}
         }
@@ -95,7 +98,7 @@ fn recursive_root_results_keep_ordinary_failures_independent() {
         let error = results[1].as_ref().unwrap_err();
         assert_eq!(error.state(), FailureState::Failed);
         assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
-        assert_eq!(error.cause().index(), None);
+        let _: &std::io::Error = error.cause();
         assert!(error.progress().is_none());
         assert!(!fs.exists_impl(&first).unwrap());
         assert!(!fs.exists_impl(&last).unwrap());
@@ -165,7 +168,7 @@ fn recursive_root_results_distinguish_complete_active_unknown_and_untouched() {
             FailureState::NotAttempted
         );
         for error in results.iter().filter_map(|result| result.as_ref().err()) {
-            assert_eq!(error.cause().index(), None);
+            let _: &std::io::Error = error.cause();
             assert!(error.progress().is_none());
         }
         assert!(fs.exists_impl(&active).unwrap());
@@ -216,10 +219,12 @@ fn recursive_root_results_handle_empty_and_predispatch_rejection_without_io() {
     let results = fs.run_rm_tasks(
         Vec::new(),
         vec![
-            RemoveRoot::Failed(OpError::not_attempted(VfError::transport(
-                None,
-                "preflight rejected",
-            ))),
+            RemoveRoot::Failed(OpError::not_attempted(
+                vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "preflight rejected",
+                ),
+            )),
             RemoveRoot::Pending,
         ],
         RemoveOptions::new(),

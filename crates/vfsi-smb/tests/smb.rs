@@ -19,8 +19,7 @@ use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::test_support::borrow_writes;
 use vfsi_sync::*;
 use vfsi_sync::{
-    AttrMask, Capabilities, ExtentPair, FileOperand, ReadOp, VF_ERR_UNSUPPORTED, VfAttrs, VfOffset,
-    WriteOp,
+    AttrMask, Capabilities, ExtentPair, FileOperand, ReadOp, VfAttrs, VfOffset, WriteOp,
 };
 
 use vfsi_sync::test_support as common;
@@ -29,8 +28,16 @@ use vfsi_sync::test_support as common;
 use std::sync::Arc;
 #[cfg(feature = "test-faults")]
 use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
-#[cfg(feature = "test-faults")]
-use vfsi_sync::VfError;
+fn test_native_code(error: &std::io::Error) -> u32 {
+    match vfsi_core::native_status(error) {
+        Some(
+            vfsi_core::StatusCode::Errno(code)
+            | vfsi_core::StatusCode::Nfs(code)
+            | vfsi_core::StatusCode::Smb(code),
+        ) => code,
+        _ => panic!("expected a native error, got {error:?}"),
+    }
+}
 
 fn required(name: &str) -> bool {
     std::env::var(name).as_deref() == Ok("1")
@@ -121,6 +128,7 @@ fn concurrent_clients_keep_independent_io_and_shutdown() {
                             .and_then(|outcomes| {
                                 let count = outcomes.len();
                                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                                    .map_err(vfsi_core::IndexedError::into_cause)
                             })
                             .unwrap();
                         let reads = client
@@ -132,6 +140,7 @@ fn concurrent_clients_keep_independent_io_and_shutdown() {
                             .and_then(|outcomes| {
                                 let count = outcomes.len();
                                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                                    .map_err(vfsi_core::IndexedError::into_cause)
                             })
                             .unwrap();
                         assert_eq!(reads[0].data, payload);
@@ -159,6 +168,7 @@ fn concurrent_clients_keep_independent_io_and_shutdown() {
                 .and_then(|outcomes| {
                     let count = outcomes.len();
                     vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                        .map_err(vfsi_core::IndexedError::into_cause)
                 })
                 .unwrap()[0]
                 .data,
@@ -201,6 +211,7 @@ fn single_client_small_vectors_and_large_transfers() {
                 .and_then(|outcomes| {
                     let count = outcomes.len();
                     vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                        .map_err(vfsi_core::IndexedError::into_cause)
                 })
                 .unwrap();
             assert_eq!(written.len(), count);
@@ -210,6 +221,7 @@ fn single_client_small_vectors_and_large_transfers() {
                 .and_then(|outcomes| {
                     let count = outcomes.len();
                     vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                        .map_err(vfsi_core::IndexedError::into_cause)
                 })
                 .unwrap();
             assert_eq!(data.len(), count);
@@ -240,8 +252,11 @@ fn dfs_share_is_rejected_at_connect_while_an_ordinary_share_works() {
         .err()
         .expect("DFS membership must be rejected before exposing a backend");
     assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
-    assert!(!error.is_transport());
-    assert_eq!(error.path(), Some(Path::new(&share)));
+    assert!(!vfsi_core::transport_kind(&(error)).is_some());
+    assert_eq!(
+        vfsi_core::internal::errors::path(&(error)),
+        Some(Path::new(&share))
+    );
     assert!(
         error
             .to_string()
@@ -269,6 +284,7 @@ fn recursive_copy_uses_share_defaults_for_every_destination_directory() {
     .and_then(|outcomes| {
         let count = outcomes.len();
         vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            .map_err(vfsi_core::IndexedError::into_cause)
     })
     .unwrap();
     for server_copy in [false, true] {
@@ -320,8 +336,8 @@ fn recursive_copy_uses_share_defaults_for_every_destination_directory() {
     // Only implicit defaults change: explicit unsupported Unix modes still fail.
     let private = root.join("private");
     assert_eq!(
-        fs.mkdir_raw_impl(&private, 0o700).unwrap_err().raw_code(),
-        VF_ERR_UNSUPPORTED
+        fs.mkdir_raw_impl(&private, 0o700).unwrap_err().kind(),
+        std::io::ErrorKind::Unsupported
     );
     assert!(!fs.exists_impl(&private).unwrap());
     {
@@ -444,6 +460,7 @@ fn concurrent_write_preflight_detects_hard_link_aliases() {
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .unwrap();
     assert!(!client.test_last_writev_was_concurrent());
@@ -453,6 +470,7 @@ fn concurrent_write_preflight_detects_hard_link_aliases() {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap()[0],
         b"2222"
@@ -481,6 +499,7 @@ fn concurrent_write_preflight_keeps_distinct_files_vectorized() {
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .unwrap();
     client
@@ -491,6 +510,7 @@ fn concurrent_write_preflight_keeps_distinct_files_vectorized() {
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .unwrap();
     assert!(client.test_last_writev_was_concurrent());
@@ -517,6 +537,7 @@ fn recursive_remove_requires_no_follow_metadata() {
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .unwrap();
 
@@ -529,7 +550,7 @@ fn recursive_remove_requires_no_follow_metadata() {
         .map(|_| ())
     }
     .unwrap_err();
-    assert_eq!(error.raw_code(), VF_ERR_UNSUPPORTED);
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::Unsupported);
     assert!(
         fs.exists_impl(&child).unwrap(),
         "unsupported removal must not mutate"
@@ -579,7 +600,7 @@ fn timestamp_updates_reject_control_values_without_changing_the_file() {
             .map(|_| ())
         }
         .unwrap_err();
-        assert_eq!(error.raw_code(), libc::EINVAL as u32);
+        assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
         assert_eq!(error.index(), Some(0));
         let mut attrs = [VfAttrs {
             file: file.clone(),
@@ -621,6 +642,7 @@ fn rust_native_file_workflow_on_smb() {
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .unwrap();
     let values = client
@@ -631,6 +653,7 @@ fn rust_native_file_workflow_on_smb() {
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .unwrap();
     assert_eq!(values[0].data, b"one");
@@ -672,6 +695,7 @@ fn descriptor_metadata_never_reopens_a_replaced_path() {
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .unwrap();
     assert_eq!(fs.fstat_impl(&file).unwrap().size, 8);
@@ -695,7 +719,10 @@ fn smb_openv_injected_registration_failure_closes_all_successes() {
     let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeRegister { index: 1 },
-        VfError::transport(None, "injected registration failure"),
+        vfsi_core::internal::errors::transport(
+            vfsi_core::TransportKind::Other,
+            "injected registration failure",
+        ),
     ));
     fs.set_fault_injector(script.clone());
     let error = vfsi_sync::backend::helpers::open_raw_batch(
@@ -730,23 +757,32 @@ fn smb_failed_strict_open_quarantines_unconfirmed_cleanup() {
     let script = Arc::new(FaultScript::new([
         (
             OpenFaultPoint::BeforeRegister { index: 1 },
-            VfError::transport(None, "injected registration failure"),
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "injected registration failure",
+            ),
         ),
         (
             OpenFaultPoint::BeforeCloseDispatch { index: 0 },
-            VfError::transport(None, "injected cleanup close failure"),
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "injected cleanup close failure",
+            ),
         ),
     ]));
     fs.set_fault_injector(script.clone());
     assert!(
-        vfsi_sync::backend::helpers::open_raw_batch(
-            &mut fs,
-            &refs,
-            &[libc::O_CREAT | libc::O_RDWR; 2],
-            &[0o666; 2],
+        vfsi_core::transport_kind(
+            vfsi_sync::backend::helpers::open_raw_batch(
+                &mut fs,
+                &refs,
+                &[libc::O_CREAT | libc::O_RDWR; 2],
+                &[0o666; 2],
+            )
+            .unwrap_err()
+            .cause()
         )
-        .unwrap_err()
-        .is_transport()
+        .is_some()
     );
     assert!(script.is_consumed());
     assert_eq!(fs.test_open_handle_count(), 0);
@@ -778,12 +814,15 @@ fn owned_scalar_close_failure_drains_backend_cleanup_before_extraction() {
     fs.mkdir_raw_impl(&root, 0o777).unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeCloseDispatch { index: 0 },
-        VfError::transport(None, "injected scalar close failure"),
+        vfsi_core::internal::errors::transport(
+            vfsi_core::TransportKind::Other,
+            "injected scalar close failure",
+        ),
     ));
     fs.set_fault_injector(script.clone());
     let client = vfsi_sync::FsClient::new(fs);
     let file = client.create(root.join("file")).unwrap();
-    assert!(file.close().unwrap_err().is_transport());
+    assert!(vfsi_core::transport_kind(&(file.close().unwrap_err())).is_some());
     assert!(script.is_consumed());
     client
         .drain_cleanup()
@@ -806,7 +845,7 @@ fn owned_partial_close_drains_live_and_already_closed_handles() {
     fs.mkdir_raw_impl(&root, 0o777).unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeCloseItem { index: 1 },
-        VfError::errno(1, libc::EIO as u32),
+        std::io::Error::from_raw_os_error(libc::EIO),
     ));
     fs.set_fault_injector(script.clone());
     let client = vfsi_sync::FsClient::new(fs);
@@ -853,10 +892,13 @@ fn smb_closev_failure_keeps_handles_available_for_cleanup() {
     .unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeCloseDispatch { index: 0 },
-        VfError::transport(None, "injected close failure"),
+        vfsi_core::internal::errors::transport(
+            vfsi_core::TransportKind::Other,
+            "injected close failure",
+        ),
     ));
     fs.set_fault_injector(script.clone());
-    assert!(fs.vclose_impl(&files).unwrap_err().is_transport());
+    assert!(vfsi_core::transport_kind(&(fs.vclose_impl(&files).unwrap_err())).is_some());
     assert_eq!(fs.test_open_handle_count(), 2);
     assert!(script.is_consumed());
     assert!(
@@ -889,14 +931,14 @@ fn smb_closev_removes_successes_on_both_sides_of_a_failure() {
     .unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeCloseItem { index: 1 },
-        VfError::errno(1, libc::EIO as u32),
+        std::io::Error::from_raw_os_error(libc::EIO),
     ));
     fs.set_fault_injector(script.clone());
     let outcomes = fs.vclose_impl(&files).unwrap();
     assert!(outcomes[0].is_ok() && outcomes[2].is_ok());
     let error = outcomes[1].as_ref().unwrap_err();
     assert_eq!(error.state(), vfsi_core::FailureState::NotAttempted);
-    assert_eq!(error.cause().index(), None);
+    let _: &std::io::Error = error.cause();
     assert!(script.is_consumed());
     assert_eq!(fs.test_open_handle_count(), 1);
     fs.close_impl(&files[1]).unwrap();
@@ -920,13 +962,18 @@ fn smb_scalar_open_registration_failure_closes_remote_open() {
     let path = root.join("file");
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeRegister { index: 0 },
-        VfError::transport(None, "injected scalar registration failure"),
+        vfsi_core::internal::errors::transport(
+            vfsi_core::TransportKind::Other,
+            "injected scalar registration failure",
+        ),
     ));
     fs.set_fault_injector(script.clone());
     assert!(
-        fs.open_raw_impl(path.as_path(), libc::O_CREAT | libc::O_RDWR, 0o666)
-            .unwrap_err()
-            .is_transport()
+        vfsi_core::transport_kind(
+            &(fs.open_raw_impl(path.as_path(), libc::O_CREAT | libc::O_RDWR, 0o666)
+                .unwrap_err())
+        )
+        .is_some()
     );
     assert!(script.is_consumed());
     assert_eq!(fs.test_open_handle_count(), 0);
@@ -949,21 +996,27 @@ fn smb_confirmed_write_advances_descriptor_when_flush_path_fails() {
         .unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::AfterWriteChunk { chunk: 0 },
-        VfError::transport(None, "injected failure after confirmed write"),
+        vfsi_core::internal::errors::transport(
+            vfsi_core::TransportKind::Other,
+            "injected failure after confirmed write",
+        ),
     ));
     fs.set_fault_injector(script.clone());
     assert!(
-        fs.vwrite_impl(&borrow_writes(&[WriteOp::new(
-            file.clone(),
-            VfOffset::Cur,
-            b"a".to_vec(),
-        )]))
-        .and_then(|outcomes| {
-            let count = outcomes.len();
-            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
-        })
-        .unwrap_err()
-        .is_transport()
+        vfsi_core::transport_kind(
+            &(fs.vwrite_impl(&borrow_writes(&[WriteOp::new(
+                file.clone(),
+                VfOffset::Cur,
+                b"a".to_vec(),
+            )]))
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
+            })
+            .unwrap_err())
+        )
+        .is_some()
     );
     assert!(script.is_consumed());
     fs.vwrite_impl(&borrow_writes(&[WriteOp::new(
@@ -974,6 +1027,7 @@ fn smb_confirmed_write_advances_descriptor_when_flush_path_fails() {
     .and_then(|outcomes| {
         let count = outcomes.len();
         vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+            .map_err(vfsi_core::IndexedError::into_cause)
     })
     .unwrap();
     let read = fs
@@ -981,6 +1035,7 @@ fn smb_confirmed_write_advances_descriptor_when_flush_path_fails() {
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .unwrap();
     assert_eq!(read[0].data, b"ab");
@@ -1027,7 +1082,9 @@ fn samba_round_trip_and_copy() {
     fs.vmkdir_impl(&dir_attrs)
         .and_then(|outcomes| {
             let count = outcomes.len();
-            vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+            vfsi_core::internal::collect_vec_result(Ok(outcomes), count)
+                .map(|_| ())
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .expect("concurrent mkdirv");
     let batch_files = [batch_dirs[0].join("one"), batch_dirs[1].join("two")];
@@ -1091,6 +1148,7 @@ fn samba_round_trip_and_copy() {
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .unwrap();
     assert_eq!(path_read[0].data, b"hello over smb");
@@ -1118,6 +1176,7 @@ fn samba_round_trip_and_copy() {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap()[0],
         b"hello over smb"
@@ -1128,6 +1187,7 @@ fn samba_round_trip_and_copy() {
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .unwrap();
     assert_eq!(
@@ -1135,13 +1195,14 @@ fn samba_round_trip_and_copy() {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap()[0],
         b"hello SMB3 smb"
     );
     assert_eq!(
-        fs.lstat_impl(&copied).unwrap_err().raw_code(),
-        VF_ERR_UNSUPPORTED
+        fs.lstat_impl(&copied).unwrap_err().kind(),
+        std::io::ErrorKind::Unsupported
     );
     let no_follow_mode = VfAttrs {
         file: FileOperand::from_os_path(&copied),
@@ -1159,8 +1220,9 @@ fn samba_round_trip_and_copy() {
             .map(|_| ())
         }
         .unwrap_err()
-        .raw_code(),
-        VF_ERR_UNSUPPORTED
+        .cause()
+        .kind(),
+        std::io::ErrorKind::Unsupported
     );
 
     // Exceed Samba's usual single-request limit so vwrite_impl chunks
@@ -1177,6 +1239,7 @@ fn samba_round_trip_and_copy() {
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .expect("large SMB write");
     assert_eq!(
@@ -1184,6 +1247,7 @@ fn samba_round_trip_and_copy() {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .expect("large SMB read")[0],
         large_data
@@ -1231,6 +1295,7 @@ fn path_reads_recover_after_server_restart() {
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .unwrap();
     assert!(
@@ -1247,6 +1312,7 @@ fn path_reads_recover_after_server_restart() {
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .expect("path read should reconnect and re-establish the share");
     assert_eq!(result[0].data, b"after restart");
@@ -1291,7 +1357,7 @@ fn path_metadata_follows_symlinks_for_scalar_and_vector_requests() {
     let outcomes = fs.vgetattrs_impl(&mut attrs).unwrap();
     assert!(outcomes[0].is_ok());
     let error = outcomes[1].as_ref().unwrap_err();
-    assert_eq!(error.cause().index(), None);
+    let _: &std::io::Error = error.cause();
     assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
     cleanup_test_tree(&root);
 }
@@ -1373,7 +1439,7 @@ fn listing_walk_and_tree_copy_do_not_follow_directory_reparse_points() {
     let error = fs
         .copy_tree_impl(&source, &preserve_destination, true, false)
         .expect_err("requested symlink preservation must not be ignored");
-    assert_eq!(error.raw_code(), VF_ERR_UNSUPPORTED);
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
 
     // Isolate a regular-file link: ignoring `symlinks=true` would silently
     // create a regular destination file containing the link target's bytes.
@@ -1385,7 +1451,7 @@ fn listing_walk_and_tree_copy_do_not_follow_directory_reparse_points() {
     let error = fs
         .copy_tree_impl(&file_source, &file_destination, true, false)
         .expect_err("file-symlink preservation must not copy through silently");
-    assert_eq!(error.raw_code(), VF_ERR_UNSUPPORTED);
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
     assert!(!fs.exists_impl(&file_destination.join("alias")).unwrap());
     cleanup_test_tree(&root);
 }
@@ -1489,7 +1555,7 @@ fn copy_options_reject_unsupported_symlink_preservation_before_lookup() {
         .map(|_| ())
     }
     .unwrap_err();
-    assert_eq!(error.raw_code(), VF_ERR_UNSUPPORTED);
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::Unsupported);
     assert_eq!(error.index(), None);
 }
 
@@ -1538,7 +1604,7 @@ fn client_extent_copy_rejects_forward_aliases_before_mutation() {
             assert!(unchanged, "copy overwrote unread source bytes");
             let error =
                 result.expect_err("forward alias copy must not overwrite unread source bytes");
-            assert_eq!(error.raw_code(), libc::EINVAL as u32);
+            assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
             assert_eq!(error.index(), Some(0));
             assert!(unchanged, "rejected copies must leave the source unchanged");
         }
@@ -1570,6 +1636,7 @@ fn client_extent_copy_preserves_safe_shifted_ranges() {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         let destination = if separate { &other } else { &source };
@@ -1596,6 +1663,7 @@ fn client_extent_copy_preserves_safe_shifted_ranges() {
                 .and_then(|outcomes| {
                     let count = outcomes.len();
                     vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                        .map_err(vfsi_core::IndexedError::into_cause)
                 })
                 .unwrap()[0],
             expected
@@ -1633,6 +1701,7 @@ fn positioned_descriptor_io_preserves_cursor_and_cursor_io_advances() {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })?;
         fs.seek_raw_impl(&fd, 1, SeekFrom::Set)?;
         let read = fs
@@ -1640,6 +1709,7 @@ fn positioned_descriptor_io_preserves_cursor_and_cursor_io_advances() {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })?;
         assert_eq!(read[0].data, b"e");
         assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur)?, 1);
@@ -1647,6 +1717,7 @@ fn positioned_descriptor_io_preserves_cursor_and_cursor_io_advances() {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })?;
         assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur)?, 1);
         let read = fs
@@ -1654,6 +1725,7 @@ fn positioned_descriptor_io_preserves_cursor_and_cursor_io_advances() {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })?;
         assert_eq!(read[0].data, b"b");
         assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur)?, 2);
@@ -1661,6 +1733,7 @@ fn positioned_descriptor_io_preserves_cursor_and_cursor_io_advances() {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })?;
         assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur)?, 3);
         Ok(())
@@ -1686,23 +1759,26 @@ fn ordinary_descriptor_writes_skip_size_queries_but_end_and_append_require_them(
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })?;
         fs.seek_raw_impl(&fd, 1, SeekFrom::Set)?;
         let query = Arc::new(FaultScript::one(
             OpenFaultPoint::BeforeSizeQuery,
-            VfError::errno(0, libc::EIO as u32),
+            std::io::Error::from_raw_os_error(libc::EIO),
         ));
         fs.set_fault_injector(query.clone());
         fs.vwrite_impl(&[WriteOp::new(&fd, VfOffset::At(4), b"X".as_slice())])
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })?;
         assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur)?, 1);
         fs.vwrite_impl(&[WriteOp::new(&fd, VfOffset::Cur, b"Y".as_slice())])
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })?;
         assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur)?, 2);
         assert!(!query.is_consumed(), "ordinary writes issue no size query");
@@ -1711,9 +1787,10 @@ fn ordinary_descriptor_writes_skip_size_queries_but_end_and_append_require_them(
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap_err();
-        assert_eq!(error.raw_code(), libc::EIO as u32);
+        assert_eq!(test_native_code(&(error)), libc::EIO as u32);
         assert!(
             query.is_consumed(),
             "EOF-relative writes still query fresh size"
@@ -1721,7 +1798,7 @@ fn ordinary_descriptor_writes_skip_size_queries_but_end_and_append_require_them(
         let append = fs.open_raw_impl(&path, libc::O_RDWR | libc::O_APPEND, 0o666)?;
         let query = Arc::new(FaultScript::one(
             OpenFaultPoint::BeforeSizeQuery,
-            VfError::errno(0, libc::EIO as u32),
+            std::io::Error::from_raw_os_error(libc::EIO),
         ));
         fs.set_fault_injector(query.clone());
         let error = fs
@@ -1733,9 +1810,10 @@ fn ordinary_descriptor_writes_skip_size_queries_but_end_and_append_require_them(
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap_err();
-        assert_eq!(error.raw_code(), libc::EIO as u32);
+        assert_eq!(test_native_code(&(error)), libc::EIO as u32);
         assert!(query.is_consumed(), "append writes still query fresh size");
         fs.vwrite_impl(&[WriteOp::new(
             &append,
@@ -1745,6 +1823,7 @@ fn ordinary_descriptor_writes_skip_size_queries_but_end_and_append_require_them(
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })?;
         assert_eq!(fs.seek_raw_impl(&append, 0, SeekFrom::Cur)?, 7);
         fs.close_impl(&append)?;
@@ -1753,6 +1832,7 @@ fn ordinary_descriptor_writes_skip_size_queries_but_end_and_append_require_them(
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })?;
         assert_eq!(data[0].data, b"aYcdXfZ");
         Ok(())
@@ -1908,7 +1988,7 @@ fn directory_continuations_classify_original_children_after_rename_and_replaceme
             entries.extend(page);
             cursor = next;
         }
-        Ok::<_, vfsi_sync::VfError>(())
+        Ok::<_, std::io::Error>(())
     })();
     drop(cursor);
     cleanup_test_tree(&root);
@@ -1948,7 +2028,7 @@ fn directory_continuations_classify_original_children_after_rename_and_replaceme
         // A server may reject normalized-name queries or retain the old name
         // even after an SMB rename. The documented fallback is ESTALE, never
         // silently probing the replacement directory.
-        Err(error) => assert_eq!(error.raw_code(), libc::ESTALE as u32),
+        Err(error) => assert_eq!(test_native_code(&(error)), libc::ESTALE as u32),
     }
 }
 
@@ -1983,7 +2063,7 @@ fn directory_continuation_rejects_a_stale_probe_path_after_external_rename() {
             assert_eq!(entries.len(), 2);
             assert!(entries.iter().all(|entry| entry.ftype == VfType::Directory));
         }
-        Err(error) => assert_eq!(error.raw_code(), libc::ESTALE as u32),
+        Err(error) => assert_eq!(test_native_code(&(error)), libc::ESTALE as u32),
     }
 }
 
@@ -2008,6 +2088,7 @@ fn metadata_outcomes_preserve_independent_siblings_and_no_follow_rejection() {
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .unwrap();
     let mut attrs = [&one, &missing, &two].map(|path| VfAttrs {
@@ -2142,11 +2223,11 @@ fn directory_vector_preserves_healthy_inputs_around_mode_and_creation_failures()
     let unsupported = results[1].as_ref().unwrap_err();
     assert_eq!(unsupported.state(), vfsi_sync::FailureState::NotAttempted);
     assert_eq!(unsupported.cause().kind(), std::io::ErrorKind::Unsupported);
-    assert_eq!(unsupported.cause().index(), None);
+    let _: &std::io::Error = unsupported.cause();
     let collision = results[2].as_ref().unwrap_err();
     assert_eq!(collision.state(), vfsi_sync::FailureState::Failed);
     assert_eq!(collision.cause().kind(), std::io::ErrorKind::AlreadyExists);
-    assert_eq!(collision.cause().index(), None);
+    let _: &std::io::Error = collision.cause();
     assert!(!fs.exists_impl(&paths[1]).unwrap());
     assert!(fs.exists_impl(&paths[0]).unwrap() && fs.exists_impl(&paths[3]).unwrap());
     cleanup_test_tree(&root);
@@ -2189,7 +2270,7 @@ fn copy_results_keep_healthy_siblings_for_client_and_server_strategies() {
         let error = results[1].as_ref().unwrap_err();
         assert_eq!(error.state(), vfsi_core::FailureState::Failed);
         assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
-        assert_eq!(error.cause().index(), None);
+        let _: &std::io::Error = error.cause();
         let read = backend
             .vread_all_impl(
                 &destinations
@@ -2233,7 +2314,7 @@ fn native_page_vectors_keep_siblings_and_pinned_directory_cursors() {
     let (_, first_cursor, _) = pages.next().unwrap().unwrap();
     let error = pages.next().unwrap().err().expect("missing directory");
     assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
-    assert_eq!(error.cause().index(), None);
+    let _: &std::io::Error = error.cause();
     let (_, last_cursor, _) = pages.next().unwrap().unwrap();
     let moved = root.join("moved");
     vfsi_core::internal::collect_vec_result(

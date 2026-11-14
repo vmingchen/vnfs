@@ -1,5 +1,4 @@
 use super::support::FsReadResult as OwnedReadResult;
-use super::*;
 use crate::{FailureState, IoProgress, OpError, OpResult, VecResult};
 use std::path::Path;
 
@@ -237,7 +236,7 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
             OpSource::Into(_, offset, buffer) => (*offset, buffer.len(), false),
         };
         if length > budget {
-            return Err(Error::errno(0, libc::EFBIG as u32));
+            return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
         }
         let mut remaining = budget;
         let request = match first.source {
@@ -289,33 +288,43 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
     let mut owned_indices = Vec::new();
     let mut buffer_ops = Vec::with_capacity(if buffered_first { capacity } else { 0 });
     let mut buffer_indices = Vec::new();
-    // Backend request projections are opaque. Retain the original bounds
-    // lazily; singleton and all-whole-file batches need no extra allocation.
-    let mut expected = Vec::new();
+    // Backend projections are opaque. Owned-only reads retain compact bounds.
+    // Buffered-first batches reuse bounds storage as their final output: smaller
+    // native slots cannot expand to ReadResult in an in-place Vec collection.
+    let mut compact_bounds = Vec::new();
+    let mut expected: Vec<OpResult<ReadResult>> = Vec::new();
     let mut mixed = false;
     let mut requested = 0usize;
-    let mut count = 0usize;
     for (index, op) in ops.enumerate() {
-        count += 1;
         let bounds = match &op.source {
             OpSource::Whole(_) => None,
             OpSource::Range(_, offset, length) => Some((*offset, *length)),
             OpSource::Into(_, offset, buffer) => Some((*offset, buffer.len())),
         };
         let length = bounds.map_or(0, |(_, length)| length);
-        if let Some(bounds) = bounds {
-            if expected.is_empty() {
-                expected.reserve(capacity);
-                expected.resize(index, (0, 0));
+        if buffered_first {
+            if let Some(bounds) = bounds {
+                if expected.is_empty() {
+                    expected.reserve(capacity);
+                    expected.resize_with(index, || Ok(ReadResult::buffered(0, 0, false)));
+                }
+                expected.push(Ok(ReadResult::buffered(bounds.0, bounds.1, false)));
+            } else if !expected.is_empty() {
+                expected.push(Ok(ReadResult::buffered(0, 0, false)));
             }
-            expected.push(bounds);
-        } else if !expected.is_empty() {
-            expected.push((0, 0));
+        } else if let Some(bounds) = bounds {
+            if compact_bounds.is_empty() {
+                compact_bounds.reserve(capacity);
+                compact_bounds.resize(index, (0, 0));
+            }
+            compact_bounds.push(bounds);
+        } else if !compact_bounds.is_empty() {
+            compact_bounds.push((0, 0));
         }
         requested = requested
             .checked_add(length)
             .filter(|bytes| *bytes <= budget)
-            .ok_or_else(|| Error::errno(index, libc::EFBIG as u32))?;
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EFBIG))?;
         match op.source {
             OpSource::Whole(path) => {
                 if !mixed && !buffer_ops.is_empty() {
@@ -350,64 +359,85 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
         }
     }
     let buffer_count = buffer_ops.len();
+    if buffer_count != 0 && !buffered_first {
+        // Mixed owned-first cohorts need an output vector anyway. Promote
+        // compact bounds before I/O, then fill their final slots directly.
+        expected = compact_bounds
+            .into_iter()
+            .map(|(offset, length)| Ok(ReadResult::buffered(offset, length, false)))
+            .collect();
+        compact_bounds = Vec::new();
+    }
     let mut remaining = budget;
-    let buffered: Vec<_> = if buffer_count == 0 {
-        Vec::new()
-    } else {
-        read_phase(buffers(&mut buffer_ops, budget), buffer_count)
+    if buffer_count != 0 {
+        for (local, result) in read_phase(buffers(&mut buffer_ops, budget), buffer_count)
             .into_iter()
             .enumerate()
-            .map(|(local, result)| {
-                let index = if mixed { buffer_indices[local] } else { local };
-                checked_read(
-                    result.map(|read| ReadResult::buffered(read.offset, read.bytes_read, read.eof)),
-                    true,
-                    Some(expected[index]),
-                    false,
-                    &mut remaining,
-                )
-            })
-            .collect()
-    };
+        {
+            let index = if mixed { buffer_indices[local] } else { local };
+            let bounds = expected[index].as_ref().expect("saved read bounds");
+            let bounds = (bounds.offset(), bounds.bytes_read());
+            expected[index] = checked_read(
+                result.map(|read| ReadResult::buffered(read.offset, read.bytes_read, read.eof)),
+                true,
+                Some(bounds),
+                false,
+                &mut remaining,
+            );
+        }
+    }
     drop(buffer_ops);
     // An unsuccessful buffer phase must not discard known results or suppress
     // independent owned reads. Only confirmed data charges the shared budget.
-    let allocated: Vec<_> = if owned_ops.is_empty() {
-        Vec::new()
-    } else {
-        read_phase(owned(&owned_ops, remaining), owned_ops.len())
+    if owned_ops.is_empty() {
+        return Ok(expected);
+    }
+    if buffer_count == 0 {
+        let allocated = read_phase(owned(&owned_ops, remaining), owned_ops.len())
             .into_iter()
             .enumerate()
             .map(|(local, result)| {
                 let index = if mixed { owned_indices[local] } else { local };
                 let whole = matches!(owned_ops[local].source, Source::Whole(_));
-                checked_read(
+                let bounds = if whole {
+                    None
+                } else {
+                    Some(compact_bounds[index])
+                };
+                let result = checked_read(
                     result.map(|read| ReadResult::owned(read.offset, read.data, read.eof)),
                     false,
-                    if whole { None } else { Some(expected[index]) },
+                    bounds,
                     whole,
                     &mut remaining,
-                )
-            })
-            .collect()
-    };
-    if buffer_count == 0 {
-        return Ok(allocated);
+                );
+                (index, result)
+            });
+        return Ok(allocated.map(|(_, result)| result).collect());
     }
-    if owned_ops.is_empty() {
-        return Ok(buffered);
-    }
-    let mut output: Vec<Option<OpResult<ReadResult>>> = (0..count).map(|_| None).collect();
-    for (index, result) in buffer_indices.into_iter().zip(buffered) {
-        output[index] = Some(result);
-    }
-    for (index, result) in owned_indices.into_iter().zip(allocated) {
-        output[index] = Some(result);
-    }
-    Ok(output
+    // The iterator borrows bounds from expected. Keep the mutable output update
+    // in the same pass after reading that input's original bounds.
+    for (local, result) in read_phase(owned(&owned_ops, remaining), owned_ops.len())
         .into_iter()
-        .map(|slot| slot.expect("every read input assigned"))
-        .collect())
+        .enumerate()
+    {
+        let index = owned_indices[local];
+        let whole = matches!(owned_ops[local].source, Source::Whole(_));
+        let bounds = if whole {
+            None
+        } else {
+            let bounds = expected[index].as_ref().expect("saved read bounds");
+            Some((bounds.offset(), bounds.bytes_read()))
+        };
+        expected[index] = checked_read(
+            result.map(|read| ReadResult::owned(read.offset, read.data, read.eof)),
+            false,
+            bounds,
+            whole,
+            &mut remaining,
+        );
+    }
+    Ok(expected)
 }
 
 // After one phase has dispatched, a later phase's rejection belongs to its own
@@ -417,7 +447,7 @@ fn read_phase<T>(result: VecResult<T>, expected: usize) -> Vec<OpResult<T>> {
         Ok(mut outcomes) if outcomes.len() <= expected => {
             outcomes.resize_with(expected, || {
                 Err(OpError::unknown(
-                    Error::invalid_reply(None, "missing read outcome"),
+                    crate::internal::errors::invalid_reply("missing read outcome"),
                     None,
                 ))
             });
@@ -426,21 +456,13 @@ fn read_phase<T>(result: VecResult<T>, expected: usize) -> Vec<OpResult<T>> {
         Ok(_) => (0..expected)
             .map(|_| {
                 Err(OpError::unknown(
-                    Error::invalid_reply(None, "too many read outcomes"),
+                    crate::internal::errors::invalid_reply("too many read outcomes"),
                     None,
                 ))
             })
             .collect(),
-        Err(cause) if cause.index().is_some_and(|index| index >= expected) => (0..expected)
-            .map(|_| {
-                Err(OpError::not_attempted(Error::invalid_reply(
-                    None,
-                    "invalid read backend error index",
-                )))
-            })
-            .collect(),
-        Err(cause) => (0..expected)
-            .map(|_| Err(OpError::not_attempted(cause.clone())))
+        Err(cause) => crate::internal::errors::fanout(cause, expected)
+            .map(|cause| Err(OpError::not_attempted(cause)))
             .collect(),
     }
 }
@@ -461,7 +483,7 @@ fn checked_read(
             }
             _ => {
                 return Err(OpError::unknown(
-                    Error::invalid_reply(None, "invalid read failure progress"),
+                    crate::internal::errors::invalid_reply("invalid read failure progress"),
                     None,
                 ));
             }
@@ -482,7 +504,9 @@ fn checked_read(
             && (!whole || read.offset() == 0 && (result.is_err() || read.eof()));
         if !valid {
             return Err(OpError::unknown(
-                Error::invalid_reply(None, "invalid read offset, length, payload or byte budget"),
+                crate::internal::errors::invalid_reply(
+                    "invalid read offset, length, payload or byte budget",
+                ),
                 None,
             ));
         }

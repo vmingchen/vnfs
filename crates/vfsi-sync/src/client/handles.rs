@@ -55,9 +55,9 @@ impl<F: VectorBackend> Drop for FsDir<F> {
                     let CleanupTarget::Directory(dir, path) = target else {
                         unreachable!()
                     };
-                    backend
-                        .close_dir_impl(dir)
-                        .map_err(|error| error.with_context("close_dir", path))
+                    backend.close_dir_impl(dir).map_err(|error| {
+                        vfsi_core::internal::errors::with_context(error, "close_dir", path)
+                    })
                 },
             );
         }
@@ -99,7 +99,7 @@ impl<F: HandleBackend> OpenFile<F> {
     pub(super) fn raw(&self) -> VfResult<&FileOperand> {
         self.file
             .as_ref()
-            .ok_or_else(|| VfError::errno(0, crate::ERR_EBADF))
+            .ok_or_else(|| std::io::Error::from_raw_os_error((crate::ERR_EBADF) as i32))
     }
 
     pub fn read_request_at(&self, offset: u64, length: usize) -> FsRead<'_, F> {
@@ -149,7 +149,8 @@ impl<F: HandleBackend> OpenFile<F> {
                 .vclose_impl(std::slice::from_ref(file)),
             1,
         )
-        .map_err(|error| error.with_context("close", &self.path))?;
+        .map_err(vfsi_core::IndexedError::into_cause)
+        .map_err(|error| vfsi_core::internal::errors::with_context(error, "close", &self.path))?;
         self.file = None;
         Ok(())
     }
@@ -189,9 +190,9 @@ impl<F: HandleBackend> Drop for OpenFile<F> {
                     let CleanupTarget::File(file, path) = target else {
                         unreachable!()
                     };
-                    backend
-                        .close_deferred(file)
-                        .map_err(|error| error.with_context("close", path))
+                    backend.close_deferred(file).map_err(|error| {
+                        vfsi_core::internal::errors::with_context(error, "close", path)
+                    })
                 },
             );
         }

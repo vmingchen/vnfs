@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::Arc;
 use vfsi_core::{
-    FailureState, VfError,
+    FailureState,
     internal::faults::{FaultScript, OpenFaultPoint},
 };
 
@@ -66,7 +66,10 @@ fn readdir_vectors_preserve_pages_statuses_and_exact_submission_boundaries() {
             let fault = point.map(|point| {
                 Arc::new(FaultScript::one(
                     point,
-                    VfError::transport(None, "selected READDIR response unavailable"),
+                    vfsi_core::internal::errors::transport(
+                        vfsi_core::TransportKind::Other,
+                        "selected READDIR response unavailable",
+                    ),
                 ))
             });
             if let Some(fault) = &fault {
@@ -123,7 +126,7 @@ fn readdir_vectors_preserve_pages_statuses_and_exact_submission_boundaries() {
                 if let Some(expected) = expected {
                     let error = result.unwrap_err();
                     assert_eq!(error.state(), expected, "{children}/{phase}/{index}");
-                    assert_eq!(error.cause().index(), None);
+                    let _: &std::io::Error = error.cause();
                     assert!(error.progress().is_none());
                 } else {
                     let (entries, cookie) = result.unwrap();
@@ -235,7 +238,10 @@ fn filtered_pages_follow_verifiers_and_bound_continuations() {
                 "scalar" => client
                     .readdir_bounded(&root, DirCookie::default(), &[FATTR4_TYPE], 4096)
                     .map_err(|error| {
-                        vfsi_core::OpError::failed(vfsi_core::error_from_rpc(error, None), None)
+                        vfsi_core::OpError::failed(
+                            vfsi_core::internal::errors::from_rpc(error),
+                            None,
+                        )
                     }),
                 "vector" => client
                     .readdir_pages_bounded(&[(root, DirCookie::default())], &[FATTR4_TYPE], 4096)
@@ -274,17 +280,19 @@ fn filtered_pages_follow_verifiers_and_bound_continuations() {
                 "advancing-limit" => {
                     let error = result.unwrap_err();
                     assert_eq!(
-                        error.cause().transport_kind(),
+                        vfsi_core::transport_kind(error.cause()),
                         Some(vfsi_core::TransportKind::InvalidReply)
                     );
                     assert!(error.cause().to_string().contains("filtered-page limit"));
                 }
-                "cycle" => assert!(result.unwrap_err().cause().is_transport()),
+                "cycle" => {
+                    assert!(vfsi_core::transport_kind(result.unwrap_err().cause()).is_some())
+                }
                 _ => {
                     let error = result.unwrap_err();
                     assert_eq!(error.state(), FailureState::Failed);
                     assert_eq!(
-                        error.cause().status(),
+                        vfsi_core::native_status(error.cause()),
                         Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_BAD_COOKIE))
                     );
                 }
@@ -338,7 +346,7 @@ fn filtered_continuation_failures_preserve_visible_and_independent_siblings() {
             assert_eq!(observed.len(), 3);
             assert_eq!(first.state(), FailureState::Failed);
             assert_eq!(
-                last.cause().status(),
+                vfsi_core::native_status(last.cause()),
                 Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_BAD_COOKIE))
             );
         } else {
@@ -348,7 +356,7 @@ fn filtered_continuation_failures_preserve_visible_and_independent_siblings() {
                 "no continuation dispatched after reply loss"
             );
             assert_eq!(first.state(), FailureState::Unknown);
-            assert!(last.cause().is_transport());
+            assert!(vfsi_core::transport_kind(last.cause()).is_some());
         }
     }
 }

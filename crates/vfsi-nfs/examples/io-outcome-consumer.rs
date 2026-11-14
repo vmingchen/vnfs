@@ -67,11 +67,11 @@ fn main() {
         );
         if mode.starts_with("uncached") || mode == "prefix" {
             assert_eq!(
-                error.cause().status(),
+                vfsi_core::native_status(error.cause()),
                 Some(StatusCode::Nfs(if mode == "prefix" { 28 } else { 10068 }))
             );
         } else {
-            assert!(error.cause().is_transport());
+            assert!(vfsi_core::transport_kind(error.cause()).is_some());
         }
     }
     if large {
@@ -81,7 +81,7 @@ fn main() {
         } else {
             let error = outcomes[1].as_ref().unwrap_err();
             assert_eq!(error.state(), FailureState::NotAttempted);
-            assert!(error.cause().is_transport());
+            assert!(vfsi_core::transport_kind(error.cause()).is_some());
             assert!(error.progress().is_none());
         }
     }

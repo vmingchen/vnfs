@@ -12,6 +12,7 @@ name = "vfsi_c"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
+vfsi-core = { workspace = true }
 libc = "0.2"
 libntirpc-sys = { workspace = true }
 vfsi-sync = { workspace = true }

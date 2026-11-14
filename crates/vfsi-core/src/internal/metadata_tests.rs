@@ -13,8 +13,8 @@ fn metadata_validation_rejects_reserved_ids_and_preserves_absent_times() {
         SetAttrsOp::new("/file").gid(u32::MAX),
     ] {
         assert_eq!(
-            validate_setattrs(&op).unwrap_err().raw_code(),
-            crate::ERR_INVAL
+            validate_setattrs(&op).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
         );
     }
     assert!(validate_setattrs(&SetAttrsOp::new("/file").uid(0).gid(u32::MAX - 1)).is_ok());

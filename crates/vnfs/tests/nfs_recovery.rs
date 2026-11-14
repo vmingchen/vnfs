@@ -61,6 +61,7 @@ fn read_recovers_after_server_restart_and_reopens_live_descriptor() {
             .with_creation()
             .with_truncate(),
     ]))
+    .map_err(vfsi_core::IndexedError::unattributed)
     .and_then(|outcomes| {
         let count = outcomes.len();
         vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
@@ -90,6 +91,7 @@ fn read_recovers_after_server_restart_and_reopens_live_descriptor() {
             ReadOp::new(files[0].clone(), VfOffset::Cur, 3),
             ReadOp::new(files[1].clone(), VfOffset::Cur, 4),
         ])
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)

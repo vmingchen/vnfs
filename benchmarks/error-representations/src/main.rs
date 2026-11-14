@@ -78,7 +78,14 @@ enum Detail {
 impl Detail {
     fn kind(self) -> K {
         match self {
-            Self::Native(status) => vfsi_core::VfError::from_status(None, status).kind(),
+            Self::Native(StatusCode::Errno(code)) => {
+                io::Error::from_raw_os_error(code as i32).kind()
+            }
+            // Fixed protocol fixtures in this prototype, not a general mapping
+            // table. Keep this path allocation-free; tests compare it with the
+            // library's typed native factory outside any measured region.
+            Self::Native(StatusCode::Nfs(13) | StatusCode::Smb(0xc000_0022)) => K::PermissionDenied,
+            Self::Native(status) => panic!("unmodeled native fixture: {status:?}"),
             Self::Client(kind) => kind,
             Self::Transport(TransportKind::Timeout) => K::TimedOut,
             Self::Transport(TransportKind::Auth) => K::PermissionDenied,
@@ -669,7 +676,7 @@ fn main() {
             "io":layouts::<io::Error>(),"arc_io":layouts::<Arc<io::Error>>(),
             "read_result":size_of::<ReadResult>(),"attrs":size_of::<Attrs>(),
             "native_payload":size_of::<NativePayload>(),"context":size_of::<Context>(),
-            "current_vferror":size_of::<vfsi_core::VfError>(),
+            "current_io_error":size_of::<io::Error>(),
             "current_op_error":size_of::<vfsi_core::OpError>(),
             "current_op_result_unit":size_of::<vfsi_core::OpResult<()>>(),
             "current_op_result_read":size_of::<vfsi_core::OpResult<ReadResult>>(),
@@ -707,6 +714,12 @@ mod tests {
             let mini = make_mini(spec, &source);
             let io = make_io(spec, &source);
             assert_eq!(mini.kind(), io.kind());
+            if let Some(status) = mini.status() {
+                assert_eq!(
+                    mini.kind(),
+                    vfsi_core::internal::errors::from_status(status).kind()
+                );
+            }
             assert_eq!(mini.status(), io_status(&io));
             let clone = duplicate_io(&io).unwrap();
             assert_eq!(io.kind(), clone.kind());

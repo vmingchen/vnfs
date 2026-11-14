@@ -91,8 +91,8 @@ pub mod error {
     pub use crate::{Error, Result};
     pub use vfsi_core::api::ErrorKind;
     pub use vfsi_core::{
-        ErrorDomain, FailureState, IoProgress, OpError, OpResult, StatusCode, TransportKind,
-        VecResult,
+        FailureState, IndexedError, IoProgress, OpError, OpResult, StatusCode, TransportKind,
+        VecResult, native_status, transport_kind,
     };
 }
 
@@ -100,7 +100,7 @@ pub mod error {
 pub type Result<T> = vfsi_core::VfResult<T>;
 
 /// Application-facing error type for the Rust-native API.
-pub type Error = vfsi_core::VfError;
+pub type Error = std::io::Error;
 pub use vfsi_core::{OpResult, VecResult};
 
 #[cfg(any(
@@ -280,3 +280,15 @@ pub(crate) use native_nfs::{Nfs, NfsVersion};
 
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use vfsi_core::api::ReadIntoResult;
+
+#[cfg(test)]
+fn test_native_code(error: &std::io::Error) -> u32 {
+    match vfsi_core::native_status(error) {
+        Some(
+            vfsi_core::StatusCode::Errno(code)
+            | vfsi_core::StatusCode::Nfs(code)
+            | vfsi_core::StatusCode::Smb(code),
+        ) => code,
+        _ => panic!("expected a native error, got {error:?}"),
+    }
+}

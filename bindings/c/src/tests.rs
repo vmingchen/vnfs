@@ -154,7 +154,7 @@ struct ListingBackend {
     missing_after: usize,
     fail_call: Option<usize>,
     write_calls: Option<WriteCalls>,
-    open_preflight_error: Option<usize>,
+    open_preflight_error: bool,
     read_size: Option<usize>,
     open_result_count: Option<usize>,
     read_result_count: Option<usize>,
@@ -179,10 +179,10 @@ impl vfsi_sync::backend::HandleBackend for ListingBackend {
             .collect())
     }
     fn sync_data(&mut self, _: &FileOperand) -> vfsi_sync::VfResult<()> {
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
     fn open_impl(&mut self, _: &vfsi_sync::OpenOp) -> vfsi_sync::VfResult<FileOperand> {
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
     fn vclose_impl(&mut self, files: &[vfsi_sync::FileOperand]) -> vfsi_sync::VecResult<()> {
         Ok(files
@@ -202,35 +202,35 @@ impl vfsi_sync::backend::HandleBackend for ListingBackend {
             .close_failure_fd
             .is_some_and(|fd| file.fd() == Some(fd))
         {
-            Err(VfError::errno(0, libc::EIO as u32))
+            Err(std::io::Error::from_raw_os_error(libc::EIO))
         } else {
             Ok(())
         }
     }
     fn read_impl(&mut self, _: &ReadOp) -> vfsi_sync::VfResult<vfsi_sync::ReadResult> {
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
     fn write_impl(
         &mut self,
         _: vfsi_sync::WriteOp<&FileOperand, &[u8]>,
     ) -> vfsi_sync::VfResult<vfsi_sync::WriteResult> {
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
     fn seek_impl(&mut self, _: &FileOperand, _: std::io::SeekFrom) -> vfsi_sync::VfResult<u64> {
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
     fn metadata_impl(
         &mut self,
         _: vfsi_sync::Target<'_, FileOperand>,
         _: vfsi_sync::api::AttrsOptions,
     ) -> vfsi_sync::VfResult<VfAttrs> {
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
     fn set_attributes_impl(
         &mut self,
         _: &vfsi_sync::SetAttrsOp<vfsi_sync::Target<'_, FileOperand>>,
     ) -> vfsi_sync::VfResult<()> {
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
 }
 
@@ -254,7 +254,7 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
             attrs.gid = 0;
             attrs.rdev = 0x1234;
         }
-        Ok(vec![Ok(()); requested])
+        Ok((0..requested).map(|_| Ok(())).collect())
     }
 
     fn vgetattrs_nofollow_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_sync::VecResult<()> {
@@ -276,7 +276,7 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
         recursive: bool,
     ) -> vfsi_sync::VfResult<Vec<VfAttrs>> {
         if recursive {
-            return Err(VfError::unsupported(0));
+            return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
         }
         let count = if max_count == 0 {
             self.entries_per_dir
@@ -320,7 +320,7 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
     ) -> vfsi_sync::VecResult<FileOperand> {
         let count = self
             .open_result_count
-            .ok_or_else(|| VfError::unsupported(0))?;
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::Unsupported))?;
         let results: Vec<FileOperand> = match self.malformed_reply {
             Some(MalformedReply::OpenDuplicate) => vec![FileOperand::from_fd(10_000); count],
             Some(MalformedReply::OpenPath) => (0..count)
@@ -341,9 +341,10 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
     }
 
     fn vopen_preflight_impl(&mut self, _: &[&Path], _: &[i32], _: &[u32]) -> vfsi_sync::VfRes {
-        match self.open_preflight_error {
-            Some(index) => Err(VfError::unsupported(index)),
-            None => Ok(()),
+        if self.open_preflight_error {
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+        } else {
+            Ok(())
         }
     }
 
@@ -354,7 +355,7 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
 
         let result: vfsi_sync::VfResult<Vec<vfsi_sync::ReadResult>> = {
             let Some(size) = self.read_size else {
-                return Err(VfError::unsupported(0));
+                return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
             };
             let result_count = self.read_result_count.unwrap_or(reads.len());
             Ok(reads
@@ -393,7 +394,10 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
                         && self.malformed_reply == Some(MalformedReply::ReadMiddleTransport)
                     {
                         Err(vfsi_sync::OpError::unknown(
-                            VfError::transport(None, "lost read"),
+                            vfsi_core::internal::errors::transport(
+                                vfsi_core::TransportKind::Other,
+                                "lost read",
+                            ),
                             Some(vfsi_sync::IoProgress::Read(
                                 vfsi_sync::api::ReadResult::owned(
                                     read.offset,
@@ -417,7 +421,7 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
         let calls = self
             .write_calls
             .as_ref()
-            .ok_or_else(|| VfError::unsupported(0))?;
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::Unsupported))?;
         calls.lock().unwrap().push(
             writes
                 .iter()
@@ -455,7 +459,10 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
             .map(|(index, write)| {
                 if index == 1 && self.malformed_reply == Some(MalformedReply::WriteMiddlePartial) {
                     Err(vfsi_sync::OpError::unknown(
-                        VfError::transport(None, "lost write"),
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
+                            "lost write",
+                        ),
                         Some(vfsi_sync::IoProgress::Write { bytes_written: 1 }),
                     ))
                 } else {
@@ -472,7 +479,7 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
         max_entries: usize,
         recursive: bool,
         cb: &mut dyn FnMut(&VfAttrs, &Path) -> bool,
-    ) -> vfsi_sync::VfRes {
+    ) -> Result<(), vfsi_core::IndexedError> {
         assert!(!recursive);
         let call = {
             let mut calls = self.calls.lock().unwrap();
@@ -483,7 +490,9 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
             calls.len()
         };
         if self.fail_call == Some(call) {
-            return Err(VfError::errno(0, libc::EIO as u32));
+            return Err(vfsi_core::IndexedError::unattributed(
+                std::io::Error::from_raw_os_error(libc::EIO),
+            ));
         }
         let mut delivered = 0;
         for dir in dirs {
@@ -536,7 +545,7 @@ struct ListingFixture {
 }
 impl ListingFixture {
     fn new(entries_per_dir: usize, missing: AttrMask, missing_after: usize) -> Self {
-        Self::with_failure(entries_per_dir, missing, missing_after, None, None)
+        Self::with_failure(entries_per_dir, missing, missing_after, None, false)
     }
 
     fn with_failure(
@@ -544,7 +553,7 @@ impl ListingFixture {
         missing: AttrMask,
         missing_after: usize,
         fail_call: Option<usize>,
-        open_preflight_error: Option<usize>,
+        open_preflight_error: bool,
     ) -> Self {
         let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
         Self {
@@ -615,8 +624,32 @@ impl ListingFixture {
 }
 
 #[test]
+fn close_validation_missing_descriptor_keeps_its_input_index_without_retiring_siblings() {
+    for missing in 0..2 {
+        let fixture = ListingFixture::new(0, AttrMask::empty(), 0);
+        let fs = unsafe { &*fixture.fs };
+        fs.files
+            .lock()
+            .unwrap()
+            .insert(10, FileOperand::from_fd(100).into());
+        let mut fds = [10, 10];
+        fds[missing] = 999;
+        let mut items = [vfsi_result::panic(); 2];
+        let status =
+            unsafe { vfsi_closev(fixture.fs, fds.as_ptr(), fds.len(), items.as_mut_ptr()) };
+        assert_eq!(status.index, missing);
+        assert_eq!(status.err_no, libc::EBADF as u32);
+        assert_eq!(items[missing].index, missing);
+        assert_eq!(items[missing].err_no, libc::EBADF as u32);
+        assert_eq!(items[1 - missing].category, VFSI_ERROR_NOT_ATTEMPTED);
+        assert!(fs.files.lock().unwrap().contains_key(&10));
+        assert!(fixture.calls.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
 fn openv_preflight_failure_preserves_not_attempted_items() {
-    let fixture = ListingFixture::with_failure(0, AttrMask::empty(), 0, None, Some(1));
+    let fixture = ListingFixture::with_failure(0, AttrMask::empty(), 0, None, true);
     let first = CString::new("/first").unwrap();
     let second = CString::new("/second").unwrap();
     let mut ops = [
@@ -636,12 +669,15 @@ fn openv_preflight_failure_preserves_not_attempted_items() {
     let mut items = [vfsi_result::panic(); 2];
     let result = unsafe { vfsi_openv(fixture.fs, ops.as_mut_ptr(), ops.len(), items.as_mut_ptr()) };
 
-    assert_eq!(result.index, 1);
-    assert_eq!(result.err_no, VF_ERR_UNSUPPORTED);
-    assert_eq!(items[0].category, VFSI_ERROR_NOT_ATTEMPTED);
-    assert_eq!(items[1].category, VFSI_ERROR_UNSUPPORTED);
-    assert_eq!(items[1].err_no, VF_ERR_UNSUPPORTED);
-    assert_eq!(items[1].index, 1);
+    assert_eq!(result.index, C_INDEX_UNKNOWN);
+    assert_eq!(result.category, VFSI_ERROR_UNSUPPORTED);
+    assert_eq!(result.err_no, LEGACY_ERROR_UNSUPPORTED);
+    for (index, item) in items.iter().enumerate() {
+        assert_eq!(item.category, VFSI_ERROR_NOT_ATTEMPTED);
+        assert_eq!(item.index, index);
+    }
+    assert!(ops.iter().all(|op| op.fd == -1));
+    assert!(fixture.calls.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -657,7 +693,7 @@ fn c_openv_rejects_backend_result_cardinality_mismatch_and_cleans_handles() {
                 missing_after: 0,
                 fail_call: None,
                 write_calls: None,
-                open_preflight_error: None,
+                open_preflight_error: false,
                 read_size: None,
                 open_result_count: Some(returned),
                 read_result_count: None,
@@ -690,7 +726,7 @@ fn c_openv_rejects_backend_result_cardinality_mismatch_and_cleans_handles() {
         let result = unsafe { vfsi_openv(fs, ops.as_mut_ptr(), ops.len(), items.as_mut_ptr()) };
 
         assert_eq!(result.category, VFSI_ERROR_TRANSPORT);
-        assert_eq!(result.err_no, vfsi_sync::VF_ERR_RPC);
+        assert_eq!(result.err_no, LEGACY_ERROR_RPC);
         assert!(items
             .iter()
             .all(|item| item.category == VFSI_ERROR_INDETERMINATE));
@@ -723,7 +759,7 @@ fn c_openv_rejects_duplicate_and_non_handle_results() {
                 missing_after: 0,
                 fail_call: None,
                 write_calls: None,
-                open_preflight_error: None,
+                open_preflight_error: false,
                 read_size: None,
                 open_result_count: Some(2),
                 read_result_count: None,
@@ -778,7 +814,7 @@ fn c_vector_reads_reject_backend_result_cardinality_mismatch_before_copying() {
                 missing_after: 0,
                 fail_call: None,
                 write_calls: None,
-                open_preflight_error: None,
+                open_preflight_error: false,
                 read_size: Some(1),
                 open_result_count: None,
                 read_result_count: Some(returned),
@@ -828,7 +864,7 @@ fn c_vector_writes_reject_backend_result_cardinality_mismatch() {
                 missing_after: 0,
                 fail_call: None,
                 write_calls: Some(calls.clone()),
-                open_preflight_error: None,
+                open_preflight_error: false,
                 read_size: None,
                 open_result_count: None,
                 read_result_count: None,
@@ -1146,7 +1182,7 @@ fn c_vector_reads_never_copy_beyond_the_requested_output_length() {
                     missing_after: 0,
                     fail_call: None,
                     write_calls: None,
-                    open_preflight_error: None,
+                    open_preflight_error: false,
                     read_size: Some(returned),
                     open_result_count: None,
                     read_result_count: None,
@@ -1206,7 +1242,7 @@ fn c_vector_reads_reject_malformed_backend_results_before_copying() {
                 missing_after: 0,
                 fail_call: None,
                 write_calls: None,
-                open_preflight_error: None,
+                open_preflight_error: false,
                 read_size: Some(1),
                 open_result_count: None,
                 read_result_count: None,
@@ -1260,7 +1296,7 @@ fn c_vector_writes_reject_malformed_backend_results() {
                 missing_after: 0,
                 fail_call: None,
                 write_calls: Some(calls.clone()),
-                open_preflight_error: None,
+                open_preflight_error: false,
                 read_size: None,
                 open_result_count: None,
                 read_result_count: None,
@@ -1309,7 +1345,7 @@ fn c_vector_writes_borrow_payloads_and_preflight_the_entire_batch() {
             missing_after: 0,
             fail_call: None,
             write_calls: Some(calls.clone()),
-            open_preflight_error: None,
+            open_preflight_error: false,
             read_size: None,
             open_result_count: None,
             read_result_count: None,
@@ -1801,7 +1837,7 @@ fn indexed_listings_discard_earlier_cohorts_on_late_backend_or_metadata_failure(
         (AttrMask::empty(), Some(3), libc::EIO),
         (AttrMask::UID | AttrMask::GID, None, libc::ENOTSUP),
     ] {
-        let fixture = ListingFixture::with_failure(1, missing, 32, fail_call, None);
+        let fixture = ListingFixture::with_failure(1, missing, 32, fail_call, false);
         let (status, indices, results) = fixture.run(&dirs, &options);
         assert_eq!(status, expected);
         assert_eq!(fixture.calls.lock().unwrap().len(), 3);
@@ -1824,7 +1860,7 @@ fn indexed_listing_projection_errors_preserve_backend_and_budget_error_precedenc
     ] {
         // The first row lacks requested metadata. Collection must still honor
         // the original backend/quota failure precedence and deliver no prefix.
-        let fixture = ListingFixture::with_failure(1, AttrMask::UID, 0, fail_call, None);
+        let fixture = ListingFixture::with_failure(1, AttrMask::UID, 0, fail_call, false);
         let (status, indices, results) = fixture.run(
             &dirs,
             &vfsi_listing_options {
@@ -1859,7 +1895,10 @@ fn directory_byte_overflow_stops_before_retaining_or_visiting_more_entries() {
             Ok(())
         })
         .unwrap_err();
-        assert_eq!(error.raw_code(), libc::EFBIG as u32);
+        assert_eq!(
+            vfsi_core::native_status(&error),
+            Some(vfsi_core::StatusCode::Errno(libc::EFBIG as u32))
+        );
         assert_eq!(
             visited, 1,
             "overflow must stop enumeration at the first oversized entry"
@@ -1891,17 +1930,20 @@ fn bounded_directory_accepts_exact_limits_and_rejects_only_the_probe() {
             Ok(())
         })
         .unwrap_err();
-        assert_eq!(error.raw_code(), libc::EFBIG as u32);
+        assert_eq!(
+            vfsi_core::native_status(&error),
+            Some(vfsi_core::StatusCode::Errno(libc::EFBIG as u32))
+        );
         assert_eq!(visited, if count == 1 && bytes == 4 { 2 } else { 1 });
     }
     let error = collect_bounded_entries(10, 100, |cb| {
         assert!(cb(&entry));
-        Err(VfError::errno(0, libc::EIO as u32))
+        Err(std::io::Error::from_raw_os_error(libc::EIO))
     })
     .unwrap_err();
     assert_eq!(
-        error.raw_code(),
-        libc::EIO as u32,
+        vfsi_core::native_status(&error),
+        Some(vfsi_core::StatusCode::Errno(libc::EIO as u32)),
         "backend errors must not become successful prefixes"
     );
 }
@@ -2095,7 +2137,10 @@ fn file_review_setattrv_accepts_all_value_fields_in_abi_v3() {
 
 #[test]
 fn unknown_transport_index_remains_unknown_for_c_callers() {
-    let failure = vfsi_result::from_error(VfError::transport(None, "lost reply"));
+    let failure = vfsi_result::from_error(vfsi_core::internal::errors::transport(
+        vfsi_core::TransportKind::Other,
+        "lost reply",
+    ));
     assert_eq!(failure.index, C_INDEX_UNKNOWN);
     let mut items = [vfsi_result::panic(), vfsi_result::panic()];
     fail_results(&mut items, failure, true);
@@ -2108,8 +2153,8 @@ fn unknown_transport_index_remains_unknown_for_c_callers() {
 fn unattributed_status_keeps_its_errno_and_category_for_c_callers() {
     // A native NFS status is not an OS errno. Scalar helpers translate it;
     // structured vector results retain its native value and attribution.
-    let error = vfsi_sync::error_from_rpc(vfsi_sync::RpcError::op(0, 10005), None);
-    assert_eq!(error.index(), None);
+    let error = vfsi_core::internal::errors::from_rpc(vfsi_sync::RpcError::op(0, 10005));
+    let _: &std::io::Error = &error;
     assert_eq!(vf_code(&error), libc::EIO);
     let failure = vfsi_result::from_error(error);
     assert_eq!(failure.index, C_INDEX_UNKNOWN);
@@ -2128,12 +2173,15 @@ fn close_failure_releases_only_confirmed_successes_including_later_siblings() {
         Ok(vec![
             Ok(()),
             Err(OpError::failed(
-                VfError::errno(None, libc::EIO as u32),
+                std::io::Error::from_raw_os_error(libc::EIO),
                 None,
             )),
             Ok(()),
             Err(OpError::unknown(
-                VfError::transport(None, "lost reply"),
+                vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "lost reply",
+                ),
                 None,
             )),
         ]),
@@ -3077,7 +3125,7 @@ fn abi_v3_vector_io_and_bounded_streaming() {
 }
 
 #[test]
-fn close_missing_reply_keeps_known_success_and_legacy_transport_category() {
+fn close_missing_reply_keeps_known_success_and_indeterminate_category() {
     let mut results = [vfsi_result::item_success(0); 2];
     let mut retired = Vec::new();
     let status = unit_results("close", &mut results, Ok(vec![Ok(())]), |index| {
@@ -3085,7 +3133,7 @@ fn close_missing_reply_keeps_known_success_and_legacy_transport_category() {
     });
     assert_eq!(retired, [0]);
     assert_eq!(status.index, 1);
-    assert_eq!(status.category, VFSI_ERROR_TRANSPORT);
+    assert_eq!(status.category, VFSI_ERROR_INDETERMINATE);
     assert_eq!(results[0].category, VFSI_ERROR_NONE);
     assert_eq!(results[1].category, VFSI_ERROR_INDETERMINATE);
 }
@@ -3120,24 +3168,44 @@ fn abi_v3_mkdir_reports_independent_successes_after_a_collision() {
 }
 
 #[test]
-fn unit_namespace_rejection_never_exports_an_out_of_range_error_index() {
-    let mut results = [
-        vfsi_result::base(0, VFSI_ERROR_NOT_ATTEMPTED, 0, "not attempted"),
-        vfsi_result::base(1, VFSI_ERROR_NOT_ATTEMPTED, 0, "not attempted"),
-    ];
-    let mut retired = Vec::new();
-    let status = unit_results(
-        "mkdir",
-        &mut results,
-        Err(VfError::errno(99, libc::EIO as u32)),
-        |index| retired.push(index),
-    );
-    assert_eq!(status.index, C_INDEX_UNKNOWN);
-    assert_eq!(status.category, VFSI_ERROR_TRANSPORT);
-    assert!(retired.is_empty());
-    assert!(results
-        .iter()
-        .all(|result| result.category == VFSI_ERROR_NOT_ATTEMPTED));
+fn unit_namespace_rejections_preserve_categories_without_input_attribution() {
+    for (cause, category, code) in [
+        (
+            std::io::Error::from_raw_os_error(libc::EIO),
+            VFSI_ERROR_FILESYSTEM,
+            libc::EIO as u32,
+        ),
+        (
+            std::io::Error::from(std::io::ErrorKind::Unsupported),
+            VFSI_ERROR_UNSUPPORTED,
+            LEGACY_ERROR_UNSUPPORTED,
+        ),
+        (
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Connection,
+                "rejected before dispatch",
+            ),
+            VFSI_ERROR_TRANSPORT,
+            LEGACY_ERROR_RPC,
+        ),
+    ] {
+        let mut results = [
+            vfsi_result::base(0, VFSI_ERROR_NOT_ATTEMPTED, 0, "not attempted"),
+            vfsi_result::base(1, VFSI_ERROR_NOT_ATTEMPTED, 0, "not attempted"),
+        ];
+        let mut retired = Vec::new();
+        let status = unit_results("mkdir", &mut results, Err(cause), |index| {
+            retired.push(index)
+        });
+        assert_eq!(status.index, C_INDEX_UNKNOWN);
+        assert_eq!(status.category, category);
+        assert_eq!(status.err_no, code);
+        assert!(retired.is_empty());
+        for (index, result) in results.iter().enumerate() {
+            assert_eq!(result.category, VFSI_ERROR_NOT_ATTEMPTED);
+            assert_eq!(result.index, index);
+        }
+    }
 }
 
 #[test]
@@ -3306,7 +3374,7 @@ fn legacy_listings_reject_unrepresentable_names_instead_of_delivering_empty_name
                 missing_after: usize::MAX,
                 fail_call: None,
                 write_calls: None,
-                open_preflight_error: None,
+                open_preflight_error: false,
                 read_size: None,
                 open_result_count: None,
                 read_result_count: None,
@@ -3363,7 +3431,7 @@ fn independent_io_fixture(malformed_reply: MalformedReply) -> *mut vfsi_fs {
             } else {
                 Some(Default::default())
             },
-            open_preflight_error: None,
+            open_preflight_error: false,
             read_size: if malformed_reply == MalformedReply::ReadReject {
                 None
             } else {
@@ -3460,7 +3528,7 @@ fn extended_vectors_keep_siblings_and_confirmed_failed_prefixes() {
 }
 
 #[test]
-fn extended_vectors_remap_rejections_after_invalid_handles() {
+fn extended_vectors_keep_rejections_unattributed_after_invalid_handles() {
     for mode in [MalformedReply::ReadReject, MalformedReply::WriteReject] {
         let fs = independent_io_fixture(mode);
         let mut results = [std::mem::MaybeUninit::<vfsi_io_result>::uninit(); 2];
@@ -3503,7 +3571,16 @@ fn extended_vectors_remap_rejections_after_invalid_handles() {
             unsafe { vfsi_pwritev_ex(fs, ops.as_mut_ptr(), 2, results.as_mut_ptr().cast()) }
         };
         assert_eq!(result.category, VFSI_ERROR_UNSUPPORTED);
-        assert_eq!(result.index, 1);
+        assert_eq!(result.index, C_INDEX_UNKNOWN);
+        // A local handle validation failure still has its own known slot;
+        // the backend rejects the accepted subset without attributing an input.
+        let results = results.map(|result| unsafe { result.assume_init() });
+        assert_eq!(results[0].failure_state, VFSI_IO_NOT_ATTEMPTED);
+        assert_eq!(results[0].status.index, 0);
+        assert_eq!(results[0].status.err_no, libc::EBADF as u32);
+        assert_eq!(results[1].failure_state, VFSI_IO_NOT_ATTEMPTED);
+        assert_eq!(results[1].status.index, 1);
+        assert!(buffer.iter().all(|byte| *byte == 0));
         unsafe {
             vfsi_free(fs);
         }

@@ -35,21 +35,23 @@ fn directory_stage_results(
             return (0..count)
                 .map(|_| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "excess directory stage outcomes"),
+                        vfsi_core::internal::errors::invalid_reply(
+                            "excess directory stage outcomes",
+                        ),
                         None,
                     ))
                 })
                 .collect();
         }
         Err(cause) => {
-            return (0..count)
-                .map(|_| Err(OpError::not_attempted(cause.clone())))
+            return vfsi_core::internal::errors::fanout(cause, count)
+                .map(|cause| Err(OpError::not_attempted(cause)))
                 .collect();
         }
     };
     results.resize_with(count, || {
         Err(OpError::unknown(
-            VfError::invalid_reply(None, "missing directory stage outcome"),
+            vfsi_core::internal::errors::invalid_reply("missing directory stage outcome"),
             None,
         ))
     });
@@ -59,7 +61,9 @@ fn directory_stage_results(
             .is_err_and(|error| error.progress().is_some())
         {
             *result = Err(OpError::unknown(
-                VfError::invalid_reply(None, "directory stage cannot report byte progress"),
+                vfsi_core::internal::errors::invalid_reply(
+                    "directory stage cannot report byte progress",
+                ),
                 None,
             ));
         }
@@ -108,7 +112,7 @@ pub fn remove_paths_with_options_impl_default<F: VectorBackend + ?Sized>(
         return Ok(Vec::new());
     }
     if options != RemoveOptions::default() {
-        return Err(VfError::unsupported(None));
+        return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
     }
     let files: Vec<_> = objs
         .iter()
@@ -121,15 +125,17 @@ pub fn remove_paths_with_options_impl_default<F: VectorBackend + ?Sized>(
     let mut output: Vec<Option<vfsi_core::OpResult<()>>> = (0..objs.len()).map(|_| None).collect();
     let mut indices = Vec::new();
     let mut attrs = Vec::new();
-    let mut fatal: Option<VfError> = None;
+    let mut fatal: Option<std::sync::Arc<std::io::Error>> = None;
     for (index, file) in files.iter().enumerate() {
         if let Some(cause) = &fatal {
-            output[index] = Some(Err(OpError::not_attempted(cause.clone())));
+            output[index] = Some(Err(OpError::not_attempted(
+                vfsi_core::internal::errors::from_shared(cause),
+            )));
             continue;
         }
-        if let Err(cause) = backend.before_remove_type(index) {
-            if cause.is_transport() {
-                fatal = Some(cause.clone());
+        if let Err(mut cause) = backend.before_remove_type(index) {
+            if vfsi_core::transport_kind(&(cause)).is_some() {
+                fatal = Some(vfsi_core::internal::errors::share_in_place(&mut cause));
             }
             output[index] = Some(Err(OpError::not_attempted(cause)));
         } else {
@@ -143,7 +149,9 @@ pub fn remove_paths_with_options_impl_default<F: VectorBackend + ?Sized>(
     }
     if let Some(cause) = fatal {
         for index in indices {
-            output[index] = Some(Err(OpError::not_attempted(cause.clone())));
+            output[index] = Some(Err(OpError::not_attempted(
+                vfsi_core::internal::errors::from_shared(&cause),
+            )));
         }
         return Ok(output.into_iter().map(Option::unwrap).collect());
     }
@@ -152,9 +160,9 @@ pub fn remove_paths_with_options_impl_default<F: VectorBackend + ?Sized>(
     for ((index, attrs), result) in indices.into_iter().zip(attrs).zip(results) {
         match result {
             Ok(()) if mode == RemoveMode::Contents && attrs.ftype != VfType::Directory => {
-                output[index] = Some(Err(OpError::not_attempted(VfError::errno(
-                    None, ERR_NOTDIR,
-                ))));
+                output[index] = Some(Err(OpError::not_attempted(
+                    std::io::Error::from_raw_os_error((ERR_NOTDIR) as i32),
+                )));
             }
             Ok(()) => ready.push((index, attrs.ftype)),
             Err(error) => {
@@ -163,15 +171,20 @@ pub fn remove_paths_with_options_impl_default<F: VectorBackend + ?Sized>(
         }
     }
     if let Some(cause) = output
-        .iter()
-        .filter_map(|slot| slot.as_ref())
-        .filter_map(|result| result.as_ref().err())
-        .find(|error| error.state() == FailureState::Unknown || error.cause().is_transport())
-        .map(|error| error.cause().clone())
+        .iter_mut()
+        .filter_map(|slot| slot.as_mut())
+        .filter_map(|result| result.as_mut().err())
+        .find(|error| {
+            error.state() == FailureState::Unknown
+                || vfsi_core::transport_kind(error.cause()).is_some()
+        })
+        .map(vfsi_core::internal::errors::share_op_cause)
     {
         for slot in &mut output {
             if slot.is_none() {
-                *slot = Some(Err(OpError::not_attempted(cause.clone())));
+                *slot = Some(Err(OpError::not_attempted(
+                    vfsi_core::internal::errors::from_shared(&cause),
+                )));
             }
         }
         return Ok(output.into_iter().map(Option::unwrap).collect());
@@ -192,25 +205,31 @@ pub fn remove_paths_with_options_impl_default<F: VectorBackend + ?Sized>(
         }
     }
     fatal = output
-        .iter()
-        .filter_map(|slot| slot.as_ref())
-        .filter_map(|result| result.as_ref().err())
-        .find(|error| error.state() == FailureState::Unknown || error.cause().is_transport())
-        .map(|error| error.cause().clone());
+        .iter_mut()
+        .filter_map(|slot| slot.as_mut())
+        .filter_map(|result| result.as_mut().err())
+        .find(|error| {
+            error.state() == FailureState::Unknown
+                || vfsi_core::transport_kind(error.cause()).is_some()
+        })
+        .map(vfsi_core::internal::errors::share_op_cause);
     for (index, kind) in ready {
         if output[index].is_some() {
             continue;
         }
         if let Some(cause) = &fatal {
-            output[index] = Some(Err(OpError::not_attempted(cause.clone())));
+            output[index] = Some(Err(OpError::not_attempted(
+                vfsi_core::internal::errors::from_shared(cause),
+            )));
             continue;
         }
         debug_assert_eq!(kind, VfType::Directory);
-        let result = remove_directory_root(backend, objs[index], mode == RemoveMode::Contents);
-        if let Err(error) = &result
-            && (error.state() == FailureState::Unknown || error.cause().is_transport())
+        let mut result = remove_directory_root(backend, objs[index], mode == RemoveMode::Contents);
+        if let Err(error) = &mut result
+            && (error.state() == FailureState::Unknown
+                || vfsi_core::transport_kind(error.cause()).is_some())
         {
-            fatal = Some(error.cause().clone());
+            fatal = Some(vfsi_core::internal::errors::share_op_cause(error));
         }
         output[index] = Some(result);
     }
@@ -247,7 +266,7 @@ fn remove_directory_root<F: VectorBackend + ?Sized>(
                     }
                     true
                 })
-                .map_err(|cause| OpError::failed(cause, None))?;
+                .map_err(|cause| OpError::failed(cause.into_cause(), None))?;
         }
         let mut next = Vec::new();
         let mut files = Vec::new();
@@ -307,7 +326,10 @@ pub fn vopen_dirs_impl_default<F: VectorBackend + ?Sized>(
                     if attrs.ftype == VfType::Directory {
                         Ok(VfDir::Path((*path).to_owned()))
                     } else {
-                        Err(OpError::failed(VfError::errno(None, ERR_NOTDIR), None))
+                        Err(OpError::failed(
+                            std::io::Error::from_raw_os_error((ERR_NOTDIR) as i32),
+                            None,
+                        ))
                     }
                 })
             })
@@ -320,6 +342,7 @@ pub fn open_dir_impl_default<F: VectorBackend + ?Sized>(
     path: &Path,
 ) -> VfResult<VfDir> {
     vfsi_core::internal::collect_vec_result(backend.vopen_dirs_impl(&[path]), 1)
+        .map_err(vfsi_core::IndexedError::into_cause)
         .map(|mut dirs| dirs.remove(0))
 }
 
@@ -339,6 +362,7 @@ pub fn remove_dir_contents_handle_with_options_impl_default<F: VectorBackend + ?
         backend.remove_dir_contents_handles_with_options_impl(&[dir], options),
         1,
     )
+    .map_err(vfsi_core::IndexedError::into_cause)
     .map(|_| ())
 }
 
@@ -360,7 +384,11 @@ pub fn remove_dir_contents_handles_with_options_impl_default<F: VectorBackend + 
                 paths.push(path.as_path());
                 indices.push(index);
             }
-            _ => output[index] = Some(Err(OpError::not_attempted(VfError::unsupported(None)))),
+            _ => {
+                output[index] = Some(Err(OpError::not_attempted(std::io::Error::from(
+                    std::io::ErrorKind::Unsupported,
+                ))))
+            }
         }
     }
     if !paths.is_empty() {
@@ -405,6 +433,7 @@ pub fn remove_dir_contents_path_with_options_impl_default<F: VectorBackend + ?Si
         ),
         1,
     )
+    .map_err(vfsi_core::IndexedError::into_cause)
     .map(|_| ())
 }
 
@@ -423,9 +452,10 @@ pub fn ensure_empty_dir_impl_default<F: VectorBackend + ?Sized>(
             vfsi_core::internal::collect_vec_result(
                 backend.vgetattrs_nofollow_impl(std::slice::from_mut(&mut attrs)),
                 1,
-            )?;
+            )
+            .map_err(vfsi_core::IndexedError::into_cause)?;
             if attrs.ftype != VfType::Directory {
-                return Err(VfError::errno(0, ERR_NOTDIR));
+                return Err(std::io::Error::from_raw_os_error((ERR_NOTDIR) as i32));
             }
             backend.remove_dir_contents_path_impl(dir)
         }
@@ -439,8 +469,9 @@ pub fn native_remove_impl_default<F: VectorBackend + ?Sized>(
     recursive: bool,
 ) -> VfResult<()> {
     vfsi_core::internal::collect_vec_result(backend.remove_paths_impl(&[path], recursive), 1)
+        .map_err(vfsi_core::IndexedError::into_cause)
         .map(|_| ())
-        .map_err(|error| error.with_context("remove", path))
+        .map_err(|error| vfsi_core::internal::errors::with_context(error, "remove", path))
 }
 
 pub fn native_remove_dir_contents_impl_default<F: VectorBackend + ?Sized>(
@@ -449,9 +480,13 @@ pub fn native_remove_dir_contents_impl_default<F: VectorBackend + ?Sized>(
 ) -> VfResult<()> {
     backend
         .remove_dir_contents_path_impl(path)
-        .map_err(|error| error.with_context("remove_dir_contents", path))
+        .map_err(|error| {
+            vfsi_core::internal::errors::with_context(error, "remove_dir_contents", path)
+        })
 }
 
 pub fn remove_tree<F: VectorBackend + ?Sized>(backend: &mut F, path: &Path) -> VfResult<()> {
-    vfsi_core::internal::collect_vec_result(backend.remove_paths_impl(&[path], true), 1).map(|_| ())
+    vfsi_core::internal::collect_vec_result(backend.remove_paths_impl(&[path], true), 1)
+        .map_err(vfsi_core::IndexedError::into_cause)
+        .map(|_| ())
 }

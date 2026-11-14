@@ -12,8 +12,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    DirEntry, Error as VfError, Nfs, OpenFlags, OpenOp, OwnedReadResult as ReadResult, Posix,
-    ReadIntoResult, ResourceLimits, Result as VfResult, WriteResult,
+    DirEntry, Nfs, OpenFlags, OpenOp, OwnedReadResult as ReadResult, Posix, ReadIntoResult,
+    ResourceLimits, Result as VfResult, WriteResult,
 };
 use vfsi_local::LocalBackend;
 use vfsi_sync::{FsClient, OpenFile};
@@ -26,7 +26,7 @@ impl Auto {
     /// The root is a namespace convention, not a security sandbox.
     pub fn new(root: impl AsRef<Path>) -> VfResult<Self> {
         let root = fs::canonicalize(root.as_ref())
-            .map_err(|e| VfError::from_io(0, e).with_context("connect", root.as_ref()))?;
+            .map_err(|e| vfsi_core::internal::errors::with_context(e, "connect", root.as_ref()))?;
         Ok(Self {
             mounted: Posix::new(&root)?.inner,
             root,

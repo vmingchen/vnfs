@@ -46,7 +46,7 @@ pub(super) fn attrs_from_metadata(metadata: &vfsi_sync::Attrs) -> vfsi_attrs {
     }
 }
 
-fn stat_impl(fs: &vfsi_fs, path: &std::path::Path) -> Result<VfAttrs, VfError> {
+fn stat_impl(fs: &vfsi_fs, path: &std::path::Path) -> Result<VfAttrs, std::io::Error> {
     let vpath = vpath_for(fs, path)?;
     let mut attrs = VfAttrs {
         file: FileOperand::from_os_path(&vpath),
@@ -56,9 +56,10 @@ fn stat_impl(fs: &vfsi_fs, path: &std::path::Path) -> Result<VfAttrs, VfError> {
     vfsi_sync::internal::collect_vec_result(
         lock_or_io(&fs.fs)?.vgetattrs_impl(std::slice::from_mut(&mut attrs)),
         1,
-    )?;
+    )
+    .map_err(vfsi_core::IndexedError::into_cause)?;
     if !attrs.returned.contains(mask()) {
-        return Err(VfError::errno(0, libc::ENOTSUP as u32));
+        return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
     }
     Ok(attrs)
 }
@@ -146,11 +147,9 @@ pub unsafe extern "C" fn vfsi_statv(
             };
             let path = match vpath_for(fs, &path) {
                 Ok(path) => path,
-                Err(error) => fail_batch!(
-                    results,
-                    vfsi_result::from_error(error.with_index(index)),
-                    false
-                ),
+                Err(error) => {
+                    fail_batch!(results, vfsi_result::from_cause(&error, Some(index)), false)
+                }
             };
             attrs.push(VfAttrs {
                 file: FileOperand::from_os_path(&path),
@@ -165,7 +164,7 @@ pub unsafe extern "C" fn vfsi_statv(
         if let Err(error) =
             vfsi_sync::internal::collect_vec_result(backend.vgetattrs_impl(&mut attrs), attrs.len())
         {
-            fail_batch!(results, vfsi_result::from_error(error), true);
+            fail_batch!(results, vfsi_result::from_indexed(error), true);
         }
         let mut first_failure = None;
         for (index, (op, attrs)) in ops.iter_mut().zip(&attrs).enumerate() {
@@ -236,11 +235,9 @@ pub unsafe extern "C" fn vfsi_setattrv(
             };
             let path = match vpath_for(fs, &path) {
                 Ok(path) => path,
-                Err(error) => fail_batch!(
-                    results,
-                    vfsi_result::from_error(error.with_index(index)),
-                    false
-                ),
+                Err(error) => {
+                    fail_batch!(results, vfsi_result::from_cause(&error, Some(index)), false)
+                }
             };
             let Some(masks) = AttrMask::from_bits(op.mask).filter(|masks| {
                 masks

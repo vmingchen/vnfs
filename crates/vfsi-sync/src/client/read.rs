@@ -45,8 +45,11 @@ impl<F: VectorBackend> FsClient<F> {
                 .checked_add(request.length)
                 .filter(|bytes| *bytes <= max_total_bytes)
                 .ok_or_else(|| {
-                    VfError::errno(index, libc::EFBIG as u32)
-                        .with_context("vread_native", request.file.path())
+                    vfsi_core::internal::errors::with_context(
+                        std::io::Error::from_raw_os_error(libc::EFBIG),
+                        "vread_native",
+                        request.file.path(),
+                    )
                 })?;
             let raw = self
                 .validate_owner(request.file, index)
@@ -81,18 +84,15 @@ impl<F: VectorBackend> FsClient<F> {
             let outcomes = self.lock()?.vread_impl(&reads);
             match outcomes {
                 Err(error) if rejected.is_empty() => {
-                    return Err(with_indexed_context(error, "vread_native", |index| {
-                        paths.get(index).copied()
-                    }));
+                    return Err(error);
                 }
-                Err(error) => reads
-                    .iter()
-                    .map(|_| Err(OpError::not_attempted(error.clone())))
+                Err(error) => vfsi_core::internal::errors::fanout(error, reads.len())
+                    .map(|error| Err(OpError::not_attempted(error)))
                     .collect(),
                 Ok(mut outcomes) if outcomes.len() <= reads.len() => {
                     outcomes.resize_with(reads.len(), || {
                         Err(OpError::unknown(
-                            VfError::invalid_reply(None, "missing read outcome"),
+                            vfsi_core::internal::errors::invalid_reply("missing read outcome"),
                             None,
                         ))
                     });
@@ -108,6 +108,7 @@ impl<F: VectorBackend> FsClient<F> {
                                         std::slice::from_ref(request),
                                         std::slice::from_ref(&result),
                                     )
+                                    .map_err(vfsi_core::IndexedError::into_cause)
                                     .map_err(|error| OpError::unknown(error, None))?;
                                     Ok(read_result(result))
                                 })
@@ -119,7 +120,9 @@ impl<F: VectorBackend> FsClient<F> {
                     .iter()
                     .map(|_| {
                         Err(OpError::unknown(
-                            VfError::invalid_reply(None, "read backend returned too many outcomes"),
+                            vfsi_core::internal::errors::invalid_reply(
+                                "read backend returned too many outcomes",
+                            ),
                             None,
                         ))
                     })
@@ -173,8 +176,11 @@ impl<F: VectorBackend> FsClient<F> {
                 .checked_add(request.buffer.len())
                 .filter(|bytes| *bytes <= max_bytes)
                 .ok_or_else(|| {
-                    VfError::errno(index, libc::EFBIG as u32)
-                        .with_context("vread_into_native", request.file.path())
+                    vfsi_core::internal::errors::with_context(
+                        std::io::Error::from_raw_os_error(libc::EFBIG),
+                        "vread_into_native",
+                        request.file.path(),
+                    )
                 })?;
             match self
                 .validate_owner(request.file, index)
@@ -225,18 +231,17 @@ impl<F: VectorBackend> FsClient<F> {
             };
             match outcomes {
                 Err(error) if rejected.is_empty() => {
-                    return Err(with_indexed_context(error, "vread_into_native", |index| {
-                        paths.get(index).copied()
-                    }));
+                    return Err(error);
                 }
-                Err(error) => reads
-                    .iter()
-                    .map(|_| Err(OpError::not_attempted(error.clone())))
+                Err(error) => vfsi_core::internal::errors::fanout(error, reads.len())
+                    .map(|error| Err(OpError::not_attempted(error)))
                     .collect(),
                 Ok(mut outcomes) if outcomes.len() <= reads.len() => {
                     outcomes.resize_with(reads.len(), || {
                         Err(OpError::unknown(
-                            VfError::invalid_reply(None, "missing buffered read outcome"),
+                            vfsi_core::internal::errors::invalid_reply(
+                                "missing buffered read outcome",
+                            ),
                             None,
                         ))
                     });
@@ -252,6 +257,7 @@ impl<F: VectorBackend> FsClient<F> {
                                         std::slice::from_ref(request),
                                         std::slice::from_ref(&result),
                                     )
+                                    .map_err(vfsi_core::IndexedError::into_cause)
                                     .map_err(|error| OpError::unknown(error, None))?;
                                     Ok(FsReadIntoResult {
                                         offset: result.offset,
@@ -267,7 +273,9 @@ impl<F: VectorBackend> FsClient<F> {
                     .iter()
                     .map(|_| {
                         Err(OpError::unknown(
-                            VfError::invalid_reply(None, "read backend returned too many outcomes"),
+                            vfsi_core::internal::errors::invalid_reply(
+                                "read backend returned too many outcomes",
+                            ),
                             None,
                         ))
                     })
@@ -312,20 +320,13 @@ impl<F: VectorBackend> FsClient<F> {
             .iter()
             .map(|path| FileOperand::from_os_path(path.as_ref()))
             .collect();
-        let mut outcomes = self
-            .lock()?
-            .vread_all_with_options_impl(&files, options)
-            .map_err(|error| {
-                with_indexed_context(error, "read_files", |index| {
-                    paths.get(index).map(|path| path.as_ref())
-                })
-            })?;
+        let mut outcomes = self.lock()?.vread_all_with_options_impl(&files, options)?;
         if outcomes.len() > paths.len() {
             outcomes = paths
                 .iter()
                 .map(|_| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "too many whole-file outcomes"),
+                        vfsi_core::internal::errors::invalid_reply("too many whole-file outcomes"),
                         None,
                     ))
                 })
@@ -333,7 +334,7 @@ impl<F: VectorBackend> FsClient<F> {
         } else {
             outcomes.resize_with(paths.len(), || {
                 Err(OpError::unknown(
-                    VfError::invalid_reply(None, "missing whole-file outcome"),
+                    vfsi_core::internal::errors::invalid_reply("missing whole-file outcome"),
                     None,
                 ))
             });
@@ -349,8 +350,7 @@ impl<F: VectorBackend> FsClient<F> {
                     .and_then(|data| {
                         if data.len() > remaining {
                             Err(OpError::unknown(
-                                VfError::invalid_reply(
-                                    None,
+                                vfsi_core::internal::errors::invalid_reply(
                                     "whole-file backend exceeded byte budget",
                                 ),
                                 None,
@@ -397,7 +397,7 @@ fn validate_read_error(
         error
     } else {
         OpError::unknown(
-            VfError::invalid_reply(None, "invalid read failure progress"),
+            vfsi_core::internal::errors::invalid_reply("invalid read failure progress"),
             None,
         )
     }

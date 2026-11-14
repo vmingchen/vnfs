@@ -1,7 +1,7 @@
 use crate::api::{ListDirOptions, TraversalCompletion, Vfsi, VfsiExt};
 use std::num::NonZeroUsize;
 use std::path::Path;
-use vfsi_core::{AttrMask, FailureState, VfError};
+use vfsi_core::{AttrMask, FailureState};
 
 /// Shared public contract; the caller owns and removes the fixture directory.
 pub fn public_directory_results<C: Vfsi>(fs: &C, other: &C, directory: &str, recursive: bool) {
@@ -46,7 +46,7 @@ pub fn public_directory_results<C: Vfsi>(fs: &C, other: &C, directory: &str, rec
     assert!(pages[0].is_ok() && pages[2].is_ok());
     let error = pages[1].as_ref().unwrap_err();
     assert_eq!(error.state(), FailureState::Failed);
-    assert_eq!(error.cause().index(), None);
+    let _: &std::io::Error = error.cause();
     assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
     assert!(error.progress().is_none());
     let mut pages = pages.into_iter();
@@ -85,8 +85,11 @@ pub fn public_directory_results<C: Vfsi>(fs: &C, other: &C, directory: &str, rec
     assert_eq!(pages.len(), 3);
     let error = pages[1].as_ref().unwrap_err();
     assert_eq!(error.state(), FailureState::NotAttempted);
-    assert_eq!(error.cause().raw_code(), libc::EBADF as u32);
-    assert_eq!(error.cause().index(), None);
+    assert_eq!(
+        vfsi_core::internal::errors::to_errno(error.cause()) as u32,
+        libc::EBADF as u32
+    );
+    let _: &std::io::Error = error.cause();
     for (index, previous) in [(0, first_name), (2, last_name)] {
         let page = pages[index].as_ref().unwrap();
         assert_eq!(page.listing.entries.len(), 1);
@@ -115,8 +118,8 @@ pub fn public_directory_results<C: Vfsi>(fs: &C, other: &C, directory: &str, rec
         })
         .unwrap();
     assert_eq!(result.len(), 3);
-    assert_eq!(result[0], Ok(TraversalCompletion::Complete));
-    assert_eq!(result[2], Ok(TraversalCompletion::Complete));
+    assert_eq!(result[0].as_ref().unwrap(), &TraversalCompletion::Complete);
+    assert_eq!(result[2].as_ref().unwrap(), &TraversalCompletion::Complete);
     assert_eq!(
         result[1].as_ref().unwrap_err().cause().kind(),
         std::io::ErrorKind::NotFound
@@ -130,7 +133,7 @@ pub fn public_directory_results<C: Vfsi>(fs: &C, other: &C, directory: &str, rec
         .vlistdirs(&[&moved, &last], options, |index, _| {
             visits[index] += 1;
             if index == 0 {
-                Err(VfError::errno(None, libc::EACCES as u32))
+                Err(std::io::Error::from_raw_os_error(libc::EACCES))
             } else {
                 Ok(std::ops::ControlFlow::Continue(()))
             }
@@ -147,10 +150,10 @@ pub fn public_directory_results<C: Vfsi>(fs: &C, other: &C, directory: &str, rec
         FailureState::Failed
     );
     assert_eq!(
-        result[0].as_ref().unwrap_err().cause().raw_code(),
+        vfsi_core::internal::errors::to_errno(result[0].as_ref().unwrap_err().cause()) as u32,
         libc::EACCES as u32
     );
-    assert_eq!(result[1], Ok(TraversalCompletion::Complete));
+    assert_eq!(result[1].as_ref().unwrap(), &TraversalCompletion::Complete);
 
     let mut seen = Vec::new();
     let result = fs
@@ -161,11 +164,11 @@ pub fn public_directory_results<C: Vfsi>(fs: &C, other: &C, directory: &str, rec
         .unwrap();
     assert_eq!(seen, [0]);
     assert_eq!(
-        result,
-        [
-            Ok(TraversalCompletion::Stopped),
-            Ok(TraversalCompletion::Stopped)
-        ]
+        result
+            .into_iter()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap(),
+        [TraversalCompletion::Stopped, TraversalCompletion::Stopped]
     );
 
     for options in [options.with_max_entries(1), options.with_max_path_bytes(0)] {
@@ -179,7 +182,7 @@ pub fn public_directory_results<C: Vfsi>(fs: &C, other: &C, directory: &str, rec
             .unwrap();
         assert_eq!(pages.len(), 2);
         assert_eq!(
-            pages[0].as_ref().unwrap_err().cause().raw_code(),
+            vfsi_core::internal::errors::to_errno(pages[0].as_ref().unwrap_err().cause()) as u32,
             libc::EFBIG as u32
         );
         assert!(pages[1].as_ref().unwrap().listing.entries.is_empty());
@@ -200,9 +203,9 @@ pub fn public_directory_results<C: Vfsi>(fs: &C, other: &C, directory: &str, rec
             )
             .unwrap();
         assert_eq!(result.len(), 3);
-        assert_eq!(result[0], Ok(TraversalCompletion::Complete));
+        assert_eq!(result[0].as_ref().unwrap(), &TraversalCompletion::Complete);
         assert!(result[1].is_err());
-        assert_eq!(result[2], Ok(TraversalCompletion::Complete));
+        assert_eq!(result[2].as_ref().unwrap(), &TraversalCompletion::Complete);
         assert!(seen.iter().any(|(index, path)| *index == 0 && path == Path::new(&format!("{moved}/deep/sub"))));
         assert!(seen.iter().any(|(index, _)| *index == 2));
     }

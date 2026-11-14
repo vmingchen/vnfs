@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use vfsi_core::{VfError, VfResult};
+use vfsi_core::VfResult;
 use vfsi_sync::{FsClient, OpenFile, StreamCompletion, VfsiExt};
 
 use super::{NfsClientBuilder, NfsVecFs};
@@ -76,7 +76,7 @@ impl NfsReadPoolOptions {
 
     fn effective(self) -> VfResult<(usize, usize)> {
         if self.max_buffered_bytes < self.chunk_size {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         let in_flight = self
             .max_in_flight
@@ -186,7 +186,10 @@ impl NfsReadPool {
                 worker_main(worker, worker_builder, command_rx, run_events)
             })
             .map_err(|error| {
-                VfError::transport(None, format!("failed to spawn read worker: {error}"))
+                vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    format!("failed to spawn read worker: {error}"),
+                )
             })?;
             threads.push(thread);
         }
@@ -218,20 +221,26 @@ impl NfsReadPool {
                 Ok(WorkerEvent::Stopped { worker }) if worker < worker_count => {
                     pool.worker_alive[worker] = false;
                     first_error.get_or_insert_with(|| {
-                        VfError::transport(
-                            None,
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
                             format!("read worker {worker} stopped during startup"),
                         )
                     });
                 }
                 Ok(_) => {
                     first_error.get_or_insert_with(|| {
-                        VfError::transport(None, "read worker sent an invalid startup response")
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
+                            "read worker sent an invalid startup response",
+                        )
                     });
                 }
                 Err(_) => {
                     first_error.get_or_insert_with(|| {
-                        VfError::transport(None, "read worker startup channel closed")
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
+                            "read worker startup channel closed",
+                        )
                     });
                     break;
                 }
@@ -273,7 +282,10 @@ impl NfsReadPool {
             } else {
                 self.worker_alive[worker] = false;
                 primary_error.get_or_insert_with(|| {
-                    VfError::transport(None, "read worker stopped before stream start")
+                    vfsi_core::internal::errors::transport(
+                        vfsi_core::TransportKind::Other,
+                        "read worker stopped before stream start",
+                    )
                 });
             }
         }
@@ -299,12 +311,18 @@ impl NfsReadPool {
                         Ok(None) if worker != 0 => {}
                         Ok(_) => {
                             primary_error.get_or_insert_with(|| {
-                                VfError::transport(None, "invalid read worker file-size response")
+                                vfsi_core::internal::errors::transport(
+                                    vfsi_core::TransportKind::Other,
+                                    "invalid read worker file-size response",
+                                )
                             });
                         }
                         Err(error) => {
-                            primary_error
-                                .get_or_insert(error.with_context("read_stream_pipelined", &path));
+                            primary_error.get_or_insert(vfsi_core::internal::errors::with_context(
+                                error,
+                                "read_stream_pipelined",
+                                &path,
+                            ));
                         }
                     }
                 }
@@ -317,20 +335,26 @@ impl NfsReadPool {
                     started_workers[worker] = true;
                     self.worker_alive[worker] = false;
                     primary_error.get_or_insert_with(|| {
-                        VfError::transport(
-                            None,
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
                             format!("read worker {worker} stopped during stream start"),
                         )
                     });
                 }
                 Ok(_) => {
                     primary_error.get_or_insert_with(|| {
-                        VfError::transport(None, "read worker sent an unexpected stream response")
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
+                            "read worker sent an unexpected stream response",
+                        )
                     });
                 }
                 Err(_) => {
                     primary_error.get_or_insert_with(|| {
-                        VfError::transport(None, "read worker channel closed during stream start")
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
+                            "read worker channel closed during stream start",
+                        )
                     });
                     break;
                 }
@@ -338,7 +362,10 @@ impl NfsReadPool {
         }
 
         if primary_error.is_none() && file_size.is_none() {
-            primary_error = Some(VfError::transport(None, "read worker omitted file size"));
+            primary_error = Some(vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "read worker omitted file size",
+            ));
         }
         let size = file_size.unwrap_or(0);
         let chunk_size = self.options.chunk_size;
@@ -361,7 +388,7 @@ impl NfsReadPool {
             {
                 let offset = next_job
                     .checked_mul(chunk_size as u64)
-                    .ok_or_else(|| VfError::errno(0, libc::EOVERFLOW as u32))?;
+                    .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
                 let length = (size - offset).min(chunk_size as u64) as usize;
                 let worker = (next_job as usize) % self.effective_workers;
                 if self.commands[worker]
@@ -373,8 +400,8 @@ impl NfsReadPool {
                     })
                     .is_err()
                 {
-                    primary_error = Some(VfError::transport(
-                        None,
+                    primary_error = Some(vfsi_core::internal::errors::transport(
+                        vfsi_core::TransportKind::Other,
                         format!("read worker {worker} stopped before range {next_job}"),
                     ));
                     self.worker_alive[worker] = false;
@@ -397,7 +424,10 @@ impl NfsReadPool {
                 }) if result_stream == stream_id => {
                     if jobs.remove(&index) != Some(worker) {
                         primary_error.get_or_insert_with(|| {
-                            VfError::transport(None, "read worker returned an unassigned range")
+                            vfsi_core::internal::errors::transport(
+                                vfsi_core::TransportKind::Other,
+                                "read worker returned an unassigned range",
+                            )
                         });
                         continue;
                     }
@@ -405,8 +435,8 @@ impl NfsReadPool {
                         Ok(data) => {
                             let expected_offset = index.saturating_mul(chunk_size as u64);
                             if expected_offset >= size {
-                                primary_error = Some(VfError::transport(
-                                    None,
+                                primary_error = Some(vfsi_core::internal::errors::transport(
+                                    vfsi_core::TransportKind::Other,
                                     format!("worker returned out-of-range index {index}"),
                                 ));
                                 continue;
@@ -414,15 +444,15 @@ impl NfsReadPool {
                             let expected_len =
                                 (size - expected_offset).min(chunk_size as u64) as usize;
                             if offset != expected_offset || data.len() != expected_len {
-                                primary_error = Some(VfError::transport(
-                                    None,
+                                primary_error = Some(vfsi_core::internal::errors::transport(
+                                    vfsi_core::TransportKind::Other,
                                     format!("worker returned malformed range {index}"),
                                 ));
                                 continue;
                             }
                             if pending.insert(index, data).is_some() {
-                                primary_error = Some(VfError::transport(
-                                    None,
+                                primary_error = Some(vfsi_core::internal::errors::transport(
+                                    vfsi_core::TransportKind::Other,
                                     format!("worker returned range {index} more than once"),
                                 ));
                                 continue;
@@ -454,12 +484,12 @@ impl NfsReadPool {
                             }
                         }
                         Err(error) => {
-                            let index = usize::try_from(index).unwrap_or(usize::MAX);
-                            primary_error = Some(
-                                error
-                                    .with_index(index)
-                                    .with_context("read_stream_pipelined", &path),
-                            );
+                            let _index = usize::try_from(index).unwrap_or(usize::MAX);
+                            primary_error = Some(vfsi_core::internal::errors::with_context(
+                                error,
+                                "read_stream_pipelined",
+                                &path,
+                            ));
                         }
                     }
                 }
@@ -473,20 +503,26 @@ impl NfsReadPool {
                         jobs.remove(&index);
                     }
                     primary_error.get_or_insert_with(|| {
-                        VfError::transport(
-                            None,
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
                             format!("read worker {worker} stopped during range reads"),
                         )
                     });
                 }
                 Ok(_) => {
                     primary_error.get_or_insert_with(|| {
-                        VfError::transport(None, "read worker sent an unexpected range response")
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
+                            "read worker sent an unexpected range response",
+                        )
                     });
                 }
                 Err(_) => {
                     primary_error.get_or_insert_with(|| {
-                        VfError::transport(None, "read worker channel closed during range reads")
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
+                            "read worker channel closed during range reads",
+                        )
                     });
                     break;
                 }
@@ -506,8 +542,8 @@ impl NfsReadPool {
                 }) if result_stream == stream_id => {
                     if jobs.remove(&index) != Some(worker) {
                         primary_error.get_or_insert_with(|| {
-                            VfError::transport(
-                                None,
+                            vfsi_core::internal::errors::transport(
+                                vfsi_core::TransportKind::Other,
                                 "read worker returned an unassigned range while draining",
                             )
                         });
@@ -516,7 +552,11 @@ impl NfsReadPool {
                     if primary_error.is_none()
                         && let Err(error) = result
                     {
-                        primary_error = Some(error.with_context("read_stream_pipelined", &path));
+                        primary_error = Some(vfsi_core::internal::errors::with_context(
+                            error,
+                            "read_stream_pipelined",
+                            &path,
+                        ));
                     }
                 }
                 Ok(WorkerEvent::Stopped { worker }) if worker < self.effective_workers => {
@@ -529,20 +569,26 @@ impl NfsReadPool {
                         jobs.remove(&index);
                     }
                     primary_error.get_or_insert_with(|| {
-                        VfError::transport(
-                            None,
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
                             format!("read worker {worker} stopped while draining"),
                         )
                     });
                 }
                 Ok(_) => {
                     primary_error.get_or_insert_with(|| {
-                        VfError::transport(None, "read worker sent an unexpected drain response")
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
+                            "read worker sent an unexpected drain response",
+                        )
                     });
                 }
                 Err(_) => {
                     primary_error.get_or_insert_with(|| {
-                        VfError::transport(None, "read worker channel closed while draining")
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
+                            "read worker channel closed while draining",
+                        )
                     });
                     break;
                 }
@@ -583,7 +629,10 @@ impl NfsReadPool {
             {
                 self.worker_alive[worker] = false;
                 error.get_or_insert_with(|| {
-                    VfError::transport(None, "read worker stopped before stream cleanup")
+                    vfsi_core::internal::errors::transport(
+                        vfsi_core::TransportKind::Other,
+                        "read worker stopped before stream cleanup",
+                    )
                 });
             } else {
                 awaiting.push(worker);
@@ -617,20 +666,26 @@ impl NfsReadPool {
                     finished_workers[worker] = true;
                     self.worker_alive[worker] = false;
                     error.get_or_insert_with(|| {
-                        VfError::transport(
-                            None,
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
                             format!("read worker {worker} stopped during cleanup"),
                         )
                     });
                 }
                 Ok(_) => {
                     error.get_or_insert_with(|| {
-                        VfError::transport(None, "read worker sent an unexpected cleanup response")
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
+                            "read worker sent an unexpected cleanup response",
+                        )
                     });
                 }
                 Err(_) => {
                     error.get_or_insert_with(|| {
-                        VfError::transport(None, "read worker channel closed during cleanup")
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
+                            "read worker channel closed during cleanup",
+                        )
                     });
                     self.worker_alive.fill(false);
                     break;
@@ -714,7 +769,7 @@ fn worker_main(
             WorkerCommand::Start { stream_id, path } => {
                 let result = (|| {
                     if active.is_some() {
-                        return Err(VfError::errno(0, libc::EBUSY as u32));
+                        return Err(std::io::Error::from_raw_os_error(libc::EBUSY));
                     }
                     let (file, size) = open_stream_file(
                         || client.open(&path),
@@ -724,7 +779,9 @@ fn worker_main(
                                     .attrs(vfsi_core::Target::file(file))?
                                     .len()
                                     .map(Some)
-                                    .ok_or_else(|| VfError::unsupported(0))
+                                    .ok_or_else(|| {
+                                        std::io::Error::from(std::io::ErrorKind::Unsupported)
+                                    })
                             } else {
                                 Ok(None)
                             }
@@ -748,13 +805,10 @@ fn worker_main(
             } => {
                 let result = match active.as_ref() {
                     Some((active_id, file)) if *active_id == stream_id => {
-                        read_range(&client, file, offset, length).map_err(|error| {
-                            error.with_index(usize::try_from(index).unwrap_or(usize::MAX))
-                        })
+                        read_range(&client, file, offset, length)
                     }
-                    _ => Err(VfError::errno(
-                        usize::try_from(index).unwrap_or(usize::MAX),
-                        vfsi_core::ERR_EBADF,
+                    _ => Err(std::io::Error::from_raw_os_error(
+                        (vfsi_core::ERR_EBADF) as i32,
                     )),
                 };
                 let _ = events.send(WorkerEvent::Chunk {
@@ -770,7 +824,7 @@ fn worker_main(
                     Some((active_id, file)) if active_id == stream_id => file.close(),
                     Some(active_file) => {
                         active = Some(active_file);
-                        Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput))
+                        Err(std::io::Error::from(std::io::ErrorKind::InvalidInput))
                     }
                     None => Ok(()),
                 };
@@ -819,21 +873,25 @@ fn read_range(
     while filled < length {
         let current_offset = offset
             .checked_add(filled as u64)
-            .ok_or_else(|| VfError::errno(0, libc::EOVERFLOW as u32))?;
-        let results = client.read_batch(
-            [vfsi_core::api::ReadOp::into(
-                file,
-                current_offset,
-                &mut data[filled..],
-            )],
-            vfsi_core::api::ReadOptions::new()
-                .with_max_total_bytes(std::num::NonZeroUsize::new(length - filled).unwrap()),
-        )?;
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
+        let results = client
+            .read_batch(
+                [vfsi_core::api::ReadOp::into(
+                    file,
+                    current_offset,
+                    &mut data[filled..],
+                )],
+                vfsi_core::api::ReadOptions::new()
+                    .with_max_total_bytes(std::num::NonZeroUsize::new(length - filled).unwrap()),
+            )
+            .map_err(vfsi_core::IndexedError::into_cause)?;
         let count = results[0].bytes_read();
         if count == 0 {
-            return Err(
-                VfError::errno(0, libc::EIO as u32).with_context("read_pipeline", file.path())
-            );
+            return Err(vfsi_core::internal::errors::with_context(
+                std::io::Error::from_raw_os_error(libc::EIO),
+                "read_pipeline",
+                file.path(),
+            ));
         }
         filled += count;
     }
@@ -878,7 +936,7 @@ mod tests {
         let (file, size) = open_stream_file(
             || {
                 steps.borrow_mut().push("open");
-                Ok::<_, vfsi_core::VfError>(41)
+                Ok::<_, std::io::Error>(41)
             },
             |file| {
                 steps.borrow_mut().push("attrs");
@@ -898,8 +956,8 @@ mod tests {
 
         let closed = Cell::new(false);
         let error = open_stream_file(
-            || Ok::<_, vfsi_core::VfError>(42),
-            |_| Err(vfsi_core::VfError::errno(0, libc::EIO as u32)),
+            || Ok::<_, std::io::Error>(42),
+            |_| Err(std::io::Error::from_raw_os_error(libc::EIO)),
             |file| {
                 assert_eq!(file, 42);
                 closed.set(true);
@@ -907,7 +965,7 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert_eq!(error.raw_code(), libc::EIO as u32);
+        assert_eq!(crate::test_native_code(&(error)), libc::EIO as u32);
         assert!(closed.get());
     }
 

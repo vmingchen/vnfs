@@ -10,7 +10,7 @@ You do not need to construct protocol operations yourself.
 
 ```no_run
 # #[cfg(feature = "nfs")]
-# fn main() -> vnfs::Result<()> {
+# fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 use vnfs::files::{Vfsi, VfsiExt, ReadOp};
 use vnfs::nfs::{Nfs};
 

@@ -13,7 +13,7 @@ use std::{fs::File, io, sync::Arc};
 #[cfg(test)]
 use vfsi_core::FailureState;
 use vfsi_core::IoProgress;
-use vfsi_core::{OpError, OpResult, VfError};
+use vfsi_core::{OpError, OpResult};
 
 pub struct Read<'a> {
     pub file: &'a Arc<File>,
@@ -85,7 +85,7 @@ pub fn read_owned_via_borrowed(
             .into_iter()
             .map(|_| {
                 Err(OpError::unknown(
-                    VfError::invalid_reply(None, "invalid read result cardinality"),
+                    vfsi_core::internal::errors::invalid_reply("invalid read result cardinality"),
                     None,
                 ))
             })
@@ -105,7 +105,7 @@ pub fn read_owned_via_borrowed(
             };
             if count > op.buffer.len() {
                 return Err(OpError::unknown(
-                    VfError::invalid_reply(None, "read exceeds destination length"),
+                    vfsi_core::internal::errors::invalid_reply("read exceeds destination length"),
                     None,
                 ));
             }
@@ -122,7 +122,7 @@ pub fn read_ordered(operations: &mut [Read<'_>]) -> Vec<OpResult<usize>> {
         .map(|op| {
             op.file
                 .read_at(op.buffer, op.offset)
-                .map_err(|error| OpError::failed(VfError::from_io(None, error), None))
+                .map_err(|error| OpError::failed(error, None))
         })
         .collect()
 }
@@ -134,9 +134,8 @@ pub(super) fn write_complete(
     mut write: impl FnMut(&[u8], u64) -> io::Result<usize>,
 ) -> OpResult<usize> {
     if offset.checked_add(data.len() as u64).is_none() {
-        return Err(OpError::not_attempted(VfError::errno(
-            None,
-            libc::EOVERFLOW as u32,
+        return Err(OpError::not_attempted(std::io::Error::from_raw_os_error(
+            libc::EOVERFLOW,
         )));
     }
     let mut completed = 0;
@@ -149,19 +148,19 @@ pub(super) fn write_complete(
         match write(&data[completed..], offset + completed as u64) {
             Ok(0) => {
                 return Err(OpError::failed(
-                    VfError::from_io(None, io::Error::from(io::ErrorKind::WriteZero)),
+                    io::Error::from(io::ErrorKind::WriteZero),
                     progress(),
                 ));
             }
             Ok(count) if count > data.len() - completed => {
                 return Err(OpError::unknown(
-                    VfError::invalid_reply(None, "write exceeds source length"),
+                    vfsi_core::internal::errors::invalid_reply("write exceeds source length"),
                     progress(),
                 ));
             }
             Ok(count) => completed += count,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(OpError::failed(VfError::from_io(None, error), progress())),
+            Err(error) => return Err(OpError::failed(error, progress())),
         }
     }
     Ok(completed)
@@ -189,7 +188,7 @@ pub fn sync_ordered(files: &[&Arc<File>], data_only: bool) -> Vec<OpResult<()>> 
             } else {
                 file.sync_all()
             }
-            .map_err(|error| OpError::failed(VfError::from_io(None, error), None))
+            .map_err(|error| OpError::failed(error, None))
         })
         .collect()
 }
@@ -240,7 +239,7 @@ mod tests {
                 .map(|op| {
                     op.buffer[..3].copy_from_slice(b"abc");
                     Err(OpError::unknown(
-                        VfError::errno(None, libc::EIO as u32),
+                        std::io::Error::from_raw_os_error(libc::EIO),
                         Some(IoProgress::Read(vfsi_core::api::ReadResult::buffered(
                             op.offset, 3, false,
                         ))),
@@ -380,8 +379,8 @@ mod tests {
         assert_eq!(error.state(), FailureState::NotAttempted);
         assert!(error.progress().is_none());
         assert_eq!(
-            write_complete(u64::MAX, b"", |_, _| panic!("empty write")),
-            Ok(0)
+            write_complete(u64::MAX, b"", |_, _| panic!("empty write")).unwrap(),
+            0
         );
     }
 }

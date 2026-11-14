@@ -1,33 +1,37 @@
 use vfsi_core::api::ReadResult;
-use vfsi_core::{FailureState, IoProgress, OpError, OpResult, VecResult, VfError};
+use vfsi_core::{FailureState, IoProgress, OpError, OpResult, VecResult};
 
 #[test]
-fn independent_results_keep_successes_on_both_sides_of_failure() -> Result<(), VfError> {
+fn independent_results_keep_successes_on_both_sides_of_failure() -> Result<(), std::io::Error> {
     let results: VecResult<u32> = Ok(vec![
         Ok(10),
         Err(OpError::failed(
-            VfError::errno(99, libc::ENOENT as u32),
+            std::io::Error::from_raw_os_error(libc::ENOENT),
             None,
         )),
         Ok(30),
     ]);
     let results = results?;
-    assert_eq!(results[0], Ok(10));
-    assert_eq!(results[2], Ok(30));
+    assert_eq!(*results[0].as_ref().unwrap(), 10);
+    assert_eq!(*results[2].as_ref().unwrap(), 30);
     let error = results[1].as_ref().unwrap_err();
     assert_eq!(error.state(), FailureState::Failed);
-    assert_eq!(error.cause().index(), None);
     assert_eq!(
-        error.cause().status(),
+        vfsi_core::native_status(error.cause()),
         Some(vfsi_core::StatusCode::Errno(libc::ENOENT as u32))
     );
     Ok(())
 }
 #[test]
 fn unsubmitted_and_unknown_are_distinct_even_with_the_same_cause() {
-    let cause = VfError::transport(None, "lost reply");
-    let untouched = OpError::not_attempted(cause.clone());
-    let unknown = OpError::unknown(cause, Some(IoProgress::Write { bytes_written: 17 }));
+    let cause =
+        vfsi_core::internal::errors::transport(vfsi_core::TransportKind::Other, "lost reply");
+    let mut causes = vfsi_core::internal::errors::fanout(cause, 2);
+    let untouched = OpError::not_attempted(causes.next().unwrap());
+    let unknown = OpError::unknown(
+        causes.next().unwrap(),
+        Some(IoProgress::Write { bytes_written: 17 }),
+    );
     assert_eq!(untouched.state(), FailureState::NotAttempted);
     assert_eq!(untouched.progress(), None);
     assert_eq!(unknown.state(), FailureState::Unknown);
@@ -43,7 +47,7 @@ fn owned_and_borrowed_read_prefixes_survive_errors() {
         ReadResult::buffered(8, 3, false),
     ] {
         let error = OpError::failed(
-            VfError::errno(8, libc::EIO as u32),
+            std::io::Error::from_raw_os_error(libc::EIO),
             Some(IoProgress::Read(read.clone())),
         );
         assert_eq!(error.progress(), Some(&IoProgress::Read(read)));
@@ -52,21 +56,36 @@ fn owned_and_borrowed_read_prefixes_survive_errors() {
 #[test]
 fn native_cause_context_and_source_survive_normalization() {
     use std::error::Error;
-    let cause = VfError::from_io(23, std::io::Error::from_raw_os_error(libc::EACCES))
-        .with_context("vread", "/file");
-    let error = OpError::failed(cause.clone(), None);
-    assert_eq!(error.cause().path(), cause.path());
-    assert_eq!(error.cause().operation(), cause.operation());
-    assert_eq!(error.cause().status(), cause.status());
+    let cause = vfsi_core::internal::errors::with_context(
+        std::io::Error::from_raw_os_error(libc::EACCES),
+        "vread",
+        "/file",
+    );
+    let error = OpError::failed(cause, None);
+    assert_eq!(
+        vfsi_core::internal::errors::path(error.cause()),
+        Some(std::path::Path::new("/file"))
+    );
+    assert_eq!(
+        vfsi_core::internal::errors::operation(error.cause()),
+        Some("vread")
+    );
+    assert_eq!(
+        vfsi_core::native_status(error.cause()),
+        Some(vfsi_core::StatusCode::Errno(libc::EACCES as u32))
+    );
     assert!(error.source().unwrap().source().is_some());
-    let legacy = error.into_cause().with_index(2);
-    assert_eq!(legacy.index(), Some(2));
-    assert_eq!(legacy.kind(), std::io::ErrorKind::PermissionDenied);
+    let selected = vfsi_core::IndexedError::at(2, error.into_cause());
+    assert_eq!(selected.index(), Some(2));
+    assert_eq!(
+        selected.cause().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
 }
 #[test]
 fn outcome_storage_is_bounded_and_successes_need_no_error_allocation() {
     use std::mem::size_of;
-    assert!(size_of::<OpError>() <= size_of::<VfError>() + 2 * size_of::<usize>());
+    assert!(size_of::<OpError>() <= size_of::<std::io::Error>() + 2 * size_of::<usize>());
     assert!(size_of::<OpResult<usize>>() <= size_of::<OpError>() + size_of::<usize>());
     let empty: VecResult<()> = Ok(Vec::new());
     assert!(matches!(empty, Ok(values) if values.is_empty()));
@@ -78,11 +97,11 @@ fn all_success_collector_uses_input_order_and_checks_cardinality() {
     let result = collect_vec_result::<u8>(
         Ok(vec![
             Err(OpError::failed(
-                VfError::errno(None, libc::EACCES as u32),
+                std::io::Error::from_raw_os_error(libc::EACCES),
                 None,
             )),
             Err(OpError::failed(
-                VfError::errno(None, libc::ENOENT as u32),
+                std::io::Error::from_raw_os_error(libc::ENOENT),
                 None,
             )),
         ]),
@@ -90,11 +109,12 @@ fn all_success_collector_uses_input_order_and_checks_cardinality() {
     )
     .unwrap_err();
     assert_eq!(result.index(), Some(0));
-    assert_eq!(result.raw_code(), libc::EACCES as u32);
-    assert!(
-        collect_vec_result(Ok(vec![Ok(7)]), 2)
-            .unwrap_err()
-            .is_transport()
+    assert_eq!(result.cause().raw_os_error(), Some(libc::EACCES));
+    let malformed = collect_vec_result(Ok(vec![Ok(7)]), 2).unwrap_err();
+    assert_eq!(malformed.index(), None);
+    assert_eq!(
+        vfsi_core::transport_kind(malformed.cause()),
+        Some(vfsi_core::TransportKind::InvalidReply)
     );
     assert_eq!(
         collect_vec_result(Ok(vec![Ok(7), Ok(8)]), 2).unwrap(),
@@ -121,7 +141,7 @@ fn all_success_collector_drops_owned_siblings_on_failure_or_bad_shape() {
         Ok(vec![
             Ok(Owned(dropped.clone())),
             Err(OpError::failed(
-                VfError::errno(None, libc::EIO as u32),
+                std::io::Error::from_raw_os_error(libc::EIO),
                 None,
             )),
             Ok(Owned(dropped.clone())),
@@ -139,11 +159,11 @@ fn consuming_error_parts_moves_owned_progress_without_copying() {
     let data = vec![1, 2, 3];
     let pointer = data.as_ptr();
     let error = OpError::unknown(
-        VfError::transport(None, "lost suffix"),
+        vfsi_core::internal::errors::transport(vfsi_core::TransportKind::Other, "lost suffix"),
         Some(IoProgress::Read(ReadResult::owned(4, data, false))),
     );
     let (cause, state, progress) = error.into_parts();
-    assert!(cause.is_transport());
+    assert!(vfsi_core::transport_kind(&(cause)).is_some());
     assert_eq!(state, FailureState::Unknown);
     let Some(IoProgress::Read(read)) = progress else {
         panic!("missing read")
@@ -155,13 +175,13 @@ fn consuming_error_parts_moves_owned_progress_without_copying() {
 #[test]
 fn write_prefix_merging_retains_knowledge_and_rejects_invalid_progress() {
     use vfsi_core::internal::add_write_prefix;
-    use vfsi_core::{FailureState, IoProgress, OpError, VfError};
+    use vfsi_core::{FailureState, IoProgress, OpError};
     for state in [
         FailureState::NotAttempted,
         FailureState::Failed,
         FailureState::Unknown,
     ] {
-        let cause = VfError::errno(8, libc::EIO as u32);
+        let cause = std::io::Error::from_raw_os_error(libc::EIO);
         let error = match state {
             FailureState::NotAttempted => OpError::not_attempted(cause),
             FailureState::Failed => OpError::failed(cause, None),
@@ -176,7 +196,6 @@ fn write_prefix_merging_retains_knowledge_and_rejects_invalid_progress() {
                 state
             }
         );
-        assert_eq!(merged.cause().index(), None);
         assert_eq!(
             merged.progress(),
             Some(&IoProgress::Write { bytes_written: 2 })
@@ -192,7 +211,7 @@ fn write_prefix_merging_retains_knowledge_and_rejects_invalid_progress() {
         )),
     ] {
         let merged = add_write_prefix(
-            OpError::failed(VfError::errno(None, libc::EIO as u32), Some(progress)),
+            OpError::failed(std::io::Error::from_raw_os_error(libc::EIO), Some(progress)),
             2,
             5,
         );
@@ -222,7 +241,7 @@ fn accepted_subgroup_normalization_retains_known_owners_and_quarantines_bad_coun
         Ok(vec![
             Ok(owned()),
             Err(OpError::failed(
-                VfError::errno(99, libc::EACCES as u32),
+                std::io::Error::from_raw_os_error(libc::EACCES),
                 None,
             )),
             Ok(owned()),
@@ -231,7 +250,10 @@ fn accepted_subgroup_normalization_retains_known_owners_and_quarantines_bad_coun
     );
     assert_eq!(drops.load(Ordering::SeqCst), 0);
     assert!(result[0].is_ok() && result[2].is_ok());
-    assert_eq!(result[1].as_ref().err().unwrap().cause().index(), None);
+    assert_eq!(
+        vfsi_core::native_status(result[1].as_ref().err().unwrap().cause()),
+        Some(vfsi_core::StatusCode::Errno(libc::EACCES as u32))
+    );
     drop(result);
     assert_eq!(drops.load(Ordering::SeqCst), 2);
 
@@ -252,7 +274,10 @@ fn accepted_subgroup_normalization_retains_known_owners_and_quarantines_bad_coun
         result[0].as_ref().err().unwrap().state(),
         FailureState::Unknown
     );
-    let result = vfsi_core::internal::vec_result_slots::<Owned>(Err(VfError::unsupported(None)), 2);
+    let result = vfsi_core::internal::vec_result_slots::<Owned>(
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
+        2,
+    );
     assert!(
         result
             .iter()
@@ -263,11 +288,15 @@ fn accepted_subgroup_normalization_retains_known_owners_and_quarantines_bad_coun
 #[test]
 fn selected_attribution_distinguishes_outer_rejection_from_input_zero() {
     use vfsi_core::internal::collect_vec_result;
-    let outer = collect_vec_result::<()>(Err(VfError::unsupported(None)), 1).unwrap_err();
+    let outer = collect_vec_result::<()>(
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
+        1,
+    )
+    .unwrap_err();
     assert_eq!(outer.index(), None);
     let selected = collect_vec_result::<()>(
-        Ok(vec![Err(OpError::not_attempted(VfError::unsupported(
-            None,
+        Ok(vec![Err(OpError::not_attempted(std::io::Error::from(
+            std::io::ErrorKind::Unsupported,
         )))]),
         1,
     )
@@ -301,7 +330,7 @@ fn accepted_rejection_fanout_keeps_the_original_opaque_source_alive() {
         }
     }
     let drops = Arc::new(AtomicUsize::new(0));
-    let cause = VfError::from_io(None, std::io::Error::other(Opaque(drops.clone())));
+    let cause = std::io::Error::other(Opaque(drops.clone()));
     let mut slots = vfsi_core::internal::vec_result_slots::<()>(Err(cause), 3);
     for slot in &slots {
         let error = slot.as_ref().unwrap_err();

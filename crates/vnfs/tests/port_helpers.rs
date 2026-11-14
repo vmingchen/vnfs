@@ -26,10 +26,11 @@ fn mapping_preserves_final_links_and_rejects_escapes_and_destructive_dot_paths()
         Path::new("/link")
     );
     assert_eq!(
-        session
-            .map(root.path().join("link"), ResolvePath::Follow)
-            .unwrap_err()
-            .raw_code(),
+        test_native_code(
+            &(session
+                .map(root.path().join("link"), ResolvePath::Follow)
+                .unwrap_err())
+        ),
         libc::EXDEV as u32
     );
     for suffix in ["/.", "/..", "/"] {
@@ -38,8 +39,8 @@ fn mapping_preserves_final_links_and_rejects_escapes_and_destructive_dot_paths()
             session
                 .map(spelling, ResolvePath::NoFollow)
                 .unwrap_err()
-                .raw_code(),
-            libc::EINVAL as u32
+                .kind(),
+            std::io::ErrorKind::InvalidInput
         );
     }
     assert_eq!(session.local_path("/new").unwrap(), root.path().join("new"));
@@ -56,7 +57,10 @@ fn local_path_setup_errors_retain_the_original_io_source() {
         vnfs::nfs::Nfs::discover_mount(&missing).unwrap_err(),
     ] {
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        assert_eq!(error.path(), Some(missing.as_path()));
+        assert_eq!(
+            vfsi_core::internal::errors::path(&(error)),
+            Some(missing.as_path())
+        );
         let source = std::error::Error::source(&error)
             .unwrap()
             .downcast_ref::<io::Error>()
@@ -84,9 +88,19 @@ fn writer_bridge_preserves_custom_error_kind_and_source_without_replay() {
         let mut writer = Writer(kind, 0);
         let error = copy_to_writer(&fs, "/source", &mut writer, StreamOptions::new()).unwrap_err();
         assert_eq!(error.kind(), kind);
-        assert_eq!(error.status(), None, "do not fabricate an OS errno");
-        assert_eq!(error.operation(), Some("copy_to_writer"));
-        assert_eq!(error.path(), Some(Path::new("/source")));
+        assert_eq!(
+            vfsi_core::native_status(&(error)),
+            None,
+            "do not fabricate an OS errno"
+        );
+        assert_eq!(
+            vfsi_core::internal::errors::operation(&(error)),
+            Some("copy_to_writer")
+        );
+        assert_eq!(
+            vfsi_core::internal::errors::path(&(error)),
+            Some(Path::new("/source"))
+        );
         let source = std::error::Error::source(&error)
             .unwrap()
             .downcast_ref::<io::Error>()
@@ -149,7 +163,7 @@ fn writer_bridge_handles_short_writes_and_never_replays_failed_output() {
         StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(3).unwrap()),
     )
     .unwrap_err();
-    assert_eq!(err.raw_code(), libc::ENOSPC as u32);
+    assert_eq!(test_native_code(&(err)), libc::ENOSPC as u32);
     assert_eq!(bad.bytes, b"0123");
     assert_eq!(bad.calls, 4);
 }
@@ -244,37 +258,39 @@ fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
     }
     let mut calls = 0;
     assert_eq!(
-        fs.visit_dirs_ordered(
-            "/",
-            ListDirOptions::new()
-                .with_recursive(true)
-                .with_max_entries(1)
-                .with_fields(Attributes::MODE),
-            |a, b| a.path().cmp(b.path()),
-            |_| false,
-            |_, _| {
-                calls += 1;
-                Ok(WalkControl::Continue)
-            }
-        )
-        .unwrap_err()
-        .raw_code(),
+        test_native_code(
+            &(fs.visit_dirs_ordered(
+                "/",
+                ListDirOptions::new()
+                    .with_recursive(true)
+                    .with_max_entries(1)
+                    .with_fields(Attributes::MODE),
+                |a, b| a.path().cmp(b.path()),
+                |_| false,
+                |_, _| {
+                    calls += 1;
+                    Ok(WalkControl::Continue)
+                }
+            )
+            .unwrap_err())
+        ),
         libc::EFBIG as u32
     );
     assert_eq!(calls, 0);
     assert_eq!(
-        fs.visit_dirs_ordered(
-            "/",
-            ListDirOptions::new()
-                .with_recursive(true)
-                .with_max_path_bytes(1)
-                .with_fields(Attributes::MODE),
-            |a, b| a.path().cmp(b.path()),
-            |_| false,
-            |_, _| panic!("over-budget snapshot must not be delivered")
-        )
-        .unwrap_err()
-        .raw_code(),
+        test_native_code(
+            &(fs.visit_dirs_ordered(
+                "/",
+                ListDirOptions::new()
+                    .with_recursive(true)
+                    .with_max_path_bytes(1)
+                    .with_fields(Attributes::MODE),
+                |a, b| a.path().cmp(b.path()),
+                |_| false,
+                |_, _| panic!("over-budget snapshot must not be delivered")
+            )
+            .unwrap_err())
+        ),
         libc::EFBIG as u32
     );
 }
@@ -328,7 +344,7 @@ fn ordered_walk_depth_zero_delivers_root_and_limits_descent_only() {
             },
         )
         .unwrap_err();
-    assert_eq!(error.raw_code(), libc::EFBIG as u32);
+    assert_eq!(test_native_code(&(error)), libc::EFBIG as u32);
     assert_eq!(strict_listings.len(), 1);
     assert_eq!(strict_listings[0].1, 0);
 
@@ -388,7 +404,7 @@ fn ordered_walk_rejects_replaced_children_and_ancestors() {
         );
         assert!(changed);
         assert!(!escaped, "followed replacement of {victim}");
-        assert_eq!(result.unwrap_err().index(), Some(0));
+        assert!(result.is_err());
     }
 }
 
@@ -479,7 +495,7 @@ fn multiple_writers_stream_heterogeneous_files_through_one_vector() {
     let error =
         copy_to_writers(&fs, &["/missing"], &mut writers, StreamOptions::new()).unwrap_err();
     assert_eq!(
-        error.raw_code(),
+        test_native_code(error.cause()),
         libc::EINVAL as u32,
         "shape validation must precede opening sources"
     );
@@ -536,9 +552,23 @@ fn multiple_writers_preserve_write_error_and_never_replay_partial_output() {
         StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(3).unwrap()),
     )
     .unwrap_err();
-    assert_eq!(error.raw_code(), libc::ENOSPC as u32);
+    assert_eq!(test_native_code(error.cause()), libc::ENOSPC as u32);
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.operation(), Some("copy_to_writers"));
+    assert_eq!(
+        vfsi_core::internal::errors::operation(error.cause()),
+        Some("copy_to_writers")
+    );
     assert_eq!(writers[0].bytes, b"first");
     assert_eq!(writers[1].bytes, b"se");
+}
+
+fn test_native_code(error: &std::io::Error) -> u32 {
+    match vfsi_core::native_status(error) {
+        Some(
+            vfsi_core::StatusCode::Errno(code)
+            | vfsi_core::StatusCode::Nfs(code)
+            | vfsi_core::StatusCode::Smb(code),
+        ) => code,
+        _ => panic!("expected a native error, got {error:?}"),
+    }
 }

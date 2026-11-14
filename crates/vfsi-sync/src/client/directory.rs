@@ -22,7 +22,7 @@ impl<F: VectorBackend> FsClient<F> {
     ) -> vfsi_core::VecResult<crate::DirectoryPage> {
         use vfsi_core::OpError;
         if paths.len() != cursors.len() || page_size == 0 {
-            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         if paths.is_empty() {
             return Ok(Vec::new());
@@ -45,7 +45,7 @@ impl<F: VectorBackend> FsClient<F> {
             .map(|(result, path)| {
                 result.and_then(|(attrs, next, children)| {
                     let malformed = |message| {
-                        OpError::unknown(VfError::invalid_reply(None, message), None)
+                        OpError::unknown(vfsi_core::internal::errors::invalid_reply(message), None)
                             .with_context("vlistdir_pages", path)
                     };
                     if children.len() != attrs.len()
@@ -114,9 +114,7 @@ impl<F: VectorBackend> FsClient<F> {
         }
         let paths: Vec<_> = paths.iter().map(AsRef::as_ref).collect();
         let mut backend = self.lock()?;
-        let mut results = backend
-            .vopen_dirs_impl(&paths)
-            .map_err(|cause| link_error(cause, &paths, "vopen_dirs"))?;
+        let mut results = backend.vopen_dirs_impl(&paths)?;
         let own = |dir, index: usize| FsDir {
             inner: Arc::clone(&self.inner),
             dir: Some(dir),
@@ -147,10 +145,17 @@ impl<F: VectorBackend> FsClient<F> {
                     continue;
                 };
                 if let Some(&first) = seen.get(&id) {
-                    let cause = VfError::invalid_reply(None, "duplicate directory descriptor");
+                    let cause = vfsi_core::internal::errors::invalid_reply(
+                        "duplicate directory descriptor",
+                    );
                     if let Ok(dir) = std::mem::replace(
                         &mut results[first],
-                        Err(OpError::unknown(cause.clone(), None)),
+                        Err(OpError::unknown(
+                            vfsi_core::internal::errors::invalid_reply(
+                                "duplicate directory descriptor",
+                            ),
+                            None,
+                        )),
                     ) {
                         drop(own(dir, first));
                     }
@@ -168,10 +173,12 @@ impl<F: VectorBackend> FsClient<F> {
                     VfDir::Descriptor { fd, .. } if fd >= 0 => Ok(own(dir, index)),
                     VfDir::Path(_) => {
                         drop(own(dir, index));
-                        Err(OpError::not_attempted(VfError::unsupported(None)))
+                        Err(OpError::not_attempted(std::io::Error::from(
+                            std::io::ErrorKind::Unsupported,
+                        )))
                     }
                     _ => Err(OpError::unknown(
-                        VfError::invalid_reply(None, "invalid directory descriptor"),
+                        vfsi_core::internal::errors::invalid_reply("invalid directory descriptor"),
                         None,
                     )),
                 })
@@ -198,10 +205,9 @@ impl<F: VectorBackend> FsClient<F> {
         let mut paths = Vec::new();
         for (index, dir) in dirs.iter().enumerate() {
             if !Arc::ptr_eq(&self.inner, &dir.inner) || dir.is_closed() {
-                slots[index] = Some(Err(OpError::not_attempted(VfError::errno(
-                    None,
-                    crate::ERR_EBADF,
-                ))
+                slots[index] = Some(Err(OpError::not_attempted(
+                    std::io::Error::from_raw_os_error((crate::ERR_EBADF) as i32),
+                )
                 .with_context("vremove_dir_contents", &dir.path)));
             } else {
                 native.push(dir.dir.as_ref().expect("live owned directory"));
@@ -217,9 +223,8 @@ impl<F: VectorBackend> FsClient<F> {
                 "vremove_dir_contents",
             )
             .unwrap_or_else(|cause| {
-                native
-                    .iter()
-                    .map(|_| Err(OpError::not_attempted(cause.clone())))
+                vfsi_core::internal::errors::fanout(cause, native.len())
+                    .map(|cause| Err(OpError::not_attempted(cause)))
                     .collect()
             });
             for (index, result) in indices.into_iter().zip(results) {

@@ -8,8 +8,8 @@ use std::sync::{
 use vfsi_sync::api::{ReadOp as AppReadOp, ReadOptions};
 use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::{
-    FileOperand, FsClient, OpenOp, ReadOp, ReadResult, SetAttrsOp, Target, VfAttrs, VfError,
-    VfOffset, VfResult, Vfsi, VfsiExt, WriteOp, WriteResult,
+    FileOperand, FsClient, OpenOp, ReadOp, ReadResult, SetAttrsOp, Target, VfAttrs, VfOffset,
+    VfResult, Vfsi, VfsiExt, WriteOp, WriteResult,
 };
 
 #[derive(Default)]
@@ -69,20 +69,20 @@ impl HandleBackend for ReadBackend {
         })
     }
     fn write_impl(&mut self, _: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult> {
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
     fn seek_impl(&mut self, _: &FileOperand, _: SeekFrom) -> VfResult<u64> {
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
     fn metadata_impl(
         &mut self,
         _: Target<'_, FileOperand>,
         _: vfsi_sync::api::AttrsOptions,
     ) -> VfResult<VfAttrs> {
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
     fn set_attributes_impl(&mut self, _: &SetAttrsOp<Target<'_, FileOperand>>) -> VfResult<()> {
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
 }
 impl VectorBackend for ReadBackend {
@@ -93,10 +93,7 @@ impl VectorBackend for ReadBackend {
         modes: &[u32],
     ) -> vfsi_sync::VecResult<vfsi_sync::FileOperand> {
         if paths.len() != flags.len() || paths.len() != modes.len() {
-            return Err(vfsi_sync::VfError::from_kind(
-                None,
-                std::io::ErrorKind::InvalidInput,
-            ));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         Ok(paths
             .iter()
@@ -104,7 +101,7 @@ impl VectorBackend for ReadBackend {
             .zip(modes)
             .map(|((path, flags), mode)| {
                 self.open_raw_impl(path, *flags, *mode).map_err(|cause| {
-                    if cause.is_transport() {
+                    if vfsi_core::transport_kind(&cause).is_some() {
                         vfsi_sync::OpError::unknown(cause, None)
                     } else {
                         vfsi_sync::OpError::failed(cause, None)
@@ -130,11 +127,23 @@ fn fixture() -> (FsClient<ReadBackend>, Arc<AtomicUsize>) {
     let dispatches = Arc::clone(&backend.dispatches);
     (FsClient::new(backend), dispatches)
 }
-fn assert_closed(error: VfError, index: usize, operation: &str) {
-    assert_eq!(error.raw_code(), vfsi_sync::ERR_EBADF);
+fn assert_closed(error: std::io::Error, operation: &str) {
+    assert_eq!(
+        vfsi_core::internal::errors::to_errno(&error) as u32,
+        vfsi_sync::ERR_EBADF
+    );
+    assert_eq!(
+        vfsi_core::internal::errors::path(&error),
+        Some(Path::new("/closed"))
+    );
+    assert_eq!(
+        vfsi_core::internal::errors::operation(&error),
+        Some(operation)
+    );
+}
+fn assert_selected_closed(error: vfsi_core::IndexedError, index: usize, operation: &str) {
     assert_eq!(error.index(), Some(index));
-    assert_eq!(error.path(), Some(Path::new("/closed")));
-    assert_eq!(error.operation(), Some(operation));
+    assert_closed(error.into_cause(), operation);
 }
 #[test]
 fn owned_reads_isolate_closed_slots_including_zero_length() {
@@ -163,9 +172,9 @@ fn owned_reads_isolate_closed_slots_including_zero_length() {
                 if index == closed_index {
                     let error = result.unwrap_err();
                     assert_eq!(error.state(), vfsi_core::FailureState::NotAttempted);
-                    assert_eq!(error.cause().index(), None);
+                    let _: &std::io::Error = error.cause();
                     assert!(error.progress().is_none());
-                    assert_closed(error.into_cause().with_index(index), index, "vread_native");
+                    assert_closed(error.into_cause(), "vread_native");
                 } else {
                     assert_eq!(result.unwrap().data(), Some(&b"a"[..length]));
                 }
@@ -208,13 +217,9 @@ fn buffered_reads_leave_closed_storage_untouched_and_fill_valid_siblings() {
                 if index == closed_index {
                     let error = result.unwrap_err();
                     assert_eq!(error.state(), vfsi_core::FailureState::NotAttempted);
-                    assert_eq!(error.cause().index(), None);
+                    let _: &std::io::Error = error.cause();
                     assert!(error.progress().is_none());
-                    assert_closed(
-                        error.into_cause().with_index(index),
-                        index,
-                        "vread_into_native",
-                    );
+                    assert_closed(error.into_cause(), "vread_into_native");
                 } else {
                     let read = result.unwrap();
                     assert!(read.is_buffered());
@@ -254,7 +259,7 @@ fn mixed_whole_and_range_failure_retains_original_slot_without_blocking_phases()
             ReadOptions::new(),
         )
         .unwrap_err();
-    assert_closed(error, 3, "vread_native");
+    assert_selected_closed(error, 3, "vread_native");
     assert_eq!(
         dispatches.load(Ordering::SeqCst),
         2,
@@ -280,7 +285,7 @@ fn mixed_buffer_failure_keeps_valid_buffer_effects_and_original_error_slot() {
             ReadOptions::new(),
         )
         .unwrap_err();
-    assert_closed(error, 3, "vread_into_native");
+    assert_selected_closed(error, 3, "vread_into_native");
     assert_eq!(first, *b"a");
     assert_eq!(second, [0xdd]);
     assert_eq!(
@@ -331,7 +336,7 @@ fn singleton_closed_read_controls_keep_index_zero() {
     let (client, dispatches) = fixture();
     let mut closed = client.open("/closed").unwrap();
     closed.try_close().unwrap();
-    assert_closed(
+    assert_selected_closed(
         client
             .read_batch([AppReadOp::range(&closed, 0, 1)], ReadOptions::new())
             .unwrap_err(),
@@ -339,7 +344,7 @@ fn singleton_closed_read_controls_keep_index_zero() {
         "vread_native",
     );
     let mut buffer = [0xcc];
-    assert_closed(
+    assert_selected_closed(
         client
             .read_batch(
                 [AppReadOp::into(&closed, 0, &mut buffer)],

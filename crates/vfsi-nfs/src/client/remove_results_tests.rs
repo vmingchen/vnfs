@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::Arc;
 use vfsi_core::{
-    FailureState, TransportKind, VfError,
+    FailureState, TransportKind,
     internal::faults::{FaultScript, OpenFaultPoint},
 };
 
@@ -70,8 +70,7 @@ fn remove_results_preserve_chained_packing_status_and_submission_boundaries() {
             let fault = point.map(|point| {
                 Arc::new(FaultScript::one(
                     point,
-                    VfError::transport_with_kind(
-                        None,
+                    vfsi_core::internal::errors::transport(
                         TransportKind::Timeout,
                         "selected REMOVE reply unavailable",
                     ),
@@ -105,7 +104,7 @@ fn remove_results_preserve_chained_packing_status_and_submission_boundaries() {
                 if let Some(state) = state {
                     let error = result.as_ref().unwrap_err();
                     assert_eq!(error.state(), state, "{paths}/{phase}/{index}");
-                    assert_eq!(error.cause().index(), None);
+                    let _: &std::io::Error = error.cause();
                     assert!(error.progress().is_none());
                 } else {
                     assert!(result.is_ok(), "{paths}/{phase}/{index}: {result:?}");
@@ -159,7 +158,7 @@ fn remove_empty_invalid_and_predispatch_rejection_never_send_mutations() {
         let root = client.root().clone();
         let fault = Arc::new(FaultScript::one(
             OpenFaultPoint::BeforeRemoveCompound { first: 0 },
-            VfError::errno(None, libc::EACCES as u32),
+            std::io::Error::from_raw_os_error(libc::EACCES),
         ));
         client.set_fault_injector(fault.clone());
         let _ = crate::compound::thread_compound_stats();
@@ -190,7 +189,7 @@ fn remove_empty_invalid_and_predispatch_rejection_never_send_mutations() {
         }
         .unwrap_err();
         assert_eq!(
-            error.status(),
+            vfsi_core::native_status(&(error)),
             Some(vfsi_core::StatusCode::Errno(libc::EACCES as u32))
         );
         assert!(fault.is_consumed());

@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::Arc;
 use vfsi_core::{
-    FailureState, TransportKind, VfError,
+    FailureState, TransportKind,
     internal::faults::{FaultScript, OpenFaultPoint},
 };
 
@@ -82,8 +82,7 @@ fn rename_results_preserve_independent_names_and_submission_boundaries() {
             let fault = point.map(|point| {
                 Arc::new(FaultScript::one(
                     point,
-                    VfError::transport_with_kind(
-                        None,
+                    vfsi_core::internal::errors::transport(
                         TransportKind::Timeout,
                         "selected rename reply unavailable",
                     ),
@@ -117,16 +116,19 @@ fn rename_results_preserve_independent_names_and_submission_boundaries() {
                 if let Some(state) = state {
                     let error = result.as_ref().unwrap_err();
                     assert_eq!(error.state(), state, "{paths}/{phase}/{index}");
-                    assert_eq!(error.cause().index(), None);
+                    let _: &std::io::Error = error.cause();
                     assert!(error.progress().is_none());
                     if phase == "oversize" {
                         assert_eq!(
-                            error.cause().status(),
+                            vfsi_core::native_status(error.cause()),
                             Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_REQ_TOO_BIG))
                         );
                     }
                     if phase == "before" || phase == "lost" {
-                        assert_eq!(error.cause().transport_kind(), Some(TransportKind::Timeout));
+                        assert_eq!(
+                            vfsi_core::transport_kind(error.cause()),
+                            Some(TransportKind::Timeout)
+                        );
                     }
                 } else {
                     assert!(result.is_ok(), "{paths}/{phase}/{index}: {result:?}");
@@ -196,10 +198,10 @@ fn rename_pre_dispatch_faults_preserve_error_domain_and_do_not_send_mutations() 
     for paths in [false, true] {
         let mut client = NfsClient::connect_minor(&server, minor).unwrap();
         let root = client.root().clone();
-        let cause = VfError::errno(None, libc::EACCES as u32);
+        let cause = std::io::Error::from_raw_os_error(libc::EACCES);
         let fault = Arc::new(FaultScript::one(
             OpenFaultPoint::BeforeRenameCompound { first: 0 },
-            cause.clone(),
+            cause,
         ));
         client.set_fault_injector(fault.clone());
         let _ = crate::compound::thread_compound_stats();
@@ -221,9 +223,12 @@ fn rename_pre_dispatch_faults_preserve_error_domain_and_do_not_send_mutations() 
                 .unwrap_err()
         };
         assert!(fault.is_consumed());
-        assert_eq!(error.domain(), cause.domain());
-        assert_eq!(error.raw_code(), libc::EACCES as u32);
-        assert_eq!(error.index(), None);
+        assert_eq!(
+            vfsi_core::native_status(&error),
+            Some(vfsi_core::StatusCode::Errno(libc::EACCES as u32))
+        );
+        assert_eq!(crate::test_native_code(&(error)), libc::EACCES as u32);
+        let _: &std::io::Error = &error;
         assert_eq!(crate::compound::thread_compound_stats().0, 0);
     }
 }

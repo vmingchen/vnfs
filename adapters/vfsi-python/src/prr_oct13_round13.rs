@@ -11,7 +11,19 @@ fn ranged_read_transport_never_becomes_semantic_recovery() {
         }
         let backend = FaultBackend::new(
             &root.0,
-            Some(VfError::transport(index, "injected read transport")),
+            Some(match index {
+                Some(index) => IndexedError::at(
+                    index,
+                    vfsi_core::internal::errors::transport(
+                        vfsi_core::TransportKind::Other,
+                        "injected read transport",
+                    ),
+                ),
+                None => IndexedError::unattributed(vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "injected read transport",
+                )),
+            }),
         );
         let calls = backend.read_calls.clone();
         let client = client(backend);
@@ -63,7 +75,13 @@ fn ranged_read_semantic_failure_keeps_unaffected_paths_without_replay() {
         for name in ["a", "b", "c"] {
             std::fs::write(root.0.join(name), name.as_bytes()).unwrap();
         }
-        let backend = FaultBackend::new(&root.0, Some(VfError::errno(index, ERR_NOENT)));
+        let backend = FaultBackend::new(
+            &root.0,
+            Some(IndexedError::at(
+                index,
+                std::io::Error::from_raw_os_error((ERR_NOENT) as i32),
+            )),
+        );
         let calls = backend.read_calls.clone();
         let client = client(backend);
         Python::attach(|py| {

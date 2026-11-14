@@ -45,13 +45,20 @@ pub trait VfsiExt: Vfsi {
     /// Acquire all directory handles in one vector, selecting the first error
     /// in input order. On failure, successful sibling handles are dropped and
     /// their cleanup owners release or queue the native resources.
-    fn open_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<Self::Dir>> {
+    fn open_dirs<P: AsRef<Path>>(
+        &self,
+        paths: &[P],
+    ) -> std::result::Result<Vec<Self::Dir>, crate::IndexedError> {
         crate::internal::collect_vec_result(self.vopen_dirs(paths), paths.len())
     }
 
     /// Query one target through the vector filesystem-statistics engine.
     fn statfs<P: crate::AsTarget<Self::File>>(&self, target: P) -> Result<crate::FilesystemStats> {
-        single_completion(self.statfs_all(&[target])?, "statfs backend")
+        single_completion(
+            self.statfs_all(&[target])
+                .map_err(crate::IndexedError::into_cause)?,
+            "statfs backend",
+        )
     }
 
     /// Query all targets with one vector call, requiring every input to succeed.
@@ -60,7 +67,7 @@ pub trait VfsiExt: Vfsi {
     fn statfs_all<P: crate::AsTarget<Self::File>>(
         &self,
         targets: &[P],
-    ) -> Result<Vec<crate::FilesystemStats>> {
+    ) -> std::result::Result<Vec<crate::FilesystemStats>, crate::IndexedError> {
         crate::internal::collect_vec_result(self.vstatfs(targets), targets.len())
     }
 
@@ -75,11 +82,11 @@ pub trait VfsiExt: Vfsi {
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, FileHandle, WriteOp};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
-    /// let file = fs.open("/config")?;
+    /// # fn example(fs: &impl Vfsi) -> std::result::Result<(), vfsi_core::IndexedError> {
+    /// let file = fs.open("/config").map_err(vfsi_core::IndexedError::unattributed)?;
     /// let mut header = [0_u8; 128];
     /// let result = fs.read_batch([vfsi_core::api::ReadOp::into(&file, 0, &mut header)], Default::default());
-    /// let close = file.close();
+    /// let close = file.close().map_err(vfsi_core::IndexedError::unattributed);
     /// let bytes = result?[0].bytes_read();
     /// close?;
     /// println!("read {bytes} bytes");
@@ -99,10 +106,10 @@ pub trait VfsiExt: Vfsi {
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, FileHandle, WriteOp};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
-    /// let file = fs.create("/output")?;
+    /// # fn example(fs: &impl Vfsi) -> std::result::Result<(), vfsi_core::IndexedError> {
+    /// let file = fs.create("/output").map_err(vfsi_core::IndexedError::unattributed)?;
     /// let result = fs.write_batch(&[WriteOp::at(&file, 0, b"complete contents")], vfsi_core::api::WriteOptions::new().with_write_all(true));
-    /// let close = file.close();
+    /// let close = file.close().map_err(vfsi_core::IndexedError::unattributed);
     /// result?;
     /// close?;
     /// # Ok(())
@@ -139,22 +146,24 @@ pub trait VfsiExt: Vfsi {
     fn open_with(&self, request: OpenOp) -> Result<Self::File> {
         let requests = [request];
         self.open_batch(&requests)
+            .map_err(crate::IndexedError::into_cause)
             .and_then(|files| single_completion(files, "vopen"))
-            .map_err(|error| error.with_context("open", requests[0].path()))
+            .map_err(|error| {
+                crate::internal::errors::with_context(error, "open", requests[0].path())
+            })
     }
 
     /// Open all requested handles or select the first error in input order.
     /// The vector executes once. On failure, close every successful sibling in
     /// one vector and retain failed cleanup through handle Drop. This discards
     /// other errors and certainty; it does not roll back creation or truncation.
-    fn open_batch(&self, requests: &[OpenOp]) -> Result<Vec<Self::File>> {
-        let outcomes = self.vopen(requests).map_err(|error| {
-            if error.index().is_some_and(|index| index >= requests.len()) {
-                crate::VfError::invalid_reply(None, "invalid open rejection index")
-            } else {
-                error
-            }
-        })?;
+    fn open_batch(
+        &self,
+        requests: &[OpenOp],
+    ) -> std::result::Result<Vec<Self::File>, crate::IndexedError> {
+        let outcomes = self
+            .vopen(requests)
+            .map_err(crate::IndexedError::unattributed)?;
         let bad_count = outcomes.len() != requests.len();
         if !bad_count && outcomes.iter().all(|result| result.is_ok()) {
             return Ok(outcomes
@@ -167,12 +176,16 @@ pub trait VfsiExt: Vfsi {
         for (index, outcome) in outcomes.into_iter().enumerate() {
             match outcome {
                 Ok(file) => files.push(file),
-                Err(error) if first.is_none() => first = Some(error.into_cause().with_index(index)),
+                Err(error) if first.is_none() => {
+                    first = Some(crate::IndexedError::at(index, error.into_cause()))
+                }
                 Err(_) => {}
             }
         }
         let primary = if bad_count {
-            crate::VfError::invalid_reply(None, "invalid vector outcome count")
+            crate::IndexedError::unattributed(crate::internal::errors::invalid_reply(
+                "invalid vector outcome count",
+            ))
         } else {
             first.expect("failed open outcome")
         };
@@ -190,20 +203,26 @@ pub trait VfsiExt: Vfsi {
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, OpenFlags, OpenOp, WriteOp};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
+    /// # fn example(fs: &impl Vfsi) -> std::result::Result<(), vfsi_core::IndexedError> {
     /// let files = fs.open_batch(&[OpenOp::new("/config", OpenFlags::READ)])?;
     /// fs.close_files(files)?; // Observe a close error instead of discarding it in Drop.
     /// # Ok(())
     /// # }
     /// ```
-    fn close_files(&self, mut files: Vec<Self::File>) -> Result<()> {
+    fn close_files(
+        &self,
+        mut files: Vec<Self::File>,
+    ) -> std::result::Result<(), crate::IndexedError> {
         self.close_batch(&mut files)
     }
 
     /// Close all handles, retaining cleanup ownership for unsuccessful inputs.
     /// Select the first error in input order after all outcomes are available;
     /// this deliberately discards sibling errors, not successful cleanup.
-    fn close_batch(&self, files: &mut [Self::File]) -> Result<()> {
+    fn close_batch(
+        &self,
+        files: &mut [Self::File],
+    ) -> std::result::Result<(), crate::IndexedError> {
         crate::internal::collect_vec_result(self.vclose(files), files.len()).map(|_| ())
     }
 
@@ -225,7 +244,8 @@ pub trait VfsiExt: Vfsi {
         let path = path.as_ref();
         let files = self
             .read_files_with_options(&[path], options)
-            .map_err(|error| error.with_context("read", path))?;
+            .map_err(crate::IndexedError::into_cause)
+            .map_err(|error| crate::internal::errors::with_context(error, "read", path))?;
         single_completion(files, "read")
     }
     /// Read complete files in input order using vectorized whole-file reads.
@@ -236,13 +256,16 @@ pub trait VfsiExt: Vfsi {
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
+    /// # fn example(fs: &impl Vfsi) -> std::result::Result<(), vfsi_core::IndexedError> {
     /// let contents = fs.read_files(&["/file-1", "/file-2"])?;
     /// for bytes in contents { println!("{} bytes", bytes.len()); }
     /// # Ok(())
     /// # }
     /// ```
-    fn read_files<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<Vec<u8>>> {
+    fn read_files<P: AsRef<Path>>(
+        &self,
+        paths: &[P],
+    ) -> std::result::Result<Vec<Vec<u8>>, crate::IndexedError> {
         self.read_files_with_options(paths, crate::api::ReadOptions::default())
     }
 
@@ -255,7 +278,7 @@ pub trait VfsiExt: Vfsi {
         &self,
         ops: impl IntoIterator<Item = crate::api::ReadOp<'a, Self::File>>,
         options: crate::api::ReadOptions,
-    ) -> Result<Vec<crate::api::ReadResult>> {
+    ) -> std::result::Result<Vec<crate::api::ReadResult>, crate::IndexedError> {
         let mut count = 0usize;
         let result = {
             let mut ops = ops.into_iter().inspect(|_| count += 1);
@@ -272,7 +295,7 @@ pub trait VfsiExt: Vfsi {
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, ReadOptions, WriteOp};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
+    /// # fn example(fs: &impl Vfsi) -> std::result::Result<(), vfsi_core::IndexedError> {
     /// let files = fs.read_files_with_options(&["/config"],
     ///     ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(1024 * 1024).unwrap()))?;
     /// # let _ = files;
@@ -283,7 +306,7 @@ pub trait VfsiExt: Vfsi {
         &self,
         paths: &[P],
         options: crate::api::ReadOptions,
-    ) -> Result<Vec<Vec<u8>>> {
+    ) -> std::result::Result<Vec<Vec<u8>>, crate::IndexedError> {
         let results = self.read_batch(
             paths
                 .iter()
@@ -296,15 +319,19 @@ pub trait VfsiExt: Vfsi {
             .map(|(index, result)| {
                 let complete = result.offset() == 0 && result.eof();
                 let data = result.into_data().ok_or_else(|| {
-                    crate::api::Error::invalid_reply(
-                        Some(index),
-                        "whole-file vread_native omitted owned data",
+                    crate::IndexedError::at(
+                        index,
+                        crate::internal::errors::invalid_reply(
+                            "whole-file vread_native omitted owned data",
+                        ),
                     )
                 })?;
                 if !complete {
-                    return Err(crate::api::Error::invalid_reply(
-                        Some(index),
-                        "whole-file vread_native returned incomplete or invalid data",
+                    return Err(crate::IndexedError::at(
+                        index,
+                        crate::internal::errors::invalid_reply(
+                            "whole-file vread_native returned incomplete or invalid data",
+                        ),
                     ));
                 }
                 Ok(data)
@@ -350,10 +377,15 @@ pub trait VfsiExt: Vfsi {
         options: crate::api::ReadOptions,
     ) -> Result<String> {
         let path = path.as_ref();
-        let mut files = self.read_files_with_options(&[path], options)?;
+        let mut files = self
+            .read_files_with_options(&[path], options)
+            .map_err(crate::IndexedError::into_cause)?;
         String::from_utf8(files.remove(0)).map_err(|_| {
-            crate::api::Error::from_kind(0, std::io::ErrorKind::InvalidInput)
-                .with_context("read_to_string", path)
+            crate::internal::errors::with_context(
+                std::io::Error::from(std::io::ErrorKind::InvalidInput),
+                "read_to_string",
+                path,
+            )
         })
     }
 
@@ -432,24 +464,18 @@ pub trait VfsiExt: Vfsi {
         callback: impl FnMut(u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
     ) -> Result<crate::api::StreamCompletion> {
         let mut callback = callback;
-        let mut callback_error = None;
         let result = self.vstream(&[path], options, |index, offset, data| {
-            let result = if index == 0 {
+            if index == 0 {
                 callback(offset, data)
             } else {
-                Err(Error::invalid_reply(
-                    None,
+                Err(crate::internal::errors::invalid_reply(
                     "invalid scalar stream input index",
                 ))
-            };
-            if let Err(error) = &result {
-                callback_error = Some(error.clone());
             }
-            result
         });
         single_completion(
             crate::internal::collect_vec_result(result, 1)
-                .map_err(|error| callback_error.unwrap_or(error))?,
+                .map_err(crate::IndexedError::into_cause)?,
             "read_streams",
         )
     }
@@ -463,7 +489,7 @@ pub trait VfsiExt: Vfsi {
         paths: &[P],
         options: crate::api::StreamOptions,
         callback: impl FnMut(usize, u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
-    ) -> Result<Vec<crate::api::StreamCompletion>> {
+    ) -> std::result::Result<Vec<crate::api::StreamCompletion>, crate::IndexedError> {
         crate::internal::collect_vec_result(self.vstream(paths, options, callback), paths.len())
     }
 
@@ -476,7 +502,7 @@ pub trait VfsiExt: Vfsi {
         &self,
         requests: &[crate::api::WriteOp<'a, Self::File>],
         options: crate::api::WriteOptions,
-    ) -> Result<Vec<crate::api::WriteResult>> {
+    ) -> std::result::Result<Vec<crate::api::WriteResult>, crate::IndexedError> {
         crate::internal::collect_vec_result(self.vwrite(requests, options), requests.len())
     }
 
@@ -500,10 +526,12 @@ pub trait VfsiExt: Vfsi {
         // Scalar open preserves backend-specific final-symlink resolution.
         // Always attempt close, but retain the write error if both fail.
         let file = self.create(path)?;
-        let result = self.write_batch(
-            &[crate::api::WriteOp::at(&file, 0, data)],
-            crate::api::WriteOptions::new().with_write_all(true),
-        );
+        let result = self
+            .write_batch(
+                &[crate::api::WriteOp::at(&file, 0, data)],
+                crate::api::WriteOptions::new().with_write_all(true),
+            )
+            .map_err(crate::IndexedError::into_cause);
         let close_result = file.close();
         result?;
         close_result
@@ -518,7 +546,7 @@ pub trait VfsiExt: Vfsi {
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
+    /// # fn example(fs: &impl Vfsi) -> std::result::Result<(), vfsi_core::IndexedError> {
     /// fs.write_files(&[
     ///     ("/file-1", b"hello".as_slice()),
     ///     ("/file-2", b"world".as_slice()),
@@ -526,14 +554,21 @@ pub trait VfsiExt: Vfsi {
     /// # Ok(())
     /// # }
     /// ```
-    fn write_files<P: AsRef<Path>, B: AsRef<[u8]>>(&self, entries: &[(P, B)]) -> Result<()> {
+    fn write_files<P: AsRef<Path>, B: AsRef<[u8]>>(
+        &self,
+        entries: &[(P, B)],
+    ) -> std::result::Result<(), crate::IndexedError> {
         let mut seen = std::collections::HashSet::with_capacity(entries.len());
         for (index, (path, _)) in entries.iter().enumerate() {
             if !seen.insert(path.as_ref()) {
-                return Err(
-                    crate::api::Error::from_kind(index, std::io::ErrorKind::InvalidInput)
-                        .with_context("write_files", path.as_ref()),
-                );
+                return Err(crate::IndexedError::at(
+                    index,
+                    crate::internal::errors::with_context(
+                        std::io::Error::from(std::io::ErrorKind::InvalidInput),
+                        "write_files",
+                        path.as_ref(),
+                    ),
+                ));
             }
         }
         let requests: Vec<_> = entries
@@ -575,7 +610,7 @@ pub trait VfsiExt: Vfsi {
     /// write_all also reports a failure following a fully acknowledged payload.
     /// The cursor is then unresolved: progress does not contain an actual append
     /// offset. After observing the error, an explicit absolute/end-based seek
-    /// re-establishes it. Whole-call rejections retain VfError. Uncertain writes
+    /// re-establishes it. Whole-call rejections retain std::io::Error. Uncertain writes
     /// and errors after acknowledged bytes are never retryable Interrupted.
     fn std_io<'a>(
         &'a self,
@@ -587,18 +622,24 @@ pub trait VfsiExt: Vfsi {
     /// Execute one synchronization vector and require every input to succeed.
     /// Selects the first failed input after execution, discarding other outcomes;
     /// it implies neither ordered execution nor safe retry.
-    fn sync_batch(&self, files: &[&Self::File], mode: crate::api::SyncMode) -> Result<()> {
+    fn sync_batch(
+        &self,
+        files: &[&Self::File],
+        mode: crate::api::SyncMode,
+    ) -> std::result::Result<(), crate::IndexedError> {
         crate::internal::collect_vec_result(self.vfsync(files, mode), files.len()).map(|_| ())
     }
 
     /// Synchronize one retained handle through [`Vfsi::vfsync`].
     fn sync_data(&self, file: &Self::File) -> Result<()> {
         self.sync_batch(&[file], crate::api::SyncMode::Data)
+            .map_err(crate::IndexedError::into_cause)
     }
 
     /// Synchronize one retained handle's data and metadata through [`Vfsi::vfsync`].
     fn sync_all(&self, file: &Self::File) -> Result<()> {
         self.sync_batch(&[file], crate::api::SyncMode::All)
+            .map_err(crate::IndexedError::into_cause)
     }
 
     /// Query all inputs once, collecting values only if every input succeeds.
@@ -608,7 +649,7 @@ pub trait VfsiExt: Vfsi {
         &self,
         targets: &[P],
         options: crate::api::AttrsOptions,
-    ) -> Result<Vec<Attrs>> {
+    ) -> std::result::Result<Vec<Attrs>, crate::IndexedError> {
         crate::internal::collect_vec_result(self.vgetattrs(targets, options), targets.len())
     }
 
@@ -724,14 +765,15 @@ pub trait VfsiExt: Vfsi {
         options: crate::api::ListDirOptions,
     ) -> Result<Vec<crate::api::DirEntry>> {
         if options.recursive() {
-            return Err(
-                crate::api::Error::from_kind(0, std::io::ErrorKind::InvalidInput).with_context(
-                    "read_dir_with_options requires shallow options",
-                    path.as_ref(),
-                ),
-            );
+            return Err(crate::internal::errors::with_context(
+                std::io::Error::from(std::io::ErrorKind::InvalidInput),
+                "read_dir_with_options requires shallow options",
+                path.as_ref(),
+            ));
         }
-        let mut trees = self.read_dirs_with_options(&[path], options)?;
+        let mut trees = self
+            .read_dirs_with_options(&[path], options)
+            .map_err(crate::IndexedError::into_cause)?;
         Ok(single_completion(single_tree(&mut trees)?, "read_dirs")?.entries)
     }
 
@@ -745,7 +787,7 @@ pub trait VfsiExt: Vfsi {
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
+    /// # fn example(fs: &impl Vfsi) -> std::result::Result<(), vfsi_core::IndexedError> {
     /// for listing in fs.read_dirs(&["/input", "/output"])? {
     ///     for entry in listing.entries {
     ///         println!("{}: {:?} bytes", entry.path().display(), entry.attrs().len());
@@ -754,12 +796,16 @@ pub trait VfsiExt: Vfsi {
     /// # Ok(())
     /// # }
     /// ```
-    fn read_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<DirectoryListing>> {
+    fn read_dirs<P: AsRef<Path>>(
+        &self,
+        paths: &[P],
+    ) -> std::result::Result<Vec<DirectoryListing>, crate::IndexedError> {
         let trees = self.read_dirs_with_options(paths, crate::api::ListDirOptions::new())?;
         if trees.len() != paths.len() || trees.iter().any(|tree| tree.len() != 1) {
-            return Err(crate::api::Error::invalid_reply(
-                None,
-                "read_dirs returned an invalid result count",
+            return Err(crate::IndexedError::unattributed(
+                crate::internal::errors::invalid_reply(
+                    "read_dirs returned an invalid result count",
+                ),
             ));
         }
         Ok(trees.into_iter().flatten().collect())
@@ -777,7 +823,7 @@ pub trait VfsiExt: Vfsi {
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, Attributes, ListDirOptions};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
+    /// # fn example(fs: &impl Vfsi) -> std::result::Result<(), vfsi_core::IndexedError> {
     /// let trees = fs.read_dirs_with_options(&["/input", "/output"],
     ///     ListDirOptions::new().with_recursive(true).with_fields(Attributes::MODE)
     ///         .with_max_entries(10_000).with_max_path_bytes(1024 * 1024))?;
@@ -793,7 +839,7 @@ pub trait VfsiExt: Vfsi {
         &self,
         paths: &[P],
         options: crate::api::ListDirOptions,
-    ) -> Result<Vec<Vec<DirectoryListing>>> {
+    ) -> std::result::Result<Vec<Vec<DirectoryListing>>, crate::IndexedError> {
         let mut trees: Vec<Vec<DirectoryListing>> = (0..paths.len()).map(|_| Vec::new()).collect();
         let mut positions: Vec<std::collections::HashMap<std::path::PathBuf, usize>> = (0..paths
             .len())
@@ -801,7 +847,7 @@ pub trait VfsiExt: Vfsi {
             .collect();
         self.listdirs_all(paths, options, |index, page| {
             let tree = trees.get_mut(index).ok_or_else(|| {
-                crate::api::Error::invalid_reply(None, "invalid visitor root index")
+                crate::internal::errors::invalid_reply("invalid visitor root index")
             })?;
             let positions = &mut positions[index];
             if let Some(&slot) = positions.get(&page.path) {
@@ -825,7 +871,7 @@ pub trait VfsiExt: Vfsi {
         paths: &[P],
         options: crate::api::ListDirOptions,
         callback: impl FnMut(usize, DirectoryListing) -> Result<C>,
-    ) -> Result<Vec<crate::api::TraversalCompletion>> {
+    ) -> std::result::Result<Vec<crate::api::TraversalCompletion>, crate::IndexedError> {
         crate::internal::collect_vec_result(self.vlistdirs(paths, options, callback), paths.len())
     }
 
@@ -837,7 +883,7 @@ pub trait VfsiExt: Vfsi {
         cursors: Vec<Option<crate::api::DirectoryCursor>>,
         options: crate::api::ListDirOptions,
         page_size: std::num::NonZeroUsize,
-    ) -> Result<Vec<crate::api::DirectoryPage>> {
+    ) -> std::result::Result<Vec<crate::api::DirectoryPage>, crate::IndexedError> {
         crate::internal::collect_vec_result(
             self.vlistdir_pages(paths, cursors, options, page_size),
             paths.len(),
@@ -947,7 +993,7 @@ pub trait VfsiExt: Vfsi {
         paths: &[P],
         options: crate::api::ListDirOptions,
         mut callback: impl FnMut(usize, &crate::api::DirEntry) -> Result<std::ops::ControlFlow<()>>,
-    ) -> Result<Vec<crate::api::TraversalCompletion>> {
+    ) -> std::result::Result<Vec<crate::api::TraversalCompletion>, crate::IndexedError> {
         self.listdirs_all(paths, options, |index, page| {
             for entry in &page.entries {
                 if callback(index, entry)?.is_break() {
@@ -1023,9 +1069,9 @@ pub trait VfsiExt: Vfsi {
                 ),
             )?;
             for entry in &entries {
-                budget
-                    .charge(entry.path())
-                    .map_err(|error| error.with_context("visit_dirs_ordered", entry.path()))?;
+                budget.charge(entry.path()).map_err(|error| {
+                    crate::internal::errors::with_context(error, "visit_dirs_ordered", entry.path())
+                })?;
             }
             entries.sort_by(&mut order);
             let listing = DirectoryListing { path, entries };
@@ -1048,8 +1094,11 @@ pub trait VfsiExt: Vfsi {
             }
             if depth >= options.max_depth_or(Default::default()).get() && !children.is_empty() {
                 if !options.truncate_at_max_depth() {
-                    return Err(crate::api::Error::errno(0, libc::EFBIG as u32)
-                        .with_context("visit_dirs_ordered", &children[0].0));
+                    return Err(crate::internal::errors::with_context(
+                        std::io::Error::from_raw_os_error(libc::EFBIG),
+                        "visit_dirs_ordered",
+                        &children[0].0,
+                    ));
                 }
             } else {
                 pending.extend(
@@ -1081,12 +1130,16 @@ pub trait VfsiExt: Vfsi {
     /// ```
     fn create_dir(&self, path: impl AsRef<Path>) -> Result<()> {
         self.mkdirs_all(&[MkDirOp::new(path, 0o777)])
+            .map_err(crate::IndexedError::into_cause)
     }
 
     /// Create every directory or select the first error by input order.
     /// Calls vmkdir once; other outcomes and completion details are discarded.
     /// Later directories may have been created. There is no retry or rollback.
-    fn mkdirs_all<P: AsRef<Path>>(&self, directories: &[MkDirOp<P>]) -> Result<()> {
+    fn mkdirs_all<P: AsRef<Path>>(
+        &self,
+        directories: &[MkDirOp<P>],
+    ) -> std::result::Result<(), crate::IndexedError> {
         crate::internal::collect_vec_result(self.vmkdir(directories), directories.len()).map(|_| ())
     }
 
@@ -1096,13 +1149,14 @@ pub trait VfsiExt: Vfsi {
     fn setattrs_all<P: crate::api::AsTarget<Self::File>>(
         &self,
         updates: &[SetAttrsOp<P>],
-    ) -> Result<()> {
+    ) -> std::result::Result<(), crate::IndexedError> {
         crate::internal::collect_vec_result(self.vsetattrs(updates), updates.len()).map(|_| ())
     }
 
     /// Truncate or extend one path or opened object using [`Vfsi::vsetattrs`].
     fn truncate<T: crate::api::AsTarget<Self::File>>(&self, target: T, len: u64) -> Result<()> {
         self.setattrs_all(&[SetAttrsOp::new(target).len(len)])
+            .map_err(crate::IndexedError::into_cause)
     }
 
     /// Change permissions on one path or opened object using [`Vfsi::vsetattrs`].
@@ -1112,6 +1166,7 @@ pub trait VfsiExt: Vfsi {
         permissions: crate::api::Permissions,
     ) -> Result<()> {
         self.setattrs_all(&[SetAttrsOp::new(target).permissions(permissions)])
+            .map_err(crate::IndexedError::into_cause)
     }
 
     /// Change ownership of one path or opened object through [`Vfsi::vsetattrs`].
@@ -1132,48 +1187,63 @@ pub trait VfsiExt: Vfsi {
             op = op.gid(gid);
         }
         self.setattrs_all(&[op])
+            .map_err(crate::IndexedError::into_cause)
     }
 
     /// Create one directory with explicit Unix permission bits.
     fn create_dir_with_mode(&self, path: impl AsRef<Path>, mode: u32) -> Result<()> {
         self.mkdirs_all(&[MkDirOp::new(path, mode)])
+            .map_err(crate::IndexedError::into_cause)
     }
 
     /// Create all symbolic links or select the first error by input order.
     /// Calls the vector once and discards other outcomes and completion details.
     /// Later requests may have succeeded; there is no retry or rollback.
-    fn symlinks_all<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
+    fn symlinks_all<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        pairs: &[(P, Q)],
+    ) -> std::result::Result<(), crate::IndexedError> {
         crate::internal::collect_vec_result(self.vsymlink(pairs), pairs.len()).map(|_| ())
     }
 
     /// Create all hard links or select the first error by input order.
     /// Calls the vector once and discards other outcomes and completion details.
     /// Later requests may have succeeded; there is no retry or rollback.
-    fn hardlinks_all<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
+    fn hardlinks_all<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        pairs: &[(P, Q)],
+    ) -> std::result::Result<(), crate::IndexedError> {
         crate::internal::collect_vec_result(self.vhardlink(pairs), pairs.len()).map(|_| ())
     }
 
     /// Create one symbolic link; submit multiple pairs with [`Vfsi::vsymlink`].
     fn symlink(&self, target: impl AsRef<Path>, link: impl AsRef<Path>) -> Result<()> {
         self.symlinks_all(&[(target, link)])
+            .map_err(crate::IndexedError::into_cause)
     }
 
     /// Read every target or select the first error by input order.
     /// Calls the vector once; other outcomes and completion details are discarded.
     /// An error does not mean execution stopped at that input.
-    fn readlinks_all<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<std::path::PathBuf>> {
+    fn readlinks_all<P: AsRef<Path>>(
+        &self,
+        paths: &[P],
+    ) -> std::result::Result<Vec<std::path::PathBuf>, crate::IndexedError> {
         crate::internal::collect_vec_result(self.vreadlink(paths), paths.len())
     }
 
     /// Read one symlink target; submit multiple paths with [`Vfsi::vreadlink`].
     fn read_link(&self, path: impl AsRef<Path>) -> Result<std::path::PathBuf> {
-        let mut targets = self.readlinks_all(&[path])?;
+        let mut targets = self
+            .readlinks_all(&[path])
+            .map_err(crate::IndexedError::into_cause)?;
         Ok(targets.pop().expect("validated readlink count"))
     }
 
     /// Create one hard link; submit multiple pairs with [`Vfsi::vhardlink`].
     fn hard_link(&self, source: impl AsRef<Path>, link: impl AsRef<Path>) -> Result<()> {
         self.hardlinks_all(&[(source, link)])
+            .map_err(crate::IndexedError::into_cause)
     }
 
     /// Single-target convenience. For multiple directory creations, prefer [`Vfsi::vmkdir`]; plan missing parents before their children.
@@ -1206,18 +1276,21 @@ pub trait VfsiExt: Vfsi {
                     continue;
                 }
                 std::path::Component::Prefix(_) => {
-                    return Err(crate::api::Error::from_kind(
-                        0,
-                        std::io::ErrorKind::InvalidInput,
-                    ));
+                    return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
                 }
             }
-            match self.mkdirs_all(&[MkDirOp::new(&current, 0o777)]) {
+            match self
+                .mkdirs_all(&[MkDirOp::new(&current, 0o777)])
+                .map_err(crate::IndexedError::into_cause)
+            {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     if !self.attrs(&current)?.is_dir() {
-                        return Err(crate::api::Error::errno(0, crate::ERR_NOTDIR)
-                            .with_context("create_dir_all", &current));
+                        return Err(crate::internal::errors::with_context(
+                            std::io::Error::from_raw_os_error((crate::ERR_NOTDIR) as i32),
+                            "create_dir_all",
+                            &current,
+                        ));
                     }
                 }
                 Err(error) => return Err(error),
@@ -1232,7 +1305,7 @@ pub trait VfsiExt: Vfsi {
         &self,
         pairs: &[(P, Q)],
         options: crate::api::RenameMode,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), crate::IndexedError> {
         crate::internal::collect_vec_result(self.vrename(pairs, options), pairs.len()).map(|_| ())
     }
 
@@ -1253,6 +1326,7 @@ pub trait VfsiExt: Vfsi {
     /// ```
     fn rename(&self, source: impl AsRef<Path>, destination: impl AsRef<Path>) -> Result<()> {
         self.renames_all(&[(source, destination)], crate::api::RenameMode::Replace)
+            .map_err(crate::IndexedError::into_cause)
     }
 
     /// Copy one vector and select the first failing input, discarding other
@@ -1261,7 +1335,7 @@ pub trait VfsiExt: Vfsi {
         &self,
         pairs: &[(P, Q)],
         options: CopyOptions,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), crate::IndexedError> {
         crate::internal::collect_vec_result(self.vcopy(pairs, options), pairs.len()).map(|_| ())
     }
 
@@ -1294,6 +1368,7 @@ pub trait VfsiExt: Vfsi {
         options: CopyOptions,
     ) -> Result<()> {
         self.copies_all(&[(source, destination)], options)
+            .map_err(crate::IndexedError::into_cause)
     }
 
     /// Remove one vector and deliberately select its first failing input.
@@ -1303,7 +1378,7 @@ pub trait VfsiExt: Vfsi {
         paths: &[P],
         mode: crate::api::RemoveMode,
         options: crate::RemoveOptions,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), crate::IndexedError> {
         crate::internal::collect_vec_result(self.vremove(paths, mode, options), paths.len())
             .map(|_| ())
     }
@@ -1314,7 +1389,7 @@ pub trait VfsiExt: Vfsi {
         &self,
         dirs: &[&Self::Dir],
         options: crate::RemoveOptions,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), crate::IndexedError> {
         crate::internal::collect_vec_result(self.vremove_dir_contents(dirs, options), dirs.len())
             .map(|_| ())
     }
@@ -1340,15 +1415,18 @@ pub trait VfsiExt: Vfsi {
     fn remove_file(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         if self.symlink_attrs(path)?.is_dir() {
-            return Err(
-                crate::api::Error::errno(0, crate::ERR_ISDIR).with_context("remove_file", path)
-            );
+            return Err(crate::internal::errors::with_context(
+                std::io::Error::from_raw_os_error((crate::ERR_ISDIR) as i32),
+                "remove_file",
+                path,
+            ));
         }
         self.removes_all(
             &[path],
             crate::api::RemoveMode::Entry,
             crate::api::RemoveOptions::new(),
         )
+        .map_err(crate::IndexedError::into_cause)
     }
 
     /// Single-target convenience. For multiple paths, prefer [`Vfsi::vremove`]. That vector API does not enforce directory-only inputs.
@@ -1374,6 +1452,7 @@ pub trait VfsiExt: Vfsi {
             crate::api::RemoveMode::Entry,
             crate::api::RemoveOptions::new(),
         )
+        .map_err(crate::IndexedError::into_cause)
     }
 
     /// Single-target convenience. For multiple trees, prefer [`Vfsi::vremove`] with `RemoveMode::Tree`.
@@ -1402,6 +1481,7 @@ pub trait VfsiExt: Vfsi {
             crate::api::RemoveMode::Tree,
             crate::api::RemoveOptions::new(),
         )
+        .map_err(crate::IndexedError::into_cause)
     }
 
     /// Recursively remove one directory using explicit batching and failure
@@ -1415,6 +1495,7 @@ pub trait VfsiExt: Vfsi {
         let path = path.as_ref();
         require_directory(self, path, "remove_dir_all")?;
         self.removes_all(&[path], crate::api::RemoveMode::Tree, options)
+            .map_err(crate::IndexedError::into_cause)
     }
 
     /// Single-target convenience. For multiple directory roots, prefer [`Vfsi::vremove`].
@@ -1452,6 +1533,7 @@ pub trait VfsiExt: Vfsi {
         let path = path.as_ref();
         require_directory(self, path, "remove_dir_contents")?;
         self.removes_all(&[path], crate::api::RemoveMode::Contents, options)
+            .map_err(crate::IndexedError::into_cause)
     }
 }
 
@@ -1459,16 +1541,19 @@ impl<C: Vfsi + ?Sized> VfsiExt for C {}
 
 fn single_completion<T>(mut values: Vec<T>, operation: &'static str) -> Result<T> {
     if values.len() != 1 {
-        return Err(crate::api::Error::invalid_reply(
-            None,
-            format!("{operation} returned an invalid result count"),
-        ));
+        return Err(crate::internal::errors::invalid_reply(format!(
+            "{operation} returned an invalid result count"
+        )));
     }
     Ok(values.remove(0))
 }
 fn require_directory<C: Vfsi + ?Sized>(fs: &C, path: &Path, operation: &'static str) -> Result<()> {
     if !fs.symlink_attrs(path)?.is_dir() {
-        return Err(crate::api::Error::errno(0, crate::ERR_NOTDIR).with_context(operation, path));
+        return Err(crate::internal::errors::with_context(
+            std::io::Error::from_raw_os_error((crate::ERR_NOTDIR) as i32),
+            operation,
+            path,
+        ));
     }
     Ok(())
 }
@@ -1485,14 +1570,15 @@ fn attrs_query<C: Vfsi + ?Sized>(
     };
     let results = client
         .getattrs_all(&[target], options)
-        .map_err(|error| error.with_context(operation, path))?;
-    single_completion(results, "vgetattrs").map_err(|error| error.with_context(operation, path))
+        .map_err(crate::IndexedError::into_cause)
+        .map_err(|error| crate::internal::errors::with_context(error, operation, path))?;
+    single_completion(results, "vgetattrs")
+        .map_err(|error| crate::internal::errors::with_context(error, operation, path))
 }
 
 fn single_tree(trees: &mut Vec<Vec<DirectoryListing>>) -> Result<Vec<DirectoryListing>> {
     if trees.len() != 1 {
-        return Err(crate::api::Error::invalid_reply(
-            None,
+        return Err(crate::internal::errors::invalid_reply(
             "read_dirs returned an invalid root count",
         ));
     }

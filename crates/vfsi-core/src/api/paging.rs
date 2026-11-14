@@ -1,6 +1,6 @@
 //! Owned, connection-scoped directory paging for application frontiers.
-use super::{DirectoryListing, Error, ListDirOptions, Result, TraversalCompletion, Vfsi, VfsiExt};
-use crate::{VfError, VfResult};
+use super::{DirectoryListing, ListDirOptions, Result, TraversalCompletion, Vfsi, VfsiExt};
+use crate::VfResult;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,7 +25,7 @@ impl NativeDirectoryCursor {
         self.0
             .downcast::<T>()
             .map(|state| *state)
-            .map_err(|_| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
     }
 }
 
@@ -93,13 +93,13 @@ pub fn native_directory_pages<P: AsRef<Path>>(
 ) -> crate::VecResult<DirectoryPage> {
     use crate::{OpError, internal::vec_result_slots};
     if paths.len() > 32 || paths.len() != cursors.len() {
-        return Err(Error::errno(None, libc::EINVAL as u32));
+        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
     }
     if paths.is_empty() {
         return Ok(Vec::new());
     }
     if options.recursive() {
-        return Err(Error::errno(None, libc::EINVAL as u32));
+        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
     }
     let paths: Vec<_> = paths.iter().map(AsRef::as_ref).collect();
     let mut output: Vec<_> = (0..paths.len()).map(|_| None).collect();
@@ -107,10 +107,9 @@ pub fn native_directory_pages<P: AsRef<Path>>(
     for (index, (path, cursor)) in paths.iter().zip(cursors).enumerate() {
         match cursor {
             Some(cursor) if cursor.path != *path || !Arc::ptr_eq(&cursor.owner, owner) => {
-                output[index] = Some(Err(OpError::not_attempted(Error::errno(
-                    None,
-                    libc::EBADF as u32,
-                ))
+                output[index] = Some(Err(OpError::not_attempted(
+                    std::io::Error::from_raw_os_error(libc::EBADF),
+                )
                 .with_context("vlistdir_pages", path)));
             }
             cursor => pending.push_back((index, cursor.map(|cursor| cursor.state))),
@@ -150,8 +149,7 @@ pub fn native_directory_pages<P: AsRef<Path>>(
                 .map_err(|error| {
                     if error.progress().is_some() {
                         OpError::unknown(
-                            Error::invalid_reply(
-                                None,
+                            crate::internal::errors::invalid_reply(
                                 "directory page cannot report byte progress",
                             ),
                             None,
@@ -161,8 +159,9 @@ pub fn native_directory_pages<P: AsRef<Path>>(
                     }
                 })
                 .and_then(|(listing, next, children)| {
-                    let invalid =
-                        |message| OpError::unknown(Error::invalid_reply(None, message), None);
+                    let invalid = |message| {
+                        OpError::unknown(crate::internal::errors::invalid_reply(message), None)
+                    };
                     if listing.path != path
                         || listing.entries.len() > size
                         || (listing.entries.is_empty() && next.is_some())
@@ -191,13 +190,13 @@ pub fn native_directory_pages<P: AsRef<Path>>(
                     });
                     let Some(bytes) = bytes.filter(|&bytes| bytes <= remaining_bytes) else {
                         return Err(OpError::failed(
-                            Error::errno(None, libc::EFBIG as u32),
+                            std::io::Error::from_raw_os_error(libc::EFBIG),
                             None,
                         ));
                     };
                     if listing.entries.len() > remaining_entries {
                         return Err(OpError::failed(
-                            Error::errno(None, libc::EFBIG as u32),
+                            std::io::Error::from_raw_os_error(libc::EFBIG),
                             None,
                         ));
                     }
@@ -237,23 +236,22 @@ pub(super) fn fallback_pages<F: Vfsi + ?Sized, P: AsRef<Path>>(
 ) -> crate::VecResult<DirectoryPage> {
     use crate::{OpError, internal::vec_result_slots};
     if paths.len() > 32 || paths.len() != cursors.len() {
-        return Err(Error::errno(None, libc::EINVAL as u32));
+        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
     }
     if paths.is_empty() {
         return Ok(Vec::new());
     }
     if options.recursive() {
-        return Err(Error::errno(None, libc::EINVAL as u32));
+        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
     }
     let paths: Vec<_> = paths.iter().map(AsRef::as_ref).collect();
     let mut output: Vec<_> = (0..paths.len()).map(|_| None).collect();
     let mut indices = Vec::new();
     for (index, cursor) in cursors.into_iter().enumerate() {
         if cursor.is_some() {
-            output[index] = Some(Err(OpError::not_attempted(Error::errno(
-                None,
-                libc::EBADF as u32,
-            ))
+            output[index] = Some(Err(OpError::not_attempted(
+                std::io::Error::from_raw_os_error(libc::EBADF),
+            )
             .with_context("vlistdir_pages", paths[index])));
         } else {
             indices.push(index);
@@ -284,7 +282,9 @@ pub(super) fn fallback_pages<F: Vfsi + ?Sized, P: AsRef<Path>>(
         delivered = true;
         let Some(page) = pages.get_mut(index) else {
             invalid_index = true;
-            return Err(Error::invalid_reply(None, "invalid directory page index"));
+            return Err(crate::internal::errors::invalid_reply(
+                "invalid directory page index",
+            ));
         };
         let valid = (|| -> Result<usize> {
             if page.listing.path != listing.path
@@ -293,7 +293,9 @@ pub(super) fn fallback_pages<F: Vfsi + ?Sized, P: AsRef<Path>>(
                     .iter()
                     .any(|entry| entry.path().parent() != Some(listing.path.as_path()))
             {
-                return Err(Error::invalid_reply(None, "invalid directory page parent"));
+                return Err(crate::internal::errors::invalid_reply(
+                    "invalid directory page parent",
+                ));
             }
             let bytes = listing
                 .entries
@@ -301,9 +303,9 @@ pub(super) fn fallback_pages<F: Vfsi + ?Sized, P: AsRef<Path>>(
                 .try_fold(0usize, |total, entry| {
                     total.checked_add(entry.path().as_os_str().len())
                 })
-                .ok_or_else(|| Error::errno(None, libc::EFBIG as u32))?;
+                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EFBIG))?;
             if listing.entries.len() > remaining_entries || bytes > remaining_bytes {
-                return Err(Error::errno(None, libc::EFBIG as u32));
+                return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
             }
             Ok(bytes)
         })();
@@ -315,14 +317,15 @@ pub(super) fn fallback_pages<F: Vfsi + ?Sized, P: AsRef<Path>>(
                 Ok(std::ops::ControlFlow::Continue(()))
             }
             Err(cause) => {
-                errors[index] = Some(OpError::failed(cause.clone(), None));
-                Err(cause)
+                let mut causes = crate::internal::errors::fanout(cause, 2);
+                errors[index] = Some(OpError::failed(causes.next().unwrap(), None));
+                Err(causes.next().unwrap())
             }
         }
     });
     let results = match result {
-        Err(cause) if delivered => (0..pending.len())
-            .map(|_| Err(OpError::unknown(cause.clone(), None)))
+        Err(cause) if delivered => crate::internal::errors::fanout(cause, pending.len())
+            .map(|cause| Err(OpError::unknown(cause, None)))
             .collect(),
         result => vec_result_slots(result, pending.len()),
     };
@@ -331,7 +334,7 @@ pub(super) fn fallback_pages<F: Vfsi + ?Sized, P: AsRef<Path>>(
     {
         let result = if invalid_index {
             Err(OpError::unknown(
-                Error::invalid_reply(None, "invalid directory page index"),
+                crate::internal::errors::invalid_reply("invalid directory page index"),
                 None,
             ))
         } else if result
@@ -339,7 +342,9 @@ pub(super) fn fallback_pages<F: Vfsi + ?Sized, P: AsRef<Path>>(
             .is_err_and(|error| error.progress().is_some())
         {
             Err(OpError::unknown(
-                Error::invalid_reply(None, "directory completion contains byte progress"),
+                crate::internal::errors::invalid_reply(
+                    "directory completion contains byte progress",
+                ),
                 None,
             ))
         } else if let Some(error) = own_error {
@@ -350,7 +355,7 @@ pub(super) fn fallback_pages<F: Vfsi + ?Sized, P: AsRef<Path>>(
                     Ok(page)
                 } else {
                     Err(OpError::unknown(
-                        Error::invalid_reply(None, "incomplete fallback page"),
+                        crate::internal::errors::invalid_reply("incomplete fallback page"),
                         None,
                     ))
                 }
@@ -374,18 +379,19 @@ pub(super) fn collect_directory<F: Vfsi + ?Sized>(
     let mut entries = Vec::new();
     let mut children = Vec::new();
     loop {
-        let mut pages = fs.dir_pages_all(
-            &[path],
-            vec![cursor],
-            options,
-            NonZeroUsize::new(128).expect("nonzero page size"),
-        )?;
+        let mut pages = fs
+            .dir_pages_all(
+                &[path],
+                vec![cursor],
+                options,
+                NonZeroUsize::new(128).expect("nonzero page size"),
+            )
+            .map_err(crate::IndexedError::into_cause)?;
         let mut page = pages.pop().expect("validated page count");
         if page.listing.path != path
             || (page.listing.entries.is_empty() && page.continuation.is_some())
         {
-            return Err(Error::invalid_reply(
-                None,
+            return Err(crate::internal::errors::invalid_reply(
                 "invalid directory page progress",
             ));
         }
@@ -393,7 +399,13 @@ pub(super) fn collect_directory<F: Vfsi + ?Sized>(
             .max_entries()
             .expect("resolved")
             .checked_sub(page.listing.entries.len())
-            .ok_or_else(|| Error::errno(0, libc::EFBIG as u32).with_context("listdir", path))?;
+            .ok_or_else(|| {
+                crate::internal::errors::with_context(
+                    std::io::Error::from_raw_os_error(libc::EFBIG),
+                    "listdir",
+                    path,
+                )
+            })?;
         let remaining_bytes = page
             .listing
             .entries
@@ -402,7 +414,13 @@ pub(super) fn collect_directory<F: Vfsi + ?Sized>(
                 options.max_path_bytes().expect("resolved"),
                 |bytes, entry| bytes.checked_sub(entry.path().as_os_str().len()),
             )
-            .ok_or_else(|| Error::errno(0, libc::EFBIG as u32).with_context("listdir", path))?;
+            .ok_or_else(|| {
+                crate::internal::errors::with_context(
+                    std::io::Error::from_raw_os_error(libc::EFBIG),
+                    "listdir",
+                    path,
+                )
+            })?;
         options = options
             .with_max_entries(remaining_entries)
             .with_max_path_bytes(remaining_bytes);
@@ -490,7 +508,7 @@ mod tests {
             |_, _, _, _| panic!("oversized cohort must fail before I/O"),
         )
         .unwrap_err();
-        assert_eq!(error.raw_code(), libc::EINVAL as u32);
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]
@@ -533,8 +551,11 @@ mod tests {
         );
         assert!(results[0].is_ok() && results[2].is_ok());
         let error = results[1].as_ref().unwrap_err();
-        assert_eq!(error.cause().index(), None);
-        assert_eq!(error.cause().raw_code(), libc::EFBIG as u32);
+        let _: &std::io::Error = error.cause();
+        assert_eq!(
+            crate::native_status(error.cause()),
+            Some(crate::StatusCode::Errno(libc::EFBIG as u32))
+        );
     }
 
     #[test]
@@ -576,8 +597,11 @@ mod tests {
             assert!(results[0].is_ok());
             let error = results[1].as_ref().unwrap_err();
             assert_eq!(error.state(), crate::FailureState::NotAttempted);
-            assert_eq!(error.cause().index(), None);
-            assert_eq!(error.cause().raw_code(), libc::EBADF as u32);
+            let _: &std::io::Error = error.cause();
+            assert_eq!(
+                crate::native_status(error.cause()),
+                Some(crate::StatusCode::Errno(libc::EBADF as u32))
+            );
         }
     }
 
@@ -615,7 +639,10 @@ mod tests {
         .unwrap()
         .remove(0)
         .unwrap_err();
-        assert_eq!(error.cause().raw_code(), libc::EFBIG as u32);
+        assert_eq!(
+            crate::native_status(error.cause()),
+            Some(crate::StatusCode::Errno(libc::EFBIG as u32))
+        );
         assert_eq!(drops.load(Ordering::SeqCst), 2);
     }
 
@@ -666,7 +693,7 @@ mod tests {
             .remove(0)
             .unwrap_err();
             assert_eq!(
-                error.cause().transport_kind(),
+                crate::transport_kind(error.cause()),
                 Some(crate::TransportKind::InvalidReply)
             );
         }

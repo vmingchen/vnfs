@@ -88,6 +88,7 @@ fn stream_bookkeeping_allocations_do_not_scale_with_rounds() {
             for offset in 0..=length {
                 backend
                     .vread_impl(&[vfsi_sync::ReadOp::at(file.clone(), offset as u64, 1)])
+                    .map_err(vfsi_core::IndexedError::unattributed)
                     .and_then(|outcomes| {
                         let count = outcomes.len();
                         vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
@@ -129,6 +130,7 @@ fn owned_collection_saves_only_right_sized_small_output_allocations() {
         let options = ReadAllOptions::new().with_max_total_bytes(budget);
         let (borrowed, before) = measured(|| {
             helpers::vread_all_with_options_impl_default(&mut backend, &files, options)
+                .map_err(vfsi_core::IndexedError::unattributed)
                 .and_then(|outcomes| {
                     let count = outcomes.len();
                     vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
@@ -142,6 +144,7 @@ fn owned_collection_saves_only_right_sized_small_output_allocations() {
                 options,
                 std::num::NonZeroUsize::new(1).unwrap(),
             )
+            .map_err(vfsi_core::IndexedError::unattributed)
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
@@ -359,12 +362,9 @@ fn opaque_requests_preserve_owner_preflight_and_error_sources() {
     owner.close_batch(std::slice::from_mut(&mut file)).unwrap();
     assert!(file.is_closed());
     let error = std::io::Read::read(&mut owner.std_io(&file), &mut [0; 1]).unwrap_err();
-    assert!(
-        error
-            .get_ref()
-            .unwrap()
-            .downcast_ref::<vnfs::Error>()
-            .is_some()
+    assert_eq!(
+        vfsi_core::native_status(&error),
+        Some(vfsi_core::StatusCode::Errno(libc::EBADF as u32))
     );
     owner.remove_file("/a").unwrap();
 }

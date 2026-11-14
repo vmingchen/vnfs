@@ -99,7 +99,10 @@ def test_native_discovery_rejects_local_directory(tmp_path):
         pytest.skip("Linux mount discovery")
     with pytest.raises(NotImplementedError, match="sec=sys") as error:
         fsspec.filesystem("nfs4", mount=str(tmp_path), skip_instance_cache=True)
-    assert "unsupported" in str(error.value)
+    assert error.value.status_domain == "errno"
+    assert error.value.status_code == errno.EOPNOTSUPP
+    assert str(tmp_path) in str(error.value)
+    assert not hasattr(error.value, "index")
 
 
 def test_older_shared_engine_cannot_silently_drop_mount_configuration(monkeypatch):

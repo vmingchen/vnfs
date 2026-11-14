@@ -21,7 +21,7 @@ pub unsafe extern "C" fn vfsi_mkdir(
         let (Some(fs), Some(path)) = (unsafe { fs.as_ref() }, unsafe { cstr_path(path) }) else {
             return libc::EINVAL;
         };
-        let result: Result<(), VfError> = (|| {
+        let result: Result<(), std::io::Error> = (|| {
             let path = vpath_for(fs, &path)?;
             let mut f = lock_or_io(&fs.fs)?;
             if create_parents != 0 {
@@ -52,7 +52,7 @@ pub unsafe extern "C" fn vfsi_remove(fs: *mut vfsi_fs, path: *const c_char) -> c
         let (Some(fs), Some(path)) = (unsafe { fs.as_ref() }, unsafe { cstr_path(path) }) else {
             return libc::EINVAL;
         };
-        let result: Result<(), VfError> = (|| {
+        let result: Result<(), std::io::Error> = (|| {
             let path = vpath_for(fs, &path)?;
             lock_or_io(&fs.fs)?.unlink_impl(&path)
         })();
@@ -84,7 +84,7 @@ pub unsafe extern "C" fn vfsi_rename(
         else {
             return libc::EINVAL;
         };
-        let result: Result<(), VfError> = (|| {
+        let result: Result<(), std::io::Error> = (|| {
             let old = vpath_for(fs, &old)?;
             let new = vpath_for(fs, &new)?;
             lock_or_io(&fs.fs)?.rename_impl(&old, &new)
@@ -139,6 +139,7 @@ pub unsafe extern "C" fn vfsi_copy(
                 backend.vcopy_impl(&[pair], vfsi_sync::CopyOptions::new()),
                 1,
             )
+            .map_err(vfsi_core::IndexedError::into_cause)
             .map(|_| ())
         }) {
             Ok(()) => 0,
@@ -193,11 +194,9 @@ pub unsafe extern "C" fn vfsi_mkdirv(
             };
             let path = match vpath_for(fs, &path) {
                 Ok(path) => path,
-                Err(error) => fail_batch!(
-                    results,
-                    vfsi_result::from_error(error.with_index(index)),
-                    false
-                ),
+                Err(error) => {
+                    fail_batch!(results, vfsi_result::from_cause(&error, Some(index)), false)
+                }
             };
             dirs.push(VfAttrs {
                 file: FileOperand::from_os_path(&path),
@@ -256,11 +255,9 @@ pub unsafe extern "C" fn vfsi_removev(
             };
             let path = match vpath_for(fs, &path) {
                 Ok(path) => path,
-                Err(error) => fail_batch!(
-                    results,
-                    vfsi_result::from_error(error.with_index(index)),
-                    false
-                ),
+                Err(error) => {
+                    fail_batch!(results, vfsi_result::from_cause(&error, Some(index)), false)
+                }
             };
             files.push(FileOperand::from_os_path(&path));
         }
@@ -321,11 +318,7 @@ pub unsafe extern "C" fn vfsi_renamev(
             let (oldpath, newpath) = match (vpath_for(fs, &oldpath), vpath_for(fs, &newpath)) {
                 (Ok(oldpath), Ok(newpath)) => (oldpath, newpath),
                 (Err(error), _) | (_, Err(error)) => {
-                    fail_batch!(
-                        results,
-                        vfsi_result::from_error(error.with_index(index)),
-                        false
-                    );
+                    fail_batch!(results, vfsi_result::from_cause(&error, Some(index)), false);
                 }
             };
             pairs.push((
@@ -397,7 +390,10 @@ pub unsafe extern "C" fn vfsi_copyv(
             let (Some(src), Some(dst)) = (path_for(fs, &src), path_for(fs, &dst)) else {
                 fail_batch!(
                     results,
-                    vfsi_result::from_error(VfError::errno(index, ERR_NOENT)),
+                    vfsi_result::from_cause(
+                        &std::io::Error::from_raw_os_error((ERR_NOENT) as i32),
+                        Some(index)
+                    ),
                     false
                 );
             };

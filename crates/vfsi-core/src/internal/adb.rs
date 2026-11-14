@@ -1,4 +1,4 @@
-use crate::{Adb, VfError, VfResult};
+use crate::{Adb, VfResult};
 
 type Block = (u64, Option<u64>, Option<u64>);
 
@@ -7,9 +7,9 @@ type Block = (u64, Option<u64>, Option<u64>);
 /// the earlier blocks and field ends fit. Execution borrows the payload.
 pub fn adb_layout(
     pattern: &Adb,
-    index: usize,
+    _index: usize,
 ) -> VfResult<impl ExactSizeIterator<Item = Block> + DoubleEndedIterator> {
-    let overflow = || VfError::errno(index, libc::EOVERFLOW as u32);
+    let overflow = || std::io::Error::from_raw_os_error(libc::EOVERFLOW);
     let pattern_len = u64::try_from(pattern.adb_pattern_data.len()).map_err(|_| overflow())?;
     if let Some(last) = pattern.adb_block_count.checked_sub(1) {
         let last = u64::try_from(last).map_err(|_| overflow())?;
@@ -26,7 +26,7 @@ pub fn adb_layout(
                 .map(|relative| {
                     let offset = base.checked_add(relative).ok_or_else(overflow)?;
                     offset.checked_add(length).ok_or_else(overflow)?;
-                    Ok(offset)
+                    Ok::<_, std::io::Error>(offset)
                 })
                 .transpose()
         };
@@ -55,8 +55,11 @@ mod tests {
         let p = Adb::blocknum_only("/unused", u64::MAX, 1, usize::MAX, 0, 0);
         match adb_layout(&p, 7) {
             Err(error) => {
-                assert_eq!(error.index(), Some(7));
-                assert_eq!(error.raw_code(), libc::EOVERFLOW as u32);
+                let _: &std::io::Error = &error;
+                assert_eq!(
+                    error.raw_os_error().expect("OS errno") as u32,
+                    libc::EOVERFLOW as u32
+                );
             }
             Ok(_) => panic!("invalid final block must fail before allocation or execution"),
         }
@@ -71,8 +74,11 @@ mod tests {
         ] {
             match adb_layout(&p, 3) {
                 Err(error) => {
-                    assert_eq!(error.index(), Some(3));
-                    assert_eq!(error.raw_code(), libc::EOVERFLOW as u32);
+                    let _: &std::io::Error = &error;
+                    assert_eq!(
+                        error.raw_os_error().expect("OS errno") as u32,
+                        libc::EOVERFLOW as u32
+                    );
                 }
                 Ok(_) => panic!("a later overflow must fail before any blocks are executed"),
             }
@@ -126,8 +132,8 @@ mod tests {
             }
             match adb_layout(&p, 4) {
                 Ok(layout) => { prop_assert!(valid); prop_assert_eq!(layout.collect::<Vec<_>>(), expected); }
-                Err(error) => { prop_assert!(!valid); prop_assert_eq!(error.index(), Some(4));
-                    prop_assert_eq!(error.raw_code(), libc::EOVERFLOW as u32); }
+                Err(error) => { prop_assert!(!valid); let _: &std::io::Error = &error;
+                    prop_assert_eq!(error.raw_os_error().expect("OS errno") as u32, libc::EOVERFLOW as u32); }
             }
         }
     }

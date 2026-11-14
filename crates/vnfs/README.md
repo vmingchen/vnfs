@@ -34,7 +34,7 @@ use vnfs::prelude::*;
 use vnfs::nfs::Nfs;
 use vnfs::files::ReadOp;
 
-fn main() -> vnfs::Result<()> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fs = Nfs::builder("nfs.example.com")
         .root("/export/application")
         .connect()?;

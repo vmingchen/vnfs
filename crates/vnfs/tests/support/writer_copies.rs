@@ -153,16 +153,20 @@ fn round_robin_validates_shape_and_zero_client_budget_before_io() {
             .is_empty()
     );
     assert_eq!(
-        copy_to_writers(&fs, &["/missing"], &mut empty, options(1, 1))
-            .unwrap_err()
-            .raw_code(),
+        test_native_code(
+            copy_to_writers(&fs, &["/missing"], &mut empty, options(1, 1))
+                .unwrap_err()
+                .cause()
+        ),
         libc::EINVAL as u32
     );
     let mut writer = [Vec::new()];
     assert_eq!(
-        copy_to_writers(&fs, &["/missing"], &mut writer, options(1, 1))
-            .unwrap_err()
-            .raw_code(),
+        test_native_code(
+            copy_to_writers(&fs, &["/missing"], &mut writer, options(1, 1))
+                .unwrap_err()
+                .cause()
+        ),
         libc::EINVAL as u32
     );
     assert_eq!(fs.calls.borrow().opens, 0);
@@ -210,10 +214,16 @@ fn round_robin_partial_write_and_cancellation_stop_without_replay() {
             options(3, 9),
         )
         .unwrap_err();
-        assert_eq!(error.raw_code(), errno as u32);
+        assert_eq!(test_native_code(error.cause()), errno as u32);
         assert_eq!(error.index(), Some(1));
-        assert_eq!(error.operation(), Some("copy_to_writers"));
-        assert_eq!(error.path(), Some(Path::new("/src/nested/b")));
+        assert_eq!(
+            vfsi_core::internal::errors::operation(error.cause()),
+            Some("copy_to_writers")
+        );
+        assert_eq!(
+            vfsi_core::internal::errors::path(error.cause()),
+            Some(Path::new("/src/nested/b"))
+        );
         assert!(std::error::Error::source(&error).is_some());
         assert_eq!(writers[0].bytes, payload()[..3]);
         assert_eq!(writers[1].bytes, b"s");
@@ -271,7 +281,7 @@ fn round_robin_read_failures_and_bad_replies_close_without_retry() {
         Fault::ShortRead,
         Fault::NoReadProgress,
         Fault::OversizedOwnedRead,
-        Fault::BadReadIndex,
+        Fault::ExtraReadOutcome,
     ] {
         let (root, fs) = fixture();
         fs.fault.set(fault);
@@ -284,11 +294,14 @@ fn round_robin_read_failures_and_bad_replies_close_without_retry() {
         )
         .unwrap_err();
         if fault == Fault::LostRead {
-            assert!(error.is_transport());
+            assert!(vfsi_core::transport_kind(error.cause()).is_some());
             assert_eq!(error.index(), None);
             assert!(error.to_string().contains("lost read reply"));
         } else {
-            assert_eq!(error.transport_kind(), Some(TransportKind::InvalidReply));
+            assert_eq!(
+                vfsi_core::transport_kind(error.cause()),
+                Some(TransportKind::InvalidReply)
+            );
         }
         assert!(writers.iter().all(Vec::is_empty));
         assert_eq!(fs.calls.borrow().read_attempts, 1);
@@ -299,7 +312,7 @@ fn round_robin_read_failures_and_bad_replies_close_without_retry() {
 
 #[test]
 fn round_robin_open_failures_and_bad_open_counts_do_not_write() {
-    for fault in [Fault::None, Fault::BadOpenCount, Fault::BadOpenIndex] {
+    for fault in [Fault::None, Fault::BadOpenCount, Fault::ExtraOpenOutcome] {
         let (root, fs) = fixture();
         fs.fault.set(fault);
         let paths = if fault == Fault::None {
@@ -310,10 +323,13 @@ fn round_robin_open_failures_and_bad_open_counts_do_not_write() {
         let mut writers = [Vec::new(), Vec::new()];
         let error = copy_to_writers(&fs, &paths, &mut writers, options(4, 8)).unwrap_err();
         if fault == Fault::None {
-            assert_eq!(error.raw_code(), libc::ENOENT as u32);
+            assert_eq!(test_native_code(error.cause()), libc::ENOENT as u32);
             assert_eq!(error.index(), Some(1));
         } else {
-            assert_eq!(error.transport_kind(), Some(TransportKind::InvalidReply));
+            assert_eq!(
+                vfsi_core::transport_kind(error.cause()),
+                Some(TransportKind::InvalidReply)
+            );
         }
         assert!(writers.iter().all(Vec::is_empty));
         assert_eq!(fs.calls.borrow().read_attempts, 0);
@@ -322,8 +338,8 @@ fn round_robin_open_failures_and_bad_open_counts_do_not_write() {
 }
 
 #[test]
-fn round_robin_close_errors_are_reported_and_malformed_indices_rejected() {
-    for fault in [Fault::Close, Fault::BadCloseIndex] {
+fn round_robin_close_errors_are_reported_and_malformed_counts_rejected() {
+    for fault in [Fault::Close, Fault::ExtraCloseOutcome] {
         let (root, fs) = fixture();
         fs.fault.set(fault);
         let mut writers = [Vec::new(), Vec::new()];
@@ -336,10 +352,13 @@ fn round_robin_close_errors_are_reported_and_malformed_indices_rejected() {
         .unwrap_err();
         assert_eq!(writers, [payload(), b"second".to_vec()]);
         if fault == Fault::Close {
-            assert_eq!(error.raw_code(), libc::EIO as u32);
+            assert_eq!(test_native_code(error.cause()), libc::EIO as u32);
             assert_eq!(error.index(), Some(0));
         } else {
-            assert_eq!(error.transport_kind(), Some(TransportKind::InvalidReply));
+            assert_eq!(
+                vfsi_core::transport_kind(error.cause()),
+                Some(TransportKind::InvalidReply)
+            );
             assert_eq!(error.index(), None);
         }
         assert_eq!(fs.calls.borrow().closes, 2);
@@ -402,10 +421,21 @@ fn round_robin_later_close_error_retains_global_index_and_partial_effects() {
         .collect();
     let error = copy_to_writers(&fs, &["/src/a"; 6], &mut writers, options(4, 8)).unwrap_err();
     assert_eq!(error.index(), Some(2));
-    assert_eq!(error.raw_code(), libc::EIO as u32);
+    assert_eq!(test_native_code(error.cause()), libc::EIO as u32);
     assert!(writers[..4].iter().all(|w| w.bytes == payload()));
     assert!(writers[4..].iter().all(|w| w.bytes.is_empty()));
     assert_eq!(fs.calls.borrow().opens, 2);
     assert_eq!(fs.calls.borrow().closes, 4);
     assert_eq!(source_handles(root.path()), 0);
+}
+
+fn test_native_code(error: &std::io::Error) -> u32 {
+    match vfsi_core::native_status(error) {
+        Some(
+            vfsi_core::StatusCode::Errno(code)
+            | vfsi_core::StatusCode::Nfs(code)
+            | vfsi_core::StatusCode::Smb(code),
+        ) => code,
+        _ => panic!("expected a native error, got {error:?}"),
+    }
 }

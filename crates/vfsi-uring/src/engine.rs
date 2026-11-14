@@ -9,7 +9,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
-use vfsi_core::{FailureState, IoProgress, OpError, OpResult, VfError};
+use vfsi_core::{FailureState, IoProgress, OpError, OpResult};
 use vfsi_local::io::{DescriptorIo, OwnedRead, Read, Write};
 
 #[derive(Default)]
@@ -434,9 +434,8 @@ impl Engine {
             return jobs
                 .iter()
                 .map(|_| {
-                    Err(OpError::not_attempted(VfError::errno(
-                        None,
-                        libc::EIO as u32,
+                    Err(OpError::not_attempted(std::io::Error::from_raw_os_error(
+                        libc::EIO,
                     )))
                 })
                 .collect();
@@ -656,7 +655,7 @@ impl Engine {
                         Buffer::Sync(_) => unreachable!(),
                     })
                 };
-                let cause = VfError::errno(None, code as u32);
+                let cause = std::io::Error::from_raw_os_error(code);
                 Err(match state {
                     FailureState::NotAttempted => OpError::not_attempted(cause),
                     FailureState::Failed => OpError::failed(cause, confirmed),
@@ -795,7 +794,7 @@ impl DescriptorIo for Engine {
                         0
                     }
                     Err(error) => {
-                        results.push(Err(OpError::failed(VfError::from_io(None, error), None)));
+                        results.push(Err(OpError::failed(error, None)));
                         continue;
                     }
                 };
@@ -806,7 +805,7 @@ impl DescriptorIo for Engine {
                         ))
                     });
                     results.push(Err(OpError::failed(
-                        VfError::errno(None, libc::EOVERFLOW as u32),
+                        std::io::Error::from_raw_os_error(libc::EOVERFLOW),
                         progress,
                     )));
                     continue;
@@ -890,9 +889,8 @@ impl DescriptorIo for Engine {
         if self.ring.is_none() {
             return (0..operations.len())
                 .map(|_| {
-                    Err(OpError::not_attempted(VfError::errno(
-                        None,
-                        libc::EIO as u32,
+                    Err(OpError::not_attempted(std::io::Error::from_raw_os_error(
+                        libc::EIO,
                     )))
                 })
                 .collect();
@@ -941,6 +939,17 @@ impl DescriptorIo for Engine {
 
 #[cfg(test)]
 mod tests {
+    fn test_native_code(error: &std::io::Error) -> u32 {
+        match vfsi_core::native_status(error) {
+            Some(
+                vfsi_core::StatusCode::Errno(code)
+                | vfsi_core::StatusCode::Nfs(code)
+                | vfsi_core::StatusCode::Smb(code),
+            ) => code,
+            _ => panic!("expected a native error, got {error:?}"),
+        }
+    }
+
     use super::*;
     use vfsi_core::{ReadOp, VfOffset, WriteOp};
     use vfsi_sync::backend::{HandleBackend, VectorBackend};
@@ -1099,7 +1108,7 @@ mod tests {
         ]);
         assert_eq!(results[0].as_ref().unwrap(), b"abcd");
         assert_eq!(
-            results[1].as_ref().unwrap_err().cause().raw_code(),
+            test_native_code(results[1].as_ref().unwrap_err().cause()),
             libc::EBADF as u32
         );
         assert_eq!(
@@ -1188,11 +1197,11 @@ mod tests {
                     },
                 ])
             };
-            assert_eq!(results[0], Ok(4));
-            assert_eq!(results[2], Ok(4));
+            assert_eq!(*results[0].as_ref().unwrap(), 4);
+            assert_eq!(*results[2].as_ref().unwrap(), 4);
             let error = results[1].as_ref().unwrap_err();
             assert_eq!(error.state(), FailureState::Failed);
-            assert_eq!(error.cause().raw_code(), libc::EBADF as u32);
+            assert_eq!(test_native_code(error.cause()), libc::EBADF as u32);
             assert!(error.progress().is_none());
             if !owned {
                 assert_eq!((first, invalid, last), (*b"abcd", [99; 4], *b"abcd"));
@@ -1265,7 +1274,7 @@ mod tests {
             buffer: vec![99; 4],
         }]);
         assert_eq!(
-            results[0].as_ref().unwrap_err().cause().raw_code(),
+            test_native_code(results[0].as_ref().unwrap_err().cause()),
             libc::EIO as u32
         );
         assert!(engine.ring.is_none());
@@ -1316,7 +1325,7 @@ mod tests {
         let results = engine.write(&operations);
         assert_eq!(*results[0].as_ref().unwrap(), 1);
         assert_eq!(
-            results[1].as_ref().unwrap_err().cause().status(),
+            vfsi_core::native_status(results[1].as_ref().unwrap_err().cause()),
             Some(vfsi_core::StatusCode::Errno(libc::EBADF as u32))
         );
         assert_eq!(*results[2].as_ref().unwrap(), 1);
@@ -1360,10 +1369,11 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap_err();
-        assert_eq!(error.index(), Some(0));
-        assert_eq!(error.raw_code(), libc::EFBIG as u32);
+        let _: &std::io::Error = &error;
+        assert_eq!(test_native_code(&error), libc::EFBIG as u32);
         assert_eq!(telemetry.snapshot().submissions, 0);
         fs.close_impl(&file).unwrap();
     }
@@ -1588,7 +1598,7 @@ mod tests {
         ]);
         assert_eq!(*results[0].as_ref().unwrap(), 3);
         assert_eq!(
-            results[1].as_ref().unwrap_err().cause().raw_code(),
+            test_native_code(results[1].as_ref().unwrap_err().cause()),
             libc::EBADF as u32
         );
         assert_eq!(*results[2].as_ref().unwrap(), 3);
@@ -1715,7 +1725,7 @@ mod tests {
             assert_eq!(*results[0].as_ref().unwrap(), 3);
             assert_eq!(*results[1].as_ref().unwrap(), 5);
             assert_eq!(
-                results[2].as_ref().unwrap_err().cause().status(),
+                vfsi_core::native_status(results[2].as_ref().unwrap_err().cause()),
                 Some(vfsi_core::StatusCode::Errno(libc::EBADF as u32))
             );
             assert_eq!(std::fs::read(&path).unwrap(), b"abcdefgh");
@@ -1759,12 +1769,11 @@ mod tests {
             } else {
                 libc::EBADF
             };
-            assert!(
-                results
-                    .iter()
-                    .all(|result| result.as_ref().unwrap_err().cause().status()
-                        == Some(vfsi_core::StatusCode::Errno(errno as u32)))
-            );
+            assert!(results.iter().all(|result| vfsi_core::native_status(
+                result.as_ref().unwrap_err().cause()
+            ) == Some(vfsi_core::StatusCode::Errno(
+                errno as u32
+            ))));
             assert_eq!(std::fs::read(path).unwrap(), b"000000");
             let stats = telemetry.snapshot();
             assert_eq!(
@@ -1970,6 +1979,7 @@ mod tests {
                 .and_then(|outcomes| {
                     let count = outcomes.len();
                     vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                        .map_err(vfsi_core::IndexedError::into_cause)
                 })
                 .unwrap();
             assert_eq!(results[0].data, bytes);
@@ -2010,6 +2020,7 @@ mod tests {
                 .and_then(|outcomes| {
                     let count = outcomes.len();
                     vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                        .map_err(vfsi_core::IndexedError::into_cause)
                 })
                 .unwrap()
                 .remove(0);
@@ -2032,6 +2043,7 @@ mod tests {
                 .and_then(|outcomes| {
                     let count = outcomes.len();
                     vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                        .map_err(vfsi_core::IndexedError::into_cause)
                 })
                 .unwrap()
                 .remove(0);
@@ -2047,6 +2059,7 @@ mod tests {
                     .and_then(|outcomes| {
                         let count = outcomes.len();
                         vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                            .map_err(vfsi_core::IndexedError::into_cause)
                     })
                     .unwrap()
                     .remove(0);
@@ -2058,6 +2071,7 @@ mod tests {
                     .and_then(|outcomes| {
                         let count = outcomes.len();
                         vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                            .map_err(vfsi_core::IndexedError::into_cause)
                     })
                     .unwrap()
                     .remove(0);
@@ -2177,6 +2191,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert_eq!(results[0].data, b"ab");
@@ -2191,6 +2206,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert_eq!(
@@ -2210,6 +2226,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert!(
@@ -2247,7 +2264,7 @@ mod tests {
         ]);
         assert_eq!(*results[0].as_ref().unwrap(), 3);
         assert_eq!(
-            results[1].as_ref().unwrap_err().cause().status(),
+            vfsi_core::native_status(results[1].as_ref().unwrap_err().cause()),
             Some(vfsi_core::StatusCode::Errno(libc::EBADF as u32))
         );
         assert_eq!(
@@ -2497,12 +2514,12 @@ mod tests {
                     data: b"C",
                 },
             ]);
-            assert_eq!(results[0], Ok(1));
-            assert_eq!(results[2], Ok(1));
+            assert_eq!(*results[0].as_ref().unwrap(), 1);
+            assert_eq!(*results[2].as_ref().unwrap(), 1);
             let error = results[1].as_ref().unwrap_err();
             assert_eq!(error.state(), FailureState::Failed);
             assert_eq!(
-                error.cause().status(),
+                vfsi_core::native_status(error.cause()),
                 Some(vfsi_core::StatusCode::Errno(libc::EBADF as u32))
             );
             assert!(error.progress().is_none());

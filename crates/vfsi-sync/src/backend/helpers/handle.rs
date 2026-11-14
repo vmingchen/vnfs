@@ -16,9 +16,9 @@ pub fn vf_path_default<F: HandleBackend + ?Sized>(
         | FileOperand::CwdPath(path) => Ok(backend.abs_path(path)),
         FileOperand::Cwd => Ok(backend.abs_path(Path::new(""))),
         FileOperand::Fd(_) | FileOperand::Saved => {
-            Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput))
+            Err(std::io::Error::from(std::io::ErrorKind::InvalidInput))
         }
-        _ => Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
+        _ => Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
     }
 }
 
@@ -43,7 +43,8 @@ pub fn read_raw_impl_default<F: HandleBackend + ?Sized>(
         "read_raw",
         std::slice::from_ref(&request),
         std::slice::from_ref(&result),
-    )?;
+    )
+    .map_err(vfsi_core::IndexedError::into_cause)?;
     Ok(result.data)
 }
 
@@ -59,7 +60,8 @@ pub fn write_raw_impl_default<F: HandleBackend + ?Sized>(
         "write_raw",
         std::slice::from_ref(&request),
         std::slice::from_ref(&result),
-    )?;
+    )
+    .map_err(vfsi_core::IndexedError::into_cause)?;
     Ok(result.bytes_written)
 }
 
@@ -73,7 +75,7 @@ pub fn native_open_impl_default<F: HandleBackend + ?Sized>(
             vfsi_core::open_flags_to_libc(request.flags())?,
             request.creation_mode(),
         )
-        .map_err(|error| error.with_context("open", request.path()))
+        .map_err(|error| vfsi_core::internal::errors::with_context(error, "open", request.path()))
 }
 
 pub fn native_seek_impl_default<F: HandleBackend + ?Sized>(
@@ -83,14 +85,15 @@ pub fn native_seek_impl_default<F: HandleBackend + ?Sized>(
 ) -> VfResult<u64> {
     let (offset, whence) = match position {
         std::io::SeekFrom::Start(offset) => (
-            i64::try_from(offset).map_err(|_| VfError::errno(0, libc::EOVERFLOW as u32))?,
+            i64::try_from(offset)
+                .map_err(|_| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?,
             SeekFrom::Set,
         ),
         std::io::SeekFrom::End(offset) => (offset, SeekFrom::End),
         std::io::SeekFrom::Current(offset) => (offset, SeekFrom::Cur),
     };
     u64::try_from(backend.seek_raw_impl(file, offset, whence)?)
-        .map_err(|_| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
 }
 
 pub fn native_set_attributes_impl_default<F: HandleBackend + ?Sized>(
@@ -105,9 +108,10 @@ pub fn native_set_attributes_impl_default<F: HandleBackend + ?Sized>(
         backend.vsetattrs_impl(std::slice::from_ref(update)),
         1,
     )
+    .map_err(vfsi_core::IndexedError::into_cause)
     .map(|_| ());
     result.map_err(|error| match path {
-        Some(path) => error.with_context("set_attributes", path),
+        Some(path) => vfsi_core::internal::errors::with_context(error, "set_attributes", path),
         None => error,
     })
 }
@@ -130,12 +134,13 @@ pub fn read_file_impl_default<F: HandleBackend + ?Sized>(
             "read_file",
             std::slice::from_ref(&request),
             std::slice::from_ref(&result),
-        )?;
+        )
+        .map_err(vfsi_core::IndexedError::into_cause)?;
         if result.data.len() > remaining {
-            return Err(VfError::errno(0, libc::EFBIG as u32));
+            return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
         }
         if result.data.is_empty() && !result.eof {
-            return Err(VfError::errno(0, ERR_IO));
+            return Err(std::io::Error::from_raw_os_error((ERR_IO) as i32));
         }
         output.extend_from_slice(&result.data);
         if result.eof {
@@ -150,17 +155,18 @@ pub fn read_into_impl_default<F: HandleBackend + ?Sized>(
     buffer: &mut [u8],
 ) -> VfResult<ReadIntoResult> {
     if request.length != buffer.len() {
-        return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
     }
     let result = backend.read_impl(request)?;
     if result.data.len() > buffer.len() {
-        return Err(VfError::errno(0, ERR_IO));
+        return Err(std::io::Error::from_raw_os_error((ERR_IO) as i32));
     }
     validate_read_results(
         "read_into_impl",
         std::slice::from_ref(request),
         std::slice::from_ref(&result),
-    )?;
+    )
+    .map_err(vfsi_core::IndexedError::into_cause)?;
     buffer[..result.data.len()].copy_from_slice(&result.data);
     Ok(ReadIntoResult {
         file: result.file,
@@ -178,13 +184,13 @@ pub fn vsetattrs_impl_default<F: HandleBackend + ?Sized>(
         0 => Ok(Vec::new()),
         1 => Ok(vec![backend.set_attributes_impl(&updates[0]).map_err(
             |cause| {
-                if cause.is_transport() {
+                if vfsi_core::transport_kind(&(cause)).is_some() {
                     vfsi_core::OpError::unknown(cause, None)
                 } else {
                     vfsi_core::OpError::failed(cause, None)
                 }
             },
         )]),
-        _ => Err(VfError::unsupported(None)),
+        _ => Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
     }
 }

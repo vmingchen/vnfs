@@ -90,12 +90,13 @@ impl DirectoryReader {
 
     fn file_id(&self) -> VfResult<FileId> {
         if self.session != (self.connection.generation(), self.connection.session_id()) {
-            return Err(VfError::transport(
-                None,
+            return Err(vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
                 "SMB directory cursor session was invalidated",
             ));
         }
-        self.file_id.ok_or_else(|| VfError::errno(0, ERR_EBADF))
+        self.file_id
+            .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))
     }
 
     pub(super) async fn current_path(&mut self, fallback: &Path) -> VfResult<(PathBuf, u64)> {
@@ -146,7 +147,9 @@ impl DirectoryReader {
             identity
                 .output_buffer
                 .get(..8)
-                .ok_or_else(|| VfError::invalid_reply(None, "short SMB directory identity"))?
+                .ok_or_else(|| {
+                    vfsi_core::internal::errors::invalid_reply("short SMB directory identity")
+                })?
                 .try_into()
                 .expect("identity length checked"),
         );
@@ -226,8 +229,7 @@ impl DirectoryReader {
             let raw = parse_entries(self.class, &response.output_buffer)
                 .map_err(|error| smb_error(error, 0))?;
             if raw.is_empty() {
-                return Err(VfError::invalid_reply(
-                    None,
+                return Err(vfsi_core::internal::errors::invalid_reply(
                     "SMB directory page made no progress",
                 ));
             }
@@ -274,7 +276,8 @@ impl Drop for DirectoryReader {
 }
 
 fn directory_name(bytes: &[u8]) -> VfResult<PathBuf> {
-    let invalid = || VfError::invalid_reply(None, "invalid SMB normalized directory name");
+    let invalid =
+        || vfsi_core::internal::errors::invalid_reply("invalid SMB normalized directory name");
     let length = u32::from_le_bytes(
         bytes
             .get(..4)
@@ -363,12 +366,15 @@ mod tests {
                 fs.runtime.block_on(fresh.next_batch()).unwrap();
                 fs.runtime.block_on(fresh.close()).unwrap();
             } else {
-                assert!(fresh.err().expect("reconnect is disabled").is_transport());
+                assert!(
+                    vfsi_core::transport_kind(&(fresh.err().expect("reconnect is disabled")))
+                        .is_some()
+                );
                 assert_eq!(fs.client.connection().generation(), generation);
                 assert!(fs.client.is_disconnected());
             }
             let error = fs.runtime.block_on(retained.next_batch()).unwrap_err();
-            assert!(error.is_transport());
+            assert!(vfsi_core::transport_kind(&(error)).is_some());
             if auto_reconnect {
                 assert!(
                     error.to_string().contains("session was invalidated"),

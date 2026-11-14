@@ -2,17 +2,6 @@
 use super::*;
 use vfsi_sync::{FailureState, IoProgress, OpError};
 
-fn rejection(error: VfError, indices: &[usize]) -> vfsi_result {
-    let error = match error.index() {
-        Some(local) => match indices.get(local) {
-            Some(&index) => error.with_index(index),
-            None => invalid_backend_reply("invalid vector rejection index"),
-        },
-        None => error,
-    };
-    vfsi_result::from_error(error)
-}
-
 fn failed(index: usize, error: OpError) -> vfsi_io_result {
     let state = match error.state() {
         FailureState::NotAttempted => VFSI_IO_NOT_ATTEMPTED,
@@ -20,7 +9,7 @@ fn failed(index: usize, error: OpError) -> vfsi_io_result {
         FailureState::Unknown => VFSI_IO_UNKNOWN,
     };
     vfsi_io_result {
-        status: vfsi_result::from_error(error.into_cause().with_index(index)),
+        status: vfsi_result::from_cause(&(error.into_cause()), Some(index)),
         failure_state: state,
         offset: 0,
         offset_known: 0,
@@ -67,7 +56,7 @@ pub unsafe extern "C" fn vfsi_preadv_ex(
             initialized_output_slice(results, count, |index| {
                 failed(
                     index,
-                    OpError::not_attempted(VfError::errno(None, libc::ECANCELED as u32)),
+                    OpError::not_attempted(std::io::Error::from_raw_os_error(libc::ECANCELED)),
                 )
             })
         };
@@ -96,7 +85,7 @@ pub unsafe extern "C" fn vfsi_preadv_ex(
             } else {
                 results[index] = failed(
                     index,
-                    OpError::not_attempted(VfError::errno(None, ERR_EBADF)),
+                    OpError::not_attempted(std::io::Error::from_raw_os_error((ERR_EBADF) as i32)),
                 );
             }
         }
@@ -124,11 +113,14 @@ pub unsafe extern "C" fn vfsi_preadv_ex(
         }));
         let outcomes = match dispatched {
             Ok(Ok(results)) => results,
-            Ok(Err(error)) => return rejection(error, &indices),
+            Ok(Err(error)) => return vfsi_result::from_error(error),
             Err(_) => (0..requests.len())
                 .map(|_| {
                     Err(OpError::unknown(
-                        VfError::transport(None, "backend panicked after dispatch"),
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
+                            "backend panicked after dispatch",
+                        ),
                         None,
                     ))
                 })
@@ -246,7 +238,7 @@ pub unsafe extern "C" fn vfsi_pwritev_ex(
             initialized_output_slice(results, count, |index| {
                 failed(
                     index,
-                    OpError::not_attempted(VfError::errno(None, libc::ECANCELED as u32)),
+                    OpError::not_attempted(std::io::Error::from_raw_os_error(libc::ECANCELED)),
                 )
             })
         };
@@ -275,7 +267,7 @@ pub unsafe extern "C" fn vfsi_pwritev_ex(
             } else {
                 results[index] = failed(
                     index,
-                    OpError::not_attempted(VfError::errno(None, ERR_EBADF)),
+                    OpError::not_attempted(std::io::Error::from_raw_os_error((ERR_EBADF) as i32)),
                 );
             }
         }
@@ -317,11 +309,14 @@ pub unsafe extern "C" fn vfsi_pwritev_ex(
         }));
         let outcomes = match dispatched {
             Ok(Ok(results)) => results,
-            Ok(Err(error)) => return rejection(error, &indices),
+            Ok(Err(error)) => return vfsi_result::from_error(error),
             Err(_) => (0..requests.len())
                 .map(|_| {
                     Err(OpError::unknown(
-                        VfError::transport(None, "backend panicked after dispatch"),
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
+                            "backend panicked after dispatch",
+                        ),
                         None,
                     ))
                 })

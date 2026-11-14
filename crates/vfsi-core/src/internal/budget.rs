@@ -1,4 +1,4 @@
-use crate::{VfError, VfResult, api::ListDirOptions};
+use crate::{VfResult, api::ListDirOptions};
 use std::path::Path;
 
 /// Remaining traversal allocation budget. Callers decide which roots and
@@ -47,8 +47,8 @@ impl TraversalBudget {
     }
 }
 
-fn limit_error() -> VfError {
-    VfError::errno(0, libc::EFBIG as u32)
+fn limit_error() -> std::io::Error {
+    std::io::Error::from_raw_os_error(libc::EFBIG)
 }
 
 #[cfg(test)]

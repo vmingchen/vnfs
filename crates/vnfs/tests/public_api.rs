@@ -97,10 +97,14 @@ fn application_requests_results_and_errors_are_root_types() {
     assert_eq!(result.data(), Some([1].as_slice()));
     let into = vnfs::files::ReadResult::buffered(7, 1, true);
     assert!(into.eof());
-    let error = vnfs::Error::nfs(2, 28);
+    let error = vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(28));
     assert_eq!(error.kind(), vnfs::error::ErrorKind::StorageFull);
-    assert_eq!(error.status(), Some(vnfs::error::StatusCode::Nfs(28)));
-    assert_eq!(error.index(), Some(2));
+    assert_eq!(
+        vfsi_core::native_status(&(error)),
+        Some(vnfs::error::StatusCode::Nfs(28))
+    );
+    let selected = vnfs::error::IndexedError::at(2, error);
+    assert_eq!(selected.index(), Some(2));
     assert!(vnfs::nfs::NfsVersion::try_from(Some(3)).is_err());
     let _ = Nfs::builder("server")
         .version(vnfs::nfs::NfsVersion::V4_1)
@@ -113,10 +117,12 @@ fn application_traversal_and_mutation_do_not_require_backend_imports() {
         let fields = vnfs::directory::Attributes::MODE
             | vnfs::directory::Attributes::BLOCKS
             | vnfs::directory::Attributes::NLINK;
-        let listings = client.read_dirs_with_options(
-            &["/a", "/b"],
-            vnfs::directory::ListDirOptions::new().with_fields(fields),
-        )?;
+        let listings = client
+            .read_dirs_with_options(
+                &["/a", "/b"],
+                vnfs::directory::ListDirOptions::new().with_fields(fields),
+            )
+            .map_err(vfsi_core::IndexedError::into_cause)?;
         for directory in listings.into_iter().flatten() {
             for entry in directory.entries {
                 let _ = (entry.path(), entry.attrs().blocks());
@@ -135,16 +141,21 @@ fn application_traversal_and_mutation_do_not_require_backend_imports() {
                     .with_fields(fields)
                     .with_recursive(true),
             )
-            .map(|mut trees| trees.remove(0))?;
-        client.copies_all(
-            &[("/a/source", "/a/copy")],
-            vnfs::files::CopyOptions::default(),
-        )?;
-        client.removes_all(
-            &["/a/copy"],
-            vnfs::directory::RemoveMode::Entry,
-            Default::default(),
-        )
+            .map(|mut trees| trees.remove(0))
+            .map_err(vfsi_core::IndexedError::into_cause)?;
+        client
+            .copies_all(
+                &[("/a/source", "/a/copy")],
+                vnfs::files::CopyOptions::default(),
+            )
+            .map_err(vfsi_core::IndexedError::into_cause)?;
+        client
+            .removes_all(
+                &["/a/copy"],
+                vnfs::directory::RemoveMode::Entry,
+                Default::default(),
+            )
+            .map_err(vfsi_core::IndexedError::into_cause)
     }
     let _ = app as fn(&vnfs::nfs::NfsClient) -> vnfs::Result<()>;
 }
@@ -347,7 +358,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
             .is_err()
     );
     assert_eq!(
-        client.open_dirs(&["/sub"]).unwrap_err().kind(),
+        client.open_dirs(&["/sub"]).unwrap_err().cause().kind(),
         vnfs::error::ErrorKind::Unsupported
     );
     client
@@ -394,7 +405,9 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
                 )
             })
             .collect();
-        let mut files = client.open_batch(&requests)?;
+        let mut files = client
+            .open_batch(&requests)
+            .map_err(vfsi_core::IndexedError::into_cause)?;
         let writes: Vec<_> = files
             .iter()
             .map(|file| vnfs::files::WriteOp::at(file, 0, b"abc"))
@@ -404,7 +417,8 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
                 .write_batch(
                     &writes,
                     vnfs::files::WriteOptions::new().with_write_all(true)
-                )?
+                )
+                .map_err(vfsi_core::IndexedError::into_cause)?
                 .iter()
                 .all(|result| result.bytes_written == 3)
         );
@@ -415,32 +429,37 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
             .collect();
         assert!(
             client
-                .read_batch(reads, Default::default())?
+                .read_batch(reads, Default::default())
+                .map_err(vfsi_core::IndexedError::into_cause)?
                 .iter()
                 .all(|result| result.data() == Some(b"abc".as_slice()))
         );
 
         let mut first = [0; 4];
         let mut second = [0; 4];
-        let result = client.read_batch(
-            [
-                vnfs::files::ReadOp::into(&files[0], 0, &mut first),
-                vnfs::files::ReadOp::into(&files[1], 0, &mut second),
-            ],
-            Default::default(),
-        )?;
+        let result = client
+            .read_batch(
+                [
+                    vnfs::files::ReadOp::into(&files[0], 0, &mut first),
+                    vnfs::files::ReadOp::into(&files[1], 0, &mut second),
+                ],
+                Default::default(),
+            )
+            .map_err(vfsi_core::IndexedError::into_cause)?;
         assert!(result.iter().all(|result| result.bytes_read() == 3));
         assert_eq!(first, [b'a', b'b', b'c', 0]);
         assert_eq!(second, first);
         // Protocol backends may know EOF alongside positive progress, while
         // POSIX read counts alone do not. A subsequent nonempty read at EOF
         // must establish it on either backend.
-        let eof = client.read_batch(
-            files
-                .iter()
-                .map(|file| vnfs::files::ReadOp::range(file, 3, 1)),
-            Default::default(),
-        )?;
+        let eof = client
+            .read_batch(
+                files
+                    .iter()
+                    .map(|file| vnfs::files::ReadOp::range(file, 3, 1)),
+                Default::default(),
+            )
+            .map_err(vfsi_core::IndexedError::into_cause)?;
         assert!(
             eof.iter()
                 .all(|result| result.bytes_read() == 0 && result.eof())
@@ -449,8 +468,12 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
         client.std_io(&files[0]).read_to_end(&mut contents).unwrap();
         assert_eq!(contents, b"abc");
         files[0].try_close()?;
-        client.close_batch(&mut files)?;
-        client.close_batch(&mut files)?;
+        client
+            .close_batch(&mut files)
+            .map_err(vfsi_core::IndexedError::into_cause)?;
+        client
+            .close_batch(&mut files)
+            .map_err(vfsi_core::IndexedError::into_cause)?;
         assert!(files.iter().all(|file| file.is_closed()));
         assert_eq!(
             client
@@ -460,13 +483,21 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
                         .map(vnfs::files::ReadOp::whole)
                         .collect::<Vec<_>>(),
                     vnfs::files::ReadOptions::default()
-                )?
+                )
+                .map_err(vfsi_core::IndexedError::into_cause)?
                 .into_iter()
                 .map(|result| result.into_data().unwrap())
                 .collect::<Vec<_>>(),
             [b"abc".to_vec(), b"abc".to_vec()]
         );
-        assert_eq!(client.read_dirs(&[prefix])?[0].entries.len(), 2);
+        assert_eq!(
+            client
+                .read_dirs(&[prefix])
+                .map_err(vfsi_core::IndexedError::into_cause)?[0]
+                .entries
+                .len(),
+            2
+        );
         let mut visited = 0;
         assert_eq!(
             client.listdir(prefix, vnfs::directory::ListDirOptions::default(), |_| {
@@ -954,8 +985,8 @@ fn invalid_open_batch_cannot_create_or_truncate_earlier_files() {
                 ])
                 .err()
                 .unwrap();
-            assert_eq!(error.index(), Some(2));
-            assert_eq!(error.raw_code(), libc::EINVAL as u32);
+            assert_eq!(error.index(), None);
+            assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
             assert!(!root.join("new").exists());
             assert!(!root.join("invalid").exists());
             assert_eq!(std::fs::read(root.join("existing")).unwrap(), b"preserved");
@@ -1071,7 +1102,7 @@ fn canonical_open_descriptors_and_operands_preserve_ownership() {
     FileHandle::try_close(&mut file).unwrap();
     assert!(FileHandle::is_closed(&file));
     let error = fs.attrs(Target::file(&file)).unwrap_err();
-    assert_eq!(error.raw_code(), libc::EBADF as u32);
+    assert_eq!(test_native_code(&(error)), libc::EBADF as u32);
 }
 
 #[cfg(all(feature = "posix", unix))]
@@ -1093,12 +1124,7 @@ fn complete_writes_order_hardlinks_and_renamed_open_instances() {
                 .map(|r| {
                     r.file
                         .write_at(&r.data[..r.data.len().min(2)], r.offset)
-                        .map_err(|error| {
-                            vfsi_core::OpError::failed(
-                                vfsi_core::VfError::from_io(None, error),
-                                None,
-                            )
-                        })
+                        .map_err(|error| vfsi_core::OpError::failed(error, None))
                 })
                 .collect()
         }
@@ -1137,6 +1163,7 @@ fn complete_writes_order_hardlinks_and_renamed_open_instances() {
             first.write_request_at(0, b"AAAA"),
             second.write_request_at(2, b"BBBB"),
         ])
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
@@ -1197,19 +1224,28 @@ fn local_constructors_preserve_missing_and_non_directory_root_errors() {
     let missing = root.join("missing/child");
     let error = vnfs::posix::Posix::new(&missing).err().unwrap();
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-    assert_eq!(error.path(), Some(missing.as_path()));
+    assert_eq!(
+        vfsi_core::internal::errors::path(&(error)),
+        Some(missing.as_path())
+    );
     assert!(!root.join("missing").exists());
     let regular = root.join("file");
     std::fs::write(&regular, b"data").unwrap();
     let error = vnfs::posix::Posix::new(&regular).err().unwrap();
     assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
-    assert_eq!(error.path(), Some(regular.as_path()));
+    assert_eq!(
+        vfsi_core::internal::errors::path(&(error)),
+        Some(regular.as_path())
+    );
 
     #[cfg(all(feature = "auto", target_os = "linux"))]
     {
         let error = vnfs::mounted::Auto::new(&missing).err().unwrap();
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-        assert_eq!(error.path(), Some(missing.as_path()));
+        assert_eq!(
+            vfsi_core::internal::errors::path(&(error)),
+            Some(missing.as_path())
+        );
         assert!(!root.join("missing").exists());
         let error = vnfs::mounted::Auto::new(&regular).err().unwrap();
         assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
@@ -1284,4 +1320,15 @@ fn public_stream_outcomes_preserve_siblings_and_delivery_progress() {
         vfsi_sync::test_support::public_stream_results(&fs, "/mounted_streams");
     }
     std::fs::remove_dir_all(root).unwrap();
+}
+
+fn test_native_code(error: &std::io::Error) -> u32 {
+    match vfsi_core::native_status(error) {
+        Some(
+            vfsi_core::StatusCode::Errno(code)
+            | vfsi_core::StatusCode::Nfs(code)
+            | vfsi_core::StatusCode::Smb(code),
+        ) => code,
+        _ => panic!("expected a native error, got {error:?}"),
+    }
 }

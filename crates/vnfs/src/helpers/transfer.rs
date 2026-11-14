@@ -1,11 +1,12 @@
 use crate::{
     Attributes, Attrs, AttrsOptions, ControlFlow, CopyOptions, DepthLimit, Error, ListDirOptions,
-    OpenFlags, OpenOp, ReadOp, ReadOptions, Result, SetAttrsOp, TransportKind, Vfsi, VfsiExt,
-    WriteOp, WriteOptions,
+    OpenFlags, OpenOp, ReadOp, ReadOptions, SetAttrsOp, Vfsi, VfsiExt, WriteOp, WriteOptions,
 };
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
+use vfsi_core::IndexedError;
 use vfsi_core::internal::TraversalBudget;
+type Result<T> = std::result::Result<T, IndexedError>;
 
 /// Destination-file policy. Existing directories are merged, never replaced.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -158,7 +159,8 @@ pub struct TransferProgress<'a> {
     pub file_size: u64,
     pub summary: TransferSummary,
 }
-type Progress<'a> = Option<&'a mut dyn FnMut(TransferProgress<'_>) -> Result<ControlFlow<()>>>;
+type Progress<'a> =
+    Option<&'a mut dyn FnMut(TransferProgress<'_>) -> std::io::Result<ControlFlow<()>>>;
 
 /// Copy mixed files/directories into a destination directory. Parents must exist.
 /// Relative paths are interpreted from the client's root; `..` is rejected.
@@ -182,7 +184,7 @@ pub fn copy_items_with_progress<P: AsRef<Path>>(
     sources: &[P],
     destination: impl AsRef<Path>,
     options: TransferOptions,
-    mut progress: impl FnMut(TransferProgress<'_>) -> Result<ControlFlow<()>>,
+    mut progress: impl FnMut(TransferProgress<'_>) -> std::io::Result<ControlFlow<()>>,
 ) -> Result<TransferSummary> {
     run(
         fs,
@@ -200,16 +202,16 @@ pub fn copy_tree(
     source: impl AsRef<Path>,
     destination: impl AsRef<Path>,
     options: TransferOptions,
-) -> Result<TransferSummary> {
-    run(fs, &[source], destination.as_ref(), options, true, None)
+) -> std::io::Result<TransferSummary> {
+    run(fs, &[source], destination.as_ref(), options, true, None).map_err(IndexedError::into_cause)
 }
 pub fn copy_tree_with_progress(
     fs: &impl Vfsi,
     source: impl AsRef<Path>,
     destination: impl AsRef<Path>,
     options: TransferOptions,
-    mut progress: impl FnMut(TransferProgress<'_>) -> Result<ControlFlow<()>>,
-) -> Result<TransferSummary> {
+    mut progress: impl FnMut(TransferProgress<'_>) -> std::io::Result<ControlFlow<()>>,
+) -> std::io::Result<TransferSummary> {
     run(
         fs,
         &[source],
@@ -218,6 +220,7 @@ pub fn copy_tree_with_progress(
         true,
         Some(&mut progress),
     )
+    .map_err(IndexedError::into_cause)
 }
 
 #[derive(Clone)]
@@ -230,48 +233,62 @@ struct Task {
     depth: usize,
     fresh_destination: bool,
 }
-fn invalid(root: usize, path: &Path) -> Error {
-    Error::from_kind(root, std::io::ErrorKind::InvalidInput).with_context("transfer", path)
+fn invalid_cause(path: &Path) -> Error {
+    vfsi_core::internal::errors::with_context(
+        std::io::ErrorKind::InvalidInput.into(),
+        "transfer",
+        path,
+    )
 }
-fn limit(root: usize, path: &Path) -> Error {
-    Error::errno(root, libc::EFBIG as u32).with_context("transfer", path)
+fn invalid(root: usize, path: &Path) -> IndexedError {
+    IndexedError::at(root, invalid_cause(path))
 }
-fn contract(message: &'static str) -> Error {
-    Error::transport_with_kind(None, TransportKind::InvalidReply, message)
+fn limit(root: usize, path: &Path) -> IndexedError {
+    IndexedError::at(
+        root,
+        vfsi_core::internal::errors::with_context(
+            std::io::Error::from_raw_os_error(libc::EFBIG),
+            "transfer",
+            path,
+        ),
+    )
 }
-fn normalize(path: &Path, max: usize) -> Result<PathBuf> {
+fn contract(message: &'static str) -> IndexedError {
+    IndexedError::unattributed(vfsi_core::internal::errors::invalid_reply(message))
+}
+fn normalize(path: &Path, max: usize) -> std::io::Result<PathBuf> {
     if path.as_os_str().len() > max {
-        return Err(Error::errno(0, libc::EFBIG as u32));
+        return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
     }
     if path.as_os_str().is_empty() || path.as_os_str().as_encoded_bytes().contains(&0) {
-        return Err(invalid(0, path));
+        return Err(invalid_cause(path));
     }
     let mut out = PathBuf::from("/");
     for component in path.components() {
         match component {
             Component::Normal(name) => out.push(name),
             Component::RootDir | Component::CurDir => {}
-            _ => return Err(invalid(0, path)),
+            _ => return Err(invalid_cause(path)),
         }
     }
     Ok(out)
 }
+
 fn fields() -> Attributes {
     Attributes::MODE | Attributes::SIZE | Attributes::identity()
 }
-fn mapped(error: Error, tasks: &[impl std::borrow::Borrow<Task>]) -> Error {
-    if let Some(task) = error
-        .index()
-        .and_then(|i| tasks.get(i))
-        .map(std::borrow::Borrow::borrow)
-    {
-        error
-            .with_index(task.root)
-            .with_context("transfer", &task.source)
-    } else {
-        error
+fn mapped(error: IndexedError, tasks: &[impl std::borrow::Borrow<Task>]) -> IndexedError {
+    match error.index() {
+        Some(index) => match tasks.get(index).map(std::borrow::Borrow::borrow) {
+            Some(task) => error
+                .map_index(|_| task.root)
+                .with_context("transfer", &task.source),
+            None => contract("transfer: invalid batch error index"),
+        },
+        None => error,
     }
 }
+
 fn roots<P: AsRef<Path>>(
     fs: &impl Vfsi,
     sources: &[P],
@@ -284,10 +301,11 @@ fn roots<P: AsRef<Path>>(
     if sources.len() > budget.remaining_entries() {
         return Err(limit(0, destination));
     }
-    let destination = normalize(destination, max_path_bytes)?;
+    let destination = normalize(destination, max_path_bytes).map_err(IndexedError::unattributed)?;
     let mut tasks = Vec::with_capacity(sources.len());
     for (root, source) in sources.iter().enumerate() {
-        let source = normalize(source.as_ref(), max_path_bytes).map_err(|e| e.with_index(root))?;
+        let source =
+            normalize(source.as_ref(), max_path_bytes).map_err(|e| IndexedError::at(root, e))?;
         let dest = if exact || options.layout == CopyLayout::Contents {
             destination.clone()
         } else {
@@ -340,15 +358,27 @@ fn roots<P: AsRef<Path>>(
         }
         for (task, metadata) in batch.iter_mut().zip(metadata) {
             if exact && !metadata.is_dir() {
-                return Err(Error::errno(task.root, libc::ENOTDIR as u32)
-                    .with_context("transfer", &task.source));
+                return Err(IndexedError::at(
+                    task.root,
+                    vfsi_core::internal::errors::with_context(
+                        std::io::Error::from_raw_os_error(libc::ENOTDIR),
+                        "transfer",
+                        &task.source,
+                    ),
+                ));
             }
             if !metadata.is_dir()
                 && !metadata.is_file()
                 && options.unsupported == UnsupportedEntry::Error
             {
-                return Err(Error::errno(task.root, libc::ENOTSUP as u32)
-                    .with_context("transfer", &task.source));
+                return Err(IndexedError::at(
+                    task.root,
+                    vfsi_core::internal::errors::with_context(
+                        std::io::Error::from_raw_os_error(libc::ENOTSUP),
+                        "transfer",
+                        &task.source,
+                    ),
+                ));
             }
             if options.layout == CopyLayout::Contents && metadata.is_file() && !exact {
                 let mapped = destination.join(
@@ -391,12 +421,9 @@ fn ensure_dirs(fs: &impl Vfsi, tasks: &mut [Task]) -> Result<()> {
         .iter()
         .map(|task| crate::MkDirOp::new(&task.destination, 0o777))
         .collect();
-    let outcomes = fs.vmkdir(&paths).map_err(|error| mapped(error, tasks))?;
+    let outcomes = fs.vmkdir(&paths).map_err(IndexedError::unattributed)?;
     if outcomes.len() != tasks.len() {
-        return Err(Error::invalid_reply(
-            None,
-            "invalid directory creation outcome count",
-        ));
+        return Err(contract("invalid directory creation outcome count"));
     }
     for (index, result) in outcomes.into_iter().enumerate() {
         match result {
@@ -406,15 +433,15 @@ fn ensure_dirs(fs: &impl Vfsi, tasks: &mut [Task]) -> Result<()> {
                     && error.cause().kind() == std::io::ErrorKind::AlreadyExists =>
             {
                 let task = &mut tasks[index];
-                let attrs = fs
-                    .symlink_attrs(&task.destination)
-                    .map_err(|error| mapped(error, std::slice::from_ref(task)))?;
+                let attrs = fs.symlink_attrs(&task.destination).map_err(|error| {
+                    mapped(IndexedError::at(0, error), std::slice::from_ref(task))
+                })?;
                 if !attrs.is_dir() {
                     return Err(invalid(task.root, &task.destination));
                 }
                 task.fresh_destination = false;
             }
-            Err(error) => return Err(mapped(error.into_cause().with_index(index), tasks)),
+            Err(error) => return Err(mapped(IndexedError::at(index, error.into_cause()), tasks)),
         }
     }
     Ok(())
@@ -453,7 +480,8 @@ fn run<P: AsRef<Path>>(
     if !exact {
         let container = Task {
             source: roots[0].source.clone(),
-            destination: normalize(destination, max_path_bytes)?,
+            destination: normalize(destination, max_path_bytes)
+                .map_err(IndexedError::unattributed)?,
             metadata: roots[0].metadata.clone(),
             size: 0,
             root: 0,
@@ -625,12 +653,34 @@ fn copy_independent_roots(
                         ControlFlow::Continue(())
                     })
                 })();
-                if let Err(error) = &result {
-                    callback_error = Some(error.clone());
+                match result {
+                    Ok(value) => Ok(value),
+                    Err(error) => {
+                        let (root, cause) = error.into_parts();
+                        if callback_error
+                            .as_ref()
+                            .is_none_or(|(prior, _)| index < *prior)
+                        {
+                            let mut causes = vfsi_core::internal::errors::fanout(cause, 2);
+                            let cause = causes.next().unwrap();
+                            callback_error = Some((
+                                index,
+                                match root {
+                                    Some(root) => IndexedError::at(root, cause),
+                                    None => IndexedError::unattributed(cause),
+                                },
+                            ));
+                            Err(causes.next().unwrap())
+                        } else {
+                            Err(cause)
+                        }
+                    }
                 }
-                result
             })
-            .map_err(|e| callback_error.take().unwrap_or_else(|| mapped(e, &wave)))?;
+            .map_err(|e| match callback_error.take() {
+                Some((input, callback)) if e.index() == Some(input) => callback,
+                _ => mapped(e, &wave),
+            })?;
         if completed.len() > wave.len()
             || (!summary.stopped
                 && (completed.len() != wave.len()
@@ -659,15 +709,28 @@ fn dispatch(
             dirs.push(task);
         } else if task.metadata.is_file() {
             task.size = task.metadata.len().ok_or_else(|| {
-                Error::unsupported(task.root).with_context("transfer size", &task.source)
+                IndexedError::at(
+                    task.root,
+                    vfsi_core::internal::errors::with_context(
+                        std::io::Error::from(std::io::ErrorKind::Unsupported),
+                        "transfer size",
+                        &task.source,
+                    ),
+                )
             })?;
             files.push(task);
         } else if options.unsupported == UnsupportedEntry::Skip {
             summary.entries_skipped += 1;
             skipped.insert(task.root);
         } else {
-            return Err(Error::errno(task.root, libc::ENOTSUP as u32)
-                .with_context("transfer", &task.source));
+            return Err(IndexedError::at(
+                task.root,
+                vfsi_core::internal::errors::with_context(
+                    std::io::Error::from_raw_os_error(libc::ENOTSUP),
+                    "transfer",
+                    &task.source,
+                ),
+            ));
         }
     }
     ensure_dirs(fs, &mut dirs)?;
@@ -680,6 +743,9 @@ fn dispatch(
                 file_bytes_copied: 0,
                 file_size: 0,
                 summary: *summary,
+            })
+            .map_err(|cause| {
+                IndexedError::at(task.root, cause).with_context("transfer progress", &task.source)
             })?
             .is_break()
             {
@@ -735,8 +801,14 @@ fn copy_batch(
     if options.flags.preserve_permissions() {
         for task in tasks {
             if task.metadata.mode().is_none() {
-                return Err(Error::unsupported(task.root)
-                    .with_context("transfer permissions", &task.source));
+                return Err(IndexedError::at(
+                    task.root,
+                    vfsi_core::internal::errors::with_context(
+                        std::io::Error::from(std::io::ErrorKind::Unsupported),
+                        "transfer permissions",
+                        &task.source,
+                    ),
+                ));
             }
         }
     }
@@ -803,11 +875,13 @@ fn copy_batch(
                         destinations.push(files.remove(0));
                         selected.push(index);
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    Err(e) if e.cause().kind() == std::io::ErrorKind::AlreadyExists => {
                         summary.entries_skipped += 1;
                         skipped.insert(task.root);
                     }
-                    Err(e) => return Err(mapped(e, std::slice::from_ref(task))),
+                    Err(e) => {
+                        return Err(mapped(e, std::slice::from_ref(task)));
+                    }
                 }
             }
         } else {
@@ -909,6 +983,10 @@ fn copy_batch(
                         file_bytes_copied: offsets[*i],
                         file_size: task.size,
                         summary: *summary,
+                    })
+                    .map_err(|cause| {
+                        IndexedError::at(task.root, cause)
+                            .with_context("transfer progress", &task.source)
                     })?
                     .is_break()
                     {
@@ -951,7 +1029,7 @@ fn copy_batch(
             .and_then(|i| selected.get(i))
             .and_then(|i| tasks.get(*i))
         {
-            e.with_index(task.root)
+            e.map_index(|_| task.root)
                 .with_context("transfer", &task.destination)
         } else {
             e
@@ -961,7 +1039,12 @@ fn copy_batch(
     close_sources?;
     close_destinations
 }
-fn active_error(error: Error, active: &[usize], selected: &[usize], tasks: &[Task]) -> Error {
+fn active_error(
+    error: IndexedError,
+    active: &[usize],
+    selected: &[usize],
+    tasks: &[Task],
+) -> IndexedError {
     if let Some(task) = error
         .index()
         .and_then(|i| active.get(i))
@@ -969,7 +1052,7 @@ fn active_error(error: Error, active: &[usize], selected: &[usize], tasks: &[Tas
         .and_then(|i| tasks.get(*i))
     {
         error
-            .with_index(task.root)
+            .map_index(|_| task.root)
             .with_context("transfer", &task.source)
     } else {
         error
@@ -1001,7 +1084,7 @@ fn prepare_replace(fs: &impl Vfsi, tasks: &[Task]) -> Result<()> {
             }
             Ok(_) => existing.push(task),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(mapped(e, std::slice::from_ref(task))),
+            Err(e) => return Err(mapped(IndexedError::at(0, e), std::slice::from_ref(task))),
         }
     }
     if !existing.is_empty() {
@@ -1038,7 +1121,7 @@ pub fn move_items_with_progress<P: AsRef<Path>>(
     sources: &[P],
     destination: impl AsRef<Path>,
     options: TransferOptions,
-    mut progress: impl FnMut(TransferProgress<'_>) -> Result<ControlFlow<()>>,
+    mut progress: impl FnMut(TransferProgress<'_>) -> std::io::Result<ControlFlow<()>>,
 ) -> Result<TransferSummary> {
     move_run(
         fs,
@@ -1077,7 +1160,8 @@ fn move_run<P: AsRef<Path>>(
     if let Some(task) = tasks.first() {
         let container = Task {
             source: task.source.clone(),
-            destination: normalize(destination, max_path_bytes)?,
+            destination: normalize(destination, max_path_bytes)
+                .map_err(IndexedError::unattributed)?,
             metadata: task.metadata.clone(),
             size: 0,
             root: 0,
@@ -1126,16 +1210,12 @@ fn move_run<P: AsRef<Path>>(
                 .collect();
             let outcomes = match fs.vrename(&pairs, crate::RenameMode::NoReplace) {
                 Ok(outcomes) => outcomes,
-                Err(cause) => renames
-                    .iter()
-                    .map(|_| Err(vfsi_core::OpError::not_attempted(cause.clone())))
+                Err(cause) => vfsi_core::internal::errors::fanout(cause, renames.len())
+                    .map(|cause| Err(vfsi_core::OpError::not_attempted(cause)))
                     .collect(),
             };
             if outcomes.len() != renames.len() {
-                return Err(Error::invalid_reply(
-                    None,
-                    "rename outcome count differs from requests",
-                ));
+                return Err(contract("rename outcome count differs from requests"));
             }
             for (index, (task, result)) in renames.iter().zip(outcomes).enumerate() {
                 match result {
@@ -1143,12 +1223,17 @@ fn move_run<P: AsRef<Path>>(
                     Err(error) => {
                         if error.progress().is_some() {
                             return Err(mapped(
-                                Error::invalid_reply(index, "rename cannot report byte progress"),
+                                IndexedError::at(
+                                    index,
+                                    vfsi_core::internal::errors::invalid_reply(
+                                        "rename cannot report byte progress",
+                                    ),
+                                ),
                                 &renames,
                             ));
                         }
                         let fallback = error.state() != vfsi_core::FailureState::Unknown
-                            && !error.cause().is_transport()
+                            && !vfsi_core::transport_kind(error.cause()).is_some()
                             && matches!(
                                 error.cause().kind(),
                                 std::io::ErrorKind::CrossesDevices
@@ -1156,7 +1241,10 @@ fn move_run<P: AsRef<Path>>(
                                     | std::io::ErrorKind::Unsupported
                             );
                         if !fallback {
-                            return Err(mapped(error.into_cause().with_index(index), &renames));
+                            return Err(mapped(
+                                IndexedError::at(index, error.into_cause()),
+                                &renames,
+                            ));
                         }
                         prepare_rename_fallback(fs, task, error.into_cause(), &mut copies)?;
                     }
@@ -1200,13 +1288,13 @@ fn prepare_rename_fallback(
     copies: &mut Vec<Task>,
 ) -> Result<()> {
     let tasks = std::slice::from_ref(task);
-    let source = fs.symlink_attrs(&task.source).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            mapped(failure.clone().with_index(0), tasks)
-        } else {
-            mapped(error.with_index(0), tasks)
+    let source = match fs.symlink_attrs(&task.source) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(mapped(IndexedError::at(0, failure), tasks));
         }
-    })?;
+        Err(error) => return Err(mapped(IndexedError::at(0, error), tasks)),
+    };
     if task.metadata.fs_obj_id().is_some()
         && !same_file(fs, &task.source, &task.metadata, &task.source, &source)
     {
@@ -1214,9 +1302,9 @@ fn prepare_rename_fallback(
     }
     match fs.symlink_attrs(&task.destination) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(mapped(error.with_index(0), tasks)),
+        Err(error) => return Err(mapped(IndexedError::at(0, error), tasks)),
         Ok(target) if same_file(fs, &task.source, &task.metadata, &task.destination, &target) => {
-            return Err(mapped(failure.with_index(0), tasks));
+            return Err(mapped(IndexedError::at(0, failure), tasks));
         }
         Ok(_) => {}
     }

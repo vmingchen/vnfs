@@ -245,7 +245,7 @@ unsafe fn cursor_snapshot<const IDS: bool>(
         // Ordinary cursor users retain the compact Row layout; allocate IDs
         // separately only when the caller requested scoped identities.
         let mut identities = IDS.then(Vec::new);
-        let snapshot = (|| -> Result<Vec<Row>, VfError> {
+        let snapshot = (|| -> Result<Vec<Row>, std::io::Error> {
             let mut backend = lock_or_io(&fs.fs)?;
             let width = backend
                 .directory_page_batch_size()
@@ -268,10 +268,10 @@ unsafe fn cursor_snapshot<const IDS: bool>(
                 let pages = vfsi_sync::internal::collect_vec_result(
                     backend.vlistdir_pages_impl(&refs, fields, states, page_size, probe, follow),
                     refs.len(),
-                )?;
+                )
+                .map_err(vfsi_core::IndexedError::into_cause)?;
                 if pages.len() != indices.len() {
-                    return Err(VfError::invalid_reply(
-                        None,
+                    return Err(vfsi_core::internal::errors::invalid_reply(
                         "invalid cohort directory page count",
                     ));
                 }
@@ -280,20 +280,18 @@ unsafe fn cursor_snapshot<const IDS: bool>(
                         || attrs.len() > page_size
                         || (attrs.is_empty() && next.is_some())
                     {
-                        return Err(VfError::invalid_reply(
-                            Some(index),
+                        return Err(vfsi_core::internal::errors::invalid_reply(
                             "invalid cohort directory page progress",
                         ));
                     }
                     for (attrs, child) in attrs.into_iter().zip(children) {
                         let path = attrs.file.path().ok_or_else(|| {
-                            VfError::invalid_reply(Some(index), "missing cohort entry path")
+                            vfsi_core::internal::errors::invalid_reply("missing cohort entry path")
                         })?;
                         if path.parent() != Some(paths[index].as_path())
                             || (child.is_some() && attrs.ftype != vfsi_sync::VfType::Directory)
                         {
-                            return Err(VfError::invalid_reply(
-                                Some(index),
+                            return Err(vfsi_core::internal::errors::invalid_reply(
                                 "invalid cohort child path or cursor",
                             ));
                         }

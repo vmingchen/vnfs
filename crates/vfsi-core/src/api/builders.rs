@@ -81,7 +81,10 @@ impl<'a, C: Vfsi + ?Sized> OpenOptions<'a, C> {
 }
 
 impl<C: Vfsi + ?Sized> OpenOptions<'_, C> {
-    pub fn vopen<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<C::File>> {
+    pub fn vopen<P: AsRef<Path>>(
+        &self,
+        paths: &[P],
+    ) -> std::result::Result<Vec<C::File>, crate::IndexedError> {
         let requests: Vec<OpenOp> = paths
             .iter()
             .map(|path| OpenOp::new(path.as_ref(), self.flags).mode(self.mode))

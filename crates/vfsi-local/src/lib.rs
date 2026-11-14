@@ -45,9 +45,9 @@ std::thread_local! {
 
 pub mod io;
 
-fn checked_offset(base: u64, delta: u64, index: usize) -> VfResult<u64> {
+fn checked_offset(base: u64, delta: u64, _index: usize) -> VfResult<u64> {
     base.checked_add(delta)
-        .ok_or_else(|| VfError::errno(index, libc::EOVERFLOW as u32))
+        .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))
 }
 
 // Sort by object identity and start offset, so aliases are checked together
@@ -91,23 +91,25 @@ mod io_range_tests {
 #[cfg(target_os = "linux")]
 fn rename_error(
     error: std::io::Error,
-    index: usize,
+    _index: usize,
     source_is_directory: bool,
     destination_is_directory: bool,
     source: &Path,
     destination: &Path,
-) -> VfError {
+) -> std::io::Error {
     match error.raw_os_error() {
-        Some(libc::EOPNOTSUPP | libc::ENOSYS) => VfError::unsupported(index),
+        Some(libc::EOPNOTSUPP | libc::ENOSYS) => {
+            std::io::Error::from(std::io::ErrorKind::Unsupported)
+        }
         // Both renameat2 flags are known-valid constants. EINVAL identifies
         // missing support except when a directory would contain itself.
         Some(libc::EINVAL)
             if !(source_is_directory && destination.starts_with(source)
                 || destination_is_directory && source.starts_with(destination)) =>
         {
-            VfError::unsupported(index)
+            std::io::Error::from(std::io::ErrorKind::Unsupported)
         }
-        _ => VfError::from_io(index, error),
+        _ => error,
     }
 }
 
@@ -200,14 +202,14 @@ impl LocalBackend {
             let resolved = self.resolve(dir);
             let relative = resolved
                 .strip_prefix(&self.root)
-                .map_err(|_| VfError::errno(0, ERR_ACCES))?;
+                .map_err(|_| std::io::Error::from_raw_os_error((ERR_ACCES) as i32))?;
             let relative = if relative.as_os_str().is_empty() {
                 Path::new(".")
             } else {
                 relative
             };
             let path = cstring_from_bytes(path_bytes(relative))
-                .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
             let how = OpenHow {
                 flags: (libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) as u64,
                 mode: 0,
@@ -227,8 +229,10 @@ impl LocalBackend {
             if fd < 0 {
                 let error = std::io::Error::last_os_error();
                 return Err(match error.raw_os_error() {
-                    Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP) => VfError::unsupported(0),
-                    _ => VfError::from_io(0, error),
+                    Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP) => {
+                        std::io::Error::from(std::io::ErrorKind::Unsupported)
+                    }
+                    _ => error,
                 });
             }
             Ok(AnchoredPath {
@@ -242,56 +246,52 @@ impl LocalBackend {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = dir;
-            Err(VfError::unsupported(0))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
     fn system_time(
         seconds: i64,
         nanoseconds: u32,
-        index: usize,
+        _index: usize,
     ) -> VfResult<std::time::SystemTime> {
         if nanoseconds >= 1_000_000_000 {
-            return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         let seconds_only = if seconds >= 0 {
             UNIX_EPOCH.checked_add(Duration::from_secs(seconds as u64))
         } else {
             UNIX_EPOCH.checked_sub(Duration::from_secs(seconds.unsigned_abs()))
         }
-        .ok_or_else(|| VfError::from_kind(index, std::io::ErrorKind::InvalidInput))?;
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
         seconds_only
             .checked_add(Duration::from_nanos(u64::from(nanoseconds)))
-            .ok_or_else(|| VfError::from_kind(index, std::io::ErrorKind::InvalidInput))
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))
     }
 
-    fn getattr_one_impl(&mut self, a: &mut VfAttrs, i: usize, follow: bool) -> VfRes {
+    fn getattr_one_impl(&mut self, a: &mut VfAttrs, _i: usize, follow: bool) -> VfRes {
         if let FileOperand::Fd(fd) = &a.file {
             let open = self
                 .open_files
                 .get(fd)
-                .ok_or_else(|| VfError::errno(i, ERR_EBADF))?;
-            let md = open.file.metadata().map_err(|e| VfError::from_io(i, e))?;
-            self.fill_attrs(a, None, &md)
-                .map_err(|error| error.with_index(i))?;
+                .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?;
+            let md = open.file.metadata()?;
+            self.fill_attrs(a, None, &md)?;
             if a.masks.contains(AttrMask::NAMED_ATTR) {
                 use std::os::fd::AsRawFd;
-                a.has_named_attr = Self::has_xattr_fd(open.file.as_raw_fd())
-                    .map_err(|error| error.with_index(i))?;
+                a.has_named_attr = Self::has_xattr_fd(open.file.as_raw_fd())?;
                 a.returned.insert(AttrMask::NAMED_ATTR);
             }
             return Ok(());
         }
-        let lexical = self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?;
+        let lexical = self.tcfile_path(&a.file)?;
         if follow {
-            let p = self.real_path(&lexical).map_err(|e| e.with_index(i))?;
-            let md = std::fs::metadata(&p).map_err(|e| VfError::from_io(i, e))?;
-            self.fill_attrs(a, Some(&p), &md)
-                .map_err(|error| error.with_index(i))?;
+            let p = self.real_path(&lexical)?;
+            let md = std::fs::metadata(&p)?;
+            self.fill_attrs(a, Some(&p), &md)?;
         } else {
-            let p = self.no_follow_path(&lexical).map_err(|e| e.with_index(i))?;
-            let md = std::fs::symlink_metadata(&p).map_err(|e| VfError::from_io(i, e))?;
-            self.fill_attrs(a, Some(&p), &md)
-                .map_err(|error| error.with_index(i))?;
+            let p = self.no_follow_path(&lexical)?;
+            let md = std::fs::symlink_metadata(&p)?;
+            self.fill_attrs(a, Some(&p), &md)?;
         }
         Ok(())
     }
@@ -326,20 +326,18 @@ impl LocalBackend {
         let fd = if let FileOperand::Fd(fd) = file {
             self.open_files
                 .get(fd)
-                .ok_or_else(|| VfError::errno(index, ERR_EBADF))?
+                .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?
                 .file
                 .as_raw_fd()
         } else {
-            anchored = self
-                .real_path(&self.tcfile_path(file).map_err(|e| e.with_index(index))?)
-                .map_err(|e| e.with_index(index))?;
+            anchored = self.real_path(&self.tcfile_path(file)?)?;
             if anchored.nofollow_on_open {
-                return Err(VfError::errno(index, ERR_NOENT));
+                return Err(std::io::Error::from_raw_os_error((ERR_NOENT) as i32));
             }
             anchored
                 .anchor
                 .as_ref()
-                .ok_or_else(|| VfError::unsupported(index))?
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::Unsupported))?
                 .as_raw_fd()
         };
         local_filesystem_stats(fd, index)
@@ -347,8 +345,9 @@ impl LocalBackend {
 
     /// Open an existing directory with an explicit synchronous executor.
     pub fn new(root: PathBuf, engine: impl io::DescriptorIo + 'static) -> VfResult<Self> {
-        let root_error =
-            |error: std::io::Error| VfError::from_io(0, error).with_context("connect", &root);
+        let root_error = |error: std::io::Error| {
+            vfsi_core::internal::errors::with_context(error, "connect", &root)
+        };
         let root_canon = std::fs::canonicalize(&root).map_err(root_error)?;
         let root_dir = OpenOptions::new()
             .read(true)
@@ -434,32 +433,28 @@ impl LocalBackend {
     fn no_follow_path_fallback(&self, p: &Path) -> VfResult<AnchoredPath> {
         let relative = p
             .strip_prefix(&self.root)
-            .map_err(|_| VfError::errno(0, ERR_ACCES))?;
+            .map_err(|_| std::io::Error::from_raw_os_error((ERR_ACCES) as i32))?;
         let parent = relative.parent().unwrap_or(Path::new(""));
         let parent_path = if parent.as_os_str().is_empty() {
             self.root.clone()
         } else {
             self.root.join(parent)
         };
-        let canonical =
-            std::fs::canonicalize(parent_path).map_err(|error| VfError::from_io(0, error))?;
+        let canonical = std::fs::canonicalize(parent_path)?;
         let canonical_relative = canonical
             .strip_prefix(&self.root_canon)
-            .map_err(|_| VfError::errno(0, ERR_ACCES))?;
+            .map_err(|_| std::io::Error::from_raw_os_error((ERR_ACCES) as i32))?;
 
         // Walk the canonical in-root parent from the held root descriptor.
         // Each component is opened without following symlinks, so a later
         // rename or symlink swap cannot redirect the final path.
-        let mut anchor = self
-            .root_dir
-            .try_clone()
-            .map_err(|error| VfError::from_io(0, error))?;
+        let mut anchor = self.root_dir.try_clone()?;
         for component in canonical_relative.components() {
             let std::path::Component::Normal(name) = component else {
                 continue;
             };
             let name = cstring_from_bytes(path_bytes(Path::new(name)))
-                .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
             // SAFETY: anchor owns the live directory descriptor and name is NUL-
             // terminated for this synchronous openat.
             let next = unsafe {
@@ -470,9 +465,8 @@ impl LocalBackend {
                 )
             };
             if next < 0 {
-                return Err(VfError::errno(
-                    0,
-                    Self::errno(&std::io::Error::last_os_error()),
+                return Err(std::io::Error::from_raw_os_error(
+                    (Self::errno(&std::io::Error::last_os_error())) as i32,
                 ));
             }
             // SAFETY: the preceding open succeeded and returned a new descriptor,
@@ -505,14 +499,14 @@ impl LocalBackend {
             }
             let relative = p
                 .strip_prefix(&self.root)
-                .map_err(|_| VfError::errno(0, ERR_ACCES))?;
+                .map_err(|_| std::io::Error::from_raw_os_error((ERR_ACCES) as i32))?;
             let relative = if relative.as_os_str().is_empty() {
                 Path::new(".")
             } else {
                 relative
             };
             let c_path = cstring_from_bytes(path_bytes(relative))
-                .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
             let how = OpenHow {
                 flags: (libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW)
                     as u64,
@@ -541,7 +535,7 @@ impl LocalBackend {
                 } else {
                     Self::errno(&error)
                 };
-                return Err(VfError::errno(0, errno));
+                return Err(std::io::Error::from_raw_os_error((errno) as i32));
             }
             fd
         };
@@ -549,7 +543,7 @@ impl LocalBackend {
         let fd = {
             let parent_anchored = self.no_follow_path(p)?;
             let path = cstring_from_bytes(path_bytes(parent_anchored.as_ref()))
-                .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
             // SAFETY: the CString, live root descriptor and initialized syscall
             // arguments remain valid until this synchronous directory open returns.
             let fd = unsafe {
@@ -568,7 +562,7 @@ impl LocalBackend {
                 } else {
                     Self::errno(&error)
                 };
-                return Err(VfError::errno(0, errno));
+                return Err(std::io::Error::from_raw_os_error((errno) as i32));
             }
             fd
         };
@@ -601,7 +595,7 @@ impl LocalBackend {
 
         let relative = p
             .strip_prefix(&self.root)
-            .map_err(|_| VfError::errno(0, ERR_ACCES))?;
+            .map_err(|_| std::io::Error::from_raw_os_error((ERR_ACCES) as i32))?;
         let parent = relative.parent().unwrap_or(Path::new(""));
         let parent = if parent.as_os_str().is_empty() {
             Path::new(".")
@@ -610,7 +604,7 @@ impl LocalBackend {
         };
         let name = relative.file_name();
         let c_parent = cstring_from_bytes(path_bytes(parent))
-            .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
         let how = OpenHow {
             flags: (libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) as u64,
             mode: 0,
@@ -633,7 +627,7 @@ impl LocalBackend {
                 Some(code) if code == libc::EXDEV || code == libc::ELOOP => ERR_ACCES,
                 _ => Self::errno(&error),
             };
-            return Err(VfError::errno(0, errno));
+            return Err(std::io::Error::from_raw_os_error((errno) as i32));
         }
         // SAFETY: the preceding open succeeded and returned a new descriptor,
         // transferred exactly once to this owning File.
@@ -656,7 +650,7 @@ impl LocalBackend {
 
     fn real_path_depth(&self, p: &Path, depth: usize) -> VfResult<AnchoredPath> {
         if depth > 40 {
-            return Err(VfError::errno(0, ERR_ACCES)); // symlink loop / too deep
+            return Err(std::io::Error::from_raw_os_error((ERR_ACCES) as i32)); // symlink loop / too deep
         }
         // Resolve the final symlink manually so absolute targets retain the
         // backend's chroot-relative semantics. The parent is held open while
@@ -665,7 +659,7 @@ impl LocalBackend {
         if let Ok(md) = std::fs::symlink_metadata(&no_follow)
             && md.file_type().is_symlink()
         {
-            let target = std::fs::read_link(&no_follow).map_err(|e| VfError::from_io(0, e))?;
+            let target = std::fs::read_link(&no_follow)?;
             let target_path = if target.is_absolute() {
                 // Chroot semantics, matching the NFS backend: an absolute
                 // target resolves inside the root (leading "/" is the root,
@@ -692,14 +686,14 @@ impl LocalBackend {
 
             let relative = p
                 .strip_prefix(&self.root)
-                .map_err(|_| VfError::errno(0, ERR_ACCES))?;
+                .map_err(|_| std::io::Error::from_raw_os_error((ERR_ACCES) as i32))?;
             let relative = if relative.as_os_str().is_empty() {
                 Path::new(".")
             } else {
                 relative
             };
             let c_path = cstring_from_bytes(path_bytes(relative))
-                .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
             let how = OpenHow {
                 flags: (libc::O_PATH | libc::O_CLOEXEC) as u64,
                 mode: 0,
@@ -735,7 +729,7 @@ impl LocalBackend {
                 Some(code) if code == libc::EXDEV || code == libc::ELOOP => ERR_ACCES,
                 _ => Self::errno(&error),
             };
-            Err(VfError::errno(0, errno))
+            Err(std::io::Error::from_raw_os_error((errno) as i32))
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -748,7 +742,7 @@ impl LocalBackend {
                         nofollow_on_open: false,
                     });
                 }
-                return Err(VfError::errno(0, ERR_ACCES));
+                return Err(std::io::Error::from_raw_os_error((ERR_ACCES) as i32));
             }
             Ok(no_follow)
         }
@@ -766,7 +760,7 @@ impl LocalBackend {
         path: &AnchoredPath,
         mode: u32,
         directory_only: bool,
-        index: usize,
+        _index: usize,
     ) -> VfResult<()> {
         #[cfg(target_os = "linux")]
         {
@@ -774,7 +768,7 @@ impl LocalBackend {
             // O_NOFOLLOW it pins the leaf itself, including a concurrently
             // inserted symlink, which is rejected below.
             let name = cstring_from_bytes(path_bytes(path))
-                .ok_or_else(|| VfError::from_kind(index, std::io::ErrorKind::InvalidInput))?;
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
             let mut flags = libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC;
             if directory_only {
                 flags |= libc::O_DIRECTORY;
@@ -782,25 +776,21 @@ impl LocalBackend {
             // SAFETY: the owned path and NUL-terminated name remain live for this syscall.
             let fd = unsafe { libc::open(name.as_ptr(), flags) };
             if fd < 0 {
-                return Err(VfError::errno(
-                    index,
-                    Self::errno(&std::io::Error::last_os_error()),
+                return Err(std::io::Error::from_raw_os_error(
+                    (Self::errno(&std::io::Error::last_os_error())) as i32,
                 ));
             }
             // SAFETY: open succeeded and transferred a new descriptor exactly once.
             let file = unsafe { File::from_raw_fd(fd) };
-            let metadata = file
-                .metadata()
-                .map_err(|error| VfError::from_io(index, error))?;
+            let metadata = file.metadata()?;
             if metadata.file_type().is_symlink() {
-                return Err(VfError::unsupported(index));
+                return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
             }
             let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
             std::fs::set_permissions(
                 descriptor_path,
                 std::fs::Permissions::from_mode(mode & 0o7777),
             )
-            .map_err(|error| VfError::from_io(index, error))
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -812,12 +802,12 @@ impl LocalBackend {
                 let parent = path
                     .anchor
                     .as_ref()
-                    .ok_or_else(|| VfError::unsupported(index))?;
+                    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::Unsupported))?;
                 let name = path
                     .file_name()
-                    .ok_or_else(|| VfError::from_kind(index, std::io::ErrorKind::InvalidInput))?;
+                    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
                 let name = cstring_from_bytes(path_bytes(Path::new(name)))
-                    .ok_or_else(|| VfError::from_kind(index, std::io::ErrorKind::InvalidInput))?;
+                    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
                 // SAFETY: the owned parent/path and NUL-terminated name remain live for the
                 // synchronous syscall; metadata output storage is writable when used.
                 let result = unsafe {
@@ -829,9 +819,8 @@ impl LocalBackend {
                     )
                 };
                 if result != 0 {
-                    return Err(VfError::errno(
-                        index,
-                        Self::errno(&std::io::Error::last_os_error()),
+                    return Err(std::io::Error::from_raw_os_error(
+                        (Self::errno(&std::io::Error::last_os_error())) as i32,
                     ));
                 }
                 // Some systems accept AT_SYMLINK_NOFOLLOW but treat chmod on a
@@ -851,13 +840,12 @@ impl LocalBackend {
                     )
                 };
                 if result != 0 {
-                    return Err(VfError::errno(
-                        index,
-                        Self::errno(&std::io::Error::last_os_error()),
+                    return Err(std::io::Error::from_raw_os_error(
+                        (Self::errno(&std::io::Error::last_os_error())) as i32,
                     ));
                 }
                 if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
-                    return Err(VfError::errno(index, ERR_ACCES));
+                    return Err(std::io::Error::from_raw_os_error((ERR_ACCES) as i32));
                 }
                 return Ok(());
             }
@@ -870,11 +858,9 @@ impl LocalBackend {
                 flags |= libc::O_DIRECTORY;
             }
             options.custom_flags(flags);
-            let file = options
-                .open(path)
-                .map_err(|error| VfError::from_io(index, error))?;
+            let file = options.open(path).map_err(|error| (error))?;
             file.set_permissions(std::fs::Permissions::from_mode(mode & 0o7777))
-                .map_err(|error| VfError::from_io(index, error))
+                .map_err(|error| (error))
         }
     }
 
@@ -882,8 +868,8 @@ impl LocalBackend {
         e.raw_os_error().map(|n| n as u32).unwrap_or(VF_ERR_RPC)
     }
 
-    fn overflow(index: usize) -> VfError {
-        VfError::errno(index, libc::EOVERFLOW as u32)
+    fn overflow(_index: usize) -> std::io::Error {
+        std::io::Error::from_raw_os_error(libc::EOVERFLOW)
     }
 
     /// Build `OpenOptions` from fcntl-style flags.
@@ -906,15 +892,15 @@ impl LocalBackend {
                 let open = self
                     .open_files
                     .get(fd)
-                    .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
+                    .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?;
                 Ok(self.resolve(&open.path))
             }
             FileOperand::Path { .. } | FileOperand::Cwd | FileOperand::CwdPath(_) => {
                 let path = self.vf_path(f)?;
                 Ok(self.root.join(path))
             }
-            FileOperand::Saved => Err(VfError::unsupported(0)),
-            _ => Err(VfError::unsupported(0)),
+            FileOperand::Saved => Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
+            _ => Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
         }
     }
 
@@ -923,10 +909,10 @@ impl LocalBackend {
             VfOffset::At(offset) => Ok(offset),
             VfOffset::Cur => match file.fd() {
                 Some(fd) => Ok(self.open_files.get(&fd).map(|o| o.cur_offset).unwrap_or(0)),
-                None => Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
+                None => Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
             },
             VfOffset::End => Ok(len),
-            _ => Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
+            _ => Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
         }
     }
 
@@ -941,14 +927,13 @@ impl LocalBackend {
     fn xattr_result(result: libc::ssize_t) -> VfResult<bool> {
         #[cfg(test)]
         if let Some(errno) = XATTR_QUERY_ERROR.with(std::cell::Cell::take) {
-            return Err(VfError::errno(0, errno as u32));
+            return Err(std::io::Error::from_raw_os_error(errno));
         }
         if result >= 0 {
             Ok(result > 0)
         } else {
-            Err(VfError::errno(
-                0,
-                Self::errno(&std::io::Error::last_os_error()),
+            Err(std::io::Error::from_raw_os_error(
+                (Self::errno(&std::io::Error::last_os_error())) as i32,
             ))
         }
     }
@@ -958,7 +943,7 @@ impl LocalBackend {
         #[cfg(test)]
         XATTR_QUERY_COUNT.with(|count| count.set(count.get() + 1));
         let cpath = cstring_from_bytes(path_bytes(path.as_ref()))
-            .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
         // SAFETY: the path/descriptor is live; a null buffer with size zero requests
         // the xattr list size without writing memory.
         let result = unsafe {
@@ -1076,8 +1061,7 @@ impl LocalBackend {
             anchor: None, // the borrowed parent owns the live directory anchor
             nofollow_on_open: true,
         };
-        let metadata =
-            std::fs::symlink_metadata(&real).map_err(|error| VfError::from_io(0, error))?;
+        let metadata = std::fs::symlink_metadata(&real)?;
         let mut attrs = VfAttrs {
             file: FileOperand::from_os_path(path),
             masks,
@@ -1087,23 +1071,23 @@ impl LocalBackend {
         Ok(attrs)
     }
 
-    fn ownership_ids(a: &VfAttrs, index: usize) -> VfResult<(Option<u32>, Option<u32>)> {
+    fn ownership_ids(a: &VfAttrs, _index: usize) -> VfResult<(Option<u32>, Option<u32>)> {
         let uid = a.masks.contains(AttrMask::UID).then_some(a.uid);
         let gid = a.masks.contains(AttrMask::GID).then_some(a.gid);
         if uid == Some(u32::MAX) || gid == Some(u32::MAX) {
-            return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         Ok((uid, gid))
     }
 
-    fn ownership_result(result: std::io::Result<()>, index: usize) -> VfResult<()> {
+    fn ownership_result(result: std::io::Result<()>, _index: usize) -> VfResult<()> {
         result.map_err(|error| {
             let code = if error.kind() == std::io::ErrorKind::InvalidInput {
                 ERR_INVAL
             } else {
                 Self::errno(&error)
             };
-            VfError::errno(index, code)
+            std::io::Error::from_raw_os_error((code) as i32)
         })
     }
 
@@ -1115,7 +1099,7 @@ impl LocalBackend {
         // The missing-leaf fallback only pins its parent; following that leaf
         // would permit a concurrently inserted symlink to escape the root.
         if follow && path.nofollow_on_open {
-            return Err(VfError::errno(index, ERR_NOENT));
+            return Err(std::io::Error::from_raw_os_error((ERR_NOENT) as i32));
         }
         let (uid, gid) = Self::ownership_ids(a, index)?;
         let result = if follow {
@@ -1131,11 +1115,9 @@ impl LocalBackend {
             let open = self
                 .open_files
                 .get(fd)
-                .ok_or_else(|| VfError::errno(i, ERR_EBADF))?;
+                .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?;
             if a.masks.contains(AttrMask::SIZE) {
-                open.file
-                    .set_len(a.size)
-                    .map_err(|e| VfError::from_io(i, e))?;
+                open.file.set_len(a.size)?;
             }
             if a.masks.intersects(AttrMask::UID | AttrMask::GID) {
                 let (uid, gid) = Self::ownership_ids(a, i)?;
@@ -1143,8 +1125,7 @@ impl LocalBackend {
             }
             if a.masks.contains(AttrMask::MODE) {
                 open.file
-                    .set_permissions(std::fs::Permissions::from_mode(a.mode & 0o7777))
-                    .map_err(|e| VfError::from_io(i, e))?;
+                    .set_permissions(std::fs::Permissions::from_mode(a.mode & 0o7777))?;
             }
             if a.masks.intersects(AttrMask::ATIME | AttrMask::MTIME) {
                 let mut times = FileTimes::new();
@@ -1154,15 +1135,11 @@ impl LocalBackend {
                 if a.masks.contains(AttrMask::MTIME) {
                     times = times.set_modified(Self::system_time(a.mtime_sec, a.mtime_nsec, i)?);
                 }
-                open.file
-                    .set_times(times)
-                    .map_err(|e| VfError::from_io(i, e))?;
+                open.file.set_times(times)?;
             }
             return Ok(());
         }
-        let p = self
-            .real_path(&self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?)
-            .map_err(|e| e.with_index(i))?;
+        let p = self.real_path(&self.tcfile_path(&a.file)?)?;
         self.setattr_path(a, i, &p, true)
     }
 
@@ -1175,15 +1152,9 @@ impl LocalBackend {
             let file = OpenOptions::new()
                 .read(true)
                 .custom_flags(libc::O_PATH | libc::O_NOFOLLOW)
-                .open(path)
-                .map_err(|error| VfError::from_io(index, error))?;
-            if file
-                .metadata()
-                .map_err(|error| VfError::from_io(index, error))?
-                .file_type()
-                .is_symlink()
-            {
-                return Err(VfError::unsupported(index));
+                .open(path)?;
+            if file.metadata()?.file_type().is_symlink() {
+                return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
             }
             Some(file)
         } else {
@@ -1197,7 +1168,7 @@ impl LocalBackend {
             path.as_ref()
         };
         let name = cstring_from_bytes(path_bytes(path))
-            .ok_or_else(|| VfError::from_kind(index, std::io::ErrorKind::InvalidInput))?;
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
         let mut times = [libc::timespec {
             tv_sec: 0,
             tv_nsec: libc::UTIME_OMIT,
@@ -1212,7 +1183,7 @@ impl LocalBackend {
                 #[allow(clippy::useless_conversion)]
                 let tv_sec = seconds
                     .try_into()
-                    .map_err(|_| VfError::from_kind(index, std::io::ErrorKind::InvalidInput))?;
+                    .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
                 times[slot] = libc::timespec {
                     tv_sec,
                     tv_nsec: nanoseconds as libc::c_long,
@@ -1225,9 +1196,8 @@ impl LocalBackend {
         // SAFETY: the owned anchors, NUL-terminated path and two timespecs
         // stay live for the synchronous syscall.
         if unsafe { libc::utimensat(libc::AT_FDCWD, name.as_ptr(), times.as_ptr(), 0) } != 0 {
-            return Err(VfError::errno(
-                index,
-                Self::errno(&std::io::Error::last_os_error()),
+            return Err(std::io::Error::from_raw_os_error(
+                (Self::errno(&std::io::Error::last_os_error())) as i32,
             ));
         }
         Ok(())
@@ -1251,11 +1221,8 @@ impl LocalBackend {
                     0
                 };
             options.write(true).custom_flags(flags);
-            let file = options
-                .open(path)
-                .map_err(|error| VfError::from_io(i, error))?;
-            file.set_len(a.size)
-                .map_err(|error| VfError::from_io(i, error))?;
+            let file = options.open(path)?;
+            file.set_len(a.size)?;
         }
         if a.masks.intersects(AttrMask::UID | AttrMask::GID) {
             Self::chown_path(a, path, follow, i)?;
@@ -1268,8 +1235,7 @@ impl LocalBackend {
             if !follow || path.nofollow_on_open {
                 Self::set_permissions_no_follow(path, a.mode, false, i)?;
             } else {
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(a.mode & 0o7777))
-                    .map_err(|error| VfError::from_io(i, error))?;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(a.mode & 0o7777))?;
             }
         }
         if a.masks.intersects(AttrMask::ATIME | AttrMask::MTIME) {
@@ -1287,9 +1253,7 @@ impl LocalBackend {
                         0
                     };
                 options.read(true).custom_flags(flags);
-                let file = options
-                    .open(path)
-                    .map_err(|error| VfError::from_io(i, error))?;
+                let file = options.open(path).map_err(|error| (error))?;
                 let mut times = FileTimes::new();
                 if a.masks.contains(AttrMask::ATIME) {
                     times = times.set_accessed(Self::system_time(a.atime_sec, a.atime_nsec, i)?);
@@ -1297,8 +1261,7 @@ impl LocalBackend {
                 if a.masks.contains(AttrMask::MTIME) {
                     times = times.set_modified(Self::system_time(a.mtime_sec, a.mtime_nsec, i)?);
                 }
-                file.set_times(times)
-                    .map_err(|error| VfError::from_io(i, error))?;
+                file.set_times(times).map_err(|error| (error))?;
             }
         }
         Ok(())
@@ -1320,9 +1283,9 @@ impl LocalBackend {
         if let Some(fd) = op.file.fd()
             && !self.open_files.contains_key(&fd)
         {
-            return Err(vfsi_core::OpError::not_attempted(VfError::errno(
-                None, ERR_EBADF,
-            )));
+            return Err(vfsi_core::OpError::not_attempted(
+                std::io::Error::from_raw_os_error((ERR_EBADF) as i32),
+            ));
         }
         if let VfOffset::At(offset) = op.offset {
             checked_offset(offset, op.length as u64, 0)
@@ -1338,8 +1301,8 @@ impl LocalBackend {
         if reads.is_empty() {
             return Ok(Vec::new());
         }
-        if let Some(index) = reads.iter().position(|op| op.length > isize::MAX as usize) {
-            return Err(VfError::errno(index, libc::EFBIG as u32));
+        if let Some(_index) = reads.iter().position(|op| op.length > isize::MAX as usize) {
+            return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
         }
         let owned = self.io.owned_read_window().is_some_and(|limit| {
             reads
@@ -1384,9 +1347,13 @@ impl LocalBackend {
                 self.io.read_owned(operations)
             };
             if results.len() != indices.len() {
-                let cause = VfError::invalid_reply(None, "owned read returned wrong result count");
                 for index in indices {
-                    out[index] = Some(Err(OpError::unknown(cause.clone(), None)));
+                    out[index] = Some(Err(OpError::unknown(
+                        vfsi_core::internal::errors::invalid_reply(
+                            "owned read returned wrong result count",
+                        ),
+                        None,
+                    )));
                 }
             } else {
                 for (index, result) in indices.into_iter().zip(results) {
@@ -1400,8 +1367,7 @@ impl LocalBackend {
                         .and_then(|data| {
                             if data.len() > op.length {
                                 return Err(OpError::unknown(
-                                    VfError::invalid_reply(
-                                        None,
+                                    vfsi_core::internal::errors::invalid_reply(
                                         "owned read exceeds requested length",
                                     ),
                                     None,
@@ -1483,7 +1449,7 @@ impl LocalBackend {
                 error
             }
             _ => vfsi_core::OpError::unknown(
-                VfError::invalid_reply(None, "invalid descriptor read progress"),
+                vfsi_core::internal::errors::invalid_reply("invalid descriptor read progress"),
                 None,
             ),
         }
@@ -1519,14 +1485,14 @@ impl LocalBackend {
     ) -> vfsi_core::VecResult<ReadIntoResult> {
         use vfsi_core::{OpError, OpResult};
         if reads.len() != buffers.len() {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         if reads.is_empty() {
             return Ok(Vec::new());
         }
-        for (index, (op, buffer)) in reads.iter().zip(buffers.iter()).enumerate() {
+        for (op, buffer) in reads.iter().zip(buffers.iter()) {
             if op.length != buffer.len() {
-                return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput));
+                return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
             }
         }
         if Self::independent_reads(reads) {
@@ -1562,9 +1528,13 @@ impl LocalBackend {
             };
             drop(operations);
             if results.len() != indices.len() {
-                let cause = VfError::invalid_reply(None, "read returned wrong result count");
                 for index in indices {
-                    out[index] = Some(Err(OpError::unknown(cause.clone(), None)));
+                    out[index] = Some(Err(OpError::unknown(
+                        vfsi_core::internal::errors::invalid_reply(
+                            "read returned wrong result count",
+                        ),
+                        None,
+                    )));
                 }
             } else {
                 for (index, result) in indices.into_iter().zip(results) {
@@ -1578,7 +1548,9 @@ impl LocalBackend {
                         .and_then(|read| {
                             if read > op.length {
                                 return Err(OpError::unknown(
-                                    VfError::invalid_reply(None, "read exceeds destination length"),
+                                    vfsi_core::internal::errors::invalid_reply(
+                                        "read exceeds destination length",
+                                    ),
                                     None,
                                 ));
                             }
@@ -1631,16 +1603,13 @@ impl LocalBackend {
     ) -> VfResult<(&'a Arc<File>, u64)> {
         let open = open_files
             .get(&op.file.fd().unwrap())
-            .ok_or_else(|| VfError::errno(index, ERR_EBADF))?;
+            .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?;
         let file = &open.file;
         let offset = match op.offset {
             VfOffset::At(offset) => offset,
             VfOffset::Cur => open.cur_offset,
-            VfOffset::End => file
-                .metadata()
-                .map_err(|e| VfError::from_io(index, e))?
-                .len(),
-            _ => return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput)),
+            VfOffset::End => file.metadata()?.len(),
+            _ => return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
         };
         checked_offset(offset, op.length as u64, index)?;
         Ok((file, offset))
@@ -1648,7 +1617,7 @@ impl LocalBackend {
 
     fn readv_one_into(&mut self, op: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
         if op.length != buffer.len() {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         let opened;
         let (file, off, descriptor) = match &op.file {
@@ -1656,9 +1625,9 @@ impl LocalBackend {
                 let o = self
                     .open_files
                     .get(fd)
-                    .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
+                    .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?;
                 let len = if op.offset == VfOffset::End {
-                    o.file.metadata().map_err(|e| VfError::from_io(0, e))?.len()
+                    o.file.metadata()?.len()
                 } else {
                     0
                 };
@@ -1670,9 +1639,9 @@ impl LocalBackend {
                 let mut options = OpenOptions::new();
                 options.read(true);
                 Self::protect_create_open(&p, &mut options);
-                opened = options.open(&p).map_err(|e| VfError::from_io(0, e))?;
+                opened = options.open(&p)?;
                 let len = if op.offset == VfOffset::End {
-                    opened.metadata().map_err(|e| VfError::from_io(0, e))?.len()
+                    opened.metadata()?.len()
                 } else {
                     0
                 };
@@ -1680,15 +1649,13 @@ impl LocalBackend {
                 (&opened, off, false)
             }
             FileOperand::Saved => {
-                return Err(VfError::unsupported(0));
+                return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
             }
-            _ => return Err(VfError::unsupported(0)),
+            _ => return Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
         };
         let requested = u64::try_from(op.length).map_err(|_| Self::overflow(0))?;
         checked_offset(off, requested, 0)?;
-        let n = file
-            .read_at(buffer, off)
-            .map_err(|e| VfError::from_io(0, e))?;
+        let n = file.read_at(buffer, off)?;
         if descriptor && matches!(op.offset, VfOffset::Cur) {
             let next = checked_offset(off, n as u64, 0)?;
             self.advance_offset(&op.file, next);
@@ -1705,15 +1672,11 @@ impl LocalBackend {
         use vfsi_core::{FailureState, IoProgress, OpError};
         let (off, descriptor, result) = match op.file() {
             FileOperand::Fd(fd) => {
-                let open = self
-                    .open_files
-                    .get(fd)
-                    .ok_or_else(|| OpError::not_attempted(VfError::errno(None, ERR_EBADF)))?;
+                let open = self.open_files.get(fd).ok_or_else(|| {
+                    OpError::not_attempted(std::io::Error::from_raw_os_error((ERR_EBADF) as i32))
+                })?;
                 let len = if open.append || op.offset() == VfOffset::End {
-                    open.file
-                        .metadata()
-                        .map_err(|error| OpError::not_attempted(VfError::from_io(None, error)))?
-                        .len()
+                    open.file.metadata().map_err(OpError::not_attempted)?.len()
                 } else {
                     0
                 };
@@ -1745,8 +1708,7 @@ impl LocalBackend {
                     }
                     VfOffset::End => {}
                     _ => {
-                        return Err(OpError::not_attempted(VfError::from_kind(
-                            None,
+                        return Err(OpError::not_attempted(std::io::Error::from(
                             std::io::ErrorKind::InvalidInput,
                         )));
                     }
@@ -1763,12 +1725,12 @@ impl LocalBackend {
                 Self::protect_create_open(&path, &mut options);
                 let file = options
                     .open(&path)
-                    .map_err(|error| OpError::failed(VfError::from_io(None, error), None))?;
+                    .map_err(|error| OpError::failed(error, None))?;
                 let off = match op.offset() {
                     VfOffset::At(offset) => offset,
                     VfOffset::End => file
                         .metadata()
-                        .map_err(|error| OpError::failed(VfError::from_io(None, error), None))?
+                        .map_err(|error| OpError::failed(error, None))?
                         .len(),
                     _ => unreachable!("path offset preflight completed"),
                 };
@@ -1786,7 +1748,11 @@ impl LocalBackend {
                         });
                 (off, false, result)
             }
-            _ => return Err(OpError::not_attempted(VfError::unsupported(None))),
+            _ => {
+                return Err(OpError::not_attempted(std::io::Error::from(
+                    std::io::ErrorKind::Unsupported,
+                )));
+            }
         };
         let confirmed = match &result {
             Ok(count) => *count,
@@ -1824,13 +1790,15 @@ impl LocalBackend {
             let ordered = self.io.ordered();
             let mut operations = Vec::with_capacity(writes.len());
             let mut ranges = Vec::with_capacity(if ordered { 0 } else { writes.len() });
-            let mut output: Vec<Option<OpResult<WriteResult>>> = vec![None; writes.len()];
+            let mut output: Vec<Option<OpResult<WriteResult>>> =
+                (0..writes.len()).map(|_| None).collect();
             let mut independent = true;
             for (index, op) in writes.iter().enumerate() {
                 let fd = op.file().fd().expect("descriptor eligibility checked");
                 let Some(open) = self.open_files.get(&fd) else {
-                    output[index] =
-                        Some(Err(OpError::not_attempted(VfError::errno(None, ERR_EBADF))));
+                    output[index] = Some(Err(OpError::not_attempted(
+                        std::io::Error::from_raw_os_error((ERR_EBADF) as i32),
+                    )));
                     continue;
                 };
                 if open.append {
@@ -1851,8 +1819,7 @@ impl LocalBackend {
                     match open.identity() {
                         Ok(identity) => ranges.push((identity, offset, end)),
                         Err(error) => {
-                            output[index] =
-                                Some(Err(OpError::not_attempted(VfError::from_io(None, error))));
+                            output[index] = Some(Err(OpError::not_attempted(error)));
                             continue;
                         }
                     }
@@ -1878,7 +1845,9 @@ impl LocalBackend {
                     }
                     let invalid = || {
                         OpError::unknown(
-                            VfError::invalid_reply(None, "invalid descriptor WRITE completion"),
+                            vfsi_core::internal::errors::invalid_reply(
+                                "invalid descriptor WRITE completion",
+                            ),
                             None,
                         )
                     };
@@ -1931,18 +1900,16 @@ impl LocalBackend {
                 break;
             }
             let p = self.open_directory_no_follow_final(&self.resolve(&current))?;
-            let rd = std::fs::read_dir(&p).map_err(|e| VfError::from_io(0, e))?;
+            let rd = std::fs::read_dir(&p)?;
             let mut children = Vec::new();
             for entry in rd {
-                let entry = entry.map_err(|e| VfError::from_io(0, e))?;
+                let entry = entry?;
                 if reached_limit(out) {
                     break;
                 }
                 let name = entry.file_name();
                 let path = current.join(&name);
-                let attrs = self
-                    .directory_entry_attrs(&p, &path, &name, masks)
-                    .map_err(|error| error.with_index(out.len()))?;
+                let attrs = self.directory_entry_attrs(&p, &path, &name, masks)?;
                 if recursive && attrs.ftype == VfType::Directory {
                     children.push(path);
                 }
@@ -1961,26 +1928,26 @@ impl LocalBackend {
         let mut src_options = OpenOptions::new();
         src_options.read(true);
         Self::protect_create_open(&sp, &mut src_options);
-        let src = src_options.open(&sp).map_err(|e| VfError::from_io(0, e))?;
+        let src = src_options.open(&sp)?;
         let mut dst_options = OpenOptions::new();
         dst_options.write(true).create(true).truncate(false);
         Self::protect_create_open(&dp, &mut dst_options);
-        let dst = dst_options.open(&dp).map_err(|e| VfError::from_io(0, e))?;
+        let dst = dst_options.open(&dp)?;
         let mut length = p.length;
         if p.dst_offset > p.src_offset && length != Some(0) {
-            let src_metadata = src.metadata().map_err(|e| VfError::from_io(0, e))?;
-            let dst_metadata = dst.metadata().map_err(|e| VfError::from_io(0, e))?;
+            let src_metadata = src.metadata()?;
+            let dst_metadata = dst.metadata()?;
             if src_metadata.dev() == dst_metadata.dev() && src_metadata.ino() == dst_metadata.ino()
             {
                 let Some(requested) = length else {
                     // A forward to-EOF alias copy can extend its own source.
-                    return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+                    return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
                 };
                 let available = src_metadata.len().saturating_sub(p.src_offset);
                 let actual = requested.min(available);
                 if p.dst_offset - p.src_offset < actual {
                     // Do not overwrite bytes that a later chunk still needs.
-                    return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+                    return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
                 }
                 // A finite alias copy must not consume data or holes created
                 // by its own writes beyond the original source EOF.
@@ -2000,14 +1967,11 @@ impl LocalBackend {
             let remaining = length.map_or(u64::MAX, |l| l - copied);
             let chunk_len = remaining.min(1 << 20) as usize;
             buf.resize(chunk_len, 0);
-            let n = src
-                .read_at(&mut buf, so)
-                .map_err(|e| VfError::from_io(0, e))?;
+            let n = src.read_at(&mut buf, so)?;
             if n == 0 {
                 break; // EOF
             }
-            dst.write_all_at(&buf[..n], doff)
-                .map_err(|e| VfError::from_io(0, e))?;
+            dst.write_all_at(&buf[..n], doff)?;
             so = so.checked_add(n as u64).ok_or_else(|| Self::overflow(0))?;
             doff = doff
                 .checked_add(n as u64)
@@ -2017,7 +1981,7 @@ impl LocalBackend {
                 .ok_or_else(|| Self::overflow(0))?;
         }
         // Truncate any stale tail beyond what was copied (cp semantics).
-        dst.set_len(doff).map_err(|e| VfError::from_io(0, e))?;
+        dst.set_len(doff)?;
         Ok(())
     }
 }
@@ -2029,13 +1993,12 @@ impl HandleBackend for LocalBackend {
     ) -> VfResult<Option<vfsi_sync::backend::OpenObjectRef<'_>>> {
         let fd = file
             .fd()
-            .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
         let (device, inode) = self
             .open_files
             .get(&fd)
-            .ok_or_else(|| VfError::errno(0, ERR_EBADF))?
-            .identity()
-            .map_err(|e| VfError::from_io(0, e))?;
+            .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?
+            .identity()?;
         Ok(Some(vfsi_sync::backend::OpenObjectRef::Id(FsObjId::new(
             u128::from(device),
             inode,
@@ -2054,11 +2017,11 @@ impl HandleBackend for LocalBackend {
         for (index, file) in files.iter().enumerate() {
             let open = file
                 .fd()
-                .ok_or_else(|| VfError::from_kind(None, std::io::ErrorKind::InvalidInput))
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))
                 .and_then(|fd| {
                     self.open_files
                         .get(&fd)
-                        .ok_or_else(|| VfError::errno(None, ERR_EBADF))
+                        .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))
                 });
             match open {
                 Ok(open) => {
@@ -2086,7 +2049,9 @@ impl HandleBackend for LocalBackend {
                 .iter()
                 .map(|_| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "too many synchronization outcomes"),
+                        vfsi_core::internal::errors::invalid_reply(
+                            "too many synchronization outcomes",
+                        ),
                         None,
                     ))
                 })
@@ -2094,7 +2059,7 @@ impl HandleBackend for LocalBackend {
         } else {
             results.resize_with(prepared.len(), || {
                 Err(OpError::unknown(
-                    VfError::invalid_reply(None, "missing synchronization outcome"),
+                    vfsi_core::internal::errors::invalid_reply("missing synchronization outcome"),
                     None,
                 ))
             });
@@ -2106,7 +2071,9 @@ impl HandleBackend for LocalBackend {
                 .is_some_and(|error| error.progress().is_some())
             {
                 *result = Err(OpError::unknown(
-                    VfError::invalid_reply(None, "synchronization cannot report I/O byte progress"),
+                    vfsi_core::internal::errors::invalid_reply(
+                        "synchronization cannot report I/O byte progress",
+                    ),
                     None,
                 ));
             }
@@ -2200,15 +2167,15 @@ impl HandleBackend for LocalBackend {
                     let mut fallback = Self::open_options(flags);
                     use std::os::unix::fs::OpenOptionsExt;
                     fallback.mode(mode & 0o7777);
-                    fallback.open(&p).map_err(|e| VfError::from_io(0, e))?
+                    fallback.open(&p)?
                 }
-                Err(e) => return Err(VfError::from_io(0, e)),
+                Err(e) => return Err(e),
             }
         } else {
             let mut options = Self::open_options(flags);
             // O_TMPFILE also consumes a creation mode without O_CREAT.
             options.mode(mode & 0o7777);
-            options.open(&p).map_err(|e| VfError::from_io(0, e))?
+            options.open(&p)?
         };
         let fd = self.insert_open_file(LocalOpen {
             file: Arc::new(file),
@@ -2232,18 +2199,18 @@ impl HandleBackend for LocalBackend {
 
     fn close_impl(&mut self, tcf: &FileOperand) -> VfResult<()> {
         if !tcf.is_fd() {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         self.open_files
             .remove(&tcf.fd().unwrap())
             .map(|_| ())
-            .ok_or_else(|| VfError::errno(0, ERR_EBADF))
+            .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))
     }
 
     fn chdir(&mut self, path: &Path) -> VfResult<()> {
         let p = self.real_path(&self.resolve(path))?;
         if !p.is_dir() {
-            return Err(VfError::errno(0, ERR_NOTDIR));
+            return Err(std::io::Error::from_raw_os_error((ERR_NOTDIR) as i32));
         }
         self.cwd = self.abs_path(path);
         Ok(())
@@ -2255,13 +2222,13 @@ impl HandleBackend for LocalBackend {
 
     fn seek_raw_impl(&mut self, tcf: &FileOperand, offset: i64, whence: SeekFrom) -> VfResult<i64> {
         if !tcf.is_fd() {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         let cur = self
             .open_files
             .get(&tcf.fd().unwrap())
             .map(|o| o.cur_offset)
-            .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
+            .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?;
         let base = match whence {
             SeekFrom::Set => 0i128,
             SeekFrom::Cur => i128::from(cur),
@@ -2269,17 +2236,17 @@ impl HandleBackend for LocalBackend {
                 let o = self
                     .open_files
                     .get(&tcf.fd().unwrap())
-                    .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
-                let len = o.file.metadata().map_err(|e| VfError::from_io(0, e))?.len();
+                    .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?;
+                let len = o.file.metadata()?.len();
                 i128::from(len)
             }
-            _ => return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
+            _ => return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
         };
         let new = base
             .checked_add(i128::from(offset))
             .ok_or_else(|| Self::overflow(0))?;
         if new < 0 {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         let new = u64::try_from(new).map_err(|_| Self::overflow(0))?;
         let reported = i64::try_from(new).map_err(|_| Self::overflow(0))?;
@@ -2340,7 +2307,7 @@ impl VectorBackend for LocalBackend {
     ) -> vfsi_core::VecResult<FileOperand> {
         use vfsi_core::OpError;
         if paths.len() != flags.len() || paths.len() != modes.len() {
-            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         #[cfg(feature = "test-faults")]
         self.inject_open_fault(OpenFaultPoint::BeforeDispatch { chunk: 0 })?;
@@ -2375,7 +2342,7 @@ impl VectorBackend for LocalBackend {
         chunk_size: usize,
         memory_limit: usize,
         cb: &mut ReadStreamCallback<'_>,
-    ) -> VfRes {
+    ) -> Result<(), vfsi_core::IndexedError> {
         // A whole-file read must not give one sibling the entire stream
         // budget. Share it across the live queue-sized cohort, without tiny
         // probes, and let remaining files grow after short siblings reach EOF.
@@ -2448,9 +2415,8 @@ impl VectorBackend for LocalBackend {
             );
             let reads = match reads {
                 Ok(reads) => reads,
-                Err(error) => opened
-                    .iter()
-                    .map(|_| Err(OpError::failed(error.clone(), None)))
+                Err(error) => vfsi_core::internal::errors::fanout(error, opened.len())
+                    .map(|error| Err(OpError::failed(error, None)))
                     .collect(),
             };
             // Each successful OPEN keeps exactly one close owner, even when
@@ -2529,15 +2495,15 @@ impl VectorBackend for LocalBackend {
             .enumerate()
             .map(|(i, a)| {
                 if !a.masks.difference(SETTABLE).is_empty() {
-                    return Err(vfsi_core::OpError::not_attempted(VfError::unsupported(
-                        None,
+                    return Err(vfsi_core::OpError::not_attempted(std::io::Error::from(
+                        std::io::ErrorKind::Unsupported,
                     )));
                 }
                 (|| {
                     self.setattr_one(a, i)?;
                     Ok(())
                 })()
-                .map_err(|cause: VfError| vfsi_core::OpError::failed(cause, None))
+                .map_err(|cause: std::io::Error| vfsi_core::OpError::failed(cause, None))
             })
             .collect())
     }
@@ -2554,8 +2520,8 @@ impl VectorBackend for LocalBackend {
             .enumerate()
             .map(|(i, a)| {
                 if !a.masks.difference(SETTABLE).is_empty() {
-                    return Err(vfsi_core::OpError::not_attempted(VfError::unsupported(
-                        None,
+                    return Err(vfsi_core::OpError::not_attempted(std::io::Error::from(
+                        std::io::ErrorKind::Unsupported,
                     )));
                 }
                 let mut applying = false;
@@ -2565,9 +2531,7 @@ impl VectorBackend for LocalBackend {
                         self.setattr_one(a, i)?;
                         return Ok(());
                     }
-                    let p = self
-                        .no_follow_path(&self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?)
-                        .map_err(|e| e.with_index(i))?;
+                    let p = self.no_follow_path(&self.tcfile_path(&a.file)?)?;
                     if a.masks.intersects(AttrMask::UID | AttrMask::GID)
                         && a.masks.difference(AttrMask::UID | AttrMask::GID).is_empty()
                     {
@@ -2575,10 +2539,10 @@ impl VectorBackend for LocalBackend {
                         Self::chown_path(a, &p, false, i)?;
                         return Ok(());
                     }
-                    let md = std::fs::symlink_metadata(&p).map_err(|e| VfError::from_io(i, e))?;
+                    let md = std::fs::symlink_metadata(&p)?;
                     if md.file_type().is_symlink() {
                         // No portable lchmod/ltruncate: refuse rather than follow.
-                        return Err(VfError::unsupported(i));
+                        return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
                     }
                     #[cfg(feature = "test-faults")]
                     self.inject_open_fault(OpenFaultPoint::AfterNoFollowSetattrTypeCheck {
@@ -2588,7 +2552,7 @@ impl VectorBackend for LocalBackend {
                     self.setattr_path(a, i, &p, false)?;
                     Ok(())
                 })()
-                .map_err(|cause: VfError| {
+                .map_err(|cause: std::io::Error| {
                     if !applying && cause.kind() == std::io::ErrorKind::Unsupported {
                         vfsi_core::OpError::not_attempted(cause)
                     } else {
@@ -2623,7 +2587,7 @@ impl VectorBackend for LocalBackend {
         #[cfg(test)]
         self.directory_page_sizes.push(page_size);
         if page_size == 0 {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         let mut state = match cursor {
             Some(cursor) => cursor.into_state::<LocalDirectoryCursor>()?,
@@ -2633,7 +2597,7 @@ impl VectorBackend for LocalBackend {
                 } else {
                     self.strict_directory_path(dir)?
                 };
-                let entries = std::fs::read_dir(&p).map_err(|error| VfError::from_io(0, error))?;
+                let entries = std::fs::read_dir(&p)?;
                 LocalDirectoryCursor {
                     entries,
                     virtual_dir: dir.to_path_buf(),
@@ -2646,12 +2610,10 @@ impl VectorBackend for LocalBackend {
             let Some(entry) = state.entries.next() else {
                 return Ok((page, None));
             };
-            let entry = entry.map_err(|error| VfError::from_io(0, error))?;
+            let entry = entry?;
             let name = entry.file_name();
             let path = state.virtual_dir.join(&name);
-            let attrs = self
-                .directory_entry_attrs(&state._anchor, &path, &name, masks)
-                .map_err(|error| error.with_index(page.len()))?;
+            let attrs = self.directory_entry_attrs(&state._anchor, &path, &name, masks)?;
             page.push(attrs);
         }
         Ok((page, Some(DirPageCursor::new(state))))
@@ -2665,17 +2627,15 @@ impl VectorBackend for LocalBackend {
         cb: &mut dyn FnMut(&VfAttrs) -> bool,
     ) -> VfRes {
         let p = self.open_directory_no_follow_final(&self.resolve(dir))?;
-        let entries = std::fs::read_dir(&p).map_err(|error| VfError::from_io(0, error))?;
+        let entries = std::fs::read_dir(&p)?;
         for (count, entry) in entries.enumerate() {
             if max_entries != 0 && count >= max_entries {
                 return Ok(());
             }
-            let entry = entry.map_err(|error| VfError::from_io(0, error))?;
+            let entry = entry?;
             let name = entry.file_name();
             let path = dir.join(&name);
-            let attrs = self
-                .directory_entry_attrs(&p, &path, &name, masks)
-                .map_err(|error| error.with_index(count))?;
+            let attrs = self.directory_entry_attrs(&p, &path, &name, masks)?;
             if !cb(&attrs) {
                 return Ok(());
             }
@@ -2695,7 +2655,7 @@ impl VectorBackend for LocalBackend {
         use vfsi_core::OpError;
         #[cfg(not(target_os = "linux"))]
         if options != vfsi_core::api::RenameMode::Replace && !pairs.is_empty() {
-            return Err(VfError::unsupported(None));
+            return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
         }
         Ok(pairs
             .iter()
@@ -2712,20 +2672,18 @@ impl VectorBackend for LocalBackend {
                 let (source_path, destination_path, source, destination) = paths;
                 if options == vfsi_core::api::RenameMode::Replace {
                     return std::fs::rename(source, destination)
-                        .map_err(|error| OpError::failed(VfError::from_io(None, error), None));
+                        .map_err(|error| OpError::failed(error, None));
                 }
                 #[cfg(target_os = "linux")]
                 {
                     let source_name = cstring_from_bytes(path_bytes(&source)).ok_or_else(|| {
-                        OpError::not_attempted(VfError::from_kind(
-                            None,
+                        OpError::not_attempted(std::io::Error::from(
                             std::io::ErrorKind::InvalidInput,
                         ))
                     })?;
                     let destination_name = cstring_from_bytes(path_bytes(&destination))
                         .ok_or_else(|| {
-                            OpError::not_attempted(VfError::from_kind(
-                                None,
+                            OpError::not_attempted(std::io::Error::from(
                                 std::io::ErrorKind::InvalidInput,
                             ))
                         })?;
@@ -2788,13 +2746,13 @@ impl VectorBackend for LocalBackend {
                     .and_then(|path| self.no_follow_path(&self.root.join(path)))
                     .map_err(OpError::not_attempted)?;
                 let metadata = std::fs::symlink_metadata(&path)
-                    .map_err(|error| OpError::failed(VfError::from_io(None, error), None))?;
+                    .map_err(|error| OpError::failed(error, None))?;
                 let result = if metadata.is_dir() && !metadata.file_type().is_symlink() {
                     std::fs::remove_dir(path)
                 } else {
                     std::fs::remove_file(path)
                 };
-                result.map_err(|error| OpError::failed(VfError::from_io(None, error), None))
+                result.map_err(|error| OpError::failed(error, None))
             })
             .collect())
     }
@@ -2817,7 +2775,7 @@ impl VectorBackend for LocalBackend {
                 std::fs::DirBuilder::new()
                     .mode(mode)
                     .create(&path)
-                    .map_err(|error| OpError::failed(VfError::from_io(None, error), None))?;
+                    .map_err(|error| OpError::failed(error, None))?;
                 if attrs.masks.contains(AttrMask::MODE) {
                     #[cfg(feature = "test-faults")]
                     self.inject_open_fault(OpenFaultPoint::BeforeSetPermissions { index })
@@ -2836,7 +2794,7 @@ impl VectorBackend for LocalBackend {
         newpaths: &[&Path],
     ) -> vfsi_core::VecResult<()> {
         if oldpaths.len() != newpaths.len() {
-            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         Ok(oldpaths
             .iter()
@@ -2845,9 +2803,7 @@ impl VectorBackend for LocalBackend {
                 let new = self
                     .no_follow_path(&self.resolve(new))
                     .map_err(vfsi_core::OpError::not_attempted)?;
-                symlink(old, new).map_err(|error| {
-                    vfsi_core::OpError::failed(VfError::from_io(None, error), None)
-                })
+                symlink(old, new).map_err(|error| vfsi_core::OpError::failed(error, None))
             })
             .collect())
     }
@@ -2861,9 +2817,7 @@ impl VectorBackend for LocalBackend {
                     .map_err(vfsi_core::OpError::not_attempted)?;
                 std::fs::read_link(path)
                     .map(|target| path_bytes(&target).to_vec())
-                    .map_err(|error| {
-                        vfsi_core::OpError::failed(VfError::from_io(None, error), None)
-                    })
+                    .map_err(|error| vfsi_core::OpError::failed(error, None))
             })
             .collect())
     }
@@ -2874,7 +2828,7 @@ impl VectorBackend for LocalBackend {
         newpaths: &[&Path],
     ) -> vfsi_core::VecResult<()> {
         if oldpaths.len() != newpaths.len() {
-            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         Ok(oldpaths
             .iter()
@@ -2886,9 +2840,8 @@ impl VectorBackend for LocalBackend {
                 let old = self
                     .no_follow_path(&self.resolve(old))
                     .map_err(vfsi_core::OpError::not_attempted)?;
-                std::fs::hard_link(old, new).map_err(|error| {
-                    vfsi_core::OpError::failed(VfError::from_io(None, error), None)
-                })
+                std::fs::hard_link(old, new)
+                    .map_err(|error| vfsi_core::OpError::failed(error, None))
             })
             .collect())
     }
@@ -2916,13 +2869,11 @@ impl VectorBackend for LocalBackend {
             .map(|p| {
                 (|| {
                     let source = self.no_follow_path(&self.resolve(&p.src_path))?;
-                    let metadata = std::fs::symlink_metadata(&source)
-                        .map_err(|error| VfError::from_io(None, error))?;
+                    let metadata = std::fs::symlink_metadata(&source)?;
                     if metadata.file_type().is_symlink() {
-                        let target = std::fs::read_link(&source)
-                            .map_err(|error| VfError::from_io(None, error))?;
+                        let target = std::fs::read_link(&source)?;
                         let destination = self.no_follow_path(&self.resolve(&p.dst_path))?;
-                        symlink(&target, destination).map_err(|error| VfError::from_io(None, error))
+                        symlink(&target, destination)
                     } else {
                         self.copy_extent(p)
                     }
@@ -2947,9 +2898,10 @@ impl VectorBackend for LocalBackend {
             AttrMask::MODE | AttrMask::SIZE | AttrMask::FILEID,
             |backend, pairs| {
                 vfsi_core::internal::collect_vec_result(backend.vcopy_data_impl(pairs), pairs.len())
+                    .map_err(vfsi_core::IndexedError::into_cause)
                     .map(|_| ())
             },
-            |error| error.with_index(0),
+            |error| error,
         )
     }
     fn before_remove_type(&mut self, _index: usize) -> VfResult<()> {
@@ -2962,25 +2914,21 @@ impl VectorBackend for LocalBackend {
         let mut counts = Vec::with_capacity(patterns.len());
         for (i, p) in patterns.iter().enumerate() {
             let layout = vfsi_core::internal::adb_layout(p, i)?;
-            let path = self
-                .real_path(&self.resolve(&p.path))
-                .map_err(|e| e.with_index(i))?;
+            let path = self.real_path(&self.resolve(&p.path))?;
             let mut options = OpenOptions::new();
             options.write(true).create(true).truncate(false);
             Self::protect_create_open(&path, &mut options);
-            let file = options.open(&path).map_err(|e| VfError::from_io(i, e))?;
+            let file = options.open(&path)?;
             let mut written = 0usize;
             for (block_number, number_offset, pattern_offset) in layout {
                 if let Some(offset) = number_offset {
                     let adbn = block_number.to_be_bytes();
-                    file.write_all_at(&adbn, offset)
-                        .map_err(|e| VfError::from_io(i, e))?;
+                    file.write_all_at(&adbn, offset)?;
                 }
                 if let Some(offset) = pattern_offset
                     && !p.adb_pattern_data.is_empty()
                 {
-                    file.write_all_at(&p.adb_pattern_data, offset)
-                        .map_err(|e| VfError::from_io(i, e))?;
+                    file.write_all_at(&p.adb_pattern_data, offset)?;
                 }
                 written += 1;
             }
@@ -2995,23 +2943,22 @@ impl VectorBackend for LocalBackend {
 mod contract_tests;
 
 #[cfg(target_os = "linux")]
-fn local_filesystem_stats(fd: std::os::fd::RawFd, index: usize) -> VfResult<FilesystemStats> {
+fn local_filesystem_stats(fd: std::os::fd::RawFd, _index: usize) -> VfResult<FilesystemStats> {
     // SAFETY: this libc output structure contains C integer fields and is valid when
     // zero-initialized.
     let mut raw: libc::statvfs = unsafe { std::mem::zeroed() };
     // SAFETY: fd is borrowed from a live File and raw provides writable statvfs output
     // storage.
     if unsafe { libc::fstatvfs(fd, &mut raw) } != 0 {
-        return Err(VfError::errno(
-            index,
-            LocalBackend::errno(&std::io::Error::last_os_error()),
+        return Err(std::io::Error::from_raw_os_error(
+            (LocalBackend::errno(&std::io::Error::last_os_error())) as i32,
         ));
     }
     let bytes = |blocks: u64| {
         blocks
             .checked_mul(raw.f_frsize)
             .map(Some)
-            .ok_or_else(|| VfError::errno(index, libc::EOVERFLOW as u32))
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))
     };
     let conf = |name| -> VfResult<Option<u64>> {
         // SAFETY: libc supplies the calling thread's live errno cell; no reference
@@ -3031,7 +2978,7 @@ fn local_filesystem_stats(fd: std::os::fd::RawFd, index: usize) -> VfResult<File
         if errno == 0 || errno == libc::EINVAL {
             Ok(None)
         } else {
-            Err(VfError::errno(index, errno as u32))
+            Err(std::io::Error::from_raw_os_error((errno) as i32))
         }
     };
     Ok(FilesystemStats::default()
@@ -3049,7 +2996,8 @@ fn local_filesystem_stats(fd: std::os::fd::RawFd, index: usize) -> VfResult<File
         .with_file_size_bits(
             conf(libc::_PC_FILESIZEBITS)?
                 .map(|value| {
-                    u32::try_from(value).map_err(|_| VfError::errno(index, libc::EOVERFLOW as u32))
+                    u32::try_from(value)
+                        .map_err(|_| std::io::Error::from_raw_os_error(libc::EOVERFLOW))
                 })
                 .transpose()?,
         )

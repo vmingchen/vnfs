@@ -58,26 +58,26 @@ fn retry_path_write<'a>(
 
 pub(super) fn write_all_at<C>(
     client: &mut C,
-    index: usize,
+    _index: usize,
     offset: u64,
     data: &[u8],
     mut write: impl FnMut(&mut C, u64, &[u8]) -> VfResult<usize>,
 ) -> VfResult<()> {
-    let data_len =
-        u64::try_from(data.len()).map_err(|_| VfError::errno(index, libc::EOVERFLOW as u32))?;
+    let data_len = u64::try_from(data.len())
+        .map_err(|_| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
     offset
         .checked_add(data_len)
-        .ok_or_else(|| VfError::errno(index, libc::EOVERFLOW as u32))?;
+        .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
 
     let mut progress = 0usize;
     while progress < data.len() {
         let current = offset
             .checked_add(progress as u64)
-            .ok_or_else(|| VfError::errno(index, libc::EOVERFLOW as u32))?;
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
         let remaining = &data[progress..];
         let written = write(client, current, remaining)?;
         if written == 0 || written > remaining.len() {
-            return Err(VfError::errno(index, ERR_IO));
+            return Err(std::io::Error::from_raw_os_error((ERR_IO) as i32));
         }
         progress += written;
     }
@@ -108,21 +108,14 @@ pub(super) use crate::client::WriteWaveAccess;
 
 #[cfg(test)]
 pub(super) fn remap_descriptor_chunk_error(
-    error: VfError,
+    error: vfsi_core::IndexedError,
     start: usize,
     owners: &[usize],
-) -> VfError {
+) -> vfsi_core::IndexedError {
     error.map_index(|local_index| {
         let chunk_index = start.saturating_add(local_index);
         owners.get(chunk_index).copied().unwrap_or(chunk_index)
     })
-}
-
-pub(super) fn remap_active_error(error: VfError, active: &[usize]) -> VfError {
-    match error.index().and_then(|index| active.get(index)).copied() {
-        Some(original) => error.with_index(original),
-        None => error,
-    }
 }
 
 pub(super) fn bounded_read_allv_batch(
@@ -160,11 +153,11 @@ impl NfsVecFs {
     /// Selective read recovery keeps successful siblings and resumes only an
     /// unsuccessful input's remaining range. Prefix storage moves on errors.
     pub(super) fn read_results(&mut self, reads: &[ReadOp]) -> VecResult<ReadResult> {
-        if let Some(index) = reads
+        if let Some(_index) = reads
             .iter()
             .position(|read| read.length > isize::MAX as usize)
         {
-            return Err(VfError::errno(index, libc::EFBIG as u32));
+            return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
         }
         let first_end = independent_read_prefix(reads);
         if first_end < reads.len() {
@@ -177,8 +170,10 @@ impl NfsVecFs {
                 match self.read_results(&reads[start..end]) {
                     Ok(results) => output.extend(results),
                     Err(cause) if start == 0 => return Err(cause),
-                    Err(cause) => output
-                        .extend((start..end).map(|_| Err(OpError::not_attempted(cause.clone())))),
+                    Err(cause) => output.extend(
+                        vfsi_core::internal::errors::fanout(cause, (start..end).len())
+                            .map(|cause| Err(OpError::not_attempted(cause))),
+                    ),
                 }
                 start = end;
             }
@@ -331,11 +326,11 @@ impl NfsVecFs {
     }
 
     pub(super) fn read_unrecovered(&mut self, reads: &[ReadOp]) -> VecResult<ReadResult> {
-        if let Some(index) = reads
+        if let Some(_index) = reads
             .iter()
             .position(|read| read.length > isize::MAX as usize)
         {
-            return Err(VfError::errno(index, libc::EFBIG as u32));
+            return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
         }
         if reads.is_empty() {
             return Ok(Vec::new());
@@ -359,7 +354,9 @@ impl NfsVecFs {
                         .fd()
                         .is_some_and(|fd| self.open_files.contains_key(&fd))
                 {
-                    return Err(OpError::not_attempted(VfError::errno(None, ERR_EBADF)));
+                    return Err(OpError::not_attempted(std::io::Error::from_raw_os_error(
+                        (ERR_EBADF) as i32,
+                    )));
                 }
                 let offset = match read.offset {
                     VfOffset::At(offset) => offset,
@@ -368,21 +365,20 @@ impl NfsVecFs {
                         .fd()
                         .and_then(|fd| self.open_files.get(&fd).map(|open| open.cur_offset))
                         .ok_or_else(|| {
-                            OpError::not_attempted(VfError::from_kind(
-                                None,
+                            OpError::not_attempted(std::io::Error::from(
                                 std::io::ErrorKind::InvalidInput,
                             ))
                         })?,
                     VfOffset::End => {
                         let file = self.resolve_tcfile(&read.file, true).map_err(|cause| {
-                            if cause.is_transport() {
+                            if vfsi_core::transport_kind(&(cause)).is_some() {
                                 OpError::unknown(cause, None)
                             } else {
                                 OpError::failed(cause, None)
                             }
                         })?;
                         self.file_size(&file).map_err(|cause| {
-                            if cause.is_transport() {
+                            if vfsi_core::transport_kind(&(cause)).is_some() {
                                 OpError::unknown(cause, None)
                             } else {
                                 OpError::failed(cause, None)
@@ -390,14 +386,13 @@ impl NfsVecFs {
                         })?
                     }
                     _ => {
-                        return Err(OpError::not_attempted(VfError::from_kind(
-                            None,
+                        return Err(OpError::not_attempted(std::io::Error::from(
                             std::io::ErrorKind::InvalidInput,
                         )));
                     }
                 };
                 offset.checked_add(read.length as u64).ok_or_else(|| {
-                    let cause = VfError::errno(None, libc::EOVERFLOW as u32);
+                    let cause = std::io::Error::from_raw_os_error(libc::EOVERFLOW);
                     if read.offset == VfOffset::End {
                         OpError::failed(cause, None)
                     } else {
@@ -445,10 +440,15 @@ impl NfsVecFs {
                 Ok(outcome) => {
                     self.close_path_opens(&outcome.opened);
                     if outcome.results.len() != ops.len() {
-                        let cause =
-                            VfError::invalid_reply(None, "invalid merged READ outcome count");
-                        for index in indices {
-                            output[index] = Some(Err(OpError::unknown(cause.clone(), None)));
+                        let cause = vfsi_core::internal::errors::invalid_reply(
+                            "invalid merged READ outcome count",
+                        );
+                        {
+                            let causes =
+                                vfsi_core::internal::errors::fanout(cause, (indices).len());
+                            for (index, cause) in (indices).into_iter().zip(causes) {
+                                output[index] = Some(Err(OpError::unknown(cause, None)));
+                            }
                         }
                         return Ok(output
                             .into_iter()
@@ -481,9 +481,10 @@ impl NfsVecFs {
                                 result.and_then(|(data, eof)| {
                                     if Some(index) == close_owner {
                                         Err(OpError::failed(
-                                            VfError::nfs(
-                                                None,
-                                                outcome.close_failed.expect("close failure"),
+                                            vfsi_core::internal::errors::from_status(
+                                                vfsi_core::StatusCode::Nfs(
+                                                    outcome.close_failed.expect("close failure"),
+                                                ),
                                             ),
                                             Some(IoProgress::Read(
                                                 vfsi_core::api::ReadResult::owned(
@@ -501,7 +502,7 @@ impl NfsVecFs {
                     let mut results =
                         Self::assemble_reads(&requests, ops.iter().map(|op| op.offset), payloads);
                     if full && results.iter().any(|result| result.as_ref().err().is_some_and(|error|
-                        error.progress().is_none() && error.cause().status().is_some_and(|status|
+                        error.progress().is_none() && vfsi_core::native_status(error.cause()).is_some_and(|status|
                             matches!(status, vfsi_core::StatusCode::Nfs(status) if crate::client::is_stateid_error(status)))))
                     {
                         self.merged_mode = MergedIoMode::Off;
@@ -510,7 +511,7 @@ impl NfsVecFs {
                         result.as_ref().err().filter(|error| error.progress().is_none()
                             && error.state() != FailureState::Unknown
                             && (outcome.close_failed.is_some() && error.state() == FailureState::NotAttempted
-                                || error.cause().status().is_some_and(|status| matches!(status,
+                                || vfsi_core::native_status(error.cause()).is_some_and(|status| matches!(status,
                                     vfsi_core::StatusCode::Nfs(status) if status == nfsstat4_NFS4ERR_SYMLINK
                                         || status == nfsstat4_NFS4ERR_INVAL || crate::client::is_stateid_error(status)))))
                             .map(|_| index)
@@ -526,10 +527,16 @@ impl NfsVecFs {
                             }
                             result => {
                                 let cause = result.err().unwrap_or_else(|| {
-                                    VfError::invalid_reply(None, "invalid phased READ retry count")
+                                    vfsi_core::internal::errors::invalid_reply(
+                                        "invalid phased READ retry count",
+                                    )
                                 });
-                                for index in retry {
-                                    results[index] = Err(OpError::unknown(cause.clone(), None));
+                                {
+                                    let causes =
+                                        vfsi_core::internal::errors::fanout(cause, (retry).len());
+                                    for (index, cause) in (retry).into_iter().zip(causes) {
+                                        results[index] = Err(OpError::unknown(cause, None));
+                                    }
                                 }
                             }
                         }
@@ -539,11 +546,12 @@ impl NfsVecFs {
                     }
                 }
                 Err(cause) => {
-                    for index in indices {
+                    let causes = vfsi_core::internal::errors::fanout(cause, (indices).len());
+                    for (index, cause) in (indices).into_iter().zip(causes) {
                         output[index] = Some(Err(if reads[index].offset == VfOffset::End {
-                            OpError::failed(cause.clone(), None)
+                            OpError::failed(cause, None)
                         } else {
-                            OpError::not_attempted(cause.clone())
+                            OpError::not_attempted(cause)
                         }));
                     }
                 }
@@ -568,7 +576,10 @@ impl NfsVecFs {
         mut on_data: impl FnMut(&[u8]),
     ) -> OpResult<(usize, bool)> {
         if received > op.count as usize || (op.count != 0 && received == 0 && !eof) {
-            return Err(OpError::failed(VfError::errno(None, ERR_IO), None));
+            return Err(OpError::failed(
+                std::io::Error::from_raw_os_error((ERR_IO) as i32),
+                None,
+            ));
         }
         while received < op.count as usize && !eof {
             #[cfg(feature = "test-faults")]
@@ -581,20 +592,23 @@ impl NfsVecFs {
                 fh: op.fh.clone(),
                 stateid: op.stateid,
                 offset: op.offset.checked_add(received as u64).ok_or_else(|| {
-                    OpError::not_attempted(VfError::errno(None, libc::EOVERFLOW as u32))
+                    OpError::not_attempted(std::io::Error::from_raw_os_error(libc::EOVERFLOW))
                 })?,
                 count: remaining as u32,
             };
             let mut result = self.nfs.readv(&[retry]).map_err(OpError::not_attempted)?;
             if result.len() != 1 {
                 return Err(OpError::unknown(
-                    VfError::invalid_reply(None, "malformed short READ reply"),
+                    vfsi_core::internal::errors::invalid_reply("malformed short READ reply"),
                     None,
                 ));
             }
             let (data, end) = result.pop().expect("one result validated")?;
             if data.len() > remaining || (data.is_empty() && !end) {
-                return Err(OpError::failed(VfError::errno(None, ERR_IO), None));
+                return Err(OpError::failed(
+                    std::io::Error::from_raw_os_error((ERR_IO) as i32),
+                    None,
+                ));
             }
             on_data(&data);
             received += data.len();
@@ -609,7 +623,7 @@ impl NfsVecFs {
             ops: Vec::with_capacity(reads.len()),
             owners: Vec::with_capacity(reads.len()),
             offsets: vec![0; reads.len()],
-            errors: vec![None; reads.len()],
+            errors: (0..reads.len()).map(|_| None).collect::<Vec<_>>(),
             metadata_started: false,
         };
         for (index, op) in reads.iter().enumerate() {
@@ -619,7 +633,9 @@ impl NfsVecFs {
                 .and_then(|fd| self.open_files.get(&fd))
                 .cloned()
             else {
-                plan.errors[index] = Some(OpError::not_attempted(VfError::errno(None, ERR_EBADF)));
+                plan.errors[index] = Some(OpError::not_attempted(
+                    std::io::Error::from_raw_os_error((ERR_EBADF) as i32),
+                ));
                 continue;
             };
             let offset = match op.offset {
@@ -630,25 +646,25 @@ impl NfsVecFs {
                     match self.file_size(&open.fh) {
                         Ok(size) => size,
                         Err(cause) => {
-                            plan.errors[index] = Some(if cause.is_transport() {
-                                OpError::unknown(cause, None)
-                            } else {
-                                OpError::failed(cause, None)
-                            });
+                            plan.errors[index] =
+                                Some(if vfsi_core::transport_kind(&(cause)).is_some() {
+                                    OpError::unknown(cause, None)
+                                } else {
+                                    OpError::failed(cause, None)
+                                });
                             continue;
                         }
                     }
                 }
                 _ => {
-                    plan.errors[index] = Some(OpError::not_attempted(VfError::from_kind(
-                        None,
+                    plan.errors[index] = Some(OpError::not_attempted(std::io::Error::from(
                         std::io::ErrorKind::InvalidInput,
                     )));
                     continue;
                 }
             };
             let Some(_end) = offset.checked_add(op.length as u64) else {
-                let cause = VfError::errno(None, libc::EOVERFLOW as u32);
+                let cause = std::io::Error::from_raw_os_error(libc::EOVERFLOW);
                 plan.errors[index] = Some(if op.offset == VfOffset::End {
                     OpError::failed(cause, None)
                 } else {
@@ -686,14 +702,14 @@ impl NfsVecFs {
         buffers: &mut [&mut [u8]],
     ) -> VecResult<ReadIntoResult> {
         if reads.len() != buffers.len() {
-            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
-        if let Some(index) = reads
+        if let Some(_index) = reads
             .iter()
             .zip(buffers.iter())
             .position(|(op, buffer)| op.length != buffer.len())
         {
-            return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         if reads.is_empty() {
             return Ok(Vec::new());
@@ -731,15 +747,16 @@ impl NfsVecFs {
             match wire {
                 Ok(results) => results,
                 Err(cause) if !metadata_started => return Err(cause),
-                Err(cause) => (0..ops.len())
-                    .map(|_| Err(OpError::not_attempted(cause.clone())))
+                Err(cause) => vfsi_core::internal::errors::fanout(cause, (0..ops.len()).len())
+                    .map(|cause| Err(OpError::not_attempted(cause)))
                     .collect(),
             }
         };
         if results.len() != ops.len() {
-            let cause = VfError::invalid_reply(None, "NFS READ returned wrong result count");
-            results = (0..ops.len())
-                .map(|_| Err(OpError::unknown(cause.clone(), None)))
+            let cause =
+                vfsi_core::internal::errors::invalid_reply("NFS READ returned wrong result count");
+            results = vfsi_core::internal::errors::fanout(cause, (0..ops.len()).len())
+                .map(|cause| Err(OpError::unknown(cause, None)))
                 .collect();
         }
         let mut wire = results.into_iter();
@@ -819,8 +836,8 @@ impl NfsVecFs {
     }
 
     pub(super) fn descriptor_read_results(&mut self, reads: &[ReadOp]) -> VecResult<ReadResult> {
-        if let Some(index) = reads.iter().position(|op| op.length > isize::MAX as usize) {
-            return Err(VfError::errno(index, libc::EFBIG as u32));
+        if let Some(_index) = reads.iter().position(|op| op.length > isize::MAX as usize) {
+            return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
         }
         let mut storage: Vec<_> = reads.iter().map(|op| vec![0; op.length]).collect();
         let mut buffers: Vec<_> = storage.iter_mut().map(Vec::as_mut_slice).collect();
@@ -855,20 +872,20 @@ impl NfsVecFs {
         buffers: &mut [&mut [u8]],
     ) -> VecResult<ReadIntoResult> {
         if reads.len() != buffers.len() {
-            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
-        if let Some(index) = reads
+        if let Some(_index) = reads
             .iter()
             .zip(buffers.iter())
             .position(|(read, buffer)| read.length != buffer.len())
         {
-            return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
-        if let Some(index) = reads
+        if let Some(_index) = reads
             .iter()
             .position(|read| read.length > isize::MAX as usize)
         {
-            return Err(VfError::errno(index, libc::EFBIG as u32));
+            return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
         }
         let first_end = independent_read_prefix(reads);
         if first_end < reads.len() {
@@ -879,8 +896,10 @@ impl NfsVecFs {
                 match self.read_into_results(&reads[start..end], &mut buffers[start..end]) {
                     Ok(results) => output.extend(results),
                     Err(cause) if start == 0 => return Err(cause),
-                    Err(cause) => output
-                        .extend((start..end).map(|_| Err(OpError::not_attempted(cause.clone())))),
+                    Err(cause) => output.extend(
+                        vfsi_core::internal::errors::fanout(cause, (start..end).len())
+                            .map(|cause| Err(OpError::not_attempted(cause))),
+                    ),
                 }
                 start = end;
             }
@@ -1067,13 +1086,17 @@ impl NfsVecFs {
             VfOffset::At(offset) => Ok(offset),
             VfOffset::Cur => match file.fd() {
                 Some(fd) => Ok(self.open_files.get(&fd).map(|o| o.cur_offset).unwrap_or(0)),
-                None => Err(VfError::errno(0, nfsstat4_NFS4ERR_INVAL)),
+                None => Err(std::io::Error::from_raw_os_error(
+                    (nfsstat4_NFS4ERR_INVAL) as i32,
+                )),
             },
             VfOffset::End => {
                 let fh = self.resolve_tcfile(file, true)?;
                 self.file_size(&fh)
             }
-            _ => Err(VfError::errno(0, nfsstat4_NFS4ERR_INVAL)),
+            _ => Err(std::io::Error::from_raw_os_error(
+                (nfsstat4_NFS4ERR_INVAL) as i32,
+            )),
         }
     }
 
@@ -1114,10 +1137,11 @@ impl NfsVecFs {
         let mut ops = Vec::new();
         let mut offsets = vec![0; writes.len()];
         let mut ranges = vec![0..0; writes.len()];
-        let mut handles = vec![None; writes.len()];
+        let mut handles = (0..writes.len()).map(|_| None).collect::<Vec<_>>();
         let mut predecessors = vec![false; writes.len()];
         let mut positional = vec![false; writes.len()];
-        let mut failures: Vec<Option<OpError>> = vec![None; writes.len()];
+        let mut failures: Vec<Option<OpError>> =
+            (0..writes.len()).map(|_| None).collect::<Vec<_>>();
         let mut done = vec![false; writes.len()];
         let mut seen_handles = std::collections::HashSet::new();
         // Reject invalid operands individually before any WRITE is dispatched.
@@ -1126,13 +1150,13 @@ impl NfsVecFs {
                 let offset = self.write_offset(request.file(), request.offset())?;
                 offset
                     .checked_add(request.data().len() as u64)
-                    .ok_or_else(|| VfError::errno(None, libc::EOVERFLOW as u32))?;
+                    .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
                 let open = request
                     .file()
                     .fd()
                     .and_then(|fd| self.open_files.get(&fd))
-                    .ok_or_else(|| VfError::errno(None, ERR_EBADF))?;
-                Ok::<_, VfError>((offset, open.fh.clone(), open.stateid, open.append))
+                    .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?;
+                Ok::<_, std::io::Error>((offset, open.fh.clone(), open.stateid, open.append))
             })();
             let (offset, fh, stateid, append) = match prepared {
                 Ok(prepared) => prepared,
@@ -1202,7 +1226,7 @@ impl NfsVecFs {
                     .and_then(|offset| {
                         offset
                             .checked_add(request.data().len() as u64)
-                            .ok_or_else(|| VfError::errno(None, libc::EOVERFLOW as u32))
+                            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))
                             .map(|_| offset)
                     });
                     let offset = match offset {
@@ -1266,19 +1290,32 @@ impl NfsVecFs {
             let results = match self.nfs.writev(&wire_ops) {
                 Ok(results) if results.len() == selected.len() => results,
                 Ok(_) => {
-                    let cause = VfError::invalid_reply(None, "malformed descriptor WRITE reply");
-                    stopped = Some(cause.clone());
-                    selected
-                        .iter()
-                        .map(|_| Err(OpError::unknown(cause.clone(), None)))
-                        .collect()
+                    let cause = vfsi_core::internal::errors::invalid_reply(
+                        "malformed descriptor WRITE reply",
+                    );
+                    let source = vfsi_core::internal::errors::shared_source(cause);
+                    let outcomes = (0..selected.len())
+                        .map(|_| {
+                            Err(OpError::unknown(
+                                vfsi_core::internal::errors::from_shared(&source),
+                                None,
+                            ))
+                        })
+                        .collect();
+                    stopped = Some(source);
+                    outcomes
                 }
                 Err(cause) => {
-                    stopped = Some(cause.clone());
-                    selected
-                        .iter()
-                        .map(|_| Err(OpError::not_attempted(cause.clone())))
-                        .collect()
+                    let source = vfsi_core::internal::errors::shared_source(cause);
+                    let outcomes = (0..selected.len())
+                        .map(|_| {
+                            Err(OpError::not_attempted(
+                                vfsi_core::internal::errors::from_shared(&source),
+                            ))
+                        })
+                        .collect();
+                    stopped = Some(source);
+                    outcomes
                 }
             };
             for ((&wire, &index), result) in selected.iter().zip(&owners).zip(results) {
@@ -1286,11 +1323,16 @@ impl NfsVecFs {
                     let remaining = ops[wire].data.len() - progress[wire];
                     if count as usize > remaining {
                         Err(OpError::unknown(
-                            VfError::invalid_reply(None, "WRITE exceeds remaining source"),
+                            vfsi_core::internal::errors::invalid_reply(
+                                "WRITE exceeds remaining source",
+                            ),
                             None,
                         ))
                     } else if count == 0 && remaining != 0 {
-                        Err(OpError::failed(VfError::errno(None, ERR_IO), None))
+                        Err(OpError::failed(
+                            std::io::Error::from_raw_os_error((ERR_IO) as i32),
+                            None,
+                        ))
                     } else {
                         Ok((count, committed))
                     }
@@ -1301,9 +1343,11 @@ impl NfsVecFs {
                         complete[wire] = progress[wire] == ops[wire].data.len();
                         stable[index] &= committed == stable_how4_FILE_SYNC4;
                     }
-                    Err(error) => {
-                        if error.cause().is_transport() {
-                            stopped.get_or_insert_with(|| error.cause().clone());
+                    Err(mut error) => {
+                        if vfsi_core::transport_kind(error.cause()).is_some() {
+                            stopped.get_or_insert_with(|| {
+                                vfsi_core::internal::errors::share_op_cause(&mut error)
+                            });
                         }
                         // Several wire chunks may belong to one logical write.
                         // Unknown effects dominate definite failures, which in
@@ -1349,14 +1393,17 @@ impl NfsVecFs {
                 if let Err(cause) =
                     self.inject_open_fault(OpenFaultPoint::AfterWriteChunk { chunk: wave })
                 {
-                    stopped.get_or_insert(cause);
+                    stopped
+                        .get_or_insert_with(|| vfsi_core::internal::errors::shared_source(cause));
                 }
                 wave += 1;
             }
             if let Some(cause) = stopped {
                 for index in 0..writes.len() {
                     if !done[index] {
-                        failures[index] = Some(OpError::not_attempted(cause.clone()));
+                        failures[index] = Some(OpError::not_attempted(
+                            vfsi_core::internal::errors::from_shared(&cause),
+                        ));
                         done[index] = true;
                     }
                 }
@@ -1398,15 +1445,16 @@ impl NfsVecFs {
     /// The legacy phased path-based readv (resolve + probe + open + read +
     /// close compounds).
     pub(super) fn phased_read_results(&mut self, reads: &[ReadOp]) -> VecResult<ReadResult> {
-        if let Some(index) = reads
+        if let Some(_index) = reads
             .iter()
             .position(|read| read.length > isize::MAX as usize)
         {
-            return Err(VfError::errno(index, libc::EFBIG as u32));
+            return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
         }
         let mut output: Vec<Option<OpResult<ReadResult>>> =
             (0..reads.len()).map(|_| None).collect();
-        let mut files: Vec<Option<FileOperand>> = vec![None; reads.len()];
+        let mut files: Vec<Option<FileOperand>> =
+            (0..reads.len()).map(|_| None).collect::<Vec<_>>();
         let mut paths = Vec::new();
         let mut path_indices = Vec::new();
         let mut temporary = Vec::new();
@@ -1415,14 +1463,14 @@ impl NfsVecFs {
                 if self.open_files.contains_key(&fd) {
                     files[index] = Some(read.file.clone());
                 } else {
-                    output[index] =
-                        Some(Err(OpError::not_attempted(VfError::errno(None, ERR_EBADF))));
+                    output[index] = Some(Err(OpError::not_attempted(
+                        std::io::Error::from_raw_os_error((ERR_EBADF) as i32),
+                    )));
                 }
                 continue;
             }
             if matches!(read.offset, VfOffset::Cur) {
-                output[index] = Some(Err(OpError::not_attempted(VfError::from_kind(
-                    None,
+                output[index] = Some(Err(OpError::not_attempted(std::io::Error::from(
                     std::io::ErrorKind::InvalidInput,
                 ))));
                 continue;
@@ -1441,8 +1489,8 @@ impl NfsVecFs {
             let results = self
                 .vopen_raw_impl(&pending, &vec![libc::O_RDONLY; count], &vec![0; count])
                 .unwrap_or_else(|cause| {
-                    (0..count)
-                        .map(|_| Err(OpError::not_attempted(cause.clone())))
+                    vfsi_core::internal::errors::fanout(cause, (0..count).len())
+                        .map(|cause| Err(OpError::not_attempted(cause)))
                         .collect()
                 });
             for (index, result) in path_indices.into_iter().zip(results) {
@@ -1485,16 +1533,19 @@ impl NfsVecFs {
             result => {
                 let invalid_count = result.is_ok();
                 let cause = result.err().unwrap_or_else(|| {
-                    VfError::invalid_reply(None, "invalid phased READ result count")
+                    vfsi_core::internal::errors::invalid_reply("invalid phased READ result count")
                 });
-                for index in indices {
-                    output[index] = Some(Err(if invalid_count {
-                        OpError::unknown(cause.clone(), None)
-                    } else if !reads[index].file.is_fd() {
-                        OpError::failed(cause.clone(), None)
-                    } else {
-                        OpError::not_attempted(cause.clone())
-                    }));
+                {
+                    let causes = vfsi_core::internal::errors::fanout(cause, (indices).len());
+                    for (index, cause) in (indices).into_iter().zip(causes) {
+                        output[index] = Some(Err(if invalid_count {
+                            OpError::unknown(cause, None)
+                        } else if !reads[index].file.is_fd() {
+                            OpError::failed(cause, None)
+                        } else {
+                            OpError::not_attempted(cause)
+                        }));
+                    }
                 }
             }
         }
@@ -1554,9 +1605,10 @@ impl NfsVecFs {
             for group in path_write_groups(writes) {
                 match self.vwrite_path_fallback_nfs(&writes[group.clone()]) {
                     Ok(results) => output.extend(results),
-                    Err(cause) => {
-                        output.extend(group.map(|_| Err(OpError::not_attempted(cause.clone()))))
-                    }
+                    Err(cause) => output.extend(
+                        vfsi_core::internal::errors::fanout(cause, group.len())
+                            .map(|cause| Err(OpError::not_attempted(cause))),
+                    ),
                 }
             }
             return Ok(output);
@@ -1580,21 +1632,21 @@ impl NfsVecFs {
                             .open_files
                             .get(&fd)
                             .map(|open| open.cur_offset)
-                            .ok_or_else(|| VfError::errno(None, ERR_EBADF))?,
+                            .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?,
                         None => {
-                            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+                            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
                         }
                     },
-                    _ => return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput)),
+                    _ => return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
                 };
                 offset
                     .checked_add(write.data().len() as u64)
-                    .ok_or_else(|| VfError::errno(None, libc::EOVERFLOW as u32))?;
+                    .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
                 let file = match write.file().fd() {
                     Some(fd) => crate::client::FileRef::Handle(
                         self.open_files
                             .get(&fd)
-                            .ok_or_else(|| VfError::errno(None, ERR_EBADF))?
+                            .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?
                             .fh
                             .clone(),
                     ),
@@ -1602,7 +1654,7 @@ impl NfsVecFs {
                         path_bytes(&self.server_vf_path(write.file())?).to_vec(),
                     ),
                 };
-                Ok::<_, VfError>(crate::client::PathWriteOp {
+                Ok::<_, std::io::Error>(crate::client::PathWriteOp {
                     file,
                     offset,
                     data: write.data(),
@@ -1642,9 +1694,8 @@ impl NfsVecFs {
             let results = self
                 .vwrite_path_nfs(&pending, &path_ops, &offsets, full)
                 .unwrap_or_else(|cause| {
-                    pending
-                        .iter()
-                        .map(|_| Err(OpError::not_attempted(cause.clone())))
+                    vfsi_core::internal::errors::fanout(cause, pending.len())
+                        .map(|cause| Err(OpError::not_attempted(cause)))
                         .collect()
                 });
             for (index, result) in indices.into_iter().zip(results) {
@@ -1665,7 +1716,7 @@ impl NfsVecFs {
     ) -> VecResult<WriteResult> {
         let mut output: Vec<Option<OpResult<WriteResult>>> =
             (0..writes.len()).map(|_| None).collect();
-        let mut files = vec![None; writes.len()];
+        let mut files = (0..writes.len()).map(|_| None).collect::<Vec<_>>();
         let mut paths = Vec::new();
         let mut path_indices = Vec::new();
         let mut flags = Vec::new();
@@ -1674,7 +1725,7 @@ impl NfsVecFs {
             let prepared = (|| {
                 if let Some(fd) = write.file().fd() {
                     if !self.open_files.contains_key(&fd) {
-                        return Err(VfError::errno(None, ERR_EBADF));
+                        return Err(std::io::Error::from_raw_os_error((ERR_EBADF) as i32));
                     }
                     files[index] = Some((*write.file()).clone());
                     return Ok(());
@@ -1682,13 +1733,13 @@ impl NfsVecFs {
                 if let VfOffset::At(offset) = write.offset() {
                     offset
                         .checked_add(write.data().len() as u64)
-                        .ok_or_else(|| VfError::errno(None, libc::EOVERFLOW as u32))?;
+                        .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
                 }
                 if !matches!(write.offset(), VfOffset::At(_) | VfOffset::End) {
-                    return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+                    return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
                 }
                 if matches!(write.file(), FileOperand::Cwd) {
-                    return Err(VfError::errno(None, ERR_ISDIR));
+                    return Err(std::io::Error::from_raw_os_error((ERR_ISDIR) as i32));
                 }
                 let path = self.server_vf_path(write.file())?;
                 paths.push(self.visible_path(&path));
@@ -1709,9 +1760,8 @@ impl NfsVecFs {
             let results = self
                 .vopen_raw_impl(&pending, &flags, &vec![0o644; pending.len()])
                 .unwrap_or_else(|cause| {
-                    pending
-                        .iter()
-                        .map(|_| Err(OpError::not_attempted(cause.clone())))
+                    vfsi_core::internal::errors::fanout(cause, pending.len())
+                        .map(|cause| Err(OpError::not_attempted(cause)))
                         .collect()
                 });
             for (index, result) in path_indices.into_iter().zip(results) {
@@ -1765,16 +1815,21 @@ impl NfsVecFs {
                 result => {
                     let invalid_count = result.is_ok();
                     let cause = result.err().unwrap_or_else(|| {
-                        VfError::invalid_reply(None, "invalid phased WRITE result count")
+                        vfsi_core::internal::errors::invalid_reply(
+                            "invalid phased WRITE result count",
+                        )
                     });
-                    for index in indices {
-                        output[index] = Some(Err(if invalid_count {
-                            OpError::unknown(cause.clone(), None)
-                        } else if !writes[index].file().is_fd() {
-                            OpError::failed(cause.clone(), None)
-                        } else {
-                            OpError::not_attempted(cause.clone())
-                        }));
+                    {
+                        let causes = vfsi_core::internal::errors::fanout(cause, (indices).len());
+                        for (index, cause) in (indices).into_iter().zip(causes) {
+                            output[index] = Some(Err(if invalid_count {
+                                OpError::unknown(cause, None)
+                            } else if !writes[index].file().is_fd() {
+                                OpError::failed(cause, None)
+                            } else {
+                                OpError::not_attempted(cause)
+                            }));
+                        }
                     }
                 }
             }
@@ -1802,9 +1857,8 @@ impl NfsVecFs {
                     results.extend(
                         self.vwrite_path_fallback_nfs(batch)
                             .unwrap_or_else(|cause| {
-                                batch
-                                    .iter()
-                                    .map(|_| Err(OpError::not_attempted(cause.clone())))
+                                vfsi_core::internal::errors::fanout(cause, batch.len())
+                                    .map(|cause| Err(OpError::not_attempted(cause)))
                                     .collect()
                             }),
                     );
@@ -1820,7 +1874,8 @@ impl NfsVecFs {
                 Err(cause) if results.is_empty() => return Err(cause),
                 Err(cause) => {
                     results.extend(
-                        (first..writes.len()).map(|_| Err(OpError::not_attempted(cause.clone()))),
+                        vfsi_core::internal::errors::fanout(cause, (first..writes.len()).len())
+                            .map(|cause| Err(OpError::not_attempted(cause))),
                     );
                     break;
                 }
@@ -1831,7 +1886,7 @@ impl NfsVecFs {
             }
             if outcome.results.iter().any(|result| {
                 result.as_ref().err().is_some_and(|error| {
-                    error.cause().status().is_some_and(|status| {
+                    vfsi_core::native_status(error.cause()).is_some_and(|status| {
                         matches!(status,
                     vfsi_core::StatusCode::Nfs(status) if crate::client::is_stateid_error(status))
                     })
@@ -1962,7 +2017,7 @@ mod path_write_tests {
         })
         .unwrap_err();
         assert_eq!(attempts, 1);
-        assert_eq!(error.raw_code(), ERR_IO);
+        assert_eq!(crate::test_native_code(&(error)), ERR_IO);
     }
 }
 
@@ -2068,7 +2123,7 @@ mod descriptor_outcome_tests {
                     .unwrap();
                 let script = Arc::new(FaultScript::one(
                     OpenFaultPoint::BeforeReadRepair { index: 0 },
-                    VfError::errno(None, libc::EACCES as u32),
+                    std::io::Error::from_raw_os_error(libc::EACCES),
                 ));
                 fs.set_fault_injector(script.clone());
                 fs.test_short_read_for_request_once(0, 1);
@@ -2110,7 +2165,10 @@ mod descriptor_outcome_tests {
                     .unwrap();
                 let recover = Arc::new(FaultScript::one(
                     OpenFaultPoint::BeforeReadRepair { index: 0 },
-                    VfError::transport(None, "injected cursor read repair disconnect"),
+                    vfsi_core::internal::errors::transport(
+                        vfsi_core::TransportKind::Other,
+                        "injected cursor read repair disconnect",
+                    ),
                 ));
                 fs.set_fault_injector(recover.clone());
                 fs.test_short_read_for_request_once(0, 1);
@@ -2158,14 +2216,20 @@ mod descriptor_outcome_tests {
         let mut failure = None;
         merge_descriptor_failure(
             &mut failure,
-            OpError::failed(VfError::errno(None, libc::EACCES as u32), None),
+            OpError::failed(std::io::Error::from_raw_os_error(libc::EACCES), None),
         );
         merge_descriptor_failure(
             &mut failure,
-            OpError::unknown(VfError::transport(None, "later lost reply"), None),
+            OpError::unknown(
+                vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "later lost reply",
+                ),
+                None,
+            ),
         );
         let error = failure.unwrap();
-        assert_eq!(error.cause().raw_code(), libc::EACCES as u32);
+        assert_eq!(crate::test_native_code(error.cause()), libc::EACCES as u32);
         assert_eq!(error.state(), FailureState::Unknown);
     }
 
@@ -2193,6 +2257,7 @@ mod descriptor_outcome_tests {
             )
             .with_creation()
             .with_truncate()]))
+                .map_err(vfsi_core::IndexedError::unattributed)
                 .and_then(|outcomes| {
                     let count = outcomes.len();
                     vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
@@ -2203,7 +2268,7 @@ mod descriptor_outcome_tests {
                 .unwrap();
             let script = Arc::new(FaultScript::one(
                 OpenFaultPoint::BeforeReadRepair { index: 2 },
-                VfError::errno(None, libc::EACCES as u32),
+                std::io::Error::from_raw_os_error(libc::EACCES),
             ));
             fs.set_fault_injector(script.clone());
             fs.test_short_read_for_request_once(2, 2);
@@ -2226,7 +2291,7 @@ mod descriptor_outcome_tests {
                 );
                 let error = results[2].as_ref().unwrap_err();
                 assert_eq!(error.state(), FailureState::Failed);
-                assert_eq!(error.cause().raw_code(), libc::EACCES as u32);
+                assert_eq!(crate::test_native_code(error.cause()), libc::EACCES as u32);
                 let Some(IoProgress::Read(prefix)) = error.progress() else {
                     panic!("missing prefix")
                 };
@@ -2317,12 +2382,14 @@ mod descriptor_outcome_tests {
                 .with_creation()
                 .with_truncate(),
         ]))
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
         })
         .unwrap();
         fs.vsymlink_impl(&[Path::new(&b)], &[Path::new(&link)])
+            .map_err(vfsi_core::IndexedError::unattributed)
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
@@ -2381,7 +2448,10 @@ mod descriptor_outcome_tests {
         assert_eq!(crate::compound::thread_compound_stats().0, 0);
         let close = Arc::new(FaultScript::one(
             OpenFaultPoint::BeforeCloseDispatch { index: 0 },
-            VfError::transport(None, "temporary close not submitted"),
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "temporary close not submitted",
+            ),
         ));
         fs.set_fault_injector(close.clone());
         let data = fs.phased_read_results(&reads[..1]).unwrap();
@@ -2639,7 +2709,10 @@ mod phased_write_tests {
                     .collect();
                 let fault = Arc::new(FaultScript::one(
                     OpenFaultPoint::BeforePathCloseBatch,
-                    VfError::transport(None, "defer exact owner after inline CLOSE failure"),
+                    vfsi_core::internal::errors::transport(
+                        vfsi_core::TransportKind::Other,
+                        "defer exact owner after inline CLOSE failure",
+                    ),
                 ));
                 if defer {
                     fs.set_fault_injector(fault.clone());
@@ -2743,7 +2816,10 @@ mod phased_write_tests {
             ];
             let close = Arc::new(FaultScript::one(
                 OpenFaultPoint::BeforeCloseDispatch { index: 0 },
-                VfError::transport(None, "temporary close not submitted"),
+                vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "temporary close not submitted",
+                ),
             ));
             fs.set_fault_injector(close.clone());
             let results = fs.write_results(&writes).unwrap();
@@ -2756,7 +2832,7 @@ mod phased_write_tests {
             for index in [1, 3] {
                 let error = results[index].as_ref().unwrap_err();
                 assert_eq!(error.state(), FailureState::NotAttempted);
-                assert_eq!(error.cause().index(), None);
+                let _: &std::io::Error = error.cause();
                 assert!(error.progress().is_none());
             }
             assert_eq!(
@@ -3033,7 +3109,7 @@ mod phased_write_tests {
         let data = vec![b'A'; per * 2 + 17];
         let stop = Arc::new(FaultScript::one(
             OpenFaultPoint::AfterWriteChunk { chunk: 0 },
-            VfError::errno(None, libc::EACCES as u32),
+            std::io::Error::from_raw_os_error(libc::EACCES),
         ));
         fs.set_fault_injector(stop.clone());
         let results = fs
@@ -3058,7 +3134,7 @@ mod phased_write_tests {
             "OPEN already created/truncated this logical input before its WRITE remained unsent"
         );
         assert!(created_error.progress().is_none());
-        assert_eq!(created_error.cause().index(), None);
+        let _: &std::io::Error = created_error.cause();
         assert!(fs.exists_impl(&created_path).unwrap());
         assert_eq!(fs.stat_impl(&created_path).unwrap().size, 0);
         assert_eq!(
@@ -3095,7 +3171,7 @@ mod phased_write_tests {
             fs.nfs.test_fail_merged_write_once(0, 1);
             let denied = Arc::new(FaultScript::one(
                 OpenFaultPoint::BeforeWriteRepair { index: 0 },
-                VfError::errno(None, libc::EACCES as u32),
+                std::io::Error::from_raw_os_error(libc::EACCES),
             ));
             fs.set_fault_injector(denied.clone());
             let results = fs
@@ -3109,7 +3185,7 @@ mod phased_write_tests {
             assert!(denied.is_consumed());
             let error = results[0].as_ref().unwrap_err();
             assert_eq!(error.state(), FailureState::Failed);
-            assert_eq!(error.cause().raw_code(), libc::EACCES as u32);
+            assert_eq!(crate::test_native_code(error.cause()), libc::EACCES as u32);
             assert_eq!(
                 error.progress(),
                 Some(&IoProgress::Write { bytes_written: 7 })

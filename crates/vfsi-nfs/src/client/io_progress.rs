@@ -3,7 +3,7 @@ use super::{RpcError, RpcResult, checked_offset, uncertain_completion};
 use nfsv41_sys::{nfsstat4_NFS4ERR_IO, stable_how4_FILE_SYNC4};
 #[cfg(test)]
 use vfsi_core::{FailureState, IoProgress};
-use vfsi_core::{OpError, OpResult, VfError};
+use vfsi_core::{OpError, OpResult};
 
 pub(super) fn complete_read_suffix<C>(
     client: &mut C,
@@ -31,7 +31,7 @@ pub(super) fn complete_read_suffix<C>(
 }
 
 pub(super) fn write_rpc_error(error: RpcError) -> OpError {
-    let cause = vfsi_core::error_from_rpc(error, None);
+    let cause = vfsi_core::internal::errors::from_rpc(error);
     if uncertain_completion(&cause) {
         OpError::unknown(cause, None)
     } else {
@@ -48,7 +48,7 @@ pub(super) fn complete_write_suffix<C>(
     mut write: impl FnMut(&mut C, u64, &[u8]) -> OpResult<(u32, u32)>,
 ) -> OpResult<u32> {
     checked_offset(offset, data.len(), 0)
-        .map_err(|error| OpError::not_attempted(vfsi_core::error_from_rpc(error, None)))?;
+        .map_err(|error| OpError::not_attempted(vfsi_core::internal::errors::from_rpc(error)))?;
     let mut written = 0;
     let mut committed = stable_how4_FILE_SYNC4;
     while written < data.len() {
@@ -57,12 +57,14 @@ pub(super) fn complete_write_suffix<C>(
         let count = count as usize;
         let error = if count > data.len() - written || stable > stable_how4_FILE_SYNC4 {
             Some(OpError::unknown(
-                VfError::invalid_reply(None, "invalid WRITE repair completion"),
+                vfsi_core::internal::errors::invalid_reply("invalid WRITE repair completion"),
                 None,
             ))
         } else if count == 0 {
             Some(OpError::failed(
-                VfError::nfs(None, nfsstat4_NFS4ERR_IO),
+                vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                    nfsstat4_NFS4ERR_IO,
+                )),
                 None,
             ))
         } else {
@@ -202,15 +204,15 @@ mod tests {
                 Ok((count, stable_how4_FILE_SYNC4))
             })
             .unwrap_err();
-            assert_eq!(error.cause().index(), None);
+            let _: &std::io::Error = error.cause();
             assert!(error.progress().is_none());
             if count == 0 {
                 assert_eq!(error.state(), FailureState::Failed);
-                assert_eq!(error.cause().raw_code(), nfsstat4_NFS4ERR_IO);
+                assert_eq!(crate::test_native_code(error.cause()), nfsstat4_NFS4ERR_IO);
             } else {
                 assert_eq!(error.state(), FailureState::Unknown);
                 assert_eq!(
-                    error.cause().transport_kind(),
+                    vfsi_core::transport_kind(error.cause()),
                     Some(vfsi_core::TransportKind::InvalidReply)
                 );
             }
@@ -228,8 +230,8 @@ mod tests {
             }
         })
         .unwrap_err();
-        assert!(error.cause().is_transport());
-        assert_eq!(error.cause().index(), None);
+        assert!(vfsi_core::transport_kind(error.cause()).is_some());
+        let _: &std::io::Error = error.cause();
         assert_eq!(error.state(), FailureState::Unknown);
         assert_eq!(
             error.progress(),
@@ -267,7 +269,7 @@ mod tests {
                 if calls.len() == 1 {
                     return Ok((2, stable_how4_FILE_SYNC4));
                 }
-                let cause = VfError::errno(99, libc::ENOSPC as u32);
+                let cause = std::io::Error::from_raw_os_error(libc::ENOSPC);
                 Err(match state {
                     FailureState::Failed => {
                         OpError::failed(cause, Some(IoProgress::Write { bytes_written: 1 }))
@@ -280,8 +282,8 @@ mod tests {
             })
             .unwrap_err();
             assert_eq!(calls, [(11, b"abcdef".to_vec()), (13, b"cdef".to_vec())]);
-            assert_eq!(error.cause().index(), None);
-            assert_eq!(error.cause().raw_code(), libc::ENOSPC as u32);
+            let _: &std::io::Error = error.cause();
+            assert_eq!(crate::test_native_code(error.cause()), libc::ENOSPC as u32);
             assert_eq!(
                 error.state(),
                 if state == FailureState::Unknown {
@@ -313,7 +315,7 @@ mod tests {
                     return Ok((2, stable_how4_FILE_SYNC4));
                 }
                 Err(OpError::failed(
-                    VfError::errno(None, libc::EIO as u32),
+                    std::io::Error::from_raw_os_error(libc::EIO),
                     Some(if read_progress {
                         IoProgress::Read(vfsi_core::api::ReadResult::buffered(0, 1, false))
                     } else {
@@ -325,7 +327,7 @@ mod tests {
             assert_eq!(calls, 2);
             assert_eq!(error.state(), FailureState::Unknown);
             assert_eq!(
-                error.cause().transport_kind(),
+                vfsi_core::transport_kind(error.cause()),
                 Some(vfsi_core::TransportKind::InvalidReply)
             );
             assert_eq!(

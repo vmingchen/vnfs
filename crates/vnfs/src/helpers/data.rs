@@ -1,7 +1,8 @@
 //! Data-only bridges leave creation, publication and metadata policy to callers.
 use crate::files::{OpenFlags, OpenOp, ReadOp, ReadOptions};
-use crate::{Error, Result, StreamCompletion, StreamOptions, Vfsi, VfsiExt};
+use crate::{Result, StreamCompletion, StreamOptions, Vfsi, VfsiExt};
 use std::{io::Write, num::NonZeroUsize, path::Path};
+use vfsi_core::IndexedError;
 
 /// Stream a source into a caller-owned writer with bounded read storage.
 ///
@@ -19,16 +20,19 @@ pub fn copy_to_writer(
     let mut write_error = None;
     let completion = source.read_stream_with_options(path, options, |offset, data| {
         if offset != written {
-            return Err(Error::invalid_reply(
-                Some(0),
+            return Err(vfsi_core::internal::errors::invalid_reply(
                 "invalid writer stream offset",
             ));
         }
         let next = written
             .checked_add(data.len() as u64)
-            .ok_or_else(|| Error::errno(0, libc::EOVERFLOW as u32))?;
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
         if let Err(error) = writer.write_all(data) {
-            write_error = Some(Error::from_io(0, error).with_context("copy_to_writer", path));
+            write_error = Some(vfsi_core::internal::errors::with_context(
+                error,
+                "copy_to_writer",
+                path,
+            ));
             return Ok(std::ops::ControlFlow::Break(()));
         }
         written = next;
@@ -38,9 +42,14 @@ pub fn copy_to_writer(
         return Err(error);
     }
     if completion? != StreamCompletion::Complete {
-        return Err(
-            Error::transport(None, "incomplete source stream").with_context("copy_to_writer", path)
-        );
+        return Err(vfsi_core::internal::errors::with_context(
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "incomplete source stream",
+            ),
+            "copy_to_writer",
+            path,
+        ));
     }
     Ok(written)
 }
@@ -102,7 +111,7 @@ impl From<StreamOptions> for WriterCopyOptions {
 /// ```no_run
 /// use vnfs::files::{StreamOptions, Vfsi};
 /// use vnfs::helpers::copy_to_writers;
-/// # fn example(fs: &impl Vfsi) -> vnfs::Result<()> {
+/// # fn example(fs: &impl Vfsi) -> Result<(), vnfs::error::IndexedError> {
 /// let mut writers = [Vec::new(), Vec::new()];
 /// let sizes = copy_to_writers(fs, &["/first", "/second"], &mut writers,
 ///     StreamOptions::new())?;
@@ -116,7 +125,7 @@ impl From<StreamOptions> for WriterCopyOptions {
 /// ```no_run
 /// use std::num::NonZeroUsize;
 /// use vnfs::{Vfsi, helpers::{copy_to_writers, WriterCopyOptions}};
-/// # fn example(fs: &impl Vfsi) -> vnfs::Result<()> {
+/// # fn example(fs: &impl Vfsi) -> Result<(), vnfs::error::IndexedError> {
 /// let mut writers = [Vec::new(), Vec::new()];
 /// let options = WriterCopyOptions::new()
 ///     .with_round_robin(NonZeroUsize::new(2 * 1024 * 1024).unwrap());
@@ -129,9 +138,11 @@ pub fn copy_to_writers<P: AsRef<Path>, W: Write>(
     paths: &[P],
     writers: &mut [W],
     options: impl Into<WriterCopyOptions>,
-) -> Result<Vec<u64>> {
+) -> std::result::Result<Vec<u64>, IndexedError> {
     if paths.len() != writers.len() {
-        return Err(Error::errno(0, libc::EINVAL as u32));
+        return Err(IndexedError::unattributed(
+            std::io::Error::from_raw_os_error(libc::EINVAL),
+        ));
     }
     if paths.is_empty() {
         return Ok(Vec::new());
@@ -148,22 +159,23 @@ fn copy_to_writers_ordered<P: AsRef<Path>, W: Write>(
     paths: &[P],
     writers: &mut [W],
     options: StreamOptions,
-) -> Result<Vec<u64>> {
+) -> std::result::Result<Vec<u64>, IndexedError> {
     let mut written = vec![0u64; paths.len()];
     let mut write_error = None;
     let completion = source.streams_all(paths, options, |index, offset, data| {
         let Some(position) = written.get_mut(index) else {
-            return Err(Error::invalid_reply(None, "invalid writer stream index"));
+            return Err(vfsi_core::internal::errors::invalid_reply(
+                "invalid writer stream index",
+            ));
         };
         if offset != *position {
-            return Err(Error::invalid_reply(
-                Some(index),
+            return Err(vfsi_core::internal::errors::invalid_reply(
                 "invalid writer stream offset",
             ));
         }
         let next = position
             .checked_add(data.len() as u64)
-            .ok_or_else(|| Error::errno(index, libc::EOVERFLOW as u32))?;
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
         if let Err(error) = write_chunk(&mut writers[index], data, index, paths[index].as_ref()) {
             write_error = Some(error);
             return Ok(std::ops::ControlFlow::Break(()));
@@ -176,15 +188,23 @@ fn copy_to_writers_ordered<P: AsRef<Path>, W: Write>(
     }
     let completion = completion?;
     if completion.len() != paths.len() {
-        return Err(Error::invalid_reply(
-            None,
-            "invalid writer stream completion count",
+        return Err(IndexedError::unattributed(
+            vfsi_core::internal::errors::invalid_reply("invalid writer stream completion count"),
         ));
     }
     for (index, completion) in completion.into_iter().enumerate() {
         if completion != StreamCompletion::Complete {
-            return Err(Error::transport(Some(index), "incomplete source stream")
-                .with_context("copy_to_writers", paths[index].as_ref()));
+            return Err(IndexedError::at(
+                index,
+                vfsi_core::internal::errors::with_context(
+                    vfsi_core::internal::errors::transport(
+                        vfsi_core::TransportKind::Other,
+                        "incomplete source stream",
+                    ),
+                    "copy_to_writers",
+                    paths[index].as_ref(),
+                ),
+            ));
         }
     }
     Ok(written)
@@ -198,10 +218,12 @@ fn copy_to_writers_round_robin<P: AsRef<Path>, W: Write>(
     writers: &mut [W],
     options: StreamOptions,
     budget: NonZeroUsize,
-) -> Result<Vec<u64>> {
+) -> std::result::Result<Vec<u64>, IndexedError> {
     let budget = budget.get().min(source.limits().max_read_bytes());
     let Some(budget) = NonZeroUsize::new(budget) else {
-        return Err(Error::errno(0, libc::EINVAL as u32));
+        return Err(IndexedError::unattributed(
+            std::io::Error::from_raw_os_error(libc::EINVAL),
+        ));
     };
     let chunk = options.chunk_size().min(budget.get());
     let capacity = (budget.get() / chunk).clamp(1, 32);
@@ -231,23 +253,37 @@ fn copy_to_writers_round_robin<P: AsRef<Path>, W: Write>(
                 for (&local, result) in active.iter().zip(results) {
                     let index = base + local;
                     if result.offset() != written[index] {
-                        return Err(Error::invalid_reply(
-                            Some(index),
-                            "invalid writer stream offset",
+                        return Err(IndexedError::at(
+                            index,
+                            vfsi_core::internal::errors::invalid_reply(
+                                "invalid writer stream offset",
+                            ),
                         ));
                     }
                     let data = result.data().ok_or_else(|| {
-                        Error::invalid_reply(Some(index), "missing writer stream data")
+                        IndexedError::at(
+                            index,
+                            vfsi_core::internal::errors::invalid_reply(
+                                "missing writer stream data",
+                            ),
+                        )
                     })?;
                     if data.len() > chunk || (data.is_empty() && !result.eof()) {
-                        return Err(Error::invalid_reply(
-                            Some(index),
-                            "invalid writer stream progress",
+                        return Err(IndexedError::at(
+                            index,
+                            vfsi_core::internal::errors::invalid_reply(
+                                "invalid writer stream progress",
+                            ),
                         ));
                     }
                     let next = written[index]
                         .checked_add(data.len() as u64)
-                        .ok_or_else(|| Error::errno(index, libc::EOVERFLOW as u32))?;
+                        .ok_or_else(|| {
+                            IndexedError::at(
+                                index,
+                                std::io::Error::from_raw_os_error(libc::EOVERFLOW),
+                            )
+                        })?;
                     if !data.is_empty() {
                         write_chunk(&mut writers[index], data, index, paths[local].as_ref())?;
                     }
@@ -272,22 +308,32 @@ fn copy_to_writers_round_robin<P: AsRef<Path>, W: Write>(
     Ok(written)
 }
 
-fn write_chunk(writer: &mut impl Write, data: &[u8], index: usize, path: &Path) -> Result<()> {
-    writer
-        .write_all(data)
-        .map_err(|error| Error::from_io(index, error).with_context("copy_to_writers", path))
+fn write_chunk(
+    writer: &mut impl Write,
+    data: &[u8],
+    index: usize,
+    path: &Path,
+) -> std::result::Result<(), IndexedError> {
+    writer.write_all(data).map_err(|error| {
+        IndexedError::at(
+            index,
+            vfsi_core::internal::errors::with_context(error, "copy_to_writers", path),
+        )
+    })
 }
 
 fn writer_stream_error(
-    error: Error,
+    error: IndexedError,
     base: usize,
     input_index: impl FnOnce(usize) -> Option<usize>,
-) -> Error {
+) -> IndexedError {
     match error.index() {
         None => error,
         Some(index) => match input_index(index) {
-            Some(index) => error.with_index(base + index),
-            None => Error::invalid_reply(None, "invalid writer stream error index"),
+            Some(index) => error.map_index(|_| base + index),
+            None => IndexedError::unattributed(vfsi_core::internal::errors::invalid_reply(
+                "invalid writer stream error index",
+            )),
         },
     }
 }

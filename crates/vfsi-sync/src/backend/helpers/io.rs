@@ -7,11 +7,11 @@ pub fn vread_into_impl_default<F: VectorBackend + ?Sized>(
 ) -> vfsi_core::VecResult<ReadIntoResult> {
     use vfsi_core::{FailureState, IoProgress, OpError};
     if reads.len() != buffers.len() {
-        return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
     }
-    for (index, (request, buffer)) in reads.iter().zip(buffers.iter()).enumerate() {
+    for (request, buffer) in reads.iter().zip(buffers.iter()) {
         if request.length != buffer.len() {
-            return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
     }
     let outcomes = backend.vread_impl(reads)?;
@@ -20,7 +20,9 @@ pub fn vread_into_impl_default<F: VectorBackend + ?Sized>(
             .iter()
             .map(|_| {
                 Err(OpError::unknown(
-                    VfError::invalid_reply(None, "read backend returned too many outcomes"),
+                    vfsi_core::internal::errors::invalid_reply(
+                        "read backend returned too many outcomes",
+                    ),
                     None,
                 ))
             })
@@ -29,12 +31,12 @@ pub fn vread_into_impl_default<F: VectorBackend + ?Sized>(
     let mut outcomes = outcomes.into_iter();
     Ok(reads.iter().zip(buffers.iter_mut()).map(|(request, buffer)| {
         let outcome = outcomes.next().unwrap_or_else(|| Err(OpError::unknown(
-            VfError::invalid_reply(None, "missing read outcome"), None,
+            vfsi_core::internal::errors::invalid_reply("missing read outcome"), None,
         )));
         match outcome {
             Ok(result) => {
                 validate_read_results("vread_into_impl", std::slice::from_ref(request),
-                    std::slice::from_ref(&result)).map_err(|error| OpError::unknown(error, None))?;
+                    std::slice::from_ref(&result)).map_err(vfsi_core::IndexedError::into_cause).map_err(|error| OpError::unknown(error, None))?;
                 buffer[..result.data.len()].copy_from_slice(&result.data);
                 Ok(ReadIntoResult {
                     file: result.file, offset: result.offset,
@@ -56,7 +58,7 @@ pub fn vread_into_impl_default<F: VectorBackend + ?Sized>(
                             )))
                         }
                     _ => return Err(OpError::unknown(
-                        VfError::invalid_reply(None, "invalid owned read failure progress"), None,
+                        vfsi_core::internal::errors::invalid_reply("invalid owned read failure progress"), None,
                     )),
                 };
                 Err(match state {
@@ -84,8 +86,10 @@ pub fn open_raw_batch<F: VectorBackend + ?Sized>(
     paths: &[&Path],
     flags: &[i32],
     modes: &[u32],
-) -> VfResult<Vec<FileOperand>> {
-    let results = backend.vopen_raw_impl(paths, flags, modes)?;
+) -> Result<Vec<FileOperand>, vfsi_core::IndexedError> {
+    let results = backend
+        .vopen_raw_impl(paths, flags, modes)
+        .map_err(vfsi_core::IndexedError::unattributed)?;
     let results = ManyResults::new(
         paths.len(),
         results
@@ -112,7 +116,7 @@ pub fn vopen_raw_simple_impl_default<F: VectorBackend + ?Sized>(
 ) -> VfResult<Vec<FileOperand>> {
     let flags_v = vec![flags; paths.len()];
     let modes_v = vec![mode; paths.len()];
-    open_raw_batch(backend, paths, &flags_v, &modes_v)
+    open_raw_batch(backend, paths, &flags_v, &modes_v).map_err(vfsi_core::IndexedError::into_cause)
 }
 
 pub fn vopen_typed_default<F: VectorBackend + ?Sized>(
@@ -137,8 +141,10 @@ pub fn native_read_impl_default<F: VectorBackend + ?Sized>(
         .and_then(|outcomes| {
             let count = outcomes.len();
             crate::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })?;
-    validate_read_results("read_impl", std::slice::from_ref(request), &results)?;
+    validate_read_results("read_impl", std::slice::from_ref(request), &results)
+        .map_err(vfsi_core::IndexedError::into_cause)?;
     Ok(results.pop().expect("validated one result"))
 }
 
@@ -150,8 +156,10 @@ pub fn native_read_into_impl_default<F: VectorBackend + ?Sized>(
     let mut results = vfsi_core::internal::collect_vec_result(
         backend.vread_into_impl(std::slice::from_ref(request), &mut [buffer]),
         1,
-    )?;
-    validate_read_into_results("read_into_impl", std::slice::from_ref(request), &results)?;
+    )
+    .map_err(vfsi_core::IndexedError::into_cause)?;
+    validate_read_into_results("read_into_impl", std::slice::from_ref(request), &results)
+        .map_err(vfsi_core::IndexedError::into_cause)?;
     Ok(results.pop().expect("validated one result"))
 }
 
@@ -164,7 +172,9 @@ pub fn native_write_impl_default<F: VectorBackend + ?Sized>(
         .and_then(|outcomes| {
             let count = outcomes.len();
             crate::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })?;
-    validate_write_results("write_impl", std::slice::from_ref(&request), &results)?;
+    validate_write_results("write_impl", std::slice::from_ref(&request), &results)
+        .map_err(vfsi_core::IndexedError::into_cause)?;
     Ok(results.pop().expect("validated one result"))
 }

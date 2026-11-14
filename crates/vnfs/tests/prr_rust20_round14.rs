@@ -15,13 +15,13 @@ fn creation_permission_fault_releases_the_unregistered_descriptor() {
         let mut backend = vfsi_posix::backend(root.path()).unwrap();
         let script = Arc::new(FaultScript::one(
             OpenFaultPoint::BeforeSetPermissions { index: 0 },
-            vnfs::Error::errno(0, libc::EPERM as u32),
+            std::io::Error::from_raw_os_error(libc::EPERM),
         ));
         backend.set_fault_injector(script.clone());
         let error = backend
             .open_raw_impl(Path::new("/created"), flags, 0o600)
             .unwrap_err();
-        assert_eq!(error.raw_code(), libc::EPERM as u32);
+        assert_eq!(test_native_code(&(error)), libc::EPERM as u32);
         assert!(script.is_consumed());
         assert_eq!(backend.test_open_handle_count(), 0);
         assert!(root.path().join("created").is_file());
@@ -41,7 +41,7 @@ fn opening_an_existing_file_does_not_inject_creation_permission_failure() {
     let mut backend = vfsi_posix::backend(root.path()).unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeSetPermissions { index: 0 },
-        vnfs::Error::errno(0, libc::EPERM as u32),
+        std::io::Error::from_raw_os_error(libc::EPERM),
     ));
     backend.set_fault_injector(script.clone());
     let file = backend
@@ -62,13 +62,24 @@ fn failed_lookup_does_not_consume_creation_permission_fault() {
     let mut backend = vfsi_posix::backend(root.path()).unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeSetPermissions { index: 0 },
-        vnfs::Error::errno(0, libc::EPERM as u32),
+        std::io::Error::from_raw_os_error(libc::EPERM),
     ));
     backend.set_fault_injector(script.clone());
     let error = backend
         .open_raw_impl(Path::new("/missing"), libc::O_RDONLY, 0)
         .unwrap_err();
-    assert_eq!(error.raw_code(), libc::ENOENT as u32);
+    assert_eq!(test_native_code(&(error)), libc::ENOENT as u32);
     assert!(!script.is_consumed());
     assert_eq!(backend.test_open_handle_count(), 0);
+}
+
+fn test_native_code(error: &std::io::Error) -> u32 {
+    match vfsi_core::native_status(error) {
+        Some(
+            vfsi_core::StatusCode::Errno(code)
+            | vfsi_core::StatusCode::Nfs(code)
+            | vfsi_core::StatusCode::Smb(code),
+        ) => code,
+        _ => panic!("expected a native error, got {error:?}"),
+    }
 }

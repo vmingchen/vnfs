@@ -19,8 +19,11 @@ pub fn check<F: Vfsi>(fs: &F, other: &F, directory: &str) {
     let error = results[1].as_ref().unwrap_err();
     assert_eq!(error.state(), FailureState::Failed);
     assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
-    assert_eq!(error.cause().path(), Some(Path::new(&missing)));
-    assert_eq!(error.cause().index(), None);
+    assert_eq!(
+        vfsi_core::internal::errors::path(error.cause()),
+        Some(Path::new(&missing))
+    );
+
     assert_eq!(
         fs.getattrs_all(&paths, options).unwrap_err().index(),
         Some(1)
@@ -78,12 +81,26 @@ pub fn check<F: Vfsi>(fs: &F, other: &F, directory: &str) {
     for (index, code) in [(0, libc::EBADF), (3, libc::EINVAL)] {
         let error = results[index].as_ref().unwrap_err();
         assert_eq!(error.state(), FailureState::NotAttempted);
-        assert_eq!(error.cause().raw_code(), code as u32);
-        assert_eq!(error.cause().index(), None);
+        if code == libc::EINVAL {
+            assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
+        } else {
+            assert_eq!(test_native_code(error.cause()), code as u32);
+        }
     }
     assert_eq!(results[1].as_ref().unwrap().len(), Some(6));
     assert_eq!(results[2].as_ref().unwrap().len(), Some(6));
     fs.close_batch(&mut files[1..]).unwrap();
     foreign.close().unwrap();
     assert!(fs.vgetattrs::<&str>(&[], options).unwrap().is_empty());
+}
+
+fn test_native_code(error: &std::io::Error) -> u32 {
+    match vfsi_core::native_status(error) {
+        Some(
+            vfsi_core::StatusCode::Errno(code)
+            | vfsi_core::StatusCode::Nfs(code)
+            | vfsi_core::StatusCode::Smb(code),
+        ) => code,
+        _ => panic!("expected a native error, got {error:?}"),
+    }
 }

@@ -24,7 +24,7 @@ use std::{
     num::{NonZeroU32, NonZeroUsize},
     path::Path,
 };
-use vfsi_core::{VfError, VfResult};
+use vfsi_core::VfResult;
 
 #[bitfields::bitfield(u8)]
 struct Flags {
@@ -111,8 +111,9 @@ pub fn connect_with_telemetry(
     root: impl AsRef<Path>,
     options: Options,
 ) -> VfResult<(vfsi_sync::FsClient<vfsi_local::LocalBackend>, Telemetry)> {
-    let (engine, telemetry) = engine::Engine::new(options)
-        .map_err(|e| VfError::from_io(None, e).with_context("io_uring_setup", root.as_ref()))?;
+    let (engine, telemetry) = engine::Engine::new(options).map_err(|e| {
+        vfsi_core::internal::errors::with_context(e, "io_uring_setup", root.as_ref())
+    })?;
     let backend = vfsi_local::LocalBackend::new(root.as_ref().to_path_buf(), engine)?;
     Ok((vfsi_sync::FsClient::new(backend), telemetry))
 }

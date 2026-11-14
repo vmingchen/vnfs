@@ -155,7 +155,7 @@ fn rejects_invalid_paths_and_collisions_before_creating_root() {
             .add_file(path, "bad")
             .create(&client, "/fixture")
             .unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidInput, "{path:?}");
+        assert_eq!(error.cause().kind(), ErrorKind::InvalidInput, "{path:?}");
         assert_eq!(error.index(), Some(1));
         assert!(!temp.path().join("fixture").exists());
     }
@@ -173,7 +173,7 @@ fn rejects_invalid_paths_and_collisions_before_creating_root() {
             .add_file("a", "two"),
     ] {
         let error = builder.create(&client, "/fixture").unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert_eq!(error.cause().kind(), ErrorKind::InvalidInput);
         assert_eq!(error.index(), Some(1));
         assert!(!temp.path().join("fixture").exists());
     }
@@ -254,7 +254,7 @@ fn empty_tree_and_missing_root_parent_have_explicit_semantics() {
         .add_file("f", "payload")
         .create(&client, "/missing/root")
         .unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::NotFound);
+    assert_eq!(error.cause().kind(), ErrorKind::NotFound);
     assert!(!temp.path().join("missing").exists());
 }
 
@@ -269,14 +269,18 @@ fn bulk_directory_creation_preserves_error_context_and_independent_successes() {
             vnfs::directory::MkDirOp::new("/taken", 0o777),
             vnfs::directory::MkDirOp::new("/last", 0o777),
         ])
+        .map_err(vnfs::error::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
         })
         .unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+    assert_eq!(error.cause().kind(), ErrorKind::AlreadyExists);
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.path(), Some(std::path::Path::new("/taken")));
+    assert_eq!(
+        vfsi_core::internal::errors::path(error.cause()),
+        Some(std::path::Path::new("/taken"))
+    );
     assert!(temp.path().join("first").is_dir());
     assert!(temp.path().join("last").is_dir());
     assert!(
@@ -285,6 +289,7 @@ fn bulk_directory_creation_preserves_error_context_and_independent_successes() {
                 vnfs::directory::MkDirOp::new("/duplicate", 0o777),
                 vnfs::directory::MkDirOp::new("/duplicate", 0o777)
             ])
+            .map_err(vnfs::error::IndexedError::unattributed)
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
@@ -328,6 +333,7 @@ fn routed_client_supports_the_same_builder_and_directory_preflight() {
                 vnfs::directory::MkDirOp::new("/duplicate", 0o777),
                 vnfs::directory::MkDirOp::new("/duplicate", 0o777)
             ])
+            .map_err(vnfs::error::IndexedError::unattributed)
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())

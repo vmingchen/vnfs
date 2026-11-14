@@ -2,8 +2,27 @@
 
 use super::*;
 
+// Strict listing collection selects a cause after independent execution.
+// Its optional index is relative to this wave, including transport failures.
+pub(super) fn remap_listing_error(
+    error: vfsi_core::IndexedError,
+    owners: &[usize],
+) -> vfsi_core::IndexedError {
+    match error.index() {
+        Some(index) => match owners.get(index) {
+            Some(&owner) => error.map_index(|_| owner),
+            None => {
+                vfsi_core::IndexedError::unattributed(vfsi_core::internal::errors::invalid_reply(
+                    "READDIR error index is outside the submitted cohort",
+                ))
+            }
+        },
+        None => error,
+    }
+}
+
 fn open_adb_path(
-    index: usize,
+    _index: usize,
     mut open: impl FnMut(
         crate::client::OpenCreate,
     ) -> vfsi_core::RpcResult<(NfsFh, nfsv41_sys::stateid4)>,
@@ -11,10 +30,9 @@ fn open_adb_path(
     match open(crate::client::OpenCreate::NoCreate) {
         Ok(opened) => Ok(opened),
         Err(error) if error.status == nfsstat4_NFS4ERR_NOENT => {
-            open(crate::client::OpenCreate::Guarded)
-                .map_err(|error| vfsi_core::error_from_rpc(error, index))
+            open(crate::client::OpenCreate::Guarded).map_err(vfsi_core::internal::errors::from_rpc)
         }
-        Err(error) => Err(vfsi_core::error_from_rpc(error, index)),
+        Err(error) => Err(vfsi_core::internal::errors::from_rpc(error)),
     }
 }
 
@@ -26,7 +44,7 @@ impl VectorBackend for NfsVecFs {
         modes: &[u32],
     ) -> vfsi_core::VecResult<FileOperand> {
         if paths.len() != flags.len() || paths.len() != modes.len() {
-            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         self.drain_deferred_descriptor_closes()?;
         if paths.is_empty() {
@@ -48,17 +66,15 @@ impl VectorBackend for NfsVecFs {
                 self.openv_merged(&pending, &valid_flags, &valid_modes)
             }
             .unwrap_or_else(|cause| {
-                indices
-                    .iter()
-                    .map(|_| Err(vfsi_core::OpError::not_attempted(cause.clone())))
+                vfsi_core::internal::errors::fanout(cause, indices.len())
+                    .map(|cause| Err(vfsi_core::OpError::not_attempted(cause)))
                     .collect()
             });
             let mut output: Vec<_> = (0..paths.len())
                 .map(|_| {
-                    Err(vfsi_core::OpError::not_attempted(VfError::errno(
-                        None,
-                        libc::EROFS as u32,
-                    )))
+                    Err(vfsi_core::OpError::not_attempted(
+                        std::io::Error::from_raw_os_error(libc::EROFS),
+                    ))
                 })
                 .collect();
             for (index, outcome) in indices.into_iter().zip(outcomes) {
@@ -71,14 +87,16 @@ impl VectorBackend for NfsVecFs {
         for (index, result) in results.iter_mut().enumerate() {
             if !result.as_ref().err().is_some_and(|error| {
                 error.state() == vfsi_core::FailureState::Failed
-                    && error.cause().status()
+                    && vfsi_core::native_status(error.cause())
                         == Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_SYMLINK))
             }) {
                 continue;
             }
             if flags[index] & (libc::O_CREAT | libc::O_EXCL) == (libc::O_CREAT | libc::O_EXCL) {
                 *result = Err(vfsi_core::OpError::failed(
-                    VfError::nfs(None, nfsstat4_NFS4ERR_EXIST),
+                    vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                        nfsstat4_NFS4ERR_EXIST,
+                    )),
                     None,
                 ));
                 continue;
@@ -89,7 +107,7 @@ impl VectorBackend for NfsVecFs {
                 .nfs
                 .ensure_usable()
                 .map_err(|error| {
-                    vfsi_core::OpError::not_attempted(vfsi_core::error_from_rpc(error, None))
+                    vfsi_core::OpError::not_attempted(vfsi_core::internal::errors::from_rpc(error))
                 })
                 .and_then(|()| {
                     self.open_raw_impl(paths[index], flags[index], modes[index])
@@ -173,7 +191,7 @@ impl VectorBackend for NfsVecFs {
         follow_symlinks: bool,
     ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
         if page_size == 0 {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         // Only a failed first page may be retried: after a page has reached
         // the application, a reconnect could invalidate the READDIR cookie.
@@ -196,7 +214,7 @@ impl VectorBackend for NfsVecFs {
             let (page, next_cookie) = self
                 .nfs
                 .readdir(&state.fh, state.cookie, &ids)
-                .map_err(|error| vfsi_core::error_from_rpc(error, 0))?;
+                .map_err(vfsi_core::internal::errors::from_rpc)?;
             if page.is_empty() {
                 return Ok((Vec::new(), None));
             }
@@ -297,7 +315,7 @@ impl VectorBackend for NfsVecFs {
             let (page, next_cookie) = self
                 .nfs
                 .readdir(&fh, cookie, &ids)
-                .map_err(|error| vfsi_core::error_from_rpc(error, 0))?;
+                .map_err(vfsi_core::internal::errors::from_rpc)?;
             for entry in &page {
                 if max_entries != 0 && count >= max_entries {
                     return Ok(());
@@ -335,7 +353,8 @@ impl VectorBackend for NfsVecFs {
         max_entries: usize,
         recursive: bool,
         cb: &mut dyn FnMut(&VfAttrs, &Path) -> bool,
-    ) -> VfRes {
+    ) -> Result<(), vfsi_core::IndexedError> {
+        use vfsi_core::IndexedError;
         if dirs.is_empty() {
             return Ok(());
         }
@@ -353,7 +372,9 @@ impl VectorBackend for NfsVecFs {
                 .map(|p| FileOperand::from_os_path(p))
                 .collect();
             let refs: Vec<&FileOperand> = files.iter().collect();
-            let resolved = self.resolve_files_nfs(&refs, true)?;
+            let resolved = self
+                .resolve_files_nfs(&refs, true)
+                .map_err(IndexedError::unattributed)?;
             let mut level: Vec<(NfsFh, PathBuf, usize)> = Vec::with_capacity(level_paths.len());
             for (i, r) in resolved.into_iter().enumerate() {
                 let owner = level_owners[i];
@@ -362,9 +383,14 @@ impl VectorBackend for NfsVecFs {
                         level.push((fh, level_paths[i].clone(), owner));
                     }
                     Ok((_, _)) => {
-                        return Err(VfError::errno(owner, nfsstat4_NFS4ERR_NOTDIR));
+                        return Err(IndexedError::at(
+                            owner,
+                            vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                                nfsstat4_NFS4ERR_NOTDIR,
+                            )),
+                        ));
                     }
-                    Err(error) => return Err(error.into_cause().with_index(owner)),
+                    Err(error) => return Err(IndexedError::at(owner, error.into_cause())),
                 }
             }
             // First pages for all directories in one compound.
@@ -374,18 +400,17 @@ impl VectorBackend for NfsVecFs {
                 .collect();
             let results = {
                 let page_ops = &ops;
-                crate::client::collect_rpc_results(
+                vfsi_core::internal::collect_vec_result(
                     self.nfs.readdir_pages(page_ops, &ids),
                     page_ops.len(),
                 )
             }
-            .map_err(|error| {
-                remap_active_error(vfsi_core::error_from_rpc_indexed(error), &level_owners)
-            })?;
+            .map_err(|error| remap_listing_error(error, &level_owners))?;
             if results.len() != level.len() {
-                return Err(VfError::transport(
-                    None,
-                    "READDIR returned the wrong number of directory pages",
+                return Err(IndexedError::unattributed(
+                    vfsi_core::internal::errors::invalid_reply(
+                        "READDIR returned the wrong number of directory pages",
+                    ),
                 ));
             }
             // Emit each bounded READDIR page before fetching a continuation.
@@ -394,7 +419,7 @@ impl VectorBackend for NfsVecFs {
             let mut next_level: Vec<PathBuf> = Vec::new();
             let mut next_owners: Vec<usize> = Vec::new();
             let mut emit_page =
-                |idx: usize, entries: Vec<crate::client::DirEntry>| -> VfResult<bool> {
+                |idx: usize, entries: Vec<crate::client::DirEntry>| -> Result<bool, IndexedError> {
                     let dir = &level[idx].1;
                     let owner = level[idx].2;
                     for e in entries {
@@ -408,7 +433,7 @@ impl VectorBackend for NfsVecFs {
                             ..VfAttrs::default()
                         };
                         let vals = parse_metadata_attrs(&e.attrmask, &e.attrs)
-                            .map_err(|error| error.with_index(owner))?;
+                            .map_err(|cause| IndexedError::at(owner, cause))?;
                         apply_attrs(&mut a, &vals);
                         if recursive && a.ftype == VfType::Directory {
                             next_level.push(path);
@@ -430,7 +455,8 @@ impl VectorBackend for NfsVecFs {
                     return Ok(());
                 }
                 let mut seen_cookies = std::collections::HashSet::new();
-                validate_readdir_progress(0, cookie.value, &mut seen_cookies, Some(level[idx].2))?;
+                validate_readdir_progress(0, cookie.value, &mut seen_cookies, Some(level[idx].2))
+                    .map_err(|cause| IndexedError::at(level[idx].2, cause))?;
                 if cookie.value != 0 {
                     pending.push((idx, level[idx].0.clone(), cookie, seen_cookies));
                 }
@@ -444,18 +470,17 @@ impl VectorBackend for NfsVecFs {
                     pending.iter().map(|(idx, _, _, _)| level[*idx].2).collect();
                 let cont = {
                     let page_ops = &cont_ops;
-                    crate::client::collect_rpc_results(
+                    vfsi_core::internal::collect_vec_result(
                         self.nfs.readdir_pages(page_ops, &ids),
                         page_ops.len(),
                     )
                 }
-                .map_err(|error| {
-                    remap_active_error(vfsi_core::error_from_rpc_indexed(error), &pending_owners)
-                })?;
+                .map_err(|error| remap_listing_error(error, &pending_owners))?;
                 if cont.len() != pending.len() {
-                    return Err(VfError::transport(
-                        None,
-                        "READDIR continuation returned the wrong number of pages",
+                    return Err(IndexedError::unattributed(
+                        vfsi_core::internal::errors::invalid_reply(
+                            "READDIR continuation returned the wrong number of pages",
+                        ),
                     ));
                 }
                 let mut next_pending = Vec::new();
@@ -467,7 +492,8 @@ impl VectorBackend for NfsVecFs {
                         cookie.value,
                         &mut seen_cookies,
                         Some(level[idx].2),
-                    )?;
+                    )
+                    .map_err(|cause| IndexedError::at(level[idx].2, cause))?;
                     if !emit_page(idx, entries)? {
                         return Ok(());
                     }
@@ -512,7 +538,7 @@ impl VectorBackend for NfsVecFs {
             let (page, next_cookie) = self
                 .nfs
                 .readdir(&root_fh, cookie, &ids)
-                .map_err(|error| vfsi_core::error_from_rpc(error, 0))?;
+                .map_err(vfsi_core::internal::errors::from_rpc)?;
             append_bounded_walk_page(
                 root,
                 root,
@@ -567,7 +593,7 @@ impl VectorBackend for NfsVecFs {
                     page_ops.len(),
                 )
             }
-            .map_err(vfsi_core::error_from_rpc_indexed)?;
+            .map_err(vfsi_core::internal::errors::from_rpc)?;
             let mut level_attrs: Vec<Vec<VfAttrs>> =
                 (0..results.len()).map(|_| Vec::new()).collect();
             let mut pending = Vec::new();
@@ -601,7 +627,7 @@ impl VectorBackend for NfsVecFs {
                         page_ops.len(),
                     )
                 }
-                .map_err(vfsi_core::error_from_rpc_indexed)?;
+                .map_err(vfsi_core::internal::errors::from_rpc)?;
                 let mut next_pending = Vec::new();
                 for ((index, handle, previous_cookie, mut seen_cookies), (page, cookie)) in
                     pending.into_iter().zip(pages)
@@ -715,9 +741,8 @@ impl VectorBackend for NfsVecFs {
         }
         let outcomes = match self.nfs.create_many(&requests) {
             Ok(outcomes) => outcomes,
-            Err(cause) => requests
-                .iter()
-                .map(|_| Err(OpError::not_attempted(cause.clone())))
+            Err(cause) => vfsi_core::internal::errors::fanout(cause, requests.len())
+                .map(|cause| Err(OpError::not_attempted(cause)))
                 .collect(),
         };
         for (index, outcome) in active.into_iter().zip(outcomes) {
@@ -728,7 +753,7 @@ impl VectorBackend for NfsVecFs {
             .map(|slot| {
                 slot.unwrap_or_else(|| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "missing mkdir outcome"),
+                        vfsi_core::internal::errors::invalid_reply("missing mkdir outcome"),
                         None,
                     ))
                 })
@@ -743,7 +768,7 @@ impl VectorBackend for NfsVecFs {
     ) -> vfsi_core::VecResult<()> {
         use vfsi_core::OpError;
         if oldpaths.len() != newpaths.len() {
-            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         self.ensure_writable(newpaths.len())?;
         let parents = self.resolve_link_parents(newpaths)?;
@@ -767,9 +792,8 @@ impl VectorBackend for NfsVecFs {
         }
         let outcomes = match self.nfs.create_many(&ops) {
             Ok(outcomes) => outcomes,
-            Err(cause) => ops
-                .iter()
-                .map(|_| Err(OpError::not_attempted(cause.clone())))
+            Err(cause) => vfsi_core::internal::errors::fanout(cause, ops.len())
+                .map(|cause| Err(OpError::not_attempted(cause)))
                 .collect(),
         };
         for (index, result) in indices.into_iter().zip(outcomes) {
@@ -780,7 +804,7 @@ impl VectorBackend for NfsVecFs {
             .map(|slot| {
                 slot.unwrap_or_else(|| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "missing symlink outcome"),
+                        vfsi_core::internal::errors::invalid_reply("missing symlink outcome"),
                         None,
                     ))
                 })
@@ -825,9 +849,8 @@ impl VectorBackend for NfsVecFs {
         }
         let outcomes = match self.nfs.readlink_many(&ops) {
             Ok(outcomes) => outcomes,
-            Err(error) => ops
-                .iter()
-                .map(|_| Err(OpError::not_attempted(error.clone())))
+            Err(error) => vfsi_core::internal::errors::fanout(error, ops.len())
+                .map(|error| Err(OpError::not_attempted(error)))
                 .collect(),
         };
         for (index, result) in indices.into_iter().zip(outcomes) {
@@ -838,7 +861,7 @@ impl VectorBackend for NfsVecFs {
             .map(|slot| {
                 slot.unwrap_or_else(|| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "missing NFS readlink outcome"),
+                        vfsi_core::internal::errors::invalid_reply("missing NFS readlink outcome"),
                         None,
                     ))
                 })
@@ -853,7 +876,7 @@ impl VectorBackend for NfsVecFs {
     ) -> vfsi_core::VecResult<()> {
         use vfsi_core::OpError;
         if oldpaths.len() != newpaths.len() {
-            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         self.ensure_writable(newpaths.len())?;
         let files: Vec<_> = oldpaths
@@ -892,9 +915,8 @@ impl VectorBackend for NfsVecFs {
         }
         let outcomes = match self.nfs.link_many(&ops) {
             Ok(outcomes) => outcomes,
-            Err(cause) => ops
-                .iter()
-                .map(|_| Err(OpError::not_attempted(cause.clone())))
+            Err(cause) => vfsi_core::internal::errors::fanout(cause, ops.len())
+                .map(|cause| Err(OpError::not_attempted(cause)))
                 .collect(),
         };
         for (index, result) in indices.into_iter().zip(outcomes) {
@@ -905,7 +927,7 @@ impl VectorBackend for NfsVecFs {
             .map(|slot| {
                 slot.unwrap_or_else(|| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "missing hard-link outcome"),
+                        vfsi_core::internal::errors::invalid_reply("missing hard-link outcome"),
                         None,
                     ))
                 })
@@ -915,21 +937,23 @@ impl VectorBackend for NfsVecFs {
 
     fn vcopy_data_impl(&mut self, pairs: &[ExtentPair]) -> vfsi_core::VecResult<()> {
         self.ensure_writable(pairs.len())?;
-        let mut fatal: Option<VfError> = None;
+        let mut fatal: Option<std::sync::Arc<std::io::Error>> = None;
         Ok(pairs
             .iter()
             .map(|pair| {
                 if let Some(cause) = &fatal {
-                    return Err(vfsi_core::OpError::not_attempted(cause.clone()));
+                    return Err(vfsi_core::OpError::not_attempted(
+                        vfsi_core::internal::errors::from_shared(cause),
+                    ));
                 }
                 let result = (|| {
                     let source = self.follow_target_path(&self.server_path(&pair.src_path))?;
                     let destination = self.follow_target_path(&self.server_path(&pair.dst_path))?;
                     self.copy_extent(&source, &destination, pair)
                 })();
-                result.map_err(|cause| {
+                result.map_err(|mut cause| {
                     if crate::client::uncertain_completion(&cause) {
-                        fatal = Some(cause.clone());
+                        fatal = Some(vfsi_core::internal::errors::share_in_place(&mut cause));
                         vfsi_core::OpError::unknown(cause, None)
                     } else {
                         vfsi_core::OpError::failed(cause, None)
@@ -1035,16 +1059,18 @@ impl VectorBackend for NfsVecFs {
                         backend.vcopy_data_nfs(pairs),
                         pairs.len(),
                     )
+                    .map_err(vfsi_core::IndexedError::into_cause)
                     .map(|_| ())
                 } else {
                     vfsi_core::internal::collect_vec_result(
                         backend.vcopy_data_impl(pairs),
                         pairs.len(),
                     )
+                    .map_err(vfsi_core::IndexedError::into_cause)
                     .map(|_| ())
                 }
             },
-            |error| error.with_index(0),
+            |error| error,
         )
     }
     fn vread_all_with_options_impl(
@@ -1119,9 +1145,9 @@ impl VectorBackend for NfsVecFs {
                         pass_changed: false,
                     }),
                     Ok(_) => {
-                        roots[root] = RemoveRoot::Failed(OpError::not_attempted(VfError::errno(
-                            None, ERR_NOTDIR,
-                        )))
+                        roots[root] = RemoveRoot::Failed(OpError::not_attempted(
+                            std::io::Error::from_raw_os_error((ERR_NOTDIR) as i32),
+                        ))
                     }
                     Err(error) => roots[root] = RemoveRoot::Failed(error),
                 }
@@ -1132,7 +1158,7 @@ impl VectorBackend for NfsVecFs {
                 if let Err(cause) =
                     self.inject_open_fault(OpenFaultPoint::BeforeRemoveType { index: root })
                 {
-                    let fatal = cause.is_transport();
+                    let fatal = vfsi_core::transport_kind(&(cause)).is_some();
                     roots[root] = RemoveRoot::Failed(OpError::not_attempted(cause));
                     if fatal {
                         break;
@@ -1147,7 +1173,7 @@ impl VectorBackend for NfsVecFs {
                         expand: mode == RemoveMode::Tree,
                     }),
                     Err(cause) => {
-                        let fatal = cause.is_transport();
+                        let fatal = vfsi_core::transport_kind(&(cause)).is_some();
                         roots[root] = RemoveRoot::Failed(OpError::not_attempted(cause));
                         if fatal {
                             break;
@@ -1175,7 +1201,10 @@ impl VectorBackend for NfsVecFs {
                 .map(|result| {
                     result.and_then(|(fh, kind)| {
                         if kind != nfs_ftype4_NF4DIR {
-                            return Err(OpError::failed(VfError::errno(None, ERR_NOTDIR), None));
+                            return Err(OpError::failed(
+                                std::io::Error::from_raw_os_error((ERR_NOTDIR) as i32),
+                                None,
+                            ));
                         }
                         // Directory filehandles have no server-side OPEN state.
                         // Registration failure drops only this acquired filehandle.
@@ -1195,12 +1224,12 @@ impl VectorBackend for NfsVecFs {
         match dir {
             VfDir::Descriptor { fd, owner } if *owner == self.dir_owner => {
                 if !self.open_dirs.contains_key(fd) {
-                    return Err(VfError::errno(0, ERR_EBADF));
+                    return Err(std::io::Error::from_raw_os_error((ERR_EBADF) as i32));
                 }
                 self.open_dirs.remove(fd);
                 Ok(())
             }
-            _ => Err(VfError::errno(0, ERR_EBADF)),
+            _ => Err(std::io::Error::from_raw_os_error((ERR_EBADF) as i32)),
         }
     }
 
@@ -1234,8 +1263,9 @@ impl VectorBackend for NfsVecFs {
                     pass_changed: false,
                 }),
                 None => {
-                    roots[root] =
-                        RemoveRoot::Failed(OpError::not_attempted(VfError::errno(None, ERR_EBADF)))
+                    roots[root] = RemoveRoot::Failed(OpError::not_attempted(
+                        std::io::Error::from_raw_os_error((ERR_EBADF) as i32),
+                    ))
                 }
             }
         }
@@ -1250,18 +1280,15 @@ impl VectorBackend for NfsVecFs {
             let full = self.server_path(&p.path);
             let (dir, name) = match split_path_bytes(path_bytes(&full)) {
                 Ok(x) => x,
-                Err(_) => return Err(VfError::errno(i, ERR_NOENT)),
+                Err(_) => return Err(std::io::Error::from_raw_os_error((ERR_NOENT) as i32)),
             };
-            let dirfh = match self.resolve_path(&path_from_bytes(dir), true) {
-                Ok(fh) => fh,
-                Err(e) => return Err(e.with_index(i)),
-            };
+            let dirfh = self.resolve_path(&path_from_bytes(dir), true)?;
             let (fh, sid) = open_adb_path(i, |create| {
                 self.nfs
                     .open_path(&dirfh, name, OPEN4_SHARE_ACCESS_WRITE, create)
             })?;
             let mut written = 0usize;
-            let mut failed: Option<VfError> = None;
+            let mut failed: Option<std::io::Error> = None;
             for (block_number, number_offset, pattern_offset) in layout {
                 if let Some(offset) = number_offset {
                     let adbn = block_number.to_be_bytes();
@@ -1273,7 +1300,7 @@ impl VectorBackend for NfsVecFs {
                         |nfs, offset, data| {
                             nfs.write(&fh, &sid, offset, data)
                                 .map(|(written, _)| written as usize)
-                                .map_err(|error| vfsi_core::error_from_rpc(error, i))
+                                .map_err(vfsi_core::internal::errors::from_rpc)
                         },
                     ) {
                         failed = Some(error);
@@ -1290,7 +1317,7 @@ impl VectorBackend for NfsVecFs {
                         |nfs, offset, data| {
                             nfs.write(&fh, &sid, offset, data)
                                 .map(|(written, _)| written as usize)
-                                .map_err(|error| vfsi_core::error_from_rpc(error, i))
+                                .map_err(vfsi_core::internal::errors::from_rpc)
                         },
                     )
                 {
@@ -1358,6 +1385,92 @@ mod adb_path_tests {
                 crate::client::OpenCreate::NoCreate,
                 crate::client::OpenCreate::Guarded,
             ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod listing_error_tests {
+    use super::remap_listing_error;
+    use vfsi_core::internal::{collect_vec_result, errors};
+    use vfsi_core::{IndexedError, OpError, StatusCode, TransportKind};
+
+    #[derive(Debug)]
+    struct OpaqueSource(u64);
+    impl std::fmt::Display for OpaqueSource {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "opaque {}", self.0)
+        }
+    }
+    impl std::error::Error for OpaqueSource {}
+
+    #[test]
+    fn outer_readdir_rejection_retains_no_owner_and_native_status() {
+        let error = collect_vec_result::<()>(Err(errors::from_status(StatusCode::Nfs(10067))), 2)
+            .unwrap_err();
+        let error = remap_listing_error(error, &[4, 9]);
+        assert_eq!(error.index(), None);
+        assert_eq!(
+            vfsi_core::native_status(error.cause()),
+            Some(StatusCode::Nfs(10067))
+        );
+    }
+
+    #[test]
+    fn continuation_selection_maps_the_submitted_owner_and_moves_opaque_source() {
+        let source = std::io::Error::other(OpaqueSource(73));
+        let source_address = source.get_ref().unwrap() as *const dyn std::error::Error;
+        let error = collect_vec_result(Ok(vec![Ok(()), Err(OpError::unknown(source, None))]), 2)
+            .unwrap_err();
+        let error = remap_listing_error(error, &[4, 9]);
+        assert_eq!(error.index(), Some(9));
+        assert_eq!(
+            error
+                .cause()
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<OpaqueSource>()
+                .unwrap()
+                .0,
+            73
+        );
+        assert!(std::ptr::eq(
+            source_address,
+            error.cause().get_ref().unwrap() as *const dyn std::error::Error
+        ));
+    }
+
+    #[test]
+    fn selected_transport_failure_keeps_known_owner() {
+        let error = collect_vec_result(
+            Ok(vec![
+                Ok(()),
+                Err(OpError::unknown(
+                    errors::transport(TransportKind::Connection, "lost continuation"),
+                    None,
+                )),
+            ]),
+            2,
+        )
+        .unwrap_err();
+        let error = remap_listing_error(error, &[4, 9]);
+        assert_eq!(error.index(), Some(9));
+        assert_eq!(
+            vfsi_core::transport_kind(error.cause()),
+            Some(TransportKind::Connection)
+        );
+    }
+
+    #[test]
+    fn malformed_owner_mapping_is_unattributed_invalid_reply() {
+        let error = remap_listing_error(
+            IndexedError::at(2, std::io::Error::from_raw_os_error(libc::ENOENT)),
+            &[4, 9],
+        );
+        assert_eq!(error.index(), None);
+        assert_eq!(
+            vfsi_core::transport_kind(error.cause()),
+            Some(TransportKind::InvalidReply)
         );
     }
 }

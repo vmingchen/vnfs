@@ -1,6 +1,6 @@
 use crate::api::{StreamCompletion, StreamOptions, Vfsi, VfsiExt};
 use std::{num::NonZeroUsize, ops::ControlFlow};
-use vfsi_core::{FailureState, IoProgress, VfError};
+use vfsi_core::{FailureState, IoProgress};
 
 /// Shared public contract; the caller owns and removes the fixture directory.
 pub fn public_stream_results(fs: &impl Vfsi, directory: &str) {
@@ -35,7 +35,7 @@ pub fn public_stream_results(fs: &impl Vfsi, directory: &str) {
     assert_eq!(outcomes[2].as_ref().unwrap(), &StreamCompletion::Complete);
     let error = outcomes[1].as_ref().unwrap_err();
     assert_eq!(error.state(), FailureState::Failed);
-    assert_eq!(error.cause().index(), None);
+    let _: &std::io::Error = error.cause();
     assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
     assert!(error.progress().is_none());
     assert_eq!(bytes, [b"abcdef".to_vec(), vec![], b"uvwxyz".to_vec()]);
@@ -45,7 +45,7 @@ pub fn public_stream_results(fs: &impl Vfsi, directory: &str) {
         .vstream(&[&first, &last], options, |index, offset, _| {
             calls[index] += 1;
             if index == 0 && offset == 2 {
-                Err(VfError::errno(17, libc::EACCES as u32))
+                Err(std::io::Error::from_raw_os_error(libc::EACCES))
             } else {
                 Ok(ControlFlow::Continue(()))
             }
@@ -53,8 +53,11 @@ pub fn public_stream_results(fs: &impl Vfsi, directory: &str) {
         .unwrap();
     let error = outcomes[0].as_ref().unwrap_err();
     assert_eq!(error.state(), FailureState::Failed);
-    assert_eq!(error.cause().index(), None);
-    assert_eq!(error.cause().raw_code(), libc::EACCES as u32);
+    let _: &std::io::Error = error.cause();
+    assert_eq!(
+        vfsi_core::internal::errors::to_errno(error.cause()) as u32,
+        libc::EACCES as u32
+    );
     assert_eq!(
         error.progress(),
         Some(&IoProgress::Stream { next_offset: 2 })

@@ -12,6 +12,7 @@ pub fn symlink_raw_impl_default<F: VectorBackend + ?Sized>(
         ),
         1,
     )
+    .map_err(vfsi_core::IndexedError::into_cause)
     .map(|_| ())
 }
 
@@ -24,7 +25,8 @@ pub fn readlink_raw_impl_default<F: VectorBackend + ?Sized>(
         vfsi_core::internal::collect_vec_result(
             backend.vreadlink_impl(std::slice::from_ref(&path)),
             1,
-        )?,
+        )
+        .map_err(vfsi_core::IndexedError::into_cause)?,
     )
 }
 
@@ -35,7 +37,7 @@ pub fn native_symlink_impl_default<F: VectorBackend + ?Sized>(
 ) -> VfResult<()> {
     backend
         .symlink_raw_impl(target, link)
-        .map_err(|error| error.with_context("symlink", link))
+        .map_err(|error| vfsi_core::internal::errors::with_context(error, "symlink", link))
 }
 
 pub fn native_hard_link_impl_default<F: VectorBackend + ?Sized>(
@@ -45,8 +47,12 @@ pub fn native_hard_link_impl_default<F: VectorBackend + ?Sized>(
 ) -> VfResult<()> {
     backend
         .vhardlink_impl(&[source], &[link])
-        .and_then(|results| vfsi_core::internal::collect_vec_result(Ok(results), 1).map(|_| ()))
-        .map_err(|error| error.with_context("hard_link", link))
+        .and_then(|results| {
+            vfsi_core::internal::collect_vec_result(Ok(results), 1)
+                .map_err(vfsi_core::IndexedError::into_cause)
+                .map(|_| ())
+        })
+        .map_err(|error| vfsi_core::internal::errors::with_context(error, "hard_link", link))
 }
 
 pub fn native_read_link_impl_default<F: VectorBackend + ?Sized>(
@@ -56,5 +62,5 @@ pub fn native_read_link_impl_default<F: VectorBackend + ?Sized>(
     backend
         .readlink_raw_impl(path)
         .map(bytes_to_path)
-        .map_err(|error| error.with_context("read_link", path))
+        .map_err(|error| vfsi_core::internal::errors::with_context(error, "read_link", path))
 }

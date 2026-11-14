@@ -19,6 +19,7 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
         .map(|i| vnfs::directory::MkDirOp::new(format!("{directory}/dir-{i}"), 0o700 | (i % 8)))
         .collect();
     fs.vmkdir(&directories)
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
@@ -118,13 +119,13 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
         .symlinks_all(&[("file-0", &fresh), ("file-1", &links[1])])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::AlreadyExists);
     let fresh_hard = format!("{directory}/fresh-hard");
     let error = fs
         .hardlinks_all(&[(&files[0], &fresh_hard), (&files[1], &hardlinks[1])])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::AlreadyExists);
     let error = fs.readlinks_all(&[&links[0], &files[0]]).unwrap_err();
     assert_eq!(error.index(), Some(1));
     // Rich results retain both sides of failures, including unchanged raw bytes.
@@ -146,8 +147,11 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
         let error = outcomes[index].as_ref().unwrap_err();
         assert_eq!(error.state(), vnfs::error::FailureState::Failed);
         assert_eq!(error.cause().kind(), kind);
-        assert_eq!(error.cause().index(), None);
-        assert_eq!(error.cause().path(), Some(Path::new(inputs[index])));
+
+        assert_eq!(
+            vfsi_core::internal::errors::path(error.cause()),
+            Some(Path::new(inputs[index]))
+        );
         assert!(error.progress().is_none());
     }
 
@@ -173,8 +177,11 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
         let error = outcomes[index].as_ref().unwrap_err();
         assert_ne!(error.state(), vnfs::error::FailureState::Unknown);
         assert_eq!(error.cause().kind(), kind);
-        assert_eq!(error.cause().index(), None);
-        assert_eq!(error.cause().path(), Some(Path::new(symbol_ops[index].1)));
+
+        assert_eq!(
+            vfsi_core::internal::errors::path(error.cause()),
+            Some(Path::new(symbol_ops[index].1))
+        );
         assert!(error.progress().is_none());
     }
     assert_eq!(fs.read_link(&new_symbols[0]).unwrap(), raw);
@@ -204,8 +211,11 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
         let error = outcomes[index].as_ref().unwrap_err();
         assert_ne!(error.state(), vnfs::error::FailureState::Unknown);
         assert_eq!(error.cause().kind(), kind);
-        assert_eq!(error.cause().index(), None);
-        assert_eq!(error.cause().path(), Some(Path::new(hard_ops[index].1)));
+
+        assert_eq!(
+            vfsi_core::internal::errors::path(error.cause()),
+            Some(Path::new(hard_ops[index].1))
+        );
         assert!(error.progress().is_none());
     }
     assert_eq!(
@@ -222,13 +232,14 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
             vnfs::directory::MkDirOp::new(std::path::Path::new(&new_dir), 0o711),
             vnfs::directory::MkDirOp::new(directories[0].path(), 0o755),
         ])
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
         })
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::AlreadyExists);
     assert_eq!(
         fs.attrs(&new_dir).unwrap().permissions().unwrap().mode() & 0o7777,
         0o711
@@ -239,6 +250,7 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
             vnfs::directory::MkDirOp::new(&duplicate, 0o700),
             vnfs::directory::MkDirOp::new(&duplicate, 0o755),
         ])
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
@@ -269,8 +281,11 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
         let error = results[index].as_ref().unwrap_err();
         assert_ne!(error.state(), vnfs::error::FailureState::Unknown);
         assert_eq!(error.cause().kind(), kind);
-        assert_eq!(error.cause().index(), None);
-        assert_eq!(error.cause().path(), Some(dirs[index].path()));
+
+        assert_eq!(
+            vfsi_core::internal::errors::path(error.cause()),
+            Some(dirs[index].path())
+        );
     }
     for (path, mode) in [(&first, 0o700), (&last, 0o751)] {
         assert_eq!(
@@ -303,8 +318,11 @@ fn check_rename_results(fs: &impl Vfsi, directory: &str) {
     let error = results[1].as_ref().unwrap_err();
     assert_eq!(error.state(), FailureState::Failed);
     assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
-    assert_eq!(error.cause().index(), None);
-    assert_eq!(error.cause().path(), Some(Path::new(&missing)));
+
+    assert_eq!(
+        vfsi_core::internal::errors::path(error.cause()),
+        Some(Path::new(&missing))
+    );
     assert!(error.progress().is_none());
     assert_eq!(fs.read(&one).unwrap(), b"first");
     assert_eq!(fs.read(&three).unwrap(), b"last");
@@ -354,8 +372,11 @@ fn check_copy_results(fs: &impl Vfsi, directory: &str) {
         FailureState::Failed | FailureState::NotAttempted
     ));
     assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
-    assert_eq!(error.cause().index(), None);
-    assert_eq!(error.cause().path(), Some(Path::new(&two)));
+
+    assert_eq!(
+        vfsi_core::internal::errors::path(error.cause()),
+        Some(Path::new(&two))
+    );
     assert!(error.progress().is_none());
     assert_eq!(fs.read(&one).unwrap(), b"one");
     assert_eq!(fs.read(&three).unwrap(), b"three");

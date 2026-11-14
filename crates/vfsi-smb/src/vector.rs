@@ -42,7 +42,10 @@ impl VectorBackend for SmbVecFs {
                     .map_err(|error| protocol::wire_failure(error, None))?;
                 let response =
                     CreateResponse::unpack(&mut ReadCursor::new(&frame.body)).map_err(|error| {
-                        OpError::unknown(VfError::invalid_reply(None, error.to_string()), None)
+                        OpError::unknown(
+                            vfsi_core::internal::errors::invalid_reply(error.to_string()),
+                            None,
+                        )
                     })?;
                 Ok::<_, OpError>((response.file_id, response.end_of_file))
             }
@@ -55,19 +58,20 @@ impl VectorBackend for SmbVecFs {
             // has its own outcome, and ordinary failures do not stop siblings.
             let mut results = Vec::with_capacity(paths.len());
             for job in jobs {
-                let result = job.await;
+                let mut result = job.await;
                 let fatal = result
-                    .as_ref()
+                    .as_mut()
                     .err()
                     .filter(|error| error.state() == vfsi_core::FailureState::Unknown)
-                    .map(|error| error.cause().clone());
+                    .map(vfsi_core::internal::errors::share_op_cause);
                 results.push(result);
                 if let Some(cause) = fatal {
                     // Do not even construct requests for an untouched suffix.
-                    results.extend(
-                        (results.len()..paths.len())
-                            .map(|_| Err(OpError::not_attempted(cause.clone()))),
-                    );
+                    results.extend((results.len()..paths.len()).map(|_| {
+                        Err(OpError::not_attempted(
+                            vfsi_core::internal::errors::from_shared(&cause),
+                        ))
+                    }));
                     break;
                 }
             }
@@ -93,13 +97,18 @@ impl VectorBackend for SmbVecFs {
                     ));
                 }
             }
+            let affected = results.iter().filter(|result| !matches!(result, Err(error) if error.state() == vfsi_core::FailureState::NotAttempted)).count();
+            let mut causes = vfsi_core::internal::errors::fanout(error, affected);
             return Ok(results
                 .into_iter()
                 .map(|result| match result {
                     Err(error) if error.state() == vfsi_core::FailureState::NotAttempted => {
                         Err(error)
                     }
-                    _ => Err(OpError::unknown(error.clone(), None)),
+                    _ => Err(OpError::unknown(
+                        causes.next().expect("affected OPEN cause"),
+                        None,
+                    )),
                 })
                 .collect());
         }
@@ -180,8 +189,8 @@ impl VectorBackend for SmbVecFs {
 
     fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_core::VecResult<()> {
         use vfsi_core::OpError;
-        let classify = |error: VfError| {
-            if error.is_transport() {
+        let classify = |error: std::io::Error| {
+            if vfsi_core::transport_kind(&(error)).is_some() {
                 OpError::unknown(error, None)
             } else {
                 OpError::failed(error, None)
@@ -292,7 +301,7 @@ impl VectorBackend for SmbVecFs {
         } else {
             // Preserve the existing unsupported guarantee for Samba servers
             // that ignore FILE_OPEN_REPARSE_POINT; do not fabricate lstat data.
-            Err(VfError::unsupported(None))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
 
@@ -317,14 +326,16 @@ impl VectorBackend for SmbVecFs {
 
     fn vsetattrs_raw_impl(&mut self, attrs: &[VfAttrs]) -> vfsi_core::VecResult<()> {
         use vfsi_core::OpError;
-        let mut unavailable: Option<VfError> = None;
+        let mut unavailable: Option<Arc<std::io::Error>> = None;
         Ok(attrs
             .iter()
             .enumerate()
             .map(|(index, attrs)| {
                 let settable = AttrMask::SIZE | AttrMask::ATIME | AttrMask::MTIME;
                 if !attrs.masks.difference(settable).is_empty() {
-                    return Err(OpError::not_attempted(VfError::unsupported(None)));
+                    return Err(OpError::not_attempted(std::io::Error::from(
+                        std::io::ErrorKind::Unsupported,
+                    )));
                 }
                 if attrs.masks.is_empty() {
                     return Ok(());
@@ -354,22 +365,22 @@ impl VectorBackend for SmbVecFs {
                     }
                 }
                 if let Some(cause) = &unavailable {
-                    return Err(OpError::not_attempted(cause.clone()));
+                    return Err(OpError::not_attempted(
+                        vfsi_core::internal::errors::from_shared(cause),
+                    ));
                 }
                 (|| {
                     if attrs.masks.contains(AttrMask::SIZE) {
                         match attrs.file {
                             FileOperand::Fd(_) => {
                                 let id = retained.expect("descriptor validated before dispatch");
-                                self.set_size_handle(id, attrs.size)
-                                    .map_err(|e| e.with_index(index))?;
+                                self.set_size_handle(id, attrs.size)?;
                             }
                             _ => {
                                 self.set_size_encoded_path(
                                     path.as_deref().expect("path preflighted"),
                                     attrs.size,
-                                )
-                                .map_err(|e| e.with_index(index))?;
+                                )?;
                             }
                         }
                     }
@@ -399,9 +410,9 @@ impl VectorBackend for SmbVecFs {
                     }
                     Ok(())
                 })()
-                .map_err(|cause: VfError| {
-                    if cause.is_transport() {
-                        unavailable = Some(cause.clone());
+                .map_err(|mut cause: std::io::Error| {
+                    if vfsi_core::transport_kind(&(cause)).is_some() {
+                        unavailable = Some(vfsi_core::internal::errors::share_in_place(&mut cause));
                         OpError::unknown(cause, None)
                     } else {
                         OpError::failed(cause, None)
@@ -418,8 +429,8 @@ impl VectorBackend for SmbVecFs {
                 if attrs.masks.is_empty() {
                     Ok(())
                 } else {
-                    Err(vfsi_core::OpError::not_attempted(VfError::unsupported(
-                        None,
+                    Err(vfsi_core::OpError::not_attempted(std::io::Error::from(
+                        std::io::ErrorKind::Unsupported,
                     )))
                 }
             })
@@ -447,7 +458,7 @@ impl VectorBackend for SmbVecFs {
     ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
         if !follow_symlinks && cursor.is_none() {
             // Ordinary SMB path opens do not guarantee no-follow for every component.
-            return Err(VfError::unsupported(0));
+            return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
         }
         self.read_directory_page(dir, masks, cursor, page_size)
     }
@@ -486,8 +497,8 @@ impl VectorBackend for SmbVecFs {
                 Err(cause) => slots[index] = Some(Err(OpError::not_attempted(cause))),
             }
         }
-        let classify = |cause: VfError| {
-            if cause.is_transport() {
+        let classify = |cause: std::io::Error| {
+            if vfsi_core::transport_kind(&(cause)).is_some() {
                 OpError::unknown(cause, None)
             } else {
                 OpError::failed(cause, None)
@@ -552,21 +563,23 @@ impl VectorBackend for SmbVecFs {
                 slots[index] = Some(outcome.result);
             }
         } else {
-            let mut unavailable: Option<VfError> = None;
+            let mut unavailable: Option<Arc<std::io::Error>> = None;
             for (index, (destination, create)) in indices.into_iter().zip(prepared) {
                 #[cfg(feature = "test-faults")]
                 if unavailable.is_none()
-                    && let Err(cause) = self
+                    && let Err(mut cause) = self
                         .inject_open_fault(OpenFaultPoint::BeforeRenameCompound { first: index })
                 {
-                    if cause.is_transport() {
-                        unavailable = Some(cause.clone());
+                    if vfsi_core::transport_kind(&cause).is_some() {
+                        unavailable = Some(vfsi_core::internal::errors::share_in_place(&mut cause));
                     }
                     slots[index] = Some(Err(OpError::not_attempted(cause)));
                     continue;
                 }
                 let result = if let Some(cause) = &unavailable {
-                    slots[index] = Some(Err(OpError::not_attempted(cause.clone())));
+                    slots[index] = Some(Err(OpError::not_attempted(
+                        vfsi_core::internal::errors::from_shared(cause),
+                    )));
                     continue;
                 } else {
                     let outcome = self.runtime.block_on(protocol::rename_entry_on_connection(
@@ -581,18 +594,20 @@ impl VectorBackend for SmbVecFs {
                     }
                     outcome.result
                 };
-                let result = result.map_err(classify);
+                let mut result = result.map_err(classify);
                 #[cfg(feature = "test-faults")]
-                let result = result.and_then(|()| {
-                    self.inject_open_fault(OpenFaultPoint::AfterRenameCompoundReply {
-                        first: index,
-                    })
-                    .map_err(|cause| OpError::unknown(cause, None))
-                });
-                if let Err(error) = &result
-                    && error.cause().is_transport()
                 {
-                    unavailable = Some(error.cause().clone());
+                    result = result.and_then(|()| {
+                        self.inject_open_fault(OpenFaultPoint::AfterRenameCompoundReply {
+                            first: index,
+                        })
+                        .map_err(|cause| OpError::unknown(cause, None))
+                    });
+                }
+                if let Err(error) = &mut result
+                    && vfsi_core::transport_kind(error.cause()).is_some()
+                {
+                    unavailable = Some(vfsi_core::internal::errors::share_op_cause(error));
                 }
                 slots[index] = Some(result);
             }
@@ -622,8 +637,8 @@ impl VectorBackend for SmbVecFs {
         let paths: Vec<_> = prepared.iter().map(|(_, path, _)| path.clone()).collect();
         let connection = self.client.connection_mut().clone();
         let tree = self.tree.clone();
-        let classify = |cause: VfError| {
-            if cause.is_transport() {
+        let classify = |cause: std::io::Error| {
+            if vfsi_core::transport_kind(&(cause)).is_some() {
                 OpError::unknown(cause, None)
             } else {
                 OpError::failed(cause, None)
@@ -678,10 +693,12 @@ impl VectorBackend for SmbVecFs {
                 slots[index] = Some(outcome.result);
             }
         } else {
-            let mut fatal: Option<VfError> = None;
+            let mut fatal: Option<Arc<std::io::Error>> = None;
             for (index, _, create) in prepared {
                 if let Some(cause) = &fatal {
-                    slots[index] = Some(Err(OpError::not_attempted(cause.clone())));
+                    slots[index] = Some(Err(OpError::not_attempted(
+                        vfsi_core::internal::errors::from_shared(cause),
+                    )));
                     continue;
                 }
                 #[cfg(feature = "test-faults")]
@@ -700,18 +717,20 @@ impl VectorBackend for SmbVecFs {
                     self.deferred_closes
                         .push(DeferredClose::new(self.tree.clone(), id));
                 }
-                let result = outcome.result.map_err(classify);
+                let mut result = outcome.result.map_err(classify);
                 #[cfg(feature = "test-faults")]
-                let result = result.and_then(|()| {
-                    self.inject_open_fault(OpenFaultPoint::AfterRemoveCompoundReply {
-                        first: index,
-                    })
-                    .map_err(|cause| OpError::unknown(cause, None))
-                });
-                if let Err(error) = &result
-                    && error.cause().is_transport()
                 {
-                    fatal = Some(error.cause().clone());
+                    result = result.and_then(|()| {
+                        self.inject_open_fault(OpenFaultPoint::AfterRemoveCompoundReply {
+                            first: index,
+                        })
+                        .map_err(|cause| OpError::unknown(cause, None))
+                    });
+                }
+                if let Err(error) = &mut result
+                    && vfsi_core::transport_kind(error.cause()).is_some()
+                {
+                    fatal = Some(vfsi_core::internal::errors::share_op_cause(error));
                 }
                 slots[index] = Some(result);
             }
@@ -763,7 +782,7 @@ impl VectorBackend for SmbVecFs {
                         .push(DeferredClose::new(self.tree.clone(), file_id));
                 }
                 slots[index] = Some(outcome.result.map(|_| ()).map_err(|cause| {
-                    if cause.is_transport() {
+                    if vfsi_core::transport_kind(&(cause)).is_some() {
                         OpError::unknown(cause, None)
                     } else {
                         OpError::failed(cause, None)
@@ -771,10 +790,12 @@ impl VectorBackend for SmbVecFs {
                 }));
             }
         } else {
-            let mut fatal: Option<VfError> = None;
+            let mut fatal: Option<Arc<std::io::Error>> = None;
             for (index, _, create) in prepared {
                 if let Some(cause) = &fatal {
-                    slots[index] = Some(Err(OpError::not_attempted(cause.clone())));
+                    slots[index] = Some(Err(OpError::not_attempted(
+                        vfsi_core::internal::errors::from_shared(cause),
+                    )));
                     continue;
                 }
                 let outcome = self.runtime.block_on(open_close_on_connection(
@@ -786,9 +807,9 @@ impl VectorBackend for SmbVecFs {
                     self.deferred_closes
                         .push(DeferredClose::new(self.tree.clone(), file_id));
                 }
-                slots[index] = Some(outcome.result.map(|_| ()).map_err(|cause| {
-                    if cause.is_transport() {
-                        fatal = Some(cause.clone());
+                slots[index] = Some(outcome.result.map(|_| ()).map_err(|mut cause| {
+                    if vfsi_core::transport_kind(&(cause)).is_some() {
+                        fatal = Some(vfsi_core::internal::errors::share_in_place(&mut cause));
                         OpError::unknown(cause, None)
                     } else {
                         OpError::failed(cause, None)
@@ -808,12 +829,12 @@ impl VectorBackend for SmbVecFs {
         newpaths: &[&Path],
     ) -> vfsi_core::VecResult<()> {
         if oldpaths.len() != newpaths.len() {
-            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         if oldpaths.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(VfError::unsupported(None))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
 
@@ -821,7 +842,7 @@ impl VectorBackend for SmbVecFs {
         if paths.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(VfError::unsupported(0))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
 
@@ -831,26 +852,28 @@ impl VectorBackend for SmbVecFs {
         newpaths: &[&Path],
     ) -> vfsi_core::VecResult<()> {
         if oldpaths.len() != newpaths.len() {
-            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         if oldpaths.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(VfError::unsupported(None))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
 
     fn vcopy_data_impl(&mut self, pairs: &[ExtentPair]) -> vfsi_core::VecResult<()> {
-        let mut fatal: Option<VfError> = None;
+        let mut fatal: Option<Arc<std::io::Error>> = None;
         Ok(pairs
             .iter()
             .map(|pair| {
                 if let Some(cause) = &fatal {
-                    return Err(vfsi_core::OpError::not_attempted(cause.clone()));
+                    return Err(vfsi_core::OpError::not_attempted(
+                        vfsi_core::internal::errors::from_shared(cause),
+                    ));
                 }
-                self.copy_client_side(pair).map_err(|cause| {
-                    if cause.is_transport() {
-                        fatal = Some(cause.clone());
+                self.copy_client_side(pair).map_err(|mut cause| {
+                    if vfsi_core::transport_kind(&(cause)).is_some() {
+                        fatal = Some(vfsi_core::internal::errors::share_in_place(&mut cause));
                         vfsi_core::OpError::unknown(cause, None)
                     } else {
                         vfsi_core::OpError::failed(cause, None)
@@ -869,19 +892,21 @@ impl VectorBackend for SmbVecFs {
             return Ok(Vec::new());
         }
         if !options.follow_source_symlinks() {
-            return Err(VfError::unsupported(None));
+            return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
         }
-        let mut fatal: Option<VfError> = None;
+        let mut fatal: Option<Arc<std::io::Error>> = None;
         Ok(pairs
             .iter()
             .map(|pair| {
                 if let Some(cause) = &fatal {
-                    return Err(vfsi_core::OpError::not_attempted(cause.clone()));
+                    return Err(vfsi_core::OpError::not_attempted(
+                        vfsi_core::internal::errors::from_shared(cause),
+                    ));
                 }
                 let result = self.copy_extent_with_strategy(pair, self.server_copy_enabled);
-                result.map_err(|cause| {
-                    if cause.is_transport() {
-                        fatal = Some(cause.clone());
+                result.map_err(|mut cause| {
+                    if vfsi_core::transport_kind(&(cause)).is_some() {
+                        fatal = Some(vfsi_core::internal::errors::share_in_place(&mut cause));
                         vfsi_core::OpError::unknown(cause, None)
                     } else {
                         vfsi_core::OpError::failed(cause, None)
@@ -916,12 +941,14 @@ impl VectorBackend for SmbVecFs {
                         backend.vcopy_impl(pairs, vfsi_core::CopyOptions::new()),
                         pairs.len(),
                     )
+                    .map_err(vfsi_core::IndexedError::into_cause)
                     .map(|_| ())
                 } else {
                     vfsi_core::internal::collect_vec_result(
                         backend.vcopy_data_impl(pairs),
                         pairs.len(),
                     )
+                    .map_err(vfsi_core::IndexedError::into_cause)
                     .map(|_| ())
                 }
             },
@@ -932,9 +959,7 @@ impl VectorBackend for SmbVecFs {
         let mut counts = Vec::with_capacity(patterns.len());
         for (index, pattern) in patterns.iter().enumerate() {
             let layout = vfsi_core::internal::adb_layout(pattern, index)?;
-            let file = self
-                .open_raw_impl(&pattern.path, libc::O_WRONLY | libc::O_CREAT, 0o666)
-                .map_err(|e| e.with_index(index))?;
+            let file = self.open_raw_impl(&pattern.path, libc::O_WRONLY | libc::O_CREAT, 0o666)?;
             let result = (|| {
                 for (block_number, number_offset, pattern_offset) in layout {
                     if let Some(offset) = number_offset {
@@ -946,11 +971,11 @@ impl VectorBackend for SmbVecFs {
                         self.write_raw_impl(&file, offset, &pattern.adb_pattern_data)?;
                     }
                 }
-                Ok::<_, VfError>(pattern.adb_block_count)
+                Ok::<_, std::io::Error>(pattern.adb_block_count)
             })();
             let close = self.close_impl(&file);
-            counts.push(result.map_err(|e| e.with_index(index))?);
-            close.map_err(|e| e.with_index(index))?;
+            counts.push(result?);
+            close?;
         }
         Ok(counts)
     }
@@ -962,11 +987,11 @@ impl SmbVecFs {
         if reads.is_empty() {
             return Ok(Vec::new());
         }
-        if let Some(index) = reads
+        if let Some(_index) = reads
             .iter()
             .position(|read| read.length > isize::MAX as usize)
         {
-            return Err(VfError::errno(index, libc::EFBIG as u32));
+            return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
         }
         let max_read = self
             .client
@@ -1065,14 +1090,12 @@ impl SmbVecFs {
             return Ok(Vec::new());
         }
         if self.client.is_disconnected() {
-            let cause = VfError::transport_with_kind(
-                None,
+            let cause = vfsi_core::internal::errors::transport(
                 vfsi_core::TransportKind::Connection,
                 "SMB connection is disconnected",
             );
-            return Ok(writes
-                .iter()
-                .map(|_| Err(OpError::not_attempted(cause.clone())))
+            return Ok(vfsi_core::internal::errors::fanout(cause, writes.len())
+                .map(|cause| Err(OpError::not_attempted(cause)))
                 .collect());
         }
         let max_write = self
@@ -1092,7 +1115,8 @@ impl SmbVecFs {
                     && write.data().len() <= u32::MAX as usize
             });
         if concurrent {
-            let mut output: Vec<Option<OpResult<WriteResult>>> = vec![None; writes.len()];
+            let mut output: Vec<Option<OpResult<WriteResult>>> =
+                (0..writes.len()).map(|_| None).collect::<Vec<_>>();
             let mut prepared = Vec::with_capacity(writes.len());
             let mut indices = Vec::with_capacity(writes.len());
             for (index, write) in writes.iter().enumerate() {
@@ -1107,7 +1131,7 @@ impl SmbVecFs {
                     identity_create.desired_access = FileAccessMask::new(
                         FileAccessMask::FILE_READ_ATTRIBUTES | FileAccessMask::SYNCHRONIZE,
                     );
-                    Ok::<_, VfError>((create, identity_create, offset, write.data()))
+                    Ok::<_, std::io::Error>((create, identity_create, offset, write.data()))
                 };
                 match prepare() {
                     Ok(request) => {
@@ -1192,24 +1216,27 @@ impl SmbVecFs {
     fn write_unless_disconnected(
         &mut self,
         write: WriteOp<&FileOperand, &[u8]>,
-        stopped: &mut Option<VfError>,
+        stopped: &mut Option<Arc<std::io::Error>>,
     ) -> vfsi_core::OpResult<WriteResult> {
         use vfsi_core::OpError;
         if stopped.is_none() && self.client.is_disconnected() {
-            *stopped = Some(VfError::transport_with_kind(
-                None,
-                vfsi_core::TransportKind::Connection,
-                "SMB connection is disconnected",
+            *stopped = Some(vfsi_core::internal::errors::shared_source(
+                vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Connection,
+                    "SMB connection is disconnected",
+                ),
             ));
         }
         if let Some(cause) = stopped {
-            return Err(OpError::not_attempted(cause.clone()));
+            return Err(OpError::not_attempted(
+                vfsi_core::internal::errors::from_shared(cause),
+            ));
         }
-        let result = self.write_one(write);
+        let mut result = self.write_one(write);
         if self.client.is_disconnected()
-            && let Err(error) = &result
+            && let Err(error) = &mut result
         {
-            *stopped = Some(error.cause().clone());
+            *stopped = Some(vfsi_core::internal::errors::share_op_cause(error));
         }
         result
     }

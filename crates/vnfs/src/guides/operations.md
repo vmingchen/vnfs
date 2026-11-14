@@ -45,7 +45,7 @@ use vnfs::prelude::*;
 use vnfs::files::{ReadOp, ReadOptions, StreamOptions};
 use vnfs::directory::{Attributes, ControlFlow, ListDirOptions};
 use std::num::NonZeroUsize;
-# fn example(fs: &vnfs::nfs::NfsClient) -> vnfs::Result<()> {
+# fn example(fs: &vnfs::nfs::NfsClient) -> std::result::Result<(), vnfs::error::IndexedError> {
 let mut bytes_seen = 0u64;
 fs.streams_all(
     &["/dataset/large.bin"],

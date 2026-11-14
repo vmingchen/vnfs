@@ -8,6 +8,7 @@ pub fn unlink_impl_default<F: VectorBackend + ?Sized>(
         backend.vremove_impl(&[FileOperand::from_os_path(pathname)]),
         1,
     )
+    .map_err(vfsi_core::IndexedError::into_cause)
     .map(|_| ())
 }
 
@@ -19,7 +20,9 @@ pub fn vunlink_impl_default<F: VectorBackend + ?Sized>(
         .iter()
         .map(|path| FileOperand::from_os_path(path))
         .collect();
-    vfsi_core::internal::collect_vec_result(backend.vremove_impl(&files), files.len()).map(|_| ())
+    vfsi_core::internal::collect_vec_result(backend.vremove_impl(&files), files.len())
+        .map_err(vfsi_core::IndexedError::into_cause)
+        .map(|_| ())
 }
 
 pub fn mkdir_raw_impl_default<F: VectorBackend + ?Sized>(
@@ -34,6 +37,7 @@ pub fn mkdir_raw_impl_default<F: VectorBackend + ?Sized>(
         ..VfAttrs::default()
     };
     vfsi_core::internal::collect_vec_result(backend.vmkdir_impl(std::slice::from_ref(&a)), 1)
+        .map_err(vfsi_core::IndexedError::into_cause)
         .map(|_| ())
 }
 
@@ -54,7 +58,7 @@ pub fn ensure_dir_impl_default<F: VectorBackend + ?Sized>(
                     // Later mkdir calls validate ancestors. Only the existing
                     // final component needs a separate, following type check.
                     if so_far == target && backend.stat_impl(&so_far)?.ftype != VfType::Directory {
-                        return Err(VfError::errno(0, ERR_NOTDIR));
+                        return Err(std::io::Error::from_raw_os_error((ERR_NOTDIR) as i32));
                     }
                 }
                 Err(e) => return Err(e),
@@ -71,7 +75,7 @@ pub fn native_create_dir_impl_default<F: VectorBackend + ?Sized>(
 ) -> VfResult<()> {
     backend
         .mkdir_raw_impl(path, mode)
-        .map_err(|error| error.with_context("create_dir", path))
+        .map_err(|error| vfsi_core::internal::errors::with_context(error, "create_dir", path))
 }
 
 pub fn native_rename_impl_default<F: VectorBackend + ?Sized>(
@@ -86,6 +90,7 @@ pub fn native_rename_impl_default<F: VectorBackend + ?Sized>(
         )]),
         1,
     )
+    .map_err(vfsi_core::IndexedError::into_cause)
     .map(|_| ())
-    .map_err(|error| error.with_context("rename", from))
+    .map_err(|error| vfsi_core::internal::errors::with_context(error, "rename", from))
 }

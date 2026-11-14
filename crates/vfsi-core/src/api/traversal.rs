@@ -1,6 +1,6 @@
 //! Incremental, no-follow traversal shared by application adapters.
 use crate::api::{DirEntry, ListDirOptions, TraversalCompletion};
-use crate::{VfError, VfResult, internal::TraversalBudget};
+use crate::{VfResult, internal::TraversalBudget};
 use std::path::Path;
 
 /// Callback decision. Pruning never reads the directory's contents.
@@ -52,7 +52,7 @@ pub(super) fn walk_events_with_errors(
     sort_by_name: bool,
     mut read_dir: impl FnMut(&Path, ListDirOptions) -> VfResult<Vec<DirEntry>>,
     mut callback: impl FnMut(&WalkEvent) -> VfResult<WalkControl>,
-    mut on_error: impl FnMut(&Path, usize, VfError) -> VfResult<std::ops::ControlFlow<()>>,
+    mut on_error: impl FnMut(&Path, usize, std::io::Error) -> VfResult<std::ops::ControlFlow<()>>,
 ) -> VfResult<TraversalCompletion> {
     let mut budget = TraversalBudget::new(
         options.max_entries_or(crate::api::DEFAULT_DIRECTORY_MAX_ENTRIES),
@@ -83,14 +83,17 @@ pub(super) fn walk_events_with_errors(
                         pending.push(event);
                         continue;
                     }
-                    return Err(VfError::errno(0, libc::EFBIG as u32)
-                        .with_context("walk_events", event.entry.path()));
+                    return Err(crate::internal::errors::with_context(
+                        std::io::Error::from_raw_os_error(libc::EFBIG),
+                        "walk_events",
+                        event.entry.path(),
+                    ));
                 }
                 let remaining = budget.remaining_options(ListDirOptions::new());
                 let mut entries = match read_dir(event.entry.path(), remaining) {
                     Ok(entries) => entries,
                     Err(error)
-                        if !error.is_transport()
+                        if !crate::transport_kind(&(error)).is_some()
                             && matches!(
                                 error.kind(),
                                 std::io::ErrorKind::PermissionDenied
@@ -111,9 +114,9 @@ pub(super) fn walk_events_with_errors(
                     Err(error) => return Err(error),
                 };
                 for entry in &entries {
-                    budget
-                        .charge(entry.path())
-                        .map_err(|error| error.with_context("walk_events", entry.path()))?;
+                    budget.charge(entry.path()).map_err(|error| {
+                        crate::internal::errors::with_context(error, "walk_events", entry.path())
+                    })?;
                 }
                 if sort_by_name {
                     entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
@@ -170,7 +173,7 @@ mod tests {
             true,
             |path, _| match path.to_str().unwrap() {
                 "/" => Ok(vec![entry("/a-denied", true), entry("/z-readable", true)]),
-                "/a-denied" => Err(VfError::errno(0, libc::EACCES as u32)),
+                "/a-denied" => Err(std::io::Error::from_raw_os_error(libc::EACCES)),
                 "/z-readable" => Ok(vec![entry("/z-readable/keep", false)]),
                 _ => panic!("unexpected directory"),
             },
@@ -215,14 +218,14 @@ mod tests {
                 entry("/", true),
                 ListDirOptions::new(),
                 false,
-                |_, _| Err(VfError::errno(0, libc::ENOENT as u32)),
+                |_, _| Err(std::io::Error::from_raw_os_error(libc::ENOENT)),
                 |_| {
                     events += 1;
                     Ok(WalkControl::Continue)
                 },
                 |_, _, _| {
                     if fail {
-                        Err(VfError::errno(0, libc::EPIPE as u32))
+                        Err(std::io::Error::from_raw_os_error(libc::EPIPE))
                     } else {
                         Ok(std::ops::ControlFlow::Break(()))
                     }
@@ -230,7 +233,10 @@ mod tests {
             );
             assert_eq!(events, 1);
             if fail {
-                assert_eq!(result.unwrap_err().raw_code(), libc::EPIPE as u32);
+                assert_eq!(
+                    result.unwrap_err().raw_os_error().expect("OS errno") as u32,
+                    libc::EPIPE as u32
+                );
             } else {
                 assert_eq!(result.unwrap(), TraversalCompletion::Stopped);
             }
@@ -240,22 +246,37 @@ mod tests {
     #[test]
     fn directory_error_recovery_never_swallows_transport_or_budget_failures() {
         for error in [
-            VfError::invalid_reply(None, "bad page"),
-            VfError::errno(0, libc::EFBIG as u32),
-            VfError::errno(0, libc::EIO as u32),
+            crate::internal::errors::invalid_reply("bad page"),
+            std::io::Error::from_raw_os_error(libc::EFBIG),
+            std::io::Error::from_raw_os_error(libc::EIO),
         ] {
-            let expected = error.clone();
+            let expected = (
+                error.kind(),
+                error.raw_os_error(),
+                crate::native_status(&error),
+                crate::transport_kind(&error),
+                error.to_string(),
+            );
+            let mut error = Some(error);
             let actual = walk_events_with_errors(
                 entry("/", true),
                 ListDirOptions::new(),
                 false,
-                |_, _| Err(error.clone()),
+                |_, _| Err(error.take().expect("terminal error must not replay")),
                 |_| Ok(WalkControl::Continue),
                 |_, _, _| panic!("terminal errors must bypass recovery"),
             )
             .unwrap_err();
-            assert_eq!(actual.kind(), expected.kind());
-            assert_eq!(actual.raw_code(), expected.raw_code());
+            assert_eq!(
+                (
+                    actual.kind(),
+                    actual.raw_os_error(),
+                    crate::native_status(&actual),
+                    crate::transport_kind(&actual),
+                    actual.to_string()
+                ),
+                expected
+            );
         }
     }
 
@@ -341,7 +362,10 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert_eq!(error.raw_code(), libc::EFBIG as u32);
+        assert_eq!(
+            crate::native_status(&error),
+            Some(crate::StatusCode::Errno(libc::EFBIG as u32))
+        );
         assert!(strict_entries.contains(&PathBuf::from("/file")));
 
         let mut truncated_events = Vec::new();
@@ -388,7 +412,7 @@ mod tests {
                 ListDirOptions::default().with_recursive(true),
                 false,
                 |_, _| panic!("callback failed"),
-                |_| Err(VfError::errno(0, libc::EIO as u32))
+                |_| Err(std::io::Error::from_raw_os_error(libc::EIO))
             )
             .is_err()
         );
@@ -404,19 +428,20 @@ mod tests {
                 .with_max_depth(crate::api::DepthLimit::new(0).expect("finite depth")),
         ] {
             assert_eq!(
-                walk_events(
-                    entry("/", true),
-                    options,
-                    false,
-                    |path, _| {
-                        assert_eq!(path, Path::new("/"));
-                        Ok(vec![entry("/a", true)])
-                    },
-                    |_| Ok(WalkControl::Continue)
-                )
-                .unwrap_err()
-                .raw_code(),
-                libc::EFBIG as u32
+                crate::native_status(
+                    &walk_events(
+                        entry("/", true),
+                        options,
+                        false,
+                        |path, _| {
+                            assert_eq!(path, Path::new("/"));
+                            Ok(vec![entry("/a", true)])
+                        },
+                        |_| Ok(WalkControl::Continue)
+                    )
+                    .unwrap_err()
+                ),
+                Some(crate::StatusCode::Errno(libc::EFBIG as u32))
             );
         }
     }

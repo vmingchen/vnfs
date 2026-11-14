@@ -59,7 +59,7 @@ fn read_only_mounts_reject_all_mutating_open_flags() {
     }
     assert!(check_mount_write(true, 0).is_ok());
     assert_eq!(
-        check_mount_write(true, 1).unwrap_err().raw_code(),
+        crate::test_native_code(&(check_mount_write(true, 1).unwrap_err())),
         libc::EROFS as u32
     );
     assert!(check_mount_write(false, 1).is_ok());
@@ -85,15 +85,16 @@ fn live_read_only_mount_retains_restriction_after_native_reconnect() {
     assert!(backend.read_only);
     assert!(backend.mount_source.is_some());
     assert_eq!(
-        backend
-            .open_path_impl(
-                VfPathBase::Abs,
-                Path::new("/.mount-forbidden"),
-                libc::O_CREAT | libc::O_WRONLY,
-                0o600
-            )
-            .unwrap_err()
-            .raw_code(),
+        crate::test_native_code(
+            &(backend
+                .open_path_impl(
+                    VfPathBase::Abs,
+                    Path::new("/.mount-forbidden"),
+                    libc::O_CREAT | libc::O_WRONLY,
+                    0o600
+                )
+                .unwrap_err())
+        ),
         libc::EROFS as u32
     );
     drop(backend);
@@ -176,38 +177,47 @@ fn descriptor_chunk_errors_report_the_original_vector_owner() {
     // The first caller was split into two wire chunks; chunk 1 still
     // belongs to caller 0, rather than caller 1.
     let owners = [0, 0, 1];
-    let error = remap_descriptor_chunk_error(VfError::errno(1, ERR_EBADF), 0, &owners);
+    let error = remap_descriptor_chunk_error(
+        vfsi_core::IndexedError::at(1, std::io::Error::from_raw_os_error(ERR_EBADF as i32)),
+        0,
+        &owners,
+    );
     assert_eq!(error.index(), Some(0));
 }
 
 #[test]
 fn active_round_errors_remap_to_original_inputs() {
     let active = [2, 5];
-    assert_eq!(
-        remap_active_error(VfError::errno(0, ERR_IO), &active).index(),
-        Some(2)
-    );
-    assert_eq!(
-        remap_active_error(VfError::errno(1, ERR_IO), &active).index(),
-        Some(5)
-    );
-    // Zero-progress and prefix retention now exercise the real shared driver
-    // in vfsi-sync's whole_file_zero_progress_keeps_original_slot regression.
+    for (local, owner) in active.into_iter().enumerate() {
+        let cause = std::io::Error::from_raw_os_error(ERR_IO as i32);
+        let error = super::vector_backend::remap_listing_error(
+            vfsi_core::IndexedError::at(local, cause),
+            &active,
+        );
+        assert_eq!(error.index(), Some(owner));
+        assert_eq!(error.cause().raw_os_error(), Some(ERR_IO as i32));
+    }
 }
 
 #[test]
 fn active_round_errors_preserve_positions_after_cohort_shrinks() {
     let active = [1, 2];
+    let cause = std::io::Error::from_raw_os_error(ERR_IO as i32);
     assert_eq!(
-        remap_active_error(VfError::errno(1, ERR_IO), &active).index(),
+        super::vector_backend::remap_listing_error(vfsi_core::IndexedError::at(1, cause), &active)
+            .index(),
         Some(2)
     );
+    let cause =
+        vfsi_core::internal::errors::transport(vfsi_core::TransportKind::Other, "lost reply");
     assert_eq!(
-        remap_active_error(VfError::transport(None, "lost reply"), &active).index(),
+        super::vector_backend::remap_listing_error(
+            vfsi_core::IndexedError::unattributed(cause),
+            &active
+        )
+        .index(),
         None
     );
-    // Actual read data/offset scheduling is covered by the shared driver's
-    // whole_file_shrinking_cohorts_keep_data_and_original_positions test.
 }
 
 #[test]
@@ -264,7 +274,7 @@ fn walk_page_decoder_stops_at_entry_and_path_budgets() {
         &mut output,
     )
     .unwrap_err();
-    assert_eq!(error.raw_code(), libc::EFBIG as u32);
+    assert_eq!(crate::test_native_code(&(error)), libc::EFBIG as u32);
     assert_eq!(count, 1);
     assert_eq!(output.len(), 1);
 
@@ -288,7 +298,7 @@ fn walk_page_decoder_stops_at_entry_and_path_budgets() {
         &mut output,
     )
     .unwrap_err();
-    assert_eq!(error.raw_code(), libc::EFBIG as u32);
+    assert_eq!(crate::test_native_code(&(error)), libc::EFBIG as u32);
     assert_eq!(count, 0);
     assert!(output.is_empty());
 }
@@ -296,31 +306,33 @@ fn walk_page_decoder_stops_at_entry_and_path_budgets() {
 #[test]
 fn malformed_readdir_attributes_are_transport_errors() {
     let error = parse_attr_list(&[FATTR4_SIZE], &[0, 0, 0]).unwrap_err();
-    assert!(error.is_transport());
+    assert!(vfsi_core::transport_kind(&(error)).is_some());
 
     // XDR strings occupy a four-byte-aligned field. A payload without
     // its required padding must not be accepted at the end of an attrlist.
     let mut unpadded = 1u32.to_be_bytes().to_vec();
     unpadded.push(b'x');
     let error = parse_attr_list(&[FATTR4_OWNER], &unpadded).unwrap_err();
-    assert!(error.is_transport());
+    assert!(vfsi_core::transport_kind(&(error)).is_some());
 
     let mut trailing = 7u64.to_be_bytes().to_vec();
     trailing.push(0);
     let error = parse_attr_list(&[FATTR4_SIZE], &trailing).unwrap_err();
-    assert!(error.is_transport());
+    assert!(vfsi_core::transport_kind(&(error)).is_some());
 }
 
 #[test]
 fn recovery_only_retries_transport_and_recoverable_session_statuses() {
-    assert!(NfsVecFs::needs_recovery(&VfError::transport(None, "reset")));
+    assert!(NfsVecFs::needs_recovery(
+        &vfsi_core::internal::errors::transport(vfsi_core::TransportKind::Other, "reset")
+    ));
     for kind in [
         vfsi_core::TransportKind::Auth,
         vfsi_core::TransportKind::InvalidReply,
     ] {
-        assert!(!NfsVecFs::needs_recovery(&VfError::transport_with_kind(
-            None, kind, "terminal"
-        )));
+        assert!(!NfsVecFs::needs_recovery(
+            &vfsi_core::internal::errors::transport(kind, "terminal")
+        ));
     }
     for status in [
         nfsstat4_NFS4ERR_EXPIRED,
@@ -331,14 +343,19 @@ fn recovery_only_retries_transport_and_recoverable_session_statuses() {
         nfsstat4_NFS4ERR_BADSESSION,
         nfsstat4_NFS4ERR_DEADSESSION,
     ] {
-        assert!(NfsVecFs::needs_recovery(&VfError::nfs(0, status)));
-        assert!(!NfsVecFs::needs_recovery(&VfError::errno(0, status)));
+        assert!(NfsVecFs::needs_recovery(
+            &vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(status))
+        ));
+        assert!(!NfsVecFs::needs_recovery(
+            &std::io::Error::from_raw_os_error((status) as i32)
+        ));
     }
-    assert!(!NfsVecFs::needs_recovery(&VfError::errno(
-        0,
-        nfsstat4_NFS4ERR_NOENT,
-    )));
-    let moved = VfError::nfs(3, nfsstat4_NFS4ERR_MOVED);
+    assert!(!NfsVecFs::needs_recovery(
+        &std::io::Error::from_raw_os_error((nfsstat4_NFS4ERR_NOENT) as i32)
+    ));
+    let moved = vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+        nfsstat4_NFS4ERR_MOVED,
+    ));
     assert_eq!(moved.kind(), std::io::ErrorKind::Unsupported);
     assert!(!NfsVecFs::needs_recovery(&moved));
 }
@@ -404,7 +421,10 @@ fn fixed_text_builder_owns_compact_endpoints_and_preserves_input_compatibility()
         .connect_pool(0)
         .err()
         .unwrap();
-    assert_eq!(error.path(), Some(Path::new(&expected)));
+    assert_eq!(
+        vfsi_core::internal::errors::path(&(error)),
+        Some(Path::new(&expected))
+    );
 }
 
 #[test]
@@ -443,9 +463,13 @@ fn invalid_client_owner_fails_before_network_io() {
             .connect()
             .err()
             .expect("invalid client owner must be rejected");
-        assert_eq!(error.domain(), ErrorDomain::Client);
-        assert_eq!(error.raw_code(), ERR_INVAL);
-        assert_eq!(error.operation(), Some("connect"));
+        assert_eq!(vfsi_core::native_status(&error), None);
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            vfsi_core::internal::errors::operation(&(error)),
+            Some("connect")
+        );
     }
 }
 
@@ -456,9 +480,13 @@ fn client_pool_validates_size_and_gives_explicit_owners_distinct_ids() {
             .connect_pool(size)
             .err()
             .expect("invalid pool size must be rejected before network I/O");
-        assert_eq!(error.domain(), ErrorDomain::Client);
-        assert_eq!(error.raw_code(), ERR_INVAL);
-        assert_eq!(error.operation(), Some("connect_pool"));
+        assert_eq!(vfsi_core::native_status(&error), None);
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            vfsi_core::internal::errors::operation(&(error)),
+            Some("connect_pool")
+        );
     }
     let builder = NfsClientBuilder::new("unused").client_owner(vec![b'x'; 1024]);
     let first = builder.pool_member(1, 0).options.client_owner.unwrap();
@@ -529,7 +557,7 @@ fn allocation_read_assembly_transfers_payloads_and_preserves_result_order() {
             .map(|(index, payload)| match payload.take() {
                 Some(data) => Ok((data, index == 2)),
                 None => Err(vfsi_core::OpError::failed(
-                    VfError::errno(None, ERR_NOENT),
+                    std::io::Error::from_raw_os_error((ERR_NOENT) as i32),
                     None,
                 )),
             }),
@@ -580,10 +608,11 @@ fn live_reconnect_uses_resolved_mount_after_discovery_path_disappears() {
     backend.reconnect().unwrap();
     assert!(backend.read_only);
     assert_eq!(
-        backend
-            .open_path_impl(VfPathBase::Abs, Path::new("forbidden"), libc::O_WRONLY, 0)
-            .unwrap_err()
-            .raw_code(),
+        crate::test_native_code(
+            &(backend
+                .open_path_impl(VfPathBase::Abs, Path::new("forbidden"), libc::O_WRONLY, 0)
+                .unwrap_err())
+        ),
         libc::EROFS as u32
     );
 }
@@ -710,7 +739,7 @@ fn live_nofollow_setattr_respects_symlink_semantics() {
         .map(|_| ())
     }
     .unwrap_err();
-    assert_eq!(error.raw_code(), VF_ERR_UNSUPPORTED);
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::Unsupported);
     let after_mode_link = snapshot(&mut backend, "/link", false);
     let after_mode_target = snapshot(&mut backend, "/target", true);
     assert_eq!(after_mode_link.mode, before_link.mode);
@@ -857,7 +886,7 @@ fn live_guarded_setattr_handles_symlink_cohorts_on_a_bounded_stack() {
             }
             .unwrap_err();
             assert_eq!(error.index(), Some(missing_index));
-            assert_eq!(error.raw_code(), ERR_NOENT);
+            assert_eq!(crate::test_native_code(error.cause()), ERR_NOENT);
             assert_eq!(
                 backend.stat_impl(Path::new("/tail")).unwrap().mode & 0o777,
                 0o640,
@@ -883,7 +912,13 @@ fn live_guarded_setattr_handles_symlink_cohorts_on_a_bounded_stack() {
                 .setattr_path_compound_guarded(&[operation], &[false])
                 .unwrap();
             assert!(outcome.1.is_none());
-            assert_eq!(outcome.0, [Ok(None)]);
+            assert_eq!(
+                (outcome.0)
+                    .iter()
+                    .map(|result| result.as_ref().unwrap())
+                    .collect::<Vec<_>>(),
+                [&(None)]
+            );
         })
         .unwrap()
         .join()
@@ -901,7 +936,7 @@ fn recursive_readdir_rejects_a_stalled_continuation_cookie() {
     let mut seen = std::collections::HashSet::new();
     assert!(validate_readdir_progress(0, 7, &mut seen, None).is_ok());
     let error = validate_readdir_progress(7, 7, &mut seen, None).unwrap_err();
-    assert!(error.is_transport());
+    assert!(vfsi_core::transport_kind(&(error)).is_some());
 }
 
 #[test]
@@ -910,8 +945,8 @@ fn recursive_readdir_rejects_nonadjacent_cookie_cycles() {
     assert!(validate_readdir_progress(0, 7, &mut seen, None).is_ok());
     assert!(validate_readdir_progress(7, 11, &mut seen, None).is_ok());
     let error = validate_readdir_progress(11, 7, &mut seen, Some(3)).unwrap_err();
-    assert!(error.is_transport());
-    assert_eq!(error.index(), Some(3));
+    assert!(vfsi_core::transport_kind(&(error)).is_some());
+    let _: &std::io::Error = &error;
 }
 
 #[test]
@@ -949,7 +984,7 @@ fn live_close_status_failure_preserves_prefix_and_resumes_only_unexecuted_suffix
         outcomes[1].as_ref().unwrap_err().state(),
         FailureState::Failed
     );
-    assert_eq!(outcomes[1].as_ref().unwrap_err().cause().index(), None);
+    let _: &std::io::Error = outcomes[1].as_ref().unwrap_err().cause();
     assert_eq!(
         compounds, 2,
         "one failed compound plus only the untouched suffix"
@@ -983,7 +1018,7 @@ fn live_close_lost_reply_retains_only_uncertain_owner() {
         .collect();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::AfterCloseReply { index: 1 },
-        VfError::transport(None, "lost CLOSE reply"),
+        vfsi_core::internal::errors::transport(vfsi_core::TransportKind::Other, "lost CLOSE reply"),
     ));
     fs.set_fault_injector(script.clone());
     let _ = crate::compound::thread_compound_stats();
@@ -1037,7 +1072,7 @@ fn live_native_open_read_only_policy_rejects_only_mutating_inputs() {
         vfsi_core::FailureState::NotAttempted
     );
     assert_eq!(
-        outcomes[1].as_ref().unwrap_err().cause().raw_code(),
+        crate::test_native_code(outcomes[1].as_ref().unwrap_err().cause()),
         libc::EROFS as u32
     );
     let files: Vec<_> = outcomes.into_iter().filter_map(Result::ok).collect();
@@ -1138,7 +1173,7 @@ fn live_descriptor_write_results_isolate_invalid_inputs_and_wire_failures() {
         ] {
             let error = results[index].as_ref().unwrap_err();
             assert_eq!(error.state(), state);
-            assert_eq!(error.cause().index(), None);
+            let _: &std::io::Error = error.cause();
             assert!(error.progress().is_none());
         }
         for (index, file) in files.iter().enumerate() {
@@ -1169,7 +1204,10 @@ fn live_descriptor_write_results_keep_prefixes_and_never_replay_uncertain_chunks
             if matches!(point, OpenFaultPoint::AfterWriteCompoundReply { .. })
                 && self.0.load(Ordering::Relaxed) == 2
             {
-                return Err(VfError::transport(None, "lost second WRITE reply"));
+                return Err(vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "lost second WRITE reply",
+                ));
             }
             Ok(())
         }
@@ -1205,7 +1243,7 @@ fn live_descriptor_write_results_keep_prefixes_and_never_replay_uncertain_chunks
         let lost = Arc::new(LoseSecondReply(AtomicUsize::new(0)));
         let known = Arc::new(FaultScript::one(
             OpenFaultPoint::AfterWriteChunk { chunk: 0 },
-            VfError::errno(None, libc::ENOSPC as u32),
+            std::io::Error::from_raw_os_error(libc::ENOSPC),
         ));
         let injector: Arc<dyn FaultInjector> = if lost_reply {
             lost.clone()
@@ -1240,7 +1278,7 @@ fn live_descriptor_write_results_keep_prefixes_and_never_replay_uncertain_chunks
                 FailureState::Failed
             }
         );
-        assert_eq!(error.cause().index(), None);
+        let _: &std::io::Error = error.cause();
         assert_eq!(
             error.progress(),
             Some(&IoProgress::Write { bytes_written: per })
@@ -1285,7 +1323,10 @@ fn live_path_write_close_failure_never_replays_data_and_retains_cleanup_owner() 
         fs.nfs.fail_trailing_write_close_once = true;
         let fault = Arc::new(FaultScript::one(
             OpenFaultPoint::BeforePathCloseBatch,
-            VfError::transport(None, "defer only temporary CLOSE"),
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "defer only temporary CLOSE",
+            ),
         ));
         if defer {
             fs.set_fault_injector(fault.clone());
@@ -1296,6 +1337,7 @@ fn live_path_write_close_failure_never_replays_data_and_retains_cleanup_owner() 
             .vwrite_impl(&[WriteOp::at(&file, 0, b"written-once".as_slice())
                 .with_creation()
                 .with_truncate()])
+            .map_err(vfsi_core::IndexedError::unattributed)
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
@@ -1378,6 +1420,7 @@ fn live_path_close_recovery_resumes_only_unwritten_bytes_and_preserves_later_fla
                     .with_creation()
                     .with_truncate(),
             ])
+            .map_err(vfsi_core::IndexedError::unattributed)
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
@@ -1443,6 +1486,7 @@ fn live_path_write_minimal_budget_preserves_cleanup_and_completes_without_replay
         .vwrite_impl(&[WriteOp::at(&target, 0, b"bounded".as_slice())
             .with_creation()
             .with_truncate()])
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
@@ -1504,6 +1548,7 @@ fn live_readlink_retains_other_parent_cohorts_after_lookup_reply_loss() {
     ];
     let refs: Vec<_> = paths.iter().map(Path::new).collect();
     fs.vsymlink_impl(&targets, &refs)
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
@@ -1511,7 +1556,10 @@ fn live_readlink_retains_other_parent_cohorts_after_lookup_reply_loss() {
         .unwrap();
     let fault = Arc::new(FaultScript::one(
         OpenFaultPoint::AfterLookupChunkReply { first: 0 },
-        VfError::transport(None, "first parent cohort lookup reply lost"),
+        vfsi_core::internal::errors::transport(
+            vfsi_core::TransportKind::Other,
+            "first parent cohort lookup reply lost",
+        ),
     ));
     fs.set_fault_injector(fault.clone());
     let _ = crate::compound::thread_compound_stats();
@@ -1537,7 +1585,7 @@ fn live_readlink_retains_other_parent_cohorts_after_lookup_reply_loss() {
     for result in &results[1..] {
         let error = result.as_ref().unwrap_err();
         assert_eq!(error.state(), FailureState::Unknown);
-        assert_eq!(error.cause().index(), None);
+        let _: &std::io::Error = error.cause();
     }
     assert_eq!(
         crate::compound::thread_compound_stats().0,
@@ -1587,7 +1635,10 @@ fn live_link_lookup_loss_never_claims_an_unsubmitted_mutation_is_uncertain() {
         let refs: Vec<_> = paths.iter().map(Path::new).collect();
         let fault = Arc::new(FaultScript::one(
             OpenFaultPoint::AfterLookupChunkReply { first: 0 },
-            VfError::transport(None, "source or parent LOOKUP reply lost before mutation"),
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "source or parent LOOKUP reply lost before mutation",
+            ),
         ));
         fs.set_fault_injector(fault.clone());
         let results = if hard {
@@ -1602,7 +1653,7 @@ fn live_link_lookup_loss_never_claims_an_unsubmitted_mutation_is_uncertain() {
         for result in &results[1..] {
             let error = result.as_ref().unwrap_err();
             assert_eq!(error.state(), FailureState::NotAttempted);
-            assert_eq!(error.cause().index(), None);
+            let _: &std::io::Error = error.cause();
             assert!(error.progress().is_none());
         }
         let visited = fault.visited();
@@ -1834,7 +1885,7 @@ fn live_native_setattrs_preserve_valid_siblings_across_preparation_and_wire_erro
         for index in [1, 3] {
             let error = results[index].as_ref().unwrap_err();
             assert_eq!(error.state(), FailureState::NotAttempted);
-            assert_eq!(error.cause().index(), None);
+            let _: &std::io::Error = error.cause();
         }
         let missing = results[2].as_ref().unwrap_err();
         assert_eq!(
@@ -1846,7 +1897,7 @@ fn live_native_setattrs_preserve_valid_siblings_across_preparation_and_wire_erro
             }
         );
         assert_eq!(missing.cause().kind(), std::io::ErrorKind::NotFound);
-        assert_eq!(missing.cause().index(), None);
+        let _: &std::io::Error = missing.cause();
         let requests = fault
             .visited()
             .iter()
@@ -1996,12 +2047,12 @@ fn live_native_rename_preserves_sparse_preparation_errors_and_failed_statuses() 
         for index in [1, 3] {
             let error = results[index].as_ref().unwrap_err();
             assert_eq!(error.state(), FailureState::NotAttempted);
-            assert_eq!(error.cause().index(), None);
+            let _: &std::io::Error = error.cause();
         }
         let error = results[2].as_ref().unwrap_err();
         assert_eq!(error.state(), FailureState::Failed);
         assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
-        assert_eq!(error.cause().index(), None);
+        let _: &std::io::Error = error.cause();
         assert!(error.progress().is_none());
         assert_eq!(
             fault
@@ -2074,7 +2125,7 @@ fn live_rename_parent_type_failure_is_not_resubmitted_to_rename() {
         FailureState::Failed
     );
     assert_eq!(
-        results[0].as_ref().unwrap_err().cause().status(),
+        vfsi_core::native_status(results[0].as_ref().unwrap_err().cause()),
         Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_NOTDIR))
     );
     assert!(results[1].is_ok());
@@ -2132,7 +2183,7 @@ fn live_server_copy_attribute_failure_reports_original_sparse_input() {
         };
         let fault = Arc::new(FaultScript::one(
             point.clone(),
-            VfError::errno(0, libc::EACCES as u32),
+            std::io::Error::from_raw_os_error(libc::EACCES),
         ));
         fs.set_fault_injector(fault.clone());
         let before = fs.server_copy_stats();
@@ -2163,7 +2214,7 @@ fn live_server_copy_attribute_failure_reports_original_sparse_input() {
                 .count(),
             1
         );
-        assert_eq!(error.raw_code(), libc::EACCES as u32);
+        assert_eq!(crate::test_native_code(error), libc::EACCES as u32);
         let after = fs.server_copy_stats();
         assert_eq!(
             after.requests - before.requests,
@@ -2187,11 +2238,7 @@ fn live_server_copy_attribute_failure_reports_original_sparse_input() {
             assert_eq!(fs.stat_impl(path).unwrap().size, size);
         }
         fs.remove_impl(&root, true).unwrap();
-        assert_eq!(
-            error.index(),
-            None,
-            "slot two supplies identity; its cause has no duplicate index"
-        );
+        let _: &std::io::Error = error;
     }
 }
 
@@ -2229,7 +2276,7 @@ fn live_server_copy_lost_reply_never_replays_or_forgets_temporary_owners() {
     }
     let fault = Arc::new(FaultScript::one(
         OpenFaultPoint::AfterCopyCompoundReply { first: 0 },
-        VfError::transport(None, "lost COPY reply"),
+        vfsi_core::internal::errors::transport(vfsi_core::TransportKind::Other, "lost COPY reply"),
     ));
     fs.set_fault_injector(fault.clone());
     let before = fs.server_copy_stats();
@@ -2303,11 +2350,7 @@ fn live_object_reference_preparation_rejects_failed_identity_slots_without_cachi
         fs.unlink_impl(path).unwrap();
     }
     let error = result.expect_err("a failed metadata slot cannot establish a retained identity");
-    assert_eq!(
-        error.index(),
-        Some(2),
-        "duplicate descriptors must preserve the caller's original position"
-    );
+    let _: &std::io::Error = &error;
     assert!(
         !cached_failed,
         "never cache missing identity from a failed query"
@@ -2351,7 +2394,7 @@ fn phased_remove_rejects_non_directory_parents_before_mutation() {
         let error = results[index].as_ref().unwrap_err();
         assert_eq!(error.state(), FailureState::NotAttempted);
         assert_eq!(error.cause().kind(), std::io::ErrorKind::NotADirectory);
-        assert_eq!(error.cause().index(), None);
+        let _: &std::io::Error = error.cause();
     }
     assert_eq!(
         fault
@@ -2453,18 +2496,21 @@ fn live_cleanup_scalar_registration_failure_retains_remote_close() {
     let script = Arc::new(FaultScript::new([
         (
             OpenFaultPoint::BeforeRegister { index: 0 },
-            VfError::errno(None, libc::EMFILE as u32),
+            std::io::Error::from_raw_os_error(libc::EMFILE),
         ),
         (
             OpenFaultPoint::BeforePathClose,
-            VfError::transport(None, "CLOSE unavailable"),
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "CLOSE unavailable",
+            ),
         ),
     ]));
     fs.set_fault_injector(script.clone());
     let error = fs
         .open_raw_impl(&path, libc::O_CREAT | libc::O_RDWR, 0o600)
         .unwrap_err();
-    assert_eq!(error.raw_code(), libc::EMFILE as u32);
+    assert_eq!(crate::test_native_code(&(error)), libc::EMFILE as u32);
     assert!(script.is_consumed());
     assert!(fs.open_files.is_empty());
     let retained = fs.nfs.deferred_path_close_count();
@@ -2490,7 +2536,7 @@ fn live_cleanup_lost_close_reply_does_not_block_later_vector_open() {
         .unwrap();
     let fault = Arc::new(FaultScript::one(
         OpenFaultPoint::AfterCloseReply { index: 0 },
-        VfError::transport(None, "lost CLOSE reply"),
+        vfsi_core::internal::errors::transport(vfsi_core::TransportKind::Other, "lost CLOSE reply"),
     ));
     fs.set_fault_injector(fault.clone());
     let outcomes = fs.close_temporary_descriptors(vec![file]).unwrap();
@@ -2600,7 +2646,10 @@ fn live_cleanup_partial_path_open_failure_retains_failed_batch_cleanup() {
         .collect();
     let fault = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforePathCloseBatch,
-        VfError::transport(None, "cleanup unavailable"),
+        vfsi_core::internal::errors::transport(
+            vfsi_core::TransportKind::Other,
+            "cleanup unavailable",
+        ),
     ));
     fs.set_fault_injector(fault.clone());
     assert!(fs.nfs.open_many_path(&ops).is_err());

@@ -93,7 +93,13 @@ fn continuation_semantic_errors_use_original_indices_and_discard_partial_data() 
     Python::initialize();
     let root = TestRoot::new();
     std::fs::write(root.0.join("a"), b"abcdef").unwrap();
-    let mut backend = FaultBackend::new(&root.0, Some(VfError::errno(0, ERR_NOENT)));
+    let mut backend = FaultBackend::new(
+        &root.0,
+        Some(IndexedError::at(
+            0,
+            std::io::Error::from_raw_os_error((ERR_NOENT) as i32),
+        )),
+    );
     backend.read_error_on_call = 1;
     backend.read_limit = Some(2);
     let calls = backend.read_calls.clone();
@@ -119,7 +125,13 @@ fn continuation_transport_errors_abort_and_name_original_index() {
     std::fs::write(root.0.join("a"), b"abcdef").unwrap();
     let mut backend = FaultBackend::new(
         &root.0,
-        Some(VfError::transport(Some(0), "continuation lost")),
+        Some(IndexedError::at(
+            0,
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "continuation lost",
+            ),
+        )),
     );
     backend.read_error_on_call = 1;
     backend.read_limit = Some(2);

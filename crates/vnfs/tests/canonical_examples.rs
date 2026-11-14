@@ -45,7 +45,8 @@ fn bulk_roundtrip_cleanup_and_existing_directory_protection() -> Result<()> {
         fs.read_batch(
             [vnfs::files::ReadOp::whole("/existing/precious")],
             vnfs::files::ReadOptions::default()
-        )?[0]
+        )
+        .map_err(vfsi_core::IndexedError::into_cause)?[0]
             .data()
             .unwrap(),
         b"keep"
@@ -67,7 +68,8 @@ fn handle_ranges_preserve_order_for_empty_short_and_large_files() -> Result<()> 
         ("/empty", &[][..]),
         ("/short", b"hello"),
         ("/large", &vec![42; 9000]),
-    ])?;
+    ])
+    .map_err(vfsi_core::IndexedError::into_cause)?;
     let paths = ["/large", "/empty", "/short"].map(str::to_owned);
     assert_eq!(
         open_handles::run(&fs, &paths)?,
@@ -134,7 +136,8 @@ fn canonical_workflows_on_nfsv41_and_nfsv42() -> Result<()> {
             .add_empty_file("empty")
             .add_file("large", vec![37; bytes])
             .add_file("sub/file", b"hello")
-            .create(&fs, &root)?;
+            .create(&fs, &root)
+            .map_err(vfsi_core::IndexedError::into_cause)?;
         let result = (|| -> Result<()> {
             assert_eq!(
                 bulk_files::run(&fs, &format!("{root}/bulk"))?,
@@ -152,16 +155,18 @@ fn canonical_workflows_on_nfsv41_and_nfsv42() -> Result<()> {
             assert_eq!(stream_file::run(&fs, &paths[0])?, bytes as u64);
             let file = fs.open(&paths[0])?;
             let mut buffer = [0; 4];
-            let mixed = fs.read_batch(
-                [
-                    vnfs::files::ReadOp::whole(&paths[2]),
-                    vnfs::files::ReadOp::range(&file, 10, 3),
-                    vnfs::files::ReadOp::whole(&paths[1]),
-                    vnfs::files::ReadOp::into(&file, 20, &mut buffer),
-                ],
-                vnfs::files::ReadOptions::new()
-                    .with_max_total_bytes(std::num::NonZeroUsize::new(12).unwrap()),
-            )?;
+            let mixed = fs
+                .read_batch(
+                    [
+                        vnfs::files::ReadOp::whole(&paths[2]),
+                        vnfs::files::ReadOp::range(&file, 10, 3),
+                        vnfs::files::ReadOp::whole(&paths[1]),
+                        vnfs::files::ReadOp::into(&file, 20, &mut buffer),
+                    ],
+                    vnfs::files::ReadOptions::new()
+                        .with_max_total_bytes(std::num::NonZeroUsize::new(12).unwrap()),
+                )
+                .map_err(vfsi_core::IndexedError::into_cause)?;
             assert_eq!(mixed[0].data().unwrap(), b"hello");
             assert_eq!(mixed[1].offset(), 10);
             assert_eq!(mixed[1].data().unwrap(), [37; 3]);

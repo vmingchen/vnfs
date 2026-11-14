@@ -16,7 +16,8 @@ fn query_attributes<F: VectorBackend + ?Sized>(
     } else {
         backend.vgetattrs_nofollow_impl(std::slice::from_mut(&mut attrs))
     };
-    vfsi_core::internal::collect_vec_result(result, 1)?;
+    vfsi_core::internal::collect_vec_result(result, 1)
+        .map_err(vfsi_core::IndexedError::into_cause)?;
     Ok(attrs)
 }
 
@@ -89,7 +90,7 @@ pub fn native_metadata_impl_default<F: VectorBackend + ?Sized>(
         options.follow_final_symlink(),
     )
     .map_err(|error| match path {
-        Some(path) => error.with_context("metadata", path),
+        Some(path) => vfsi_core::internal::errors::with_context(error, "metadata", path),
         None => error,
     })
 }
@@ -116,7 +117,7 @@ pub fn native_set_metadata_path_impl_default<F: VectorBackend + ?Sized>(
     let path = *op.target();
     backend
         .set_attributes_impl(&op.with_target(Target::Path(path)))
-        .map_err(|error| error.with_context("set_metadata", path))
+        .map_err(|error| vfsi_core::internal::errors::with_context(error, "set_metadata", path))
 }
 
 // Wire/raw masks and timestamp tuples are execution details, not a second
@@ -198,26 +199,18 @@ pub fn vsetattrs_typed_default<F: VectorBackend + ?Sized>(
                     .iter()
                     .map(|_| {
                         Err(OpError::unknown(
-                            VfError::invalid_reply(None, "too many SETATTR outcomes"),
+                            vfsi_core::internal::errors::invalid_reply("too many SETATTR outcomes"),
                             None,
                         ))
                     })
                     .collect(),
-                Err(cause) => {
-                    let cause = if cause.index().is_some_and(|index| index >= attrs.len()) {
-                        VfError::invalid_reply(None, "invalid SETATTR outer error index")
-                    } else {
-                        cause
-                    };
-                    attrs
-                        .iter()
-                        .map(|_| Err(OpError::not_attempted(cause.clone())))
-                        .collect()
-                }
+                Err(cause) => vfsi_core::internal::errors::fanout(cause, attrs.len())
+                    .map(|cause| Err(OpError::not_attempted(cause)))
+                    .collect(),
             };
             results.resize_with(attrs.len(), || {
                 Err(OpError::unknown(
-                    VfError::invalid_reply(None, "missing SETATTR outcome"),
+                    vfsi_core::internal::errors::invalid_reply("missing SETATTR outcome"),
                     None,
                 ))
             });

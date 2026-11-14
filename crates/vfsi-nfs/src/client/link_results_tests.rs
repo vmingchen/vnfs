@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::Arc;
+use vfsi_core::FailureState;
 use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
-use vfsi_core::{FailureState, VfError};
 
 #[test]
 fn namespace_mutations_preserve_status_submission_and_uncertainty_boundaries() {
@@ -66,7 +66,10 @@ fn namespace_mutations_preserve_status_submission_and_uncertainty_boundaries() {
             let fault = point.map(|point| {
                 Arc::new(FaultScript::one(
                     point,
-                    VfError::transport(None, "selected namespace mutation reply unavailable"),
+                    vfsi_core::internal::errors::transport(
+                        vfsi_core::TransportKind::Other,
+                        "selected namespace mutation reply unavailable",
+                    ),
                 ))
             });
             if let Some(fault) = &fault {
@@ -92,7 +95,7 @@ fn namespace_mutations_preserve_status_submission_and_uncertainty_boundaries() {
                             let error = result.as_ref().unwrap_err();
                             assert_eq!(error.state(), FailureState::Failed);
                             assert_eq!(error.cause().kind(), std::io::ErrorKind::AlreadyExists);
-                            assert_eq!(error.cause().index(), None);
+                            let _: &std::io::Error = error.cause();
                         } else {
                             assert!(result.is_ok());
                         }
@@ -126,7 +129,7 @@ fn namespace_mutations_preserve_status_submission_and_uncertainty_boundaries() {
                             FailureState::NotAttempted
                         };
                         assert_eq!(error.state(), expected);
-                        assert_eq!(error.cause().index(), None);
+                        let _: &std::io::Error = error.cause();
                         assert!(error.progress().is_none());
                     }
                     assert_eq!(compounds, if phase == "lost" { 2 } else { 1 });

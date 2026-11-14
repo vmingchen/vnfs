@@ -4,7 +4,7 @@ use super::*;
 pub(super) fn validate_c_read_results(
     reads: &[ReadOp],
     results: &[vfsi_sync::ReadResult],
-) -> Result<(), VfError> {
+) -> Result<(), std::io::Error> {
     if results.len() != reads.len() {
         return Err(invalid_backend_result_count(
             "vread_impl",
@@ -45,7 +45,7 @@ pub(super) fn validate_c_read_results(
 pub(super) fn validate_c_write_results(
     writes: &[WriteOp<&FileOperand, &[u8]>],
     results: &[vfsi_sync::WriteResult],
-) -> Result<(), VfError> {
+) -> Result<(), std::io::Error> {
     if results.len() != writes.len() {
         return Err(invalid_backend_result_count(
             "vwrite_impl",
@@ -78,11 +78,16 @@ pub(super) fn validate_c_write_results(
     Ok(())
 }
 
-fn pread_impl(fs: &vfsi_fs, fd: i32, buffer: &mut [u8], offset: u64) -> Result<usize, VfError> {
+fn pread_impl(
+    fs: &vfsi_fs,
+    fd: i32,
+    buffer: &mut [u8],
+    offset: u64,
+) -> Result<usize, std::io::Error> {
     let file = lock_or_io(&fs.files)?
         .get(&fd)
         .map(|file| file.file.clone())
-        .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
+        .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?;
     let request = ReadOp::at(file, offset, buffer.len());
     let result = lock_or_io(&fs.fs)?.read_into_impl(&request, buffer)?;
     Ok(result.bytes_read)
@@ -128,11 +133,11 @@ pub unsafe extern "C" fn vfsi_pread(
     })
 }
 
-fn pwrite_impl(fs: &vfsi_fs, fd: i32, data: &[u8], offset: u64) -> Result<usize, VfError> {
+fn pwrite_impl(fs: &vfsi_fs, fd: i32, data: &[u8], offset: u64) -> Result<usize, std::io::Error> {
     let file = lock_or_io(&fs.files)?
         .get(&fd)
         .cloned()
-        .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
+        .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?;
     let offset = if file.append {
         vfsi_sync::VfOffset::End
     } else {
@@ -241,7 +246,10 @@ pub unsafe extern "C" fn vfsi_preadv(
             let Some(file) = table.get(&op.fd).cloned() else {
                 fail_batch!(
                     item_results,
-                    vfsi_result::from_error(VfError::errno(index, ERR_EBADF)),
+                    vfsi_result::from_cause(
+                        &std::io::Error::from_raw_os_error((ERR_EBADF) as i32),
+                        Some(index)
+                    ),
                     false
                 );
             };
@@ -254,13 +262,13 @@ pub unsafe extern "C" fn vfsi_preadv(
                 fail_batch!(item_results, vfsi_result::from_error(error), false)
             }
         };
-        let results = match backend.vread_impl(&reads).and_then(|outcomes| {
-            let count = outcomes.len();
-            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
-        }) {
+        let results = match vfsi_sync::internal::collect_vec_result(
+            backend.vread_impl(&reads),
+            reads.len(),
+        ) {
             Ok(results) => results,
             Err(error) => {
-                fail_batch!(item_results, vfsi_result::from_error(error), true)
+                fail_batch!(item_results, vfsi_result::from_indexed(error), true)
             }
         };
         if let Err(error) = validate_c_read_results(&reads, &results) {
@@ -271,8 +279,8 @@ pub unsafe extern "C" fn vfsi_preadv(
                 if result.data.len() > op.len {
                     fail_batch!(
                         item_results,
-                        vfsi_result::from_error(VfError::transport(
-                            None,
+                        vfsi_result::from_error(vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
                             "read result exceeded its output buffer"
                         )),
                         true
@@ -354,7 +362,10 @@ pub unsafe extern "C" fn vfsi_pwritev(
             let Some(file) = table.get(&op.fd).cloned() else {
                 fail_batch!(
                     item_results,
-                    vfsi_result::from_error(VfError::errno(index, ERR_EBADF)),
+                    vfsi_result::from_cause(
+                        &std::io::Error::from_raw_os_error((ERR_EBADF) as i32),
+                        Some(index)
+                    ),
                     false
                 );
             };
@@ -392,13 +403,13 @@ pub unsafe extern "C" fn vfsi_pwritev(
                 fail_batch!(item_results, vfsi_result::from_error(error), false)
             }
         };
-        let results = match backend.vwrite_impl(&writes).and_then(|outcomes| {
-            let count = outcomes.len();
-            vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
-        }) {
+        let results = match vfsi_sync::internal::collect_vec_result(
+            backend.vwrite_impl(&writes),
+            writes.len(),
+        ) {
             Ok(results) => results,
             Err(error) => {
-                fail_batch!(item_results, vfsi_result::from_error(error), true)
+                fail_batch!(item_results, vfsi_result::from_indexed(error), true)
             }
         };
         if let Err(error) = validate_c_write_results(&writes, &results) {
@@ -466,7 +477,7 @@ pub unsafe extern "C" fn vfsi_read_streamv(
             };
             let vpath = match vpath_for(fs, &kernel_path) {
                 Ok(path) => path,
-                Err(error) => return vfsi_result::from_error(error.with_index(index)),
+                Err(error) => return vfsi_result::from_cause(&error, Some(index)),
             };
             cpaths.push(cpath);
             files.push(FileOperand::from_os_path(&vpath));
@@ -477,10 +488,9 @@ pub unsafe extern "C" fn vfsi_read_streamv(
             |_| chunk_size,
             memory_limit,
             |reads| {
-                lock_or_io(&fs.fs)?.vread_impl(reads).and_then(|outcomes| {
-                    let count = outcomes.len();
-                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
-                })
+                let mut backend =
+                    lock_or_io(&fs.fs).map_err(vfsi_core::IndexedError::unattributed)?;
+                vfsi_sync::internal::collect_vec_result(backend.vread_impl(reads), reads.len())
             },
             |index, result| {
                 completed += usize::from(result.eof);
@@ -501,7 +511,7 @@ pub unsafe extern "C" fn vfsi_read_streamv(
         );
         match result {
             Ok(()) => vfsi_result::success(completed),
-            Err(error) => vfsi_result::from_error(error),
+            Err(error) => vfsi_result::from_indexed(error),
         }
     })
 }
@@ -571,7 +581,7 @@ pub unsafe extern "C" fn vfsi_read_paths_with_limit(
             kernel_paths.push(path);
         }
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let vpaths: Result<Vec<PathBuf>, VfError> =
+            let vpaths: Result<Vec<PathBuf>, std::io::Error> =
                 kernel_paths.iter().map(|p| vpath_for(fs, p)).collect();
             let vpaths = vpaths?;
             let files: Vec<FileOperand> = vpaths
@@ -585,6 +595,7 @@ pub unsafe extern "C" fn vfsi_read_paths_with_limit(
                 )
                 .and_then(|outcomes| {
                     vfsi_sync::internal::collect_vec_result(Ok(outcomes), files.len())
+                        .map_err(vfsi_core::IndexedError::into_cause)
                 })?;
             let c_cb = cb;
             for (i, data) in datas.iter().enumerate() {
@@ -597,7 +608,7 @@ pub unsafe extern "C" fn vfsi_read_paths_with_limit(
                     break;
                 }
             }
-            Ok::<_, VfError>(())
+            Ok::<_, std::io::Error>(())
         }));
         match res {
             Ok(Ok(())) => 0,

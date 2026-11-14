@@ -117,7 +117,10 @@ fn positioned_outcomes_preserve_transport_failures_and_successful_siblings() {
         .open_raw_impl(Path::new("/file"), libc::O_RDONLY, 0)
         .unwrap();
     let fd = file.fd().unwrap() as i64;
-    backend.read_item_errors = vec![(1, VfError::transport(None, "lost middle read"))];
+    backend.read_item_errors = vec![(
+        1,
+        vfsi_core::internal::errors::transport(vfsi_core::TransportKind::Other, "lost middle read"),
+    )];
     let calls = backend.read_calls.clone();
     Python::attach(|py| {
         let results = client(backend)
@@ -153,7 +156,7 @@ fn positioned_write_outcomes_keep_progress_and_later_success_without_replay() {
     backend.write_item_errors = vec![(
         1,
         vfsi_core::OpError::unknown(
-            VfError::transport(None, "lost write"),
+            vfsi_core::internal::errors::transport(vfsi_core::TransportKind::Other, "lost write"),
             Some(vfsi_core::IoProgress::Write { bytes_written: 1 }),
         ),
     )];
@@ -198,16 +201,16 @@ fn operation_exceptions_preserve_each_failure_state_and_owned_read_prefix() {
         for (state, error) in [
             (
                 "not_attempted",
-                vfsi_core::OpError::not_attempted(VfError::errno(None, libc::EBADF as u32)),
+                vfsi_core::OpError::not_attempted(std::io::Error::from_raw_os_error(libc::EBADF)),
             ),
             (
                 "failed",
-                vfsi_core::OpError::failed(VfError::errno(None, libc::EIO as u32), None),
+                vfsi_core::OpError::failed(std::io::Error::from_raw_os_error(libc::EIO), None),
             ),
             (
                 "unknown",
                 vfsi_core::OpError::unknown(
-                    VfError::transport(None, "lost"),
+                    vfsi_core::internal::errors::transport(vfsi_core::TransportKind::Other, "lost"),
                     Some(vfsi_core::IoProgress::Read(
                         vfsi_core::api::ReadResult::owned(9, b"prefix".to_vec(), false),
                     )),
@@ -266,7 +269,9 @@ fn unsupported_outcomes_preserve_the_existing_python_exception_class() {
         let error = operation_exception(
             py,
             0,
-            vfsi_core::OpError::not_attempted(VfError::unsupported(None)),
+            vfsi_core::OpError::not_attempted(std::io::Error::from(
+                std::io::ErrorKind::Unsupported,
+            )),
         )
         .unwrap();
         assert!(error.bind(py).is_instance_of::<PyNotImplementedError>());
@@ -326,7 +331,7 @@ fn whole_file_validation_charges_only_valid_returned_prefixes() {
         backend.read_all_item_errors = vec![(
             0,
             OpError::failed(
-                VfError::errno(None, libc::EIO as u32),
+                std::io::Error::from_raw_os_error(libc::EIO),
                 Some(IoProgress::Read(prefix)),
             ),
         )];
@@ -336,7 +341,7 @@ fn whole_file_validation_charges_only_valid_returned_prefixes() {
         let error = outcomes.next().unwrap().unwrap_err();
         assert_eq!(error.state(), FailureState::Unknown);
         assert_eq!(
-            error.cause().transport_kind(),
+            vfsi_core::transport_kind(error.cause()),
             Some(TransportKind::InvalidReply)
         );
         assert!(error.progress().is_none());
@@ -347,7 +352,7 @@ fn whole_file_validation_charges_only_valid_returned_prefixes() {
     backend.read_all_item_errors = vec![(
         0,
         OpError::failed(
-            VfError::errno(None, libc::EIO as u32),
+            std::io::Error::from_raw_os_error(libc::EIO),
             Some(IoProgress::Read(vfsi_core::api::ReadResult::owned(
                 0,
                 b"xx".to_vec(),
@@ -357,12 +362,12 @@ fn whole_file_validation_charges_only_valid_returned_prefixes() {
     )];
     let outcomes = read_all_outcomes_impl(&mut backend, &paths, 2).unwrap();
     assert_eq!(
-        outcomes[0].as_ref().unwrap_err().cause().raw_code(),
+        vfsi_core::internal::errors::to_errno(outcomes[0].as_ref().unwrap_err().cause()) as u32,
         libc::EIO as u32
     );
     assert!(outcomes[0].as_ref().unwrap_err().progress().is_some());
     assert_eq!(
-        outcomes[1].as_ref().unwrap_err().cause().transport_kind(),
+        vfsi_core::transport_kind(outcomes[1].as_ref().unwrap_err().cause()),
         Some(TransportKind::InvalidReply)
     );
 }

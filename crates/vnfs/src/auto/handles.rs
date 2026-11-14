@@ -92,9 +92,11 @@ impl AutoFile {
         if let Route::Nfs(connection) = &self.route
             && AuthSysIdentity::current().as_ref() != Some(&connection.credentials)
         {
-            return Err(
-                VfError::errno(0, libc::EACCES as u32).with_context("auto_auth", &self.path)
-            );
+            return Err(vfsi_core::internal::errors::with_context(
+                std::io::Error::from_raw_os_error(libc::EACCES),
+                "auto_auth",
+                &self.path,
+            ));
         }
         Ok(())
     }

@@ -1,6 +1,6 @@
 //! Independent public OPEN owners, merged path execution, and finalization.
 use super::*;
-use vfsi_core::{OpError, OpResult, VecResult, VfError, error_from_rpc};
+use vfsi_core::{OpError, OpResult, VecResult};
 
 impl NfsClient {
     /// Open independent inputs in merged compounds. Each successful result
@@ -11,9 +11,9 @@ impl NfsClient {
             return Ok(Vec::new());
         }
         self.ensure_usable()
-            .map_err(|error| error_from_rpc(error, None))?;
+            .map_err(vfsi_core::internal::errors::from_rpc)?;
         self.drain_deferred_path_closes()
-            .map_err(|error| error_from_rpc(error, None))?;
+            .map_err(vfsi_core::internal::errors::from_rpc)?;
         let owners: Vec<_> = (0..ops.len())
             .map(|_| self.next_public_open_owner_name())
             .collect();
@@ -21,10 +21,11 @@ impl NfsClient {
             (0..ops.len()).map(|_| None).collect();
         for (index, op) in ops.iter().enumerate() {
             if split_path_bytes(&op.path).is_err() {
-                slots[index] = Some(Err(OpError::not_attempted(VfError::nfs(
-                    None,
-                    nfsstat4_NFS4ERR_INVAL,
-                ))));
+                slots[index] = Some(Err(OpError::not_attempted(
+                    vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                        nfsstat4_NFS4ERR_INVAL,
+                    )),
+                )));
             }
         }
         let per_file = 6;
@@ -45,7 +46,7 @@ impl NfsClient {
                 return Ok(completion::finish_slots(
                     slots,
                     &[],
-                    error_from_rpc(error, None),
+                    vfsi_core::internal::errors::from_rpc(error),
                 ));
             }
             let chunk_start = global;
@@ -129,7 +130,7 @@ impl NfsClient {
                 }
                 Ok(false) => {}
                 Err(error) => {
-                    let cause = error_from_rpc(error, None);
+                    let cause = vfsi_core::internal::errors::from_rpc(error);
                     if !dispatched {
                         return Err(cause);
                     }
@@ -155,7 +156,7 @@ impl NfsClient {
                     return Ok(completion::finish_slots(
                         slots,
                         &map.ranges,
-                        error_from_rpc(error, None),
+                        vfsi_core::internal::errors::from_rpc(error),
                     ));
                 }
             };
@@ -202,7 +203,9 @@ impl NfsClient {
                     return Ok(completion::finish_slots(
                         slots,
                         &map.ranges,
-                        VfError::invalid_reply(None, format!("malformed OPEN reply: {error}")),
+                        vfsi_core::internal::errors::invalid_reply(format!(
+                            "malformed OPEN reply: {error}"
+                        )),
                     ));
                 }
             };
@@ -210,7 +213,7 @@ impl NfsClient {
                 return Ok(completion::finish_slots(
                     slots,
                     &[],
-                    VfError::nfs(None, status),
+                    vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(status)),
                 ));
             }
             let mut verifier_attrs = Vec::new();
@@ -233,7 +236,9 @@ impl NfsClient {
             self.finalize_path_opens(ops, &mut slots, &verifier_attrs);
             if let Some(failure) = report.failure {
                 slots[failure.caller] = Some(Err(OpError::failed(
-                    VfError::nfs(None, failure.status),
+                    vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                        failure.status,
+                    )),
                     None,
                 )));
                 // RFC COMPOUND stops at that actual protocol operation.
@@ -325,9 +330,8 @@ impl NfsClient {
             |_, _, _| Ok(()),
         );
         let outcomes = outcomes.unwrap_or_else(|cause| {
-            updates
-                .iter()
-                .map(|_| Err(OpError::not_attempted(cause.clone())))
+            vfsi_core::internal::errors::fanout(cause, updates.len())
+                .map(|cause| Err(OpError::not_attempted(cause)))
                 .collect()
         });
         for (index, outcome) in indices.into_iter().zip(outcomes) {

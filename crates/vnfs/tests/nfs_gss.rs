@@ -54,6 +54,7 @@ fn supported_rpcsec_gss_protection_levels_access_the_export() {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap_or_else(|error| panic!("write using {name}: {error}"));
         let result = fs
@@ -61,6 +62,7 @@ fn supported_rpcsec_gss_protection_levels_access_the_export() {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap_or_else(|error| panic!("read using {name}: {error}"));
         assert_eq!(result[0].data, payload, "payload using {name}");
@@ -94,7 +96,7 @@ fn gss_only_export_rejects_auth_sys() {
     .err()
     .expect("a GSS-only export must reject AUTH_SYS");
     assert!(
-        !error.is_transport(),
+        !vfsi_core::transport_kind(&(error)).is_some(),
         "server should reject AUTH_SYS: {error}"
     );
 }
@@ -123,6 +125,7 @@ fn renewable_ticket_allows_reconnect_after_ticket_expiry() {
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .expect("initial authenticated write");
 
@@ -154,6 +157,7 @@ fn renewable_ticket_allows_reconnect_after_ticket_expiry() {
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .expect("read after GSS reconnect");
     assert_eq!(read[0].data, payload);

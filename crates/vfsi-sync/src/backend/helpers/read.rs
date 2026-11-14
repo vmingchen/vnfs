@@ -1,5 +1,5 @@
 use super::*;
-use vfsi_core::{FailureState, IoProgress, OpError, OpResult, VecResult};
+use vfsi_core::{FailureState, IndexedError, IoProgress, OpError, OpResult, VecResult};
 
 pub fn vread_all_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
@@ -91,7 +91,9 @@ pub fn read_all_vectors<F: VectorBackend + ?Sized>(
             Ok(mut outcomes) if outcomes.len() <= reads.len() => {
                 outcomes.resize_with(reads.len(), || {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "missing whole-file read outcome"),
+                        vfsi_core::internal::errors::invalid_reply(
+                            "missing whole-file read outcome",
+                        ),
                         None,
                     ))
                 });
@@ -101,14 +103,15 @@ pub fn read_all_vectors<F: VectorBackend + ?Sized>(
                 .iter()
                 .map(|_| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "too many whole-file read outcomes"),
+                        vfsi_core::internal::errors::invalid_reply(
+                            "too many whole-file read outcomes",
+                        ),
                         None,
                     ))
                 })
                 .collect(),
-            Err(cause) => reads
-                .iter()
-                .map(|_| Err(OpError::not_attempted(cause.clone())))
+            Err(cause) => vfsi_core::internal::errors::fanout(cause, reads.len())
+                .map(|cause| Err(OpError::not_attempted(cause)))
                 .collect(),
         };
         for ((&index, request), outcome) in indices.iter().zip(&reads).zip(outcomes) {
@@ -118,7 +121,7 @@ pub fn read_all_vectors<F: VectorBackend + ?Sized>(
                     std::slice::from_ref(request),
                     std::slice::from_ref(&read),
                 )
-                .map_err(|cause| OpError::unknown(cause, None))?;
+                .map_err(|error| OpError::unknown(error.into_cause(), None))?;
                 Ok(read)
             });
             let (mut chunk, eof, failure) = match outcome {
@@ -144,7 +147,9 @@ pub fn read_all_vectors<F: VectorBackend + ?Sized>(
                             Vec::new(),
                             false,
                             Some((
-                                VfError::invalid_reply(None, "invalid whole-file read prefix"),
+                                vfsi_core::internal::errors::invalid_reply(
+                                    "invalid whole-file read prefix",
+                                ),
                                 FailureState::Unknown,
                             )),
                         ),
@@ -171,7 +176,7 @@ pub fn read_all_vectors<F: VectorBackend + ?Sized>(
             let failure = failure.or_else(|| {
                 exceeded.then(|| {
                     (
-                        VfError::errno(None, libc::EFBIG as u32),
+                        std::io::Error::from_raw_os_error(libc::EFBIG),
                         FailureState::Failed,
                     )
                 })
@@ -210,17 +215,12 @@ pub fn vstream_impl_default<F: VectorBackend + ?Sized>(
     chunk_size: impl Fn(usize) -> usize,
     memory_limit: usize,
     cb: &mut ReadStreamCallback<'_>,
-) -> VfRes {
+) -> Result<(), IndexedError> {
     stream_read_chunks(
         files,
         chunk_size,
         memory_limit,
-        |reads| {
-            backend.vread_impl(reads).and_then(|outcomes| {
-                let count = outcomes.len();
-                crate::internal::collect_vec_result(Ok(outcomes), count)
-            })
-        },
+        |reads| crate::internal::collect_vec_result(backend.vread_impl(reads), reads.len()),
         |index, result| cb(index, result.offset, &result.data, result.eof),
     )
 }
@@ -233,13 +233,15 @@ pub fn stream_read_chunks(
     files: &[FileOperand],
     chunk_size: impl Fn(usize) -> usize,
     memory_limit: usize,
-    mut read: impl FnMut(&[ReadOp]) -> VfResult<Vec<ReadResult>>,
+    mut read: impl FnMut(&[ReadOp]) -> Result<Vec<ReadResult>, IndexedError>,
     mut cb: impl FnMut(usize, ReadResult) -> bool,
-) -> VfRes {
+) -> Result<(), IndexedError> {
     use std::collections::VecDeque;
 
     if memory_limit == 0 || chunk_size(files.len()) == 0 {
-        return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+        return Err(IndexedError::unattributed(std::io::Error::from(
+            std::io::ErrorKind::InvalidInput,
+        )));
     }
     let mut pending: VecDeque<usize> = (0..files.len()).collect();
     let mut offsets = vec![0u64; files.len()];
@@ -250,7 +252,9 @@ pub fn stream_read_chunks(
         // A constant policy preserves the ordinary backend's fixed chunk size.
         let chunk_size = chunk_size(pending.len());
         if chunk_size == 0 {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+            return Err(IndexedError::unattributed(std::io::Error::from(
+                std::io::ErrorKind::InvalidInput,
+            )));
         }
         let mut budget = memory_limit;
         batch_indices.clear();
@@ -262,24 +266,26 @@ pub fn stream_read_chunks(
             batch_indices.push(index);
             budget -= length;
         }
-        let remap_error = |error: VfError| match error.index() {
+        let remap = |error: IndexedError| match error.index() {
             Some(index) => match batch_indices.get(index) {
-                Some(&input) => error.with_index(input),
-                None => {
-                    VfError::invalid_reply(None, "vstream backend returned an invalid error index")
-                }
+                Some(&owner) => error.map_index(|_| owner),
+                None => IndexedError::unattributed(vfsi_core::internal::errors::invalid_reply(
+                    "stream error index is outside the submitted wave",
+                )),
             },
             None => error,
         };
-        let results = read(&reads).map_err(remap_error)?;
-        validate_read_results("vstream_impl", &reads, &results).map_err(remap_error)?;
+        let results = read(&reads).map_err(remap)?;
+        validate_read_results("vstream_impl", &reads, &results).map_err(remap)?;
         for (batch_index, result) in results.into_iter().enumerate() {
             let index = batch_indices[batch_index];
             let offset = offsets[index];
             let eof = result.eof;
             offsets[index] = offset
                 .checked_add(result.data.len() as u64)
-                .ok_or_else(|| VfError::errno(index, libc::EOVERFLOW as u32))?;
+                .ok_or_else(|| {
+                    IndexedError::at(index, std::io::Error::from_raw_os_error(libc::EOVERFLOW))
+                })?;
             if !cb(index, result) {
                 return Ok(());
             }
@@ -304,17 +310,17 @@ pub fn native_read_file_impl_default<F: VectorBackend + ?Sized>(
         .and_then(|outcomes| {
             let count = outcomes.len();
             crate::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .and_then(|mut results| {
             if results.len() != 1 {
-                return Err(VfError::invalid_reply(
-                    None,
+                return Err(vfsi_core::internal::errors::invalid_reply(
                     "read_file backend returned an invalid result count",
                 ));
             }
             let data = results.pop().expect("validated result count");
             if data.len() > max_bytes {
-                return Err(VfError::errno(0, libc::EFBIG as u32));
+                return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
             }
             Ok(data)
         })
@@ -335,7 +341,10 @@ mod stream_error_tests {
             |_| {
                 calls += 1;
                 // Input 1 exists globally but was absent from this one-input wave.
-                Err(VfError::errno(1, libc::EACCES as u32))
+                Err(IndexedError::at(
+                    1,
+                    std::io::Error::from_raw_os_error(libc::EACCES),
+                ))
             },
             |_, _| panic!("failed wave must not deliver data"),
         )
@@ -343,7 +352,7 @@ mod stream_error_tests {
         assert_eq!(calls, 1, "contract errors must not trigger replay");
         assert_eq!(error.index(), None);
         assert_eq!(
-            error.transport_kind(),
+            vfsi_core::transport_kind(error.cause()),
             Some(vfsi_core::TransportKind::InvalidReply)
         );
     }
@@ -361,7 +370,15 @@ mod stream_error_tests {
                 |reads| {
                     calls += 1;
                     if calls == 3 {
-                        return Err(VfError::errno(index, libc::EACCES as u32));
+                        return Err(match index {
+                            Some(index) => IndexedError::at(
+                                index,
+                                std::io::Error::from_raw_os_error(libc::EACCES),
+                            ),
+                            None => IndexedError::unattributed(std::io::Error::from_raw_os_error(
+                                libc::EACCES,
+                            )),
+                        });
                     }
                     Ok(vec![ReadResult {
                         file: reads[0].file.clone(),
@@ -379,7 +396,66 @@ mod stream_error_tests {
             assert_eq!(calls, 3);
             assert_eq!(delivered, [0, 1]);
             assert_eq!(error.index(), index.map(|_| 2));
-            assert_eq!(error.raw_code(), libc::EACCES as u32);
+            assert_eq!(error.cause().raw_os_error(), Some(libc::EACCES));
+        }
+    }
+    #[test]
+    fn malformed_later_wave_results_keep_item_indices_but_not_cardinality_indices() {
+        for malformed in 0..5 {
+            let files: Vec<_> = (0..6).map(FileOperand::from_fd).collect();
+            let mut calls = 0;
+            let mut delivered = Vec::new();
+            let error = stream_read_chunks(
+                &files,
+                |_| 1,
+                2,
+                |requests| {
+                    calls += 1;
+                    let mut results: Vec<_> = requests
+                        .iter()
+                        .map(|request| ReadResult {
+                            file: request.file.clone(),
+                            offset: 0,
+                            data: vec![1],
+                            eof: true,
+                        })
+                        .collect();
+                    if calls == 2 {
+                        match malformed {
+                            0 => results[1].offset = 1,
+                            1 => results[1].file = FileOperand::from_fd(99),
+                            2 => results[1].data.push(2),
+                            3 => {
+                                results[1].data.clear();
+                                results[1].eof = false;
+                            }
+                            _ => {
+                                results.pop();
+                            }
+                        }
+                    }
+                    Ok(results)
+                },
+                |input, _| {
+                    delivered.push(input);
+                    true
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.index(), (malformed < 4).then_some(3));
+            assert_eq!(
+                vfsi_core::transport_kind(error.cause()),
+                Some(vfsi_core::TransportKind::InvalidReply)
+            );
+            assert_eq!(
+                calls, 2,
+                "never replay validation failures or dispatch another wave"
+            );
+            assert_eq!(
+                delivered,
+                [0, 1],
+                "validate the complete wave before callbacks"
+            );
         }
     }
 }

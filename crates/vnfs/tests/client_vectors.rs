@@ -90,9 +90,15 @@ fn strict_complete_writes_preserve_healthy_effects_around_rejected_inputs() {
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(fs.read_files(&["/a"]).unwrap(), [b"bad!".to_vec()]);
-    assert_eq!(error.operation(), Some("vwrite_native"));
-    assert_eq!(error.path(), Some(std::path::Path::new("/a")));
-    assert_eq!(error.raw_code(), libc::EOVERFLOW as u32);
+    assert_eq!(
+        vfsi_core::internal::errors::operation(error.cause()),
+        Some("vwrite_native")
+    );
+    assert_eq!(
+        vfsi_core::internal::errors::path(error.cause()),
+        Some(std::path::Path::new("/a"))
+    );
+    assert_eq!(test_native_code(error.cause()), libc::EOVERFLOW as u32);
     let mut closed = fs.create("/closed").unwrap();
     closed.try_close().unwrap();
     assert_eq!(
@@ -252,11 +258,17 @@ fn stable_targets<C: Vfsi>(fs: &C, other: &C) {
         Target::File(&file),
     )];
     let error = fs.getattrs_all(&targets, AttrsOptions::new()).unwrap_err();
-    assert_eq!(error.path(), Some(missing));
+    assert_eq!(
+        vfsi_core::internal::errors::path(error.cause()),
+        Some(missing)
+    );
     assert_eq!(targets[0].calls.get(), 1);
     targets[0].calls.set(0);
     let error = fs.statfs_all(&targets).unwrap_err();
-    assert_eq!(error.path(), Some(missing));
+    assert_eq!(
+        vfsi_core::internal::errors::path(error.cause()),
+        Some(missing)
+    );
     assert_eq!(targets[0].calls.get(), 1);
     let updates = [SetAttrsOp::new(ChangingTarget::new(
         Target::Path(missing),
@@ -264,7 +276,10 @@ fn stable_targets<C: Vfsi>(fs: &C, other: &C) {
     ))
     .len(0)];
     let error = fs.setattrs_all(&updates).unwrap_err();
-    assert_eq!(error.path(), Some(missing));
+    assert_eq!(
+        vfsi_core::internal::errors::path(error.cause()),
+        Some(missing)
+    );
     assert_eq!(updates[0].target().calls.get(), 1);
     assert_eq!(fs.attrs("/original").unwrap().len(), Some(2));
     file.close().unwrap();
@@ -297,7 +312,7 @@ fn path_contents_removal_works_without_retained_directory_handles() {
         fs.write("/dir/keep", b"keep").unwrap();
         assert!(fs.open_dirs::<&str>(&[]).unwrap().is_empty());
         assert_eq!(
-            fs.open_dirs(&["/dir"]).err().unwrap().kind(),
+            fs.open_dirs(&["/dir"]).err().unwrap().cause().kind(),
             vnfs::error::ErrorKind::Unsupported
         );
         fs.remove_contents_all(&[], Default::default()).unwrap();
@@ -431,5 +446,16 @@ fn close_outcomes_on_posix_and_mounted_routing() {
                 "/closes",
             );
         }
+    }
+}
+
+fn test_native_code(error: &std::io::Error) -> u32 {
+    match vfsi_core::native_status(error) {
+        Some(
+            vfsi_core::StatusCode::Errno(code)
+            | vfsi_core::StatusCode::Nfs(code)
+            | vfsi_core::StatusCode::Smb(code),
+        ) => code,
+        _ => panic!("expected a native error, got {error:?}"),
     }
 }

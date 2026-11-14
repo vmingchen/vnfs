@@ -58,7 +58,7 @@ impl Vfsi for PortableFs {
         if targets.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(vfsi_core::VfError::unsupported(0))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
     fn vfsync(&self, files: &[&Self::File], _: SyncMode) -> vfsi_core::VecResult<()> {
@@ -110,7 +110,10 @@ impl Vfsi for PortableFs {
     ) -> vfsi_core::VecResult<ReadResult> {
         self.reads.set(self.reads.get() + 1);
         if self.shape.get() == 6 {
-            return Err(Error::transport(None, "rejected before dispatch"));
+            return Err(vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "rejected before dispatch",
+            ));
         }
         let mut results: Vec<_> = ops
             .into_iter()
@@ -166,7 +169,7 @@ impl Vfsi for PortableFs {
         if pairs.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(vfsi_core::VfError::unsupported(None))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
     fn vremove<P: AsRef<Path>>(
@@ -181,7 +184,10 @@ impl Vfsi for PortableFs {
             options,
         ));
         if self.shape.get() == 6 {
-            Err(Error::transport(None, "lost removal reply"))
+            Err(vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "lost removal reply",
+            ))
         } else {
             Ok(paths.iter().map(|_| Ok(())).collect())
         }
@@ -200,7 +206,7 @@ impl Vfsi for PortableFs {
             .map(|(index, _)| {
                 if index == 1 {
                     Err(vfsi_core::OpError::failed(
-                        Error::errno(99, libc::ENOENT as u32),
+                        std::io::Error::from_raw_os_error(libc::ENOENT),
                         None,
                     ))
                 } else {
@@ -232,7 +238,7 @@ impl Vfsi for PortableFs {
         }
         let mut results = Vec::new();
         if self.tree.get() && self.shape.get() == 11 {
-            return Err(Error::errno(99, libc::EIO as u32));
+            return Err(std::io::Error::from_raw_os_error(libc::EIO));
         }
         for (index, path) in paths.iter().enumerate() {
             let outcome = (|| -> vfsi_core::OpResult<TraversalCompletion> {
@@ -298,7 +304,7 @@ impl Vfsi for PortableFs {
         }
         if self.shape.get() == 12 && !results.is_empty() {
             results[0] = Err(vfsi_core::OpError::failed(
-                Error::errno(None, libc::EIO as u32),
+                std::io::Error::from_raw_os_error(libc::EIO),
                 Some(vfsi_core::IoProgress::Write { bytes_written: 1 }),
             ));
         }
@@ -376,8 +382,8 @@ fn path_contents_helpers_dispatch_once_without_handles_or_listing() {
     let error = fs
         .remove_dir_contents_with_options(path, options)
         .unwrap_err();
-    assert!(error.is_transport());
-    assert_eq!(error.index(), None);
+    assert!(vfsi_core::transport_kind(&(error)).is_some());
+    let _: &std::io::Error = &error;
     assert_eq!(
         fs.removals.borrow().len(),
         3,
@@ -414,18 +420,33 @@ fn listdir_preserves_callback_error_provenance_in_every_presentation_mode() {
     for sort in [false, true] {
         for lifecycle in [false, true] {
             for expected in [
-                Error::errno(3, libc::ENOSPC as u32),
-                Error::nfs(3, 13),
-                Error::smb(3, 0xc000_0022),
-                Error::transport_with_kind(
-                    Some(3),
+                std::io::Error::from_raw_os_error(libc::ENOSPC),
+                vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(13)),
+                vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Smb(0xc000_0022)),
+                vfsi_core::internal::errors::transport(
                     vfsi_core::TransportKind::Connection,
                     "nested operation lost its reply",
                 ),
-                Error::transport(None, "unattributed nested failure"),
+                vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "unattributed nested failure",
+                ),
             ] {
                 let fs = tree_fs();
-                let expected = expected.with_context("nested operation", "/nested/file");
+                let expected = vfsi_core::internal::errors::with_context(
+                    expected,
+                    "nested operation",
+                    "/nested/file",
+                );
+                let facts = (
+                    expected.kind(),
+                    vfsi_core::native_status(&expected),
+                    vfsi_core::transport_kind(&expected),
+                    expected.to_string(),
+                );
+                let source =
+                    expected.get_ref().unwrap() as *const (dyn std::error::Error + Send + Sync);
+                let mut expected = Some(expected);
                 let mut calls = 0;
                 let actual = fs
                     .listdir(
@@ -435,11 +456,29 @@ fn listdir_preserves_callback_error_provenance_in_every_presentation_mode() {
                             .with_enter_leave(lifecycle),
                         |_| {
                             calls += 1;
-                            Err(expected.clone())
+                            Err(expected.take().expect("callback error must not replay"))
                         },
                     )
                     .unwrap_err();
-                assert_eq!(actual, expected, "sort={sort}, lifecycle={lifecycle}");
+                assert_eq!(
+                    (
+                        actual.kind(),
+                        vfsi_core::native_status(&actual),
+                        vfsi_core::transport_kind(&actual),
+                        actual.to_string()
+                    ),
+                    facts,
+                    "sort={sort}, lifecycle={lifecycle}"
+                );
+                assert_eq!(
+                    vfsi_core::internal::errors::operation(&actual),
+                    Some("nested operation")
+                );
+                assert_eq!(
+                    vfsi_core::internal::errors::path(&actual),
+                    Some(Path::new("/nested/file"))
+                );
+                assert!(std::ptr::eq(actual.get_ref().unwrap(), source));
                 assert_eq!(calls, 1, "stop immediately after the callback failure");
             }
         }
@@ -447,7 +486,7 @@ fn listdir_preserves_callback_error_provenance_in_every_presentation_mode() {
 }
 
 #[test]
-fn listdir_rejects_malformed_page_indices_parents_and_completions_without_replay() {
+fn listdir_rejects_malformed_pages_and_preserves_unindexed_rejections_without_replay() {
     for shape in 7..=11 {
         let fs = tree_fs();
         fs.shape.set(shape);
@@ -458,7 +497,16 @@ fn listdir_rejects_malformed_page_indices_parents_and_completions_without_replay
                 Ok(WalkControl::Continue)
             })
             .unwrap_err();
-        assert!(error.is_transport(), "shape {shape}: {error}");
+        if shape == 11 {
+            assert_eq!(error.raw_os_error(), Some(libc::EIO));
+            assert_eq!(vfsi_core::transport_kind(&error), None);
+        } else {
+            assert_eq!(
+                vfsi_core::transport_kind(&error),
+                Some(vfsi_core::TransportKind::InvalidReply),
+                "shape {shape}: {error}"
+            );
+        }
         assert_eq!(fs.listings.get(), 1, "never replay a malformed reply");
         if shape >= 9 {
             assert_eq!(calls, 0);
@@ -655,7 +703,10 @@ fn extensions_reject_malformed_results_and_do_not_replay_transport_failures() {
         fs.shape.set(shape);
         let before = fs.reads.get();
         let error = fs.read_files(&["/a", "/b"]).unwrap_err();
-        assert!(error.is_transport(), "{error}");
+        assert!(
+            vfsi_core::transport_kind(error.cause()).is_some(),
+            "{error}"
+        );
         assert_eq!(fs.reads.get(), before + 1);
         if shape == 6 {
             assert_eq!(error.index(), None);
@@ -810,15 +861,17 @@ fn default_portable_paging_collects_complete_roots_without_backend_types() {
     );
     let fs = tree_fs();
     assert_eq!(
-        fs.dir_pages_all(
-            &["/tree"],
-            vec![None],
-            ListDirOptions::new().with_max_entries(1),
-            std::num::NonZeroUsize::new(1).unwrap()
-        )
-        .unwrap_err()
-        .raw_code(),
-        libc::EFBIG as u32
+        vfsi_core::native_status(
+            fs.dir_pages_all(
+                &["/tree"],
+                vec![None],
+                ListDirOptions::new().with_max_entries(1),
+                std::num::NonZeroUsize::new(1).unwrap()
+            )
+            .unwrap_err()
+            .cause()
+        ),
+        Some(vfsi_core::StatusCode::Errno(libc::EFBIG as u32))
     );
     assert_eq!(
         fs.page_calls.get(),
@@ -837,7 +890,7 @@ fn read_batch_checks_unconsumed_inputs_without_replaying_the_vector() {
             Default::default(),
         )
         .unwrap_err();
-    assert!(error.is_transport());
+    assert!(vfsi_core::transport_kind(error.cause()).is_some());
     assert_eq!(fs.reads.get(), 1);
 }
 
@@ -856,7 +909,7 @@ fn fallback_pages_quarantine_byte_progress_without_losing_healthy_roots() {
         .into_iter();
     let error = outcomes.next().unwrap().unwrap_err();
     assert_eq!(error.state(), vfsi_core::FailureState::Unknown);
-    assert_eq!(error.cause().index(), None);
+    let _: &std::io::Error = error.cause();
     assert!(error.progress().is_none());
     assert!(outcomes.next().unwrap().is_ok());
     assert_eq!(fs.listings.get(), 1, "one vector, without replay");
@@ -879,7 +932,7 @@ fn fallback_pages_keep_known_roots_when_completion_slots_are_missing() {
     assert_eq!(page.listing.entries.len(), 6);
     let error = outcomes.next().unwrap().unwrap_err();
     assert_eq!(error.state(), vfsi_core::FailureState::Unknown);
-    assert_eq!(error.cause().index(), None);
+    let _: &std::io::Error = error.cause();
     assert_eq!(fs.listings.get(), 1, "missing completion is not replayed");
 }
 
@@ -900,7 +953,7 @@ fn strict_stream_collection_dispatches_once_and_does_not_invent_a_prefix() {
         )
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
     assert_eq!(
         seen,
         [0, 2],
@@ -917,12 +970,36 @@ fn strict_stream_collection_dispatches_once_and_does_not_invent_a_prefix() {
 fn scalar_stream_preserves_nested_callback_error_after_rich_normalization() {
     let fs = PortableFs::default();
     fs.shape.set(13);
-    let expected =
-        Error::transport(7, "nested callback operation").with_context("nested", "/nested");
+    let expected = vfsi_core::internal::errors::with_context(
+        vfsi_core::internal::errors::transport(
+            vfsi_core::TransportKind::Other,
+            "nested callback operation",
+        ),
+        "nested",
+        "/nested",
+    );
+    let message = expected.to_string();
+    let source = expected.get_ref().unwrap() as *const (dyn std::error::Error + Send + Sync);
+    let mut expected = Some(expected);
     let actual = fs
-        .read_stream_with_options("/a", StreamOptions::new(), |_, _| Err(expected.clone()))
+        .read_stream_with_options("/a", StreamOptions::new(), |_, _| {
+            Err(expected.take().expect("callback error must not replay"))
+        })
         .unwrap_err();
-    assert_eq!(actual, expected);
+    assert_eq!(actual.to_string(), message);
+    assert_eq!(
+        vfsi_core::transport_kind(&actual),
+        Some(vfsi_core::TransportKind::Other)
+    );
+    assert_eq!(
+        vfsi_core::internal::errors::operation(&actual),
+        Some("nested")
+    );
+    assert_eq!(
+        vfsi_core::internal::errors::path(&actual),
+        Some(Path::new("/nested"))
+    );
+    assert!(std::ptr::eq(actual.get_ref().unwrap(), source));
     assert_eq!(fs.streams.get(), 1);
 }
 
@@ -944,7 +1021,7 @@ fn scalar_stream_rejects_foreign_callback_indices_before_delivery() {
         } else {
             let error = result.unwrap_err();
             assert_eq!(
-                error.transport_kind(),
+                vfsi_core::transport_kind(&(error)),
                 Some(vfsi_core::TransportKind::InvalidReply)
             );
             assert!(

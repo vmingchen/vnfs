@@ -240,12 +240,12 @@ fn old_open(fs: &impl Vfsi) { let _ = fs.open_one("/file"); }
 Conventional scalar names are extensions requiring only an `Vfsi` bound:
 
 ```no_run
-use vnfs::files::{Vfsi, VfsiExt};
+use vnfs::files::{FileHandle, Vfsi, VfsiExt};
 fn scalar_workflow(fs: &impl Vfsi) -> vnfs::Result<()> {
     fs.write("/file", b"data")?;
-    let file = fs.open("/file")?;
+    let mut file = fs.open("/file")?;
     let _ = fs.read_dir("/")?;
-    fs.close_files(vec![file])
+    file.try_close()
 }
 ```
 
@@ -258,7 +258,7 @@ fn missing_extension(fs: &impl Vfsi) {
 
 ```no_run
 use vnfs::files::{Vfsi, VfsiExt};
-fn convenience(fs: &impl Vfsi) -> vnfs::Result<Vec<Vec<u8>>> {
+fn convenience(fs: &impl Vfsi) -> Result<Vec<Vec<u8>>, vnfs::error::IndexedError> {
     fs.read_files(&["/file-1", "/file-2"])
 }
 ```

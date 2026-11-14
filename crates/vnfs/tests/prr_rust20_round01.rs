@@ -322,7 +322,7 @@ fn contents_cohorts_share_traversal_budget() {
     )
     .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.raw_code(), libc::EFBIG as u32);
+    assert_eq!(test_native_code(error.cause()), libc::EFBIG as u32);
     assert_eq!(
         std::fs::read(root.path().join("out/same")).unwrap(),
         b"first"
@@ -378,4 +378,15 @@ fn contents_collision_splits_only_the_necessary_file_cohort() {
     );
     assert_eq!(fs.calls.borrow().copies, [2, 1]);
     assert_eq!(fs.calls.borrow().opens, [2, 1]);
+}
+
+fn test_native_code(error: &std::io::Error) -> u32 {
+    match vfsi_core::native_status(error) {
+        Some(
+            vfsi_core::StatusCode::Errno(code)
+            | vfsi_core::StatusCode::Nfs(code)
+            | vfsi_core::StatusCode::Smb(code),
+        ) => code,
+        _ => panic!("expected a native error, got {error:?}"),
+    }
 }

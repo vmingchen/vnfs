@@ -41,15 +41,21 @@ impl NfsVecFs {
         let close_result = self
             .nfs
             .close_many(&closes)
-            .map_err(vfsi_core::error_from_rpc_indexed);
+            .map_err(vfsi_core::internal::errors::from_rpc);
         let shutdown_result = self
             .nfs
             .shutdown()
-            .map_err(|error| vfsi_core::error_from_rpc(error, None));
-        let result = close_result.and(shutdown_result);
+            .map_err(vfsi_core::internal::errors::from_rpc);
+        let mut result = close_result.and(shutdown_result);
         if let Some(observer) = observer {
             observer.on_event(&NfsEvent::Shutdown {
-                result: result.clone(),
+                result: match &mut result {
+                    Ok(()) => Ok(()),
+                    Err(error) => {
+                        let source = vfsi_core::internal::errors::share_in_place(error);
+                        Err(vfsi_core::internal::errors::from_shared(&source))
+                    }
+                },
             });
         }
         result
@@ -130,7 +136,7 @@ impl NfsVecFs {
         if !filesystem.connection.root.as_os_str().is_empty() {
             let root_attrs = filesystem.stat_impl(Path::new("/"))?;
             if root_attrs.ftype != VfType::Directory {
-                return Err(VfError::errno(0, ERR_NOTDIR));
+                return Err(std::io::Error::from_raw_os_error((ERR_NOTDIR) as i32));
             }
         }
         Ok(filesystem)
@@ -163,7 +169,7 @@ impl NfsVecFs {
                 Some(connection.client_verifier),
             ),
         }
-        .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
+        .map_err(vfsi_core::internal::errors::from_rpc)?;
         client.set_telemetry(connection.telemetry.clone());
         Ok(client)
     }
@@ -205,16 +211,16 @@ impl NfsVecFs {
         }
     }
 
-    pub(super) fn needs_recovery(error: &VfError) -> bool {
+    pub(super) fn needs_recovery(error: &std::io::Error) -> bool {
         matches!(
-            error.transport_kind(),
+            vfsi_core::transport_kind(error),
             Some(
                 vfsi_core::TransportKind::Timeout
                     | vfsi_core::TransportKind::Connection
                     | vfsi_core::TransportKind::Other
             )
         ) || matches!(
-            error.status(),
+            vfsi_core::native_status(error),
             Some(vfsi_core::StatusCode::Nfs(
                 nfsstat4_NFS4ERR_EXPIRED
                     | nfsstat4_NFS4ERR_GRACE
@@ -240,8 +246,8 @@ impl NfsVecFs {
                     .clone()
                     .map(|reopen| (fd, reopen, open.cur_offset, open.fh.clone()))
                     .ok_or_else(|| {
-                        VfError::transport(
-                            None,
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
                             "cannot recover while an internal temporary descriptor is live",
                         )
                     })
@@ -296,7 +302,7 @@ impl NfsVecFs {
             // state under our stable client ID. Carry that quarantine back
             // before retrying; dropping the replacement must not forget it.
             self.nfs.inherit_open_quarantine(&replacement.nfs);
-            let outcome = outcome.map_err(vfsi_core::error_from_rpc_indexed)?;
+            let outcome = outcome.map_err(vfsi_core::internal::errors::from_rpc)?;
             for ((old_fd, recipe, offset, _), opened) in snapshots.iter().zip(outcome.opened) {
                 if let Some((fh, stateid)) = opened {
                     replacement.open_files.insert(
@@ -312,8 +318,11 @@ impl NfsVecFs {
                 }
             }
             if let Some((index, status)) = outcome.failed {
-                return Err(VfError::nfs(index, status)
-                    .with_context("reconnect retained object", &snapshots[index].1.path));
+                return Err(vfsi_core::internal::errors::with_context(
+                    vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(status)),
+                    "reconnect retained object",
+                    &snapshots[index].1.path,
+                ));
             }
         }
         replacement.next_fd = self.next_fd;
@@ -372,8 +381,8 @@ impl NfsVecFs {
                     return Ok(());
                 }
                 Err(error) => {
-                    let identity_changed =
-                        !error.is_transport() && error.raw_code() == libc::ESTALE as u32;
+                    let identity_changed = vfsi_core::native_status(&error)
+                        == Some(vfsi_core::StatusCode::Errno(libc::ESTALE as u32));
                     last = Some(error);
                     // A different object at the old pathname is permanent,
                     // not a server restart/grace condition to back off over.
@@ -395,10 +404,18 @@ impl NfsVecFs {
                     .min(self.recovery_policy.max_backoff);
             }
         }
-        let error = last.unwrap_or_else(|| VfError::transport(None, "NFS reconnect failed"));
-        self.notify(NfsEvent::ReconnectFailed {
-            error: error.clone(),
+        let mut error = last.unwrap_or_else(|| {
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "NFS reconnect failed",
+            )
         });
+        if self.observer.is_some() {
+            let source = vfsi_core::internal::errors::share_in_place(&mut error);
+            self.notify(NfsEvent::ReconnectFailed {
+                error: vfsi_core::internal::errors::from_shared(&source),
+            });
+        }
         Err(error)
     }
 
@@ -433,25 +450,31 @@ impl NfsVecFs {
                 } else {
                     for index in indices {
                         previous[index] = Err(vfsi_core::OpError::unknown(
-                            VfError::invalid_reply(None, "invalid recovery outcome count"),
+                            vfsi_core::internal::errors::invalid_reply(
+                                "invalid recovery outcome count",
+                            ),
                             None,
                         ));
                     }
                 }
                 return Ok(retained.take().expect("retained recovery outcomes"));
             }
-            let outcomes = operation(client, None)?;
-            let recover = outcomes
-                .iter()
-                .enumerate()
-                .find_map(|(index, result)| match result {
-                    Err(error)
-                        if Self::needs_recovery(error.cause()) && should_retry(index, error) =>
-                    {
-                        Some(error.cause().clone())
-                    }
-                    _ => None,
-                });
+            let mut outcomes = operation(client, None)?;
+            let recover =
+                outcomes
+                    .iter_mut()
+                    .enumerate()
+                    .find_map(|(index, result)| match result {
+                        Err(error)
+                            if Self::needs_recovery(error.cause())
+                                && should_retry(index, error) =>
+                        {
+                            Some(vfsi_core::internal::errors::from_shared(
+                                &vfsi_core::internal::errors::share_op_cause(error),
+                            ))
+                        }
+                        _ => None,
+                    });
             if let Some(error) = recover {
                 retained = Some(outcomes);
                 Err(error)
@@ -509,12 +532,16 @@ mod vector_recovery_tests {
                     requests.push(indices.map(<[usize]>::to_vec));
                     match indices {
                         None => {
-                            let cause = VfError::transport(None, "injected metadata reply loss");
+                            let cause = vfsi_core::internal::errors::transport(
+                                vfsi_core::TransportKind::Other,
+                                "injected metadata reply loss",
+                            );
+                            let mut causes = vfsi_core::internal::errors::fanout(cause, 2);
                             Ok(vec![
                                 Ok(7),
-                                Err(vfsi_core::OpError::unknown(cause.clone(), None)),
+                                Err(vfsi_core::OpError::unknown(causes.next().unwrap(), None)),
                                 Ok(9),
-                                Err(vfsi_core::OpError::not_attempted(cause)),
+                                Err(vfsi_core::OpError::not_attempted(causes.next().unwrap())),
                             ])
                         }
                         Some(indices) => {
@@ -526,6 +553,12 @@ mod vector_recovery_tests {
             )
             .unwrap();
         assert_eq!(requests, [None, Some(vec![1, 3])]);
-        assert_eq!(outcomes, [Ok(7), Ok(8), Ok(9), Ok(10)]);
+        assert_eq!(
+            (outcomes)
+                .iter()
+                .map(|result| result.as_ref().unwrap())
+                .collect::<Vec<_>>(),
+            [&(7), &(8), &(9), &(10)]
+        );
     }
 }

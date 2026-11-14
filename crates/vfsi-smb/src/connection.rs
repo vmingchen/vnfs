@@ -37,10 +37,10 @@ impl SmbVecFs {
         options: SmbConnectOptions,
     ) -> VfResult<Self> {
         if server.is_empty() || share.is_empty() {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         if options.connect_timeout.is_zero() || options.request_timeout.is_zero() {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         let runtime = smb_runtime()?;
         let config = ClientConfig {
@@ -75,8 +75,7 @@ impl SmbVecFs {
                 tokio::time::timeout(setup_timeout, SmbClient::connect(config)).await
             })
             .map_err(|_| {
-                VfError::transport_with_kind(
-                    None,
+                vfsi_core::internal::errors::transport(
                     vfsi_core::TransportKind::Timeout,
                     "SMB session setup timed out",
                 )
@@ -96,8 +95,7 @@ impl SmbVecFs {
                 tokio::time::timeout(options.request_timeout, client.connect_share(share)).await
             })
             .map_err(|_| {
-                VfError::transport_with_kind(
-                    None,
+                vfsi_core::internal::errors::transport(
                     vfsi_core::TransportKind::Timeout,
                     "SMB share connection timed out",
                 )
@@ -155,11 +153,7 @@ impl SmbVecFs {
             .runtime
             .block_on(join_all(jobs))
             .into_iter()
-            .find_map(|(index, result)| {
-                result
-                    .err()
-                    .map(|error| error.into_cause().with_index(index))
-            })
+            .find_map(|(_index, result)| result.err().map(|error| error.into_cause()))
             .map_or(Ok(()), Err);
         // Already attempted CLOSEs are never submitted again. Disconnecting
         // each original live tree releases its remaining session-owned state.
@@ -215,17 +209,16 @@ impl SmbVecFs {
     pub(super) fn path_string(&self, path: &Path) -> VfResult<String> {
         std::str::from_utf8(path_bytes(path))
             .map(str::to_owned)
-            .map_err(|_| VfError::errno(0, libc::EILSEQ as u32))
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EILSEQ))
     }
 
     pub(super) fn live_file(&self, fd: Fd) -> VfResult<&SmbOpen> {
         let open = self
             .open_files
             .get(&fd)
-            .ok_or_else(|| VfError::errno(None, ERR_EBADF))?;
+            .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?;
         if !self.tree.owns_live_file(&open.tree) {
-            return Err(VfError::transport_with_kind(
-                None,
+            return Err(vfsi_core::internal::errors::transport(
                 vfsi_core::TransportKind::Connection,
                 "SMB file handle belongs to an invalidated session or tree",
             ));
@@ -239,8 +232,8 @@ impl SmbVecFs {
                 .open_files
                 .get(fd)
                 .map(|open| open.path.clone())
-                .ok_or_else(|| VfError::errno(0, ERR_EBADF)),
-            FileOperand::Saved => Err(VfError::unsupported(0)),
+                .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32)),
+            FileOperand::Saved => Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
             _ => self.vf_path(file),
         }
     }
@@ -286,7 +279,7 @@ impl SmbVecFs {
         let readable = access_mode != libc::O_WRONLY;
         let writable = access_mode != libc::O_RDONLY;
         if flags & libc::O_TRUNC != 0 && !writable {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         let mut access = FileAccessMask::FILE_READ_ATTRIBUTES | FileAccessMask::SYNCHRONIZE;
         if readable {
@@ -364,6 +357,6 @@ impl SmbVecFs {
         let connection = self.client.connection_mut().clone();
         self.runtime
             .block_on(flush_file(connection, self.tree.tree_id, file_id))
-            .map_err(|error| error.into_cause().with_index(0))
+            .map_err(|error| error.into_cause())
     }
 }

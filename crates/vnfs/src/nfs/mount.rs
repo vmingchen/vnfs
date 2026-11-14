@@ -65,7 +65,7 @@ impl NfsMountSession {
         &self,
         paths: &[P],
         policy: ResolvePath,
-    ) -> Result<Vec<PathBuf>> {
+    ) -> std::result::Result<Vec<PathBuf>, vfsi_core::IndexedError> {
         self.paths.map_many(paths, policy)
     }
 

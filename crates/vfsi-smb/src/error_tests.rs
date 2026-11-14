@@ -25,9 +25,9 @@ fn timeout_connection_auth_and_invalid_data_keep_typed_provenance() {
         ),
     ] {
         let error = smb_error(source, None);
-        assert_eq!(error.transport_kind(), Some(kind));
-        assert_eq!(error.index(), None);
-        assert_eq!(error.status(), None);
+        assert_eq!(vfsi_core::transport_kind(&(error)), Some(kind));
+
+        assert_eq!(vfsi_core::native_status(&(error)), None);
     }
 }
 
@@ -81,16 +81,18 @@ fn known_server_statuses_keep_their_original_domain() {
             },
             4,
         );
-        assert_eq!(error.status(), Some(StatusCode::Smb(status.0)));
+        assert_eq!(
+            vfsi_core::native_status(&(error)),
+            Some(StatusCode::Smb(status.0))
+        );
         assert_eq!(error.kind(), kind, "{status:?}");
-        assert_eq!(error.index(), Some(4));
     }
 }
 
 #[test]
 fn truncated_compounds_have_invalid_reply_provenance() {
     assert_eq!(
-        compound_cardinality_error(1, 3).transport_kind(),
+        vfsi_core::transport_kind(&(compound_cardinality_error(1, 3))),
         Some(vfsi_core::TransportKind::InvalidReply)
     );
 }

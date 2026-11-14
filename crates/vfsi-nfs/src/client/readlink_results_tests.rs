@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::Arc;
 use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
-use vfsi_core::{FailureState, OpError, VfError};
+use vfsi_core::{FailureState, OpError};
 
 fn fixture(label: &str) -> Option<(NfsClient, NfsFh, NfsFh, String, Vec<NfsFh>)> {
     let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
@@ -43,7 +43,7 @@ fn assert_partition<T: std::fmt::Debug>(results: &[Result<T, OpError>]) {
     for result in &results[2..4] {
         let error = result.as_ref().unwrap_err();
         assert_eq!(error.state(), FailureState::Unknown);
-        assert_eq!(error.cause().index(), None);
+        let _: &std::io::Error = error.cause();
         assert!(error.progress().is_none());
     }
     assert_eq!(
@@ -86,7 +86,10 @@ fn raw_readlink_preserves_known_results_across_status_failure_and_reply_loss() {
     client.max_ops = 5; // Two input pairs per RPC.
     let fault = Arc::new(FaultScript::one(
         OpenFaultPoint::AfterReadlinkCompoundReply { first: 2 },
-        VfError::transport(None, "second READLINK reply lost"),
+        vfsi_core::internal::errors::transport(
+            vfsi_core::TransportKind::Other,
+            "second READLINK reply lost",
+        ),
     ));
     client.set_fault_injector(fault.clone());
     let _ = crate::compound::thread_compound_stats();
@@ -128,7 +131,10 @@ fn child_lookup_preserves_known_results_across_status_failure_and_reply_loss() {
     client.max_ops = 9; // Two four-op child lookups per RPC.
     let fault = Arc::new(FaultScript::one(
         OpenFaultPoint::AfterLookupChunkReply { first: 2 },
-        VfError::transport(None, "second child-lookup reply lost"),
+        vfsi_core::internal::errors::transport(
+            vfsi_core::TransportKind::Other,
+            "second child-lookup reply lost",
+        ),
     ));
     client.set_fault_injector(fault.clone());
     let _ = crate::compound::thread_compound_stats();

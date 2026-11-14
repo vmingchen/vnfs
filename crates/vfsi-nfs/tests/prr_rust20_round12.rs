@@ -57,6 +57,7 @@ fn chained(hardlink: bool) {
     put(&mut fs, &c, b"old");
     if hardlink {
         fs.vhardlink_impl(&[Path::new(&b)], &[Path::new(&alias)])
+            .map_err(vfsi_core::IndexedError::unattributed)
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
@@ -209,6 +210,7 @@ fn fanout(hardlink: bool) {
     put(&mut fs, &a, b"fresh");
     if hardlink {
         fs.vhardlink_impl(&[Path::new(&a)], &[Path::new(&alias)])
+            .map_err(vfsi_core::IndexedError::unattributed)
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())

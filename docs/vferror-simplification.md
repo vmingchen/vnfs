@@ -1,6 +1,8 @@
 # Replace VfError with std::io::Error after VecResult
 
-Status: proposed; production implementation has not started.
+Status: stages 1–4 are implemented and reviewed locally. Binding cleanup,
+integrated performance measurements and adoption gates remain. See the
+[migration progress](vferror-migration-progress.md).
 Date: 2026-11-14.
 Baseline: vnfs02 at 70bea6a.
 Decision: owned std::io::Error is the public cause; lossy helpers use IndexedError.
@@ -23,6 +25,19 @@ The target aliases are:
 pub type VecResult<T> = std::io::Result<Vec<OpResult<T>>>;
 pub type OpResult<T> = Result<T, OpError>;
 ```
+
+The public return contracts are:
+
+| Surface | Return type | Attribution and execution details |
+| --- | --- | --- |
+| Canonical vector operation | VecResult<T> | Slot position identifies each input; OpError retains certainty/progress |
+| Scalar operation or helper | std::io::Result<T> | No input index |
+| Lossy multi-input helper | Result<T, IndexedError> | Optional selected input index; no execution-state or progress guarantee |
+
+Use ErrorKind for ordinary category matching. Callers needing exact native status
+or transport provenance use the small inspection functions described below;
+callers needing execution certainty or confirmed progress inspect OpError before
+extracting its standard error. Do not infer safe retries from ErrorKind alone.
 
 For example, `Vfsi::vread` returns `VecResult<ReadResult>`, expanding to
 `Result<Vec<Result<ReadResult, OpError>>, std::io::Error>`. The outer standard
@@ -501,5 +516,6 @@ unresponsive. Do not change host mounts or restart services for this migration.
   bespoke public error API; binding wire codes stay at adapter boundaries.
 - Actual integration tests and performance gates pass with accepted boxing
   costs reported honestly and no new healthy-path overhead.
-- Intentional API changes are documented; this proposed document alone changes
-  no production implementation, package versions or port pins.
+- Intentional API changes are documented; implementation completion is tracked
+  separately from this design. This plan grants no publication or port-repinning
+  authorization.

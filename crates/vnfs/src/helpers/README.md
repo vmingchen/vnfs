@@ -98,7 +98,7 @@ let tree = TreeBuilder::new()
 
 // Optional, explicit cleanup. Dropping `tree` does not delete anything.
 fs.remove_dir_all(tree.root())?;
-# Ok::<(), vnfs::Error>(())
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 The same builder accepts mounted/routed clients through `Vfsi`. Paths are
@@ -152,7 +152,7 @@ let result = copy_items(&fs, &["/input/images", "/input/config"], "/output",
 println!("copied {} files", result.files_copied);
 let stats = tree_stats(&fs, "/output", ListDirOptions::new())?;
 println!("{} files, {} logical bytes", stats.files, stats.file_bytes);
-# Ok::<(), vnfs::Error>(())
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 `copy_items` accepts mixed file/directory roots and defaults to placing their

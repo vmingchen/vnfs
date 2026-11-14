@@ -102,7 +102,10 @@ fn directory_open_reply_loss_keeps_known_owners_and_does_not_register_uncertain_
     fs.nfs.max_ops = 9; // Two four-op LOOKUP/type requests per compound.
     fs.set_fault_injector(Arc::new(FaultScript::new([(
         OpenFaultPoint::AfterLookupChunkReply { first: 2 },
-        VfError::transport(None, "directory LOOKUP reply lost"),
+        vfsi_core::internal::errors::transport(
+            vfsi_core::TransportKind::Other,
+            "directory LOOKUP reply lost",
+        ),
     )])));
     let results = fs.vopen_dirs_impl(&refs).unwrap();
     assert_eq!(results.len(), paths.len());

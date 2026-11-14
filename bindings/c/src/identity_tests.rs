@@ -82,10 +82,10 @@ impl HandleBackend for IdentityBackend {
             })
             .collect())
     }
-    fn sync_data(&mut self, _: &FileOperand) -> Result<(), VfError> {
+    fn sync_data(&mut self, _: &FileOperand) -> Result<(), std::io::Error> {
         unreachable!()
     }
-    fn open_impl(&mut self, _: &vfsi_sync::OpenOp) -> Result<FileOperand, VfError> {
+    fn open_impl(&mut self, _: &vfsi_sync::OpenOp) -> Result<FileOperand, std::io::Error> {
         unreachable!()
     }
     fn vclose_impl(&mut self, files: &[vfsi_sync::FileOperand]) -> vfsi_sync::VecResult<()> {
@@ -98,32 +98,32 @@ impl HandleBackend for IdentityBackend {
             .collect())
     }
 
-    fn close_impl(&mut self, _: &FileOperand) -> Result<(), VfError> {
+    fn close_impl(&mut self, _: &FileOperand) -> Result<(), std::io::Error> {
         Ok(())
     }
-    fn read_impl(&mut self, _: &ReadOp) -> Result<vfsi_sync::ReadResult, VfError> {
+    fn read_impl(&mut self, _: &ReadOp) -> Result<vfsi_sync::ReadResult, std::io::Error> {
         unreachable!()
     }
     fn write_impl(
         &mut self,
         _: WriteOp<&FileOperand, &[u8]>,
-    ) -> Result<vfsi_sync::WriteResult, VfError> {
+    ) -> Result<vfsi_sync::WriteResult, std::io::Error> {
         unreachable!()
     }
-    fn seek_impl(&mut self, _: &FileOperand, _: std::io::SeekFrom) -> Result<u64, VfError> {
+    fn seek_impl(&mut self, _: &FileOperand, _: std::io::SeekFrom) -> Result<u64, std::io::Error> {
         unreachable!()
     }
     fn metadata_impl(
         &mut self,
         _: vfsi_sync::Target<'_, FileOperand>,
         _: vfsi_sync::api::AttrsOptions,
-    ) -> Result<VfAttrs, VfError> {
+    ) -> Result<VfAttrs, std::io::Error> {
         unreachable!()
     }
     fn set_attributes_impl(
         &mut self,
         _: &vfsi_sync::SetAttrsOp<vfsi_sync::Target<'_, FileOperand>>,
-    ) -> Result<(), VfError> {
+    ) -> Result<(), std::io::Error> {
         unreachable!()
     }
 }
@@ -135,10 +135,7 @@ impl VectorBackend for IdentityBackend {
         modes: &[u32],
     ) -> vfsi_sync::VecResult<vfsi_sync::FileOperand> {
         if paths.len() != flags.len() || paths.len() != modes.len() {
-            return Err(vfsi_sync::VfError::from_kind(
-                None,
-                std::io::ErrorKind::InvalidInput,
-            ));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         Ok(paths
             .iter()
@@ -146,7 +143,7 @@ impl VectorBackend for IdentityBackend {
             .zip(modes)
             .map(|((path, flags), mode)| {
                 self.open_raw_impl(path, *flags, *mode).map_err(|cause| {
-                    if cause.is_transport() {
+                    if vfsi_core::transport_kind(&cause).is_some() {
                         vfsi_sync::OpError::unknown(cause, None)
                     } else {
                         vfsi_sync::OpError::failed(cause, None)
@@ -163,8 +160,7 @@ impl VectorBackend for IdentityBackend {
         let requested = attrs.len();
         self.calls.fetch_add(1, Ordering::Relaxed);
         if self.failure {
-            return Err(VfError::transport_with_kind(
-                Some(1),
+            return Err(vfsi_core::internal::errors::transport(
                 vfsi_sync::TransportKind::Connection,
                 "injected identity disconnect",
             ));
@@ -179,7 +175,7 @@ impl VectorBackend for IdentityBackend {
                 attrs.file = FileOperand::from_path("/wrong");
             }
         }
-        Ok(vec![Ok(()); requested])
+        Ok((0..requested).map(|_| Ok(())).collect())
     }
     fn listdir_impl(
         &mut self,
@@ -187,12 +183,13 @@ impl VectorBackend for IdentityBackend {
         fields: AttrMask,
         max: usize,
         recursive: bool,
-    ) -> Result<Vec<VfAttrs>, VfError> {
+    ) -> Result<Vec<VfAttrs>, std::io::Error> {
         let mut rows = Vec::new();
         self.vlistdirs_impl(&[dir], fields, max, recursive, &mut |attrs, _| {
             rows.push(attrs.clone());
             true
-        })?;
+        })
+        .map_err(vfsi_core::IndexedError::into_cause)?;
         Ok(rows)
     }
     fn vlistdirs_impl(
@@ -202,7 +199,7 @@ impl VectorBackend for IdentityBackend {
         _: usize,
         _: bool,
         cb: &mut dyn FnMut(&VfAttrs, &Path) -> bool,
-    ) -> vfsi_sync::VfRes {
+    ) -> Result<(), vfsi_core::IndexedError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         for dir in dirs {
             let attrs = VfAttrs {
@@ -381,8 +378,10 @@ fn missing_or_malformed_identity_and_transport_failures_clear_outputs_without_re
             assert_eq!(result.category, VFSI_ERROR_TRANSPORT);
         }
         if failure {
-            assert_eq!(result.index, 1);
-            assert_eq!(results[0].category, VFSI_ERROR_INDETERMINATE);
+            assert_eq!(result.index, C_INDEX_UNKNOWN);
+            assert!(results
+                .iter()
+                .all(|item| item.category == VFSI_ERROR_INDETERMINATE));
         }
         unsafe {
             vfsi_free(fs);
@@ -776,5 +775,43 @@ fn cursor_identity_uses_inline_attrs_without_getattr_and_rejects_missing_ids() {
             assert_eq!(results[0].completion, 0);
         }
         unsafe { vfsi_free(fs) };
+    }
+}
+
+#[test]
+fn identity_validation_missing_descriptor_keeps_its_input_index_without_dispatch() {
+    for missing in 0..2 {
+        let (fs, calls) = fake(AttrMask::empty(), false, false);
+        unsafe { &*fs }
+            .files
+            .lock()
+            .unwrap()
+            .insert(10, FileOperand::from_fd(100).into());
+        let mut ids = [vfsi_object_id::empty(); 2];
+        ids.iter_mut().for_each(|id| id.namespace_id = 999);
+        let ops: Vec<_> = ids
+            .iter_mut()
+            .enumerate()
+            .map(|(index, id)| vfsi_object_id_op {
+                path: std::ptr::null(),
+                fd: if index == missing { 999 } else { 10 },
+                flags: 0,
+                out: id,
+                attrs: std::ptr::null_mut(),
+            })
+            .collect();
+        let mut items = [vfsi_result::panic(); 2];
+        let status =
+            unsafe { vfsi_get_object_idv(fs, ops.as_ptr(), ops.len(), items.as_mut_ptr()) };
+        assert_eq!(status.index, missing);
+        assert_eq!(status.err_no, libc::EBADF as u32);
+        assert_eq!(items[missing].index, missing);
+        assert_eq!(items[missing].err_no, libc::EBADF as u32);
+        assert_eq!(items[1 - missing].category, VFSI_ERROR_NOT_ATTEMPTED);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert!(ids.iter().all(|id| id.namespace_id == 999));
+        unsafe {
+            vfsi_free(fs);
+        }
     }
 }

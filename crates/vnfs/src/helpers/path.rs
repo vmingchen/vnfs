@@ -3,9 +3,10 @@
 use crate::{Error, Result};
 use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
+use vfsi_core::IndexedError;
 
 fn io_error(path: &Path, error: std::io::Error) -> Error {
-    Error::from_io(0, error).with_context("path mapper", path)
+    vfsi_core::internal::errors::with_context(error, "path mapper", path)
 }
 
 /// Resolution policy for the final component of an application operand.
@@ -27,7 +28,7 @@ fn validate_terminal(path: &Path) -> Result<()> {
             Some(std::path::Component::Normal(_))
         )
     {
-        return Err(Error::from_kind(0, std::io::ErrorKind::InvalidInput));
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
     }
     Ok(())
 }
@@ -45,7 +46,7 @@ impl PathMapper {
         let local_root =
             std::fs::canonicalize(requested).map_err(|error| io_error(requested, error))?;
         if !local_root.is_dir() {
-            return Err(Error::errno(0, libc::ENOTDIR as u32));
+            return Err(std::io::Error::from_raw_os_error(libc::ENOTDIR));
         }
         Ok(Self::from_validated_root(local_root))
     }
@@ -71,7 +72,7 @@ impl PathMapper {
                 validate_terminal(path)?;
                 let name = path
                     .file_name()
-                    .ok_or_else(|| Error::from_kind(0, std::io::ErrorKind::InvalidInput))?;
+                    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
                 let parent = path
                     .parent()
                     .filter(|p| !p.as_os_str().is_empty())
@@ -83,7 +84,7 @@ impl PathMapper {
         };
         let suffix = absolute
             .strip_prefix(&self.local_root)
-            .map_err(|_| Error::errno(0, libc::EXDEV as u32))?;
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EXDEV))?;
         Ok(Path::new("/").join(suffix))
     }
     /// Map a cohort, resolving each distinct parent once for no-follow operands.
@@ -93,7 +94,7 @@ impl PathMapper {
         &self,
         paths: &[P],
         policy: ResolvePath,
-    ) -> Result<Vec<PathBuf>> {
+    ) -> std::result::Result<Vec<PathBuf>, IndexedError> {
         let mut parents = std::collections::HashMap::new();
         paths
             .iter()
@@ -107,7 +108,7 @@ impl PathMapper {
                     validate_terminal(path)?;
                     let name = path
                         .file_name()
-                        .ok_or_else(|| Error::from_kind(0, std::io::ErrorKind::InvalidInput))?;
+                        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
                     let parent = path
                         .parent()
                         .filter(|p| !p.as_os_str().is_empty())
@@ -121,10 +122,10 @@ impl PathMapper {
                     let absolute = resolved.join(name);
                     let suffix = absolute
                         .strip_prefix(&self.local_root)
-                        .map_err(|_| Error::errno(0, libc::EXDEV as u32))?;
+                        .map_err(|_| std::io::Error::from_raw_os_error(libc::EXDEV))?;
                     Ok(Path::new("/").join(suffix))
                 })();
-                result.map_err(|error: Error| error.with_index(index))
+                result.map_err(|error: Error| IndexedError::at(index, error))
             })
             .collect()
     }
@@ -136,7 +137,7 @@ impl PathMapper {
             .components()
             .any(|c| matches!(c, std::path::Component::ParentDir))
         {
-            return Err(Error::from_kind(0, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         Ok(self.local_root.join(path.strip_prefix("/").unwrap_or(path)))
     }
@@ -156,7 +157,7 @@ mod tests {
         assert_eq!(mapper.local_root(), root);
         assert_eq!(mapper.local_path("child").unwrap(), root.join("child"));
         assert_eq!(
-            PathMapper::new(&root).unwrap_err().raw_code(),
+            crate::test_native_code(&(PathMapper::new(&root).unwrap_err())),
             libc::ENOENT as u32
         );
     }

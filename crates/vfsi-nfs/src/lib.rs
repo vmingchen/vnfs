@@ -57,3 +57,16 @@ mod shared_contract_boundary {
     //! use vfsi_nfs::nfs::FsClient;
     //! ```
 }
+
+// Unit assertions inspect real native values; category-only errors have none.
+#[cfg(test)]
+fn test_native_code(error: &std::io::Error) -> u32 {
+    match vfsi_core::native_status(error) {
+        Some(
+            vfsi_core::StatusCode::Errno(code)
+            | vfsi_core::StatusCode::Nfs(code)
+            | vfsi_core::StatusCode::Smb(code),
+        ) => code,
+        _ => panic!("expected a native status, got {error:?}"),
+    }
+}

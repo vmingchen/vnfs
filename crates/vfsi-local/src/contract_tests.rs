@@ -1,3 +1,14 @@
+fn test_native_code(error: &std::io::Error) -> u32 {
+    match vfsi_core::native_status(error) {
+        Some(
+            vfsi_core::StatusCode::Errno(code)
+            | vfsi_core::StatusCode::Nfs(code)
+            | vfsi_core::StatusCode::Smb(code),
+        ) => code,
+        _ => panic!("expected a native error, got {error:?}"),
+    }
+}
+
 use std::path::{Path, PathBuf};
 use vfsi_core::*;
 use vfsi_sync::backend::{HandleBackend, VectorBackend};
@@ -29,8 +40,7 @@ mod tests {
             match (base.checked_add(delta), checked_offset(base, delta, index)) {
                 (Some(expected), Ok(actual)) => prop_assert_eq!(actual, expected),
                 (None, Err(error)) => {
-                    prop_assert_eq!(error.index(), Some(index));
-                    prop_assert_eq!(error.raw_code(), libc::EOVERFLOW as u32);
+                    prop_assert_eq!(test_native_code(&(error)), libc::EOVERFLOW as u32);
                 }
                 (expected, actual) => prop_assert!(false, "expected {expected:?}, got {actual:?}"),
             }
@@ -94,7 +104,6 @@ mod tests {
         let (_, first, _) = pages.next().unwrap().unwrap();
         let error = pages.next().unwrap().err().expect("missing page");
         assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
-        assert_eq!(error.cause().index(), None);
         let (_, last, _) = pages.next().unwrap().unwrap();
         std::fs::rename(root.0.join("first"), root.0.join("moved")).unwrap();
         std::fs::create_dir(root.0.join("first")).unwrap();
@@ -175,8 +184,7 @@ mod tests {
             for (i, errno) in [(1, libc::ENOENT), (2, libc::EBADF)] {
                 let error = outcomes[i].as_ref().unwrap_err();
                 assert_eq!(error.state(), FailureState::Failed);
-                assert_eq!(error.cause().index(), None);
-                assert_eq!(error.cause().raw_code(), errno as u32);
+                assert_eq!(test_native_code(error.cause()), errno as u32);
             }
         }
     }
@@ -211,11 +219,11 @@ mod tests {
         assert!(outcomes[0].is_ok());
         assert!(outcomes[3].is_ok());
         assert_eq!(
-            outcomes[1].as_ref().unwrap_err().cause().raw_code(),
+            test_native_code(outcomes[1].as_ref().unwrap_err().cause()),
             libc::ENOENT as u32
         );
         assert_eq!(
-            outcomes[2].as_ref().unwrap_err().cause().raw_code(),
+            test_native_code(outcomes[2].as_ref().unwrap_err().cause()),
             libc::EBADF as u32
         );
         assert!(backend.statfs_results(&[]).next().is_none());
@@ -251,8 +259,8 @@ mod tests {
                 .as_ref()
                 .unwrap_err()
                 .cause()
-                .index(),
-            None
+                .kind(),
+            std::io::ErrorKind::NotFound
         );
     }
 
@@ -313,7 +321,7 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.index(), Some(1));
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
         assert_eq!(std::fs::read(root.0.join("existing")).unwrap(), b"first");
         assert_eq!(std::fs::read(root.0.join("left")).unwrap(), b"right");
         assert_eq!(std::fs::read(root.0.join("right")).unwrap(), b"left");
@@ -479,8 +487,11 @@ mod tests {
         let error = LocalBackend::new(not_a_directory.clone(), ())
             .err()
             .unwrap();
-        assert_eq!(error.raw_code(), libc::ENOTDIR as u32);
-        assert_eq!(error.path(), Some(not_a_directory.as_path()));
+        assert_eq!(test_native_code(&(error)), libc::ENOTDIR as u32);
+        assert_eq!(
+            vfsi_core::internal::errors::path(&(error)),
+            Some(not_a_directory.as_path())
+        );
     }
 
     #[test]
@@ -491,7 +502,10 @@ mod tests {
         let missing = root.0.join("missing/child");
         let error = LocalBackend::new(missing.clone(), ()).err().unwrap();
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-        assert_eq!(error.path(), Some(missing.as_path()));
+        assert_eq!(
+            vfsi_core::internal::errors::path(&(error)),
+            Some(missing.as_path())
+        );
         assert!(!root.0.join("missing").exists());
 
         let blocked = root.0.join("blocked");
@@ -504,7 +518,10 @@ mod tests {
         if unsafe { libc::geteuid() } != 0 {
             let error = result.err().unwrap();
             assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
-            assert_eq!(error.path(), Some(blocked.as_path()));
+            assert_eq!(
+                vfsi_core::internal::errors::path(&(error)),
+                Some(blocked.as_path())
+            );
         }
     }
 
@@ -528,7 +545,10 @@ mod tests {
             .expect("opening a non-directory root must not block");
         worker.join().unwrap();
         assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
-        assert_eq!(error.path(), Some(fifo.as_path()));
+        assert_eq!(
+            vfsi_core::internal::errors::path(&(error)),
+            Some(fifo.as_path())
+        );
     }
 
     fn write(fs: &mut LocalBackend, path: &str, data: &[u8]) {
@@ -541,6 +561,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .expect("write");
     }
@@ -611,11 +632,7 @@ mod tests {
                     let length = op.buffer.len().min(self.max_read);
                     op.file.read_at(&mut op.buffer[..length], op.offset)
                 })
-                .map(|result| {
-                    result.map_err(|error| {
-                        vfsi_core::OpError::failed(VfError::from_io(None, error), None)
-                    })
-                })
+                .map(|result| result.map_err(|error| vfsi_core::OpError::failed(error, None)))
                 .collect()
         }
         fn write(&mut self, _: &[crate::io::Write<'_>]) -> Vec<vfsi_core::OpResult<usize>> {
@@ -700,18 +717,18 @@ mod tests {
                 "open-error" => {
                     let error = result.unwrap_err();
                     assert_eq!(error.index(), Some(1));
-                    assert_eq!(error.raw_code(), libc::ENOENT as u32);
+                    assert_eq!(test_native_code(error.cause()), libc::ENOENT as u32);
                 }
                 "read-error" => {
                     let error = result.unwrap_err();
                     assert_eq!(error.index(), Some(0));
-                    assert_eq!(error.raw_code(), libc::EIO as u32);
+                    assert_eq!(test_native_code(error.cause()), libc::EIO as u32);
                 }
                 "late-open-error" | "late-read-error" => {
                     let error = result.unwrap_err();
                     assert_eq!(error.index(), Some(2));
                     assert_eq!(
-                        error.raw_code(),
+                        test_native_code(error.cause()),
                         if scenario == "late-open-error" {
                             libc::ENOENT
                         } else {
@@ -722,7 +739,7 @@ mod tests {
                 "limit" => {
                     let error = result.unwrap_err();
                     assert_eq!(error.index(), Some(2));
-                    assert_eq!(error.raw_code(), libc::EFBIG as u32);
+                    assert_eq!(test_native_code(error.cause()), libc::EFBIG as u32);
                 }
                 _ => unreachable!(),
             }
@@ -788,6 +805,7 @@ mod tests {
                 .and_then(|outcomes| {
                     let count = outcomes.len();
                     vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                        .map_err(vfsi_core::IndexedError::into_cause)
                 })
                 .unwrap();
             assert_eq!(results.len(), 1);
@@ -835,8 +853,11 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             }) {
-            Err(e) => assert!([ERR_INVAL, libc::EOVERFLOW as u32].contains(&e.raw_code())),
+            Err(e) => {
+                assert!([ERR_INVAL, libc::EOVERFLOW as u32].contains(&test_native_code(&(e))))
+            }
             Ok(r) => {
                 assert!(r[0].data.is_empty());
                 assert!(r[0].eof);
@@ -861,6 +882,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert_eq!(w[0].offset, 11); // resolved current position
@@ -873,6 +895,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert_eq!(w[0].offset, 13);
@@ -882,6 +905,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert_eq!(r[0].offset, 14); // resolved, not the Cur sentinel
@@ -901,6 +925,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert_eq!(written[0].bytes_written, 5);
@@ -914,6 +939,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert_eq!(
@@ -943,6 +969,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert_eq!(w[0].offset, 11);
@@ -954,6 +981,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert_eq!(r[0].offset, 12); // the resolved start is the file size
@@ -969,6 +997,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert!(r[0].eof);
@@ -988,6 +1017,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         // O_TRUNC semantics: the stale tail is gone.
@@ -1007,6 +1037,7 @@ mod tests {
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .unwrap();
         assert_eq!(
@@ -1026,6 +1057,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert_eq!(r[0].data, b"abc");
@@ -1036,6 +1068,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert_eq!(r[0].data, b"abc");
@@ -1046,6 +1079,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert!(r[0].data.is_empty());
@@ -1058,6 +1092,7 @@ mod tests {
                 .and_then(|outcomes| {
                     let count = outcomes.len();
                     vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                        .map_err(vfsi_core::IndexedError::into_cause)
                 })
                 .unwrap();
             assert!(r[0].data.is_empty());
@@ -1077,6 +1112,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert_eq!(r[0].data, b"world");
@@ -1086,8 +1122,8 @@ mod tests {
         assert_eq!(
             fs.seek_raw_impl(&fd, -100, SeekFrom::Set)
                 .unwrap_err()
-                .raw_code(),
-            ERR_INVAL
+                .kind(),
+            std::io::ErrorKind::InvalidInput
         );
         fs.close_impl(&fd).unwrap();
     }
@@ -1108,16 +1144,17 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap_err();
-        assert_eq!(error.raw_code(), libc::EOVERFLOW as u32);
+        assert_eq!(test_native_code(&(error)), libc::EOVERFLOW as u32);
         assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur).unwrap(), 1);
         assert_eq!(std::fs::metadata(root.0.join("f")).unwrap().len(), 1);
         assert_eq!(std::fs::read(root.0.join("f")).unwrap(), b"x");
 
         fs.seek_raw_impl(&fd, i64::MAX, SeekFrom::Set).unwrap();
         let error = fs.seek_raw_impl(&fd, 1, SeekFrom::Cur).unwrap_err();
-        assert_eq!(error.raw_code(), libc::EOVERFLOW as u32);
+        assert_eq!(test_native_code(&(error)), libc::EOVERFLOW as u32);
         assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur).unwrap(), i64::MAX);
         assert_eq!(std::fs::metadata(root.0.join("f")).unwrap().len(), 1);
         assert_eq!(std::fs::read(root.0.join("f")).unwrap(), b"x");
@@ -1130,8 +1167,7 @@ mod tests {
         for (count, stride) in [(2, 2), (usize::MAX, 1)] {
             let pattern = Adb::blocknum_only("/overflow", u64::MAX, stride, count, 0, 0);
             let error = fs.vwrite_adb_impl(&[pattern]).unwrap_err();
-            assert_eq!(error.index(), Some(0));
-            assert_eq!(error.raw_code(), libc::EOVERFLOW as u32);
+            assert_eq!(test_native_code(&(error)), libc::EOVERFLOW as u32);
             assert!(!fs.exists_impl(Path::new("/overflow")).unwrap());
         }
     }
@@ -1152,7 +1188,7 @@ mod tests {
         // The file was removed from sub/, not from the root.
         assert!(!fs.exists_impl(Path::new("a")).unwrap());
         assert_eq!(
-            fs.lstat_impl(Path::new("/a")).unwrap_err().raw_code(),
+            test_native_code(&(fs.lstat_impl(Path::new("/a")).unwrap_err())),
             ERR_NOENT
         );
     }
@@ -1291,16 +1327,18 @@ mod tests {
                 Path::new(destination),
             );
             assert_eq!(error.kind(), expected, "errno {code}");
-            assert_eq!(error.index(), Some(3));
             if expected == K::Unsupported {
-                assert_eq!(error.status(), None);
-                assert_eq!(error.to_errno(), libc::EOPNOTSUPP);
+                assert_eq!(vfsi_core::native_status(&(error)), None);
+                assert_eq!(
+                    vfsi_core::internal::errors::to_errno(&(error)),
+                    libc::EOPNOTSUPP
+                );
             } else {
                 assert_eq!(
-                    error.status(),
+                    vfsi_core::native_status(&(error)),
                     Some(vfsi_core::StatusCode::Errno(code as u32))
                 );
-                assert!(std::error::Error::source(&error).is_some());
+                assert_eq!(error.raw_os_error(), Some(code));
             }
         }
     }
@@ -1324,7 +1362,7 @@ mod tests {
             .map(|_| ())
         }
         .unwrap_err();
-        assert_eq!(error.raw_code(), libc::EINVAL as u32);
+        assert_eq!(test_native_code(error.cause()), libc::EINVAL as u32);
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -1352,7 +1390,10 @@ mod tests {
         let (_root, mut fs) = fs("vf-path");
         write(&mut fs, "/f", b"x");
         let fd = fs.open_raw_impl(Path::new("/f"), 0, 0).unwrap();
-        assert_eq!(fs.vf_path(&fd).unwrap_err().raw_code(), ERR_INVAL);
+        assert_eq!(
+            fs.vf_path(&fd).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
         fs.close_impl(&fd).unwrap();
     }
 
@@ -1384,13 +1425,15 @@ mod tests {
         fs.vgetattrs_impl(std::slice::from_mut(&mut a)).unwrap();
         assert_eq!(a.ftype, VfType::Directory);
         assert_eq!(
-            fs.vread_impl(&[ReadOp::new(FileOperand::cwd(), VfOffset::At(0), 1)])
-                .and_then(|outcomes| {
-                    let count = outcomes.len();
-                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
-                })
-                .unwrap_err()
-                .raw_code(),
+            test_native_code(
+                &(fs.vread_impl(&[ReadOp::new(FileOperand::cwd(), VfOffset::At(0), 1)])
+                    .and_then(|outcomes| {
+                        let count = outcomes.len();
+                        vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                            .map_err(vfsi_core::IndexedError::into_cause)
+                    })
+                    .unwrap_err())
+            ),
             ERR_ISDIR
         );
     }
@@ -1413,6 +1456,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert!(fs.exists_impl(Path::new("/escape")).unwrap());
@@ -1430,6 +1474,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert!(fs.exists_impl(Path::new("/sub2")).unwrap());
@@ -1490,13 +1535,15 @@ mod tests {
         fs.symlink_raw_impl(Path::new(&outside), Path::new("/evil"))
             .unwrap();
         assert_eq!(
-            fs.vread_impl(&[ReadOp::at(FileOperand::from_path("/evil"), 0, 8)])
-                .and_then(|outcomes| {
-                    let count = outcomes.len();
-                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
-                })
-                .unwrap_err()
-                .raw_code(),
+            test_native_code(
+                &(fs.vread_impl(&[ReadOp::at(FileOperand::from_path("/evil"), 0, 8)])
+                    .and_then(|outcomes| {
+                        let count = outcomes.len();
+                        vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                            .map_err(vfsi_core::IndexedError::into_cause)
+                    })
+                    .unwrap_err())
+            ),
             ERR_NOENT,
             "resolves inside the root where nothing exists yet"
         );
@@ -1516,6 +1563,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert_eq!(
@@ -1538,18 +1586,20 @@ mod tests {
         fs.symlink_raw_impl(Path::new(&dangling), Path::new("/evil2"))
             .unwrap();
         assert_eq!(
-            fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
-                FileOperand::from_path("/evil2"),
-                0,
-                b"x".to_vec()
-            )
-            .with_creation()]))
-                .and_then(|outcomes| {
-                    let count = outcomes.len();
-                    vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
-                })
-                .unwrap_err()
-                .raw_code(),
+            test_native_code(
+                &(fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
+                    FileOperand::from_path("/evil2"),
+                    0,
+                    b"x".to_vec()
+                )
+                .with_creation()]))
+                    .and_then(|outcomes| {
+                        let count = outcomes.len();
+                        vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                            .map_err(vfsi_core::IndexedError::into_cause)
+                    })
+                    .unwrap_err())
+            ),
             ERR_NOENT,
             "the chroot-relative target's parent does not exist"
         );
@@ -1570,6 +1620,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert_eq!(
@@ -1597,7 +1648,8 @@ mod tests {
                 )
                 .map(|_| ())
             }
-            .unwrap_err(),
+            .unwrap_err()
+            .into_cause(),
             {
                 let rename_pairs = &[(
                     FileOperand::from_path("/pivot/victim"),
@@ -1609,7 +1661,8 @@ mod tests {
                 )
                 .map(|_| ())
             }
-            .unwrap_err(),
+            .unwrap_err()
+            .into_cause(),
             fs.listdir_impl(Path::new("/pivot"), AttrMask::stat(), 0, false)
                 .unwrap_err(),
             fs.vreadlink_impl(&[Path::new("/pivot/link")])
@@ -1620,12 +1673,14 @@ mod tests {
             fs.vhardlink_impl(&[Path::new("/pivot/victim")], &[Path::new("/hard")])
                 .and_then(|outcomes| {
                     let count = outcomes.len();
-                    vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+                    vfsi_core::internal::collect_vec_result(Ok(outcomes), count)
+                        .map(|_| ())
+                        .map_err(vfsi_core::IndexedError::into_cause)
                 })
                 .unwrap_err(),
             fs.lstat_impl(Path::new("/pivot/victim")).unwrap_err(),
         ] {
-            assert!([ERR_ACCES, ERR_NOENT].contains(&error.raw_code()));
+            assert!([ERR_ACCES, ERR_NOENT].contains(&test_native_code(&error)));
         }
         assert_eq!(std::fs::read(outside.0.join("victim")).unwrap(), b"outside");
         assert!(!root.0.join("renamed").exists());
@@ -1728,8 +1783,7 @@ mod tests {
         // absolute target outside the configured client root.
         std::os::unix::fs::symlink(&victim, &missing).unwrap();
         let error = LocalBackend::chown_path(&update, &anchored, true, 3).unwrap_err();
-        assert_eq!(error.raw_code(), ERR_NOENT);
-        assert_eq!(error.index(), Some(3));
+        assert_eq!(test_native_code(&(error)), ERR_NOENT);
         let after = std::fs::metadata(&victim).unwrap();
         assert_eq!((after.uid(), after.gid()), (before.uid(), before.gid()));
         assert_eq!(std::fs::read(&victim).unwrap(), b"outside");
@@ -1808,6 +1862,7 @@ mod tests {
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .unwrap();
         fs.close_impl(&fd).unwrap();
@@ -1878,6 +1933,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert_eq!(r[0].data, b"012", "descriptor sees the new size");
@@ -1899,6 +1955,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
@@ -1910,6 +1967,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert!(fs.exists_impl(Path::new("/x")).unwrap());
@@ -1930,6 +1988,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         assert!(fs.exists_impl(Path::new("/z")).unwrap());
@@ -1961,7 +2020,7 @@ mod tests {
                 .map(|_| ())
             }
             .unwrap_err();
-            assert_eq!(error.raw_code(), ERR_INVAL);
+            assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
             assert_eq!(
                 std::fs::read(root.0.join("source")).unwrap(),
                 b"bounded-source"
@@ -2019,7 +2078,7 @@ mod tests {
         }
         .unwrap_err();
         assert_eq!(error.index(), Some(0));
-        assert_eq!(error.raw_code(), ERR_INVAL);
+        assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
         assert_eq!(std::fs::read(root.0.join("source")).unwrap(), original);
     }
 
@@ -2037,7 +2096,7 @@ mod tests {
             )
             .unwrap_err();
 
-        assert_eq!(error.raw_code(), libc::EEXIST as u32);
+        assert_eq!(test_native_code(&(error)), libc::EEXIST as u32);
         assert!(std::fs::symlink_metadata(root.0.join("dangling")).is_ok());
         assert!(!root.0.join("missing-target").exists());
     }
@@ -2080,8 +2139,7 @@ mod tests {
             crate::XATTR_QUERY_ERROR.with(|error| error.set(Some(libc::EACCES)));
             let outcomes = fs.vgetattrs_impl(std::slice::from_mut(&mut attrs)).unwrap();
             let error = outcomes[0].as_ref().unwrap_err();
-            assert_eq!(error.cause().raw_code(), libc::EACCES as u32);
-            assert_eq!(error.cause().index(), None);
+            assert_eq!(test_native_code(error.cause()), libc::EACCES as u32);
             assert_eq!(error.state(), FailureState::Failed);
             assert!(!attrs.returned.contains(AttrMask::NAMED_ATTR));
         }
@@ -2214,8 +2272,9 @@ mod tests {
                     .map(|_| ())
                 }
                 .unwrap_err()
-                .raw_code(),
-                VF_ERR_UNSUPPORTED
+                .cause()
+                .kind(),
+                std::io::ErrorKind::Unsupported
             );
             let metadata = std::fs::metadata(&path).unwrap();
             assert_eq!(metadata.permissions().mode() & 0o7777, 0o600);
@@ -2489,8 +2548,9 @@ mod tests {
                 .map(|_| ())
             }
             .unwrap_err()
-            .raw_code(),
-            VF_ERR_UNSUPPORTED
+            .cause()
+            .kind(),
+            std::io::ErrorKind::Unsupported
         );
         let metadata = std::fs::metadata(&target).unwrap();
         assert_eq!(metadata.permissions().mode() & 0o7777, 0o640);
@@ -2562,11 +2622,12 @@ mod tests {
             &[0o644],
         )
         .unwrap_err();
-        assert_eq!((e.index(), e.raw_code()), (None, ERR_INVAL));
+        assert_eq!(e.index(), None);
+        assert_eq!(e.cause().kind(), std::io::ErrorKind::InvalidInput);
         let e = fs
             .vopen_raw_impl(&[Path::new("/a"), Path::new("/b")], &[O_CREAT; 2], &[0o644])
             .unwrap_err();
-        assert_eq!((e.index(), e.raw_code()), (None, ERR_INVAL));
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
         assert!(fs.open_files.is_empty());
         assert!(!fs.exists_impl(Path::new("/a")).unwrap());
         assert!(!fs.exists_impl(Path::new("/b")).unwrap());
@@ -2702,7 +2763,7 @@ mod tests {
         }
         .unwrap_err();
         assert_eq!(error.index(), Some(1));
-        assert_eq!(error.raw_code(), libc::EEXIST as u32);
+        assert_eq!(test_native_code(error.cause()), libc::EEXIST as u32);
         // Following a dangling link fails, while preserving it succeeds above.
         let error = {
             let copy_pairs = &[ExtentPair::new("/dangling", 0, "/followed", 0, None)];
@@ -2713,7 +2774,7 @@ mod tests {
             .map(|_| ())
         }
         .unwrap_err();
-        assert_eq!(error.raw_code(), libc::ENOENT as u32);
+        assert_eq!(test_native_code(error.cause()), libc::ENOENT as u32);
         {
             let copy_pairs = &[];
             vfsi_core::internal::collect_vec_result(
@@ -2768,7 +2829,7 @@ mod tests {
         let error =
             vfsi_sync::test_support::copy_new_files_batched(&mut backend, &[conflict], 0o644, None)
                 .unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(error.cause().kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(
             std::fs::read(root.0.join("destination/existing")).unwrap(),
             b"keep"
@@ -2828,7 +2889,7 @@ mod tests {
                     pages += 1;
                     // Bound the reproducer even if the alias guard regresses.
                     if pages > 4 {
-                        return Err(VfError::errno(0, libc::ELOOP as u32));
+                        return Err(std::io::Error::from_raw_os_error(libc::ELOOP));
                     }
                     let mut results = vfsi_core::internal::collect_vec_result(
                         backend.vlistdir_pages_impl(
@@ -2840,7 +2901,8 @@ mod tests {
                             true,
                         ),
                         1,
-                    )?;
+                    )
+                    .map_err(vfsi_core::IndexedError::into_cause)?;
                     Ok(results.pop().unwrap())
                 },
                 |_, _| panic!("empty source directories contain no files"),
@@ -2918,6 +2980,7 @@ mod tests {
                         copy_pairs.len(),
                     )
                     .map(|_| ())
+                    .map_err(vfsi_core::IndexedError::into_cause)
                 }
             },
             std::convert::identity,
@@ -2947,12 +3010,15 @@ mod tests {
             |_, pairs| {
                 calls += 1;
                 assert!(pairs.len() > 1);
-                Err(VfError::transport(None, "lost copy reply"))
+                Err(vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "lost copy reply",
+                ))
             },
             std::convert::identity,
         )
         .unwrap_err();
-        assert!(error.is_transport());
+        assert!(vfsi_core::transport_kind(&(error)).is_some());
         assert_eq!(calls, 1, "a failed vector must never be replayed");
     }
 
@@ -2981,6 +3047,7 @@ mod tests {
                         copy_pairs.len(),
                     )
                     .map(|_| ())
+                    .map_err(vfsi_core::IndexedError::into_cause)
                 }
             },
             std::convert::identity,
@@ -3009,7 +3076,7 @@ mod tests {
             std::fs::read_link(root.0.join("copy/link")).unwrap(),
             Path::new("file")
         );
-        for (destination, reindex) in [("/failed", false), ("/indexed", true)] {
+        for (destination, add_context) in [("/failed", false), ("/context", true)] {
             let mut calls = 0;
             let error = vfsi_sync::backend::helpers::copy_tree_with(
                 &mut backend,
@@ -3019,14 +3086,30 @@ mod tests {
                 AttrMask::MODE,
                 |_, _| {
                     calls += 1;
-                    Err(VfError::transport(None, "lost reply"))
+                    Err(vfsi_core::internal::errors::transport(
+                        vfsi_core::TransportKind::Other,
+                        "lost reply",
+                    ))
                 },
-                |error| if reindex { error.with_index(0) } else { error },
+                |error| {
+                    if add_context {
+                        vfsi_core::internal::errors::with_context(
+                            error,
+                            "copy",
+                            Path::new("/source"),
+                        )
+                    } else {
+                        error
+                    }
+                },
             )
             .unwrap_err();
             assert_eq!(calls, 1, "never replay a failed copy strategy");
-            assert!(error.is_transport());
-            assert_eq!(error.index(), reindex.then_some(0));
+            assert!(vfsi_core::transport_kind(&(error)).is_some());
+            assert_eq!(
+                vfsi_core::internal::errors::operation(&error),
+                add_context.then_some("copy")
+            );
         }
     }
 
@@ -3050,6 +3133,7 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
 
@@ -3085,13 +3169,23 @@ mod tests {
         let (_root, backend) = fs("native-error-context");
         let client = vfsi_sync::FsClient::new(backend);
         let error = client.open("/missing").unwrap_err();
-        assert_eq!(error.operation(), Some("open"));
-        assert_eq!(error.path(), Some(Path::new("/missing")));
-        assert_eq!(error.index(), Some(0));
+        assert_eq!(
+            vfsi_core::internal::errors::operation(&(error)),
+            Some("open")
+        );
+        assert_eq!(
+            vfsi_core::internal::errors::path(&(error)),
+            Some(Path::new("/missing"))
+        );
         let error = client.attrs("/missing").unwrap_err();
-        assert_eq!(error.operation(), Some("attrs"));
-        assert_eq!(error.path(), Some(Path::new("/missing")));
-        assert_eq!(error.index(), Some(0));
+        assert_eq!(
+            vfsi_core::internal::errors::operation(&(error)),
+            Some("attrs")
+        );
+        assert_eq!(
+            vfsi_core::internal::errors::path(&(error)),
+            Some(Path::new("/missing"))
+        );
     }
     #[cfg(feature = "test-faults")]
     struct ReplaceLeafWithSymlink {
@@ -3236,7 +3330,9 @@ mod tests {
                 .vmkdir_impl(std::slice::from_ref(&attrs))
                 .and_then(|outcomes| {
                     let count = outcomes.len();
-                    vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+                    vfsi_core::internal::collect_vec_result(Ok(outcomes), count)
+                        .map(|_| ())
+                        .map_err(vfsi_core::IndexedError::into_cause)
                 })
                 .is_err()
         );
@@ -3415,7 +3511,9 @@ mod tests {
             .vmkdir_impl(std::slice::from_ref(&attrs))
             .and_then(|outcomes| {
                 let count = outcomes.len();
-                vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+                vfsi_core::internal::collect_vec_result(Ok(outcomes), count)
+                    .map(|_| ())
+                    .map_err(vfsi_core::IndexedError::into_cause)
             });
         unsafe { libc::umask(previous) };
         result.unwrap();
@@ -3445,11 +3543,10 @@ mod tests {
                 use std::os::unix::ffi::OsStrExt;
 
                 let path = CString::new(self.leaf.as_os_str().as_bytes())
-                    .map_err(|_| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
+                    .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
                 if unsafe { libc::mkfifo(path.as_ptr(), 0o600) } != 0 {
-                    return Err(VfError::errno(
-                        0,
-                        LocalBackend::errno(&std::io::Error::last_os_error()),
+                    return Err(std::io::Error::from_raw_os_error(
+                        (LocalBackend::errno(&std::io::Error::last_os_error())) as i32,
                     ));
                 }
             }
@@ -3609,7 +3706,7 @@ mod tests {
         let (root, mut backend) = fs("mkdir-mode-siblings");
         let fault = Arc::new(FaultScript::one(
             OpenFaultPoint::BeforeSetPermissions { index: 1 },
-            VfError::errno(None, libc::EACCES as u32),
+            std::io::Error::from_raw_os_error(libc::EACCES),
         ));
         backend.set_fault_injector(fault.clone());
         let dirs: Vec<_> = [0o700, 0o750, 0o710]
@@ -3627,8 +3724,7 @@ mod tests {
         assert!(results[0].is_ok() && results[2].is_ok());
         let error = results[1].as_ref().unwrap_err();
         assert_eq!(error.state(), vfsi_core::FailureState::Failed);
-        assert_eq!(error.cause().raw_code(), libc::EACCES as u32);
-        assert_eq!(error.cause().index(), None);
+        assert_eq!(test_native_code(error.cause()), libc::EACCES as u32);
         assert!(
             root.0.join("dir-1").is_dir(),
             "CREATE ran before mode adjustment failed"
@@ -3653,7 +3749,7 @@ mod tests {
             std::fs::write(root.0.join("file"), b"original").unwrap();
             let fault = Arc::new(FaultScript::one(
                 OpenFaultPoint::BeforeSetPermissions { index: 0 },
-                VfError::unsupported(None),
+                std::io::Error::from(std::io::ErrorKind::Unsupported),
             ));
             backend.set_fault_injector(fault.clone());
             let attrs = [VfAttrs {
@@ -3696,7 +3792,7 @@ mod tests {
             let path = format!("/dir-{mode:o}");
             let script = Arc::new(FaultScript::one(
                 OpenFaultPoint::BeforeSetPermissions { index: 0 },
-                VfError::errno(0, libc::EIO as u32),
+                std::io::Error::from_raw_os_error(libc::EIO),
             ));
             backend.set_fault_injector(script.clone());
             let attrs = VfAttrs {
@@ -3710,10 +3806,12 @@ mod tests {
             let previous = unsafe { libc::umask(0) };
             let result = backend.vmkdir_impl(&[attrs]).and_then(|outcomes| {
                 let count = outcomes.len();
-                vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+                vfsi_core::internal::collect_vec_result(Ok(outcomes), count)
+                    .map(|_| ())
+                    .map_err(vfsi_core::IndexedError::into_cause)
             });
             unsafe { libc::umask(previous) };
-            assert_eq!(result.unwrap_err().raw_code(), libc::EIO as u32);
+            assert_eq!(test_native_code(&(result.unwrap_err())), libc::EIO as u32);
             assert!(script.is_consumed());
             assert_eq!(
                 std::fs::metadata(root.0.join(path.trim_start_matches('/')))
@@ -3746,7 +3844,7 @@ mod tests {
             if let Ok(file) = &result {
                 backend.close_impl(file).unwrap();
             }
-            assert_eq!(result.unwrap_err().raw_code(), expected as u32);
+            assert_eq!(test_native_code(&(result.unwrap_err())), expected as u32);
             assert_eq!(std::fs::read(root.0.join("file")).unwrap(), b"preserved");
         }
         // Directory flags still permit directories, and no-follow constrains
@@ -3783,9 +3881,10 @@ mod tests {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap_err();
-        assert_eq!(error.raw_code(), libc::EBADF as u32);
+        assert_eq!(test_native_code(&(error)), libc::EBADF as u32);
         backend.close_impl(&file).unwrap();
         assert_eq!(std::fs::read(root.0.join("file")).unwrap(), b"preserved");
     }
@@ -3805,6 +3904,7 @@ mod tests {
                     .and_then(|outcomes| {
                         let count = outcomes.len();
                         vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                            .map_err(vfsi_core::IndexedError::into_cause)
                     })
                     .unwrap();
                 assert_eq!(result[0].offset, offset);
@@ -3883,8 +3983,8 @@ mod tests {
                 buffer: &mut last,
             },
         ]);
-        assert_eq!(result[0], Ok(3));
-        assert_eq!(result[2], Ok(3));
+        assert_eq!(*result[0].as_ref().unwrap(), 3);
+        assert_eq!(*result[2].as_ref().unwrap(), 3);
         assert_eq!(
             result[1].as_ref().unwrap_err().state(),
             FailureState::Failed
@@ -3909,7 +4009,7 @@ mod tests {
                 let op = &mut operations[0];
                 let count = op.file.read_at(&mut op.buffer[..2], op.offset).unwrap();
                 return vec![Err(OpError::unknown(
-                    VfError::errno(None, libc::EIO as u32),
+                    std::io::Error::from_raw_os_error(libc::EIO),
                     Some(IoProgress::Read(vfsi_core::api::ReadResult::buffered(
                         if self.malformed_progress {
                             999
@@ -4032,7 +4132,7 @@ mod tests {
                 assert_eq!(error.state(), FailureState::Unknown);
                 if malformed_progress {
                     assert!(error.progress().is_none());
-                    assert!(error.cause().is_transport());
+                    assert!(vfsi_core::transport_kind(error.cause()).is_some());
                 } else {
                     let Some(IoProgress::Read(prefix)) = error.progress() else {
                         panic!("missing prefix")
@@ -4106,18 +4206,18 @@ mod tests {
                     0 => vec![
                         Ok(3),
                         Err(OpError::failed(
-                            VfError::errno(99, libc::EIO as u32),
+                            std::io::Error::from_raw_os_error(libc::EIO),
                             Some(IoProgress::Write { bytes_written: 1 }),
                         )),
                         Ok(3),
                     ],
                     1 => vec![Ok(3)],
-                    2 => vec![Ok(3); 4],
+                    2 => (0..4).map(|_| Ok(3)).collect(),
                     3 => vec![Ok(4), Ok(3), Ok(3)],
                     4 => vec![
                         Ok(3),
                         Err(OpError::failed(
-                            VfError::errno(99, libc::EIO as u32),
+                            std::io::Error::from_raw_os_error(libc::EIO),
                             Some(IoProgress::Write { bytes_written: 4 }),
                         )),
                         Ok(3),
@@ -4125,7 +4225,7 @@ mod tests {
                     _ => vec![
                         Ok(3),
                         Err(OpError::failed(
-                            VfError::errno(99, libc::EIO as u32),
+                            std::io::Error::from_raw_os_error(libc::EIO),
                             Some(IoProgress::Read(vfsi_core::api::ReadResult::buffered(
                                 0, 1, false,
                             ))),
@@ -4184,8 +4284,7 @@ mod tests {
                 for (index, code) in [(1, libc::EBADF), (3, libc::EOVERFLOW)] {
                     let error = outcomes[index].as_ref().unwrap_err();
                     assert_eq!(error.state(), FailureState::NotAttempted);
-                    assert_eq!(error.cause().raw_code(), code as u32);
-                    assert_eq!(error.cause().index(), None);
+                    assert_eq!(test_native_code(error.cause()), code as u32);
                 }
                 for index in [0, 2, 4] {
                     let failed = case == 2
@@ -4194,7 +4293,6 @@ mod tests {
                         || [0, 4, 5].contains(&case) && index == 2;
                     if failed {
                         let error = outcomes[index].as_ref().unwrap_err();
-                        assert_eq!(error.cause().index(), None);
                         if case == 0 {
                             assert_eq!(error.state(), FailureState::Failed);
                             assert_eq!(
@@ -4203,7 +4301,7 @@ mod tests {
                             );
                         } else {
                             assert_eq!(error.state(), FailureState::Unknown);
-                            assert!(error.cause().is_transport());
+                            assert!(vfsi_core::transport_kind(error.cause()).is_some());
                             assert!(error.progress().is_none());
                         }
                     } else {
@@ -4256,7 +4354,7 @@ mod tests {
             .unwrap();
         let error = results[0].as_ref().unwrap_err();
         assert_eq!(error.state(), FailureState::Failed);
-        assert_eq!(error.cause().raw_code(), libc::EBADF as u32);
+        assert_eq!(test_native_code(error.cause()), libc::EBADF as u32);
         assert!(error.progress().is_none());
         assert_eq!(results[1].as_ref().unwrap().bytes_written, 3);
         assert_eq!(std::fs::read(root.0.join("file")).unwrap(), b"new");
@@ -4301,8 +4399,11 @@ mod tests {
         ] {
             let error = results[index].as_ref().unwrap_err();
             assert_eq!(error.state(), FailureState::NotAttempted);
-            assert_eq!(error.cause().raw_code(), code as u32);
-            assert_eq!(error.cause().index(), None);
+            if code == libc::EINVAL {
+                assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
+            } else {
+                assert_eq!(test_native_code(error.cause()), code as u32);
+            }
             assert!(error.progress().is_none());
         }
         assert_eq!(
@@ -4335,8 +4436,7 @@ mod tests {
             for result in &results[..2] {
                 let error = result.as_ref().unwrap_err();
                 assert_eq!(error.state(), FailureState::NotAttempted);
-                assert_eq!(error.cause().raw_code(), libc::EOVERFLOW as u32);
-                assert_eq!(error.cause().index(), None);
+                assert_eq!(test_native_code(error.cause()), libc::EOVERFLOW as u32);
                 assert!(error.progress().is_none());
             }
             assert_eq!(results[2].as_ref().unwrap().offset, 9);
@@ -4456,8 +4556,7 @@ mod tests {
                 .unwrap();
             let error = results[0].as_ref().unwrap_err();
             assert_eq!(error.state(), FailureState::Failed);
-            assert_eq!(error.cause().raw_code(), libc::EFBIG as u32);
-            assert_eq!(error.cause().index(), None);
+            assert_eq!(test_native_code(error.cause()), libc::EFBIG as u32);
             assert_eq!(
                 error.progress(),
                 Some(&IoProgress::Write { bytes_written: 3 })

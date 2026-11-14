@@ -44,13 +44,13 @@ type ReadRequestTrace = Arc<Mutex<Vec<Vec<(u64, usize)>>>>;
 
 pub(crate) struct FaultBackend {
     pub(crate) inner: LocalBackend,
-    pub(crate) read_error: Option<VfError>,
-    pub(crate) read_errors: std::collections::VecDeque<VfError>,
-    pub(crate) read_item_errors: Vec<(usize, VfError)>,
-    pub(crate) attrs_errors: std::collections::VecDeque<Option<VfError>>,
-    pub(crate) attrs_item_errors: Vec<(usize, VfError)>,
+    pub(crate) read_error: Option<IndexedError>,
+    pub(crate) read_errors: std::collections::VecDeque<IndexedError>,
+    pub(crate) read_item_errors: Vec<(usize, std::io::Error)>,
+    pub(crate) attrs_errors: std::collections::VecDeque<Option<IndexedError>>,
+    pub(crate) attrs_item_errors: Vec<(usize, std::io::Error)>,
     pub(crate) attrs_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
-    pub(crate) extent_errors: std::collections::VecDeque<VfError>,
+    pub(crate) extent_errors: std::collections::VecDeque<IndexedError>,
     pub(crate) extent_item_errors: Vec<(usize, vfsi_core::OpError)>,
     pub(crate) extent_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
     pub(crate) write_item_errors: Vec<(usize, vfsi_core::OpError)>,
@@ -61,18 +61,18 @@ pub(crate) struct FaultBackend {
     pub(crate) grow_before_read: Option<(PathBuf, Vec<u8>)>,
     pub(crate) read_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
     pub(crate) write_counts: Option<Vec<usize>>,
-    pub(crate) write_error: Option<VfError>,
+    pub(crate) write_error: Option<IndexedError>,
     pub(crate) replace_after_write_error: Option<(PathBuf, Vec<u8>)>,
-    pub(crate) read_all_errors_after_write: std::collections::VecDeque<VfError>,
+    pub(crate) read_all_errors_after_write: std::collections::VecDeque<IndexedError>,
     pub(crate) read_all_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
     pub(crate) read_all_item_errors: Vec<(usize, vfsi_core::OpError)>,
     pub(crate) write_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
     pub(crate) close_item_errors: Vec<(usize, vfsi_core::OpError)>,
-    pub(crate) consumed_close_error: Option<VfError>,
+    pub(crate) consumed_close_error: Option<std::io::Error>,
     deferred_closes: Vec<FileOperand>,
 }
 impl FaultBackend {
-    pub(crate) fn new(root: &Path, read_error: Option<VfError>) -> Self {
+    pub(crate) fn new(root: &Path, read_error: Option<IndexedError>) -> Self {
         Self {
             inner: vfsi_posix::backend(root).unwrap(),
             read_error,
@@ -110,8 +110,16 @@ impl FaultBackend {
             .push(attrs.iter().map(|attr| operand_trace(&attr.file)).collect());
         let mut injected = std::mem::take(&mut self.attrs_item_errors);
         if let Some(error) = self.attrs_errors.pop_front().flatten() {
-            let index = error.index().unwrap_or(0);
-            injected.push((index, error));
+            let (index, cause) = error.into_parts();
+            let Some(index) = index else {
+                return Err(cause);
+            };
+            if index >= attrs.len() {
+                return Err(vfsi_core::internal::errors::invalid_reply(
+                    "invalid injected metadata slot",
+                ));
+            }
+            injected.push((index, cause));
         }
         let mut results = if follow {
             self.inner.vgetattrs_impl(attrs)?
@@ -121,7 +129,7 @@ impl FaultBackend {
         for (index, error) in injected {
             // Read-only fault injection: actual sibling results come from the
             // single native batch, never inferred from a legacy prefix index.
-            results[index] = Err(if error.is_transport() {
+            results[index] = Err(if vfsi_core::transport_kind(&error).is_some() {
                 vfsi_core::OpError::unknown(error, None)
             } else {
                 vfsi_core::OpError::failed(error, None)
@@ -235,18 +243,30 @@ impl VectorBackend for FaultBackend {
         );
         let mut injected = std::mem::take(&mut self.read_item_errors);
         if let Some(error) = self.read_errors.pop_front() {
-            let Some(index) = error.index().filter(|&index| index < ops.len()) else {
-                return Err(error);
+            let (index, cause) = error.into_parts();
+            let Some(index) = index else {
+                return Err(cause);
             };
-            injected.push((index, error));
+            if index >= ops.len() {
+                return Err(vfsi_core::internal::errors::invalid_reply(
+                    "invalid injected read slot",
+                ));
+            }
+            injected.push((index, cause));
         }
         if call == self.read_error_on_call
             && let Some(error) = self.read_error.take()
         {
-            let Some(index) = error.index().filter(|&index| index < ops.len()) else {
-                return Err(error);
+            let (index, cause) = error.into_parts();
+            let Some(index) = index else {
+                return Err(cause);
             };
-            injected.push((index, error));
+            if index >= ops.len() {
+                return Err(vfsi_core::internal::errors::invalid_reply(
+                    "invalid injected read slot",
+                ));
+            }
+            injected.push((index, cause));
         }
         if let Some((path, data)) = self.grow_before_read.take() {
             use std::io::Write;
@@ -275,7 +295,7 @@ impl VectorBackend for FaultBackend {
             }
         }
         for (index, cause) in injected {
-            results[index] = Err(if cause.is_transport() {
+            results[index] = Err(if vfsi_core::transport_kind(&cause).is_some() {
                 vfsi_core::OpError::unknown(cause, None)
             } else {
                 vfsi_core::OpError::failed(cause, None)
@@ -291,10 +311,19 @@ impl VectorBackend for FaultBackend {
             .lock()
             .unwrap()
             .push(ops.iter().map(|op| operand_trace(op.file())).collect());
+        let mut rejected = std::mem::take(&mut self.write_item_errors);
         if let Some(error) = self.write_error.take() {
-            return Err(error);
+            let (index, cause) = error.into_parts();
+            let Some(index) = index else {
+                return Err(cause);
+            };
+            if index >= ops.len() {
+                return Err(vfsi_core::internal::errors::invalid_reply(
+                    "invalid injected write slot",
+                ));
+            }
+            rejected.push((index, vfsi_core::OpError::unknown(cause, None)));
         }
-        let rejected = std::mem::take(&mut self.write_item_errors);
         let result = if !rejected.is_empty() {
             let indices: Vec<_> = (0..ops.len())
                 .filter(|index| !rejected.iter().any(|(failed, _)| failed == index))
@@ -356,10 +385,19 @@ impl VectorBackend for FaultBackend {
             .lock()
             .unwrap()
             .push(pairs.iter().map(|pair| pair.src_path.clone()).collect());
+        let mut rejected = std::mem::take(&mut self.extent_item_errors);
         if let Some(error) = self.extent_errors.pop_front() {
-            return Err(error);
+            let (index, cause) = error.into_parts();
+            let Some(index) = index else {
+                return Err(cause);
+            };
+            if index >= pairs.len() {
+                return Err(vfsi_core::internal::errors::invalid_reply(
+                    "invalid injected copy slot",
+                ));
+            }
+            rejected.push((index, vfsi_core::OpError::unknown(cause, None)));
         }
-        let rejected = std::mem::take(&mut self.extent_item_errors);
         let indices: Vec<_> = (0..pairs.len())
             .filter(|index| !rejected.iter().any(|(failed, _)| failed == index))
             .collect();
@@ -385,24 +423,30 @@ impl VectorBackend for FaultBackend {
             .lock()
             .unwrap()
             .push(files.iter().map(operand_trace).collect());
-        let injected = if self.write_calls.lock().unwrap().is_empty() {
+        let mut injected = if self.write_calls.lock().unwrap().is_empty() {
             Default::default()
         } else {
             std::mem::take(&mut self.read_all_errors_after_write)
         };
-        if let Some(error) = injected
+        if let Some(position) = injected
             .iter()
-            .find(|error| error.index().is_none_or(|index| index >= files.len()))
+            .position(|error| error.index().is_none_or(|index| index >= files.len()))
         {
-            return Err(error.clone());
+            let error = injected.remove(position).unwrap();
+            return Err(if error.index().is_none() {
+                error.into_cause()
+            } else {
+                vfsi_core::internal::errors::invalid_reply("invalid injected whole-file slot")
+            });
         }
         let mut outcomes = self.inner.vread_all_with_options_impl(files, options)?;
         for (index, error) in std::mem::take(&mut self.read_all_item_errors) {
             outcomes[index] = Err(error);
         }
         for error in injected {
-            let index = error.index().expect("validated injected position");
-            outcomes[index] = Err(if error.is_transport() {
+            let (index, error) = error.into_parts();
+            let index = index.expect("validated injected position");
+            outcomes[index] = Err(if vfsi_core::transport_kind(&error).is_some() {
                 vfsi_core::OpError::unknown(error, None)
             } else {
                 vfsi_core::OpError::failed(error, None)

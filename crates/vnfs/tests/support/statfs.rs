@@ -31,7 +31,7 @@ pub fn check<F: Vfsi>(fs: &F, other: &F, directory: &str) {
     check_stats(outcomes[2].as_ref().unwrap());
     let error = outcomes[1].as_ref().unwrap_err();
     assert_eq!(error.state(), vnfs::error::FailureState::Failed);
-    assert_eq!(error.cause().index(), None);
+
     assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
     let single = fs.statfs(&paths[0]).unwrap();
     assert_eq!(single.total_bytes(), stats[0].total_bytes());
@@ -52,16 +52,16 @@ pub fn check<F: Vfsi>(fs: &F, other: &F, directory: &str) {
     check_stats(&fs.statfs(Target::File(&files[0])).unwrap());
     let error = fs.statfs_all(&[&paths[1], &paths[0]]).unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.raw_code(), libc::ENOENT as u32);
+    assert_eq!(test_native_code(error.cause()), libc::ENOENT as u32);
     let error = other.statfs_all(&[Target::File(&files[1])]).unwrap_err();
     assert_eq!(error.index(), Some(0));
-    assert_eq!(error.raw_code(), libc::EINVAL as u32);
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
     fs.close_batch(&mut files[..1]).unwrap();
     let error = fs
         .statfs_all(&[Target::File(&files[1]), Target::File(&files[0])])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.raw_code(), libc::EBADF as u32);
+    assert_eq!(test_native_code(error.cause()), libc::EBADF as u32);
     let outcomes = fs
         .vstatfs(&[
             Target::File(&files[1]),
@@ -74,7 +74,18 @@ pub fn check<F: Vfsi>(fs: &F, other: &F, directory: &str) {
     check_stats(outcomes[2].as_ref().unwrap());
     let error = outcomes[1].as_ref().unwrap_err();
     assert_eq!(error.state(), vnfs::error::FailureState::NotAttempted);
-    assert_eq!(error.cause().index(), None);
-    assert_eq!(error.cause().raw_code(), libc::EBADF as u32);
+
+    assert_eq!(test_native_code(error.cause()), libc::EBADF as u32);
     fs.close_batch(&mut files[1..]).unwrap();
+}
+
+fn test_native_code(error: &std::io::Error) -> u32 {
+    match vfsi_core::native_status(error) {
+        Some(
+            vfsi_core::StatusCode::Errno(code)
+            | vfsi_core::StatusCode::Nfs(code)
+            | vfsi_core::StatusCode::Smb(code),
+        ) => code,
+        _ => panic!("expected a native error, got {error:?}"),
+    }
 }

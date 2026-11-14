@@ -8,7 +8,7 @@
 //!
 //! ```no_run
 //! use vfsi_core::{Vfsi, VfsiExt};
-//! fn load_parts(fs: &impl Vfsi) -> vfsi_core::api::Result<Vec<Vec<u8>>> {
+//! fn load_parts(fs: &impl Vfsi) -> std::result::Result<Vec<Vec<u8>>, vfsi_core::IndexedError> {
 //!     fs.read_files(&["/file-1", "/file-2"])
 //! }
 //! ```
@@ -29,7 +29,8 @@ mod write;
 pub use write::WriteOp;
 
 pub use error::{
-    RpcError, RpcResult, STATUS_TRANSPORT, TransportKind, native_status, transport_kind,
+    IndexedError, RpcError, RpcResult, STATUS_TRANSPORT, TransportKind, native_status,
+    transport_kind,
 };
 pub use types::*;
 

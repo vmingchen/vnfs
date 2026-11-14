@@ -34,7 +34,7 @@ use super::{DirHandle, FileHandle};
 ///
 /// ```no_run
 /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
-/// fn load_parts(fs: &impl Vfsi) -> vfsi_core::api::Result<Vec<Vec<u8>>> {
+/// fn load_parts(fs: &impl Vfsi) -> std::result::Result<Vec<Vec<u8>>, vfsi_core::IndexedError> {
 ///     fs.read_files(&["/file-1", "/file-2"])
 /// }
 /// ```
@@ -51,7 +51,7 @@ use super::{DirHandle, FileHandle};
 /// input; an `OpError` records completion certainty and acknowledged I/O progress.
 /// Neither implies a committed prefix. Preserve that evidence rather than
 /// blindly replaying a failed write. Strict `VfsiExt` conveniences deliberately
-/// discard sibling outcomes when selecting one diagnostic [`crate::api::Error`].
+/// discard sibling outcomes when selecting one [`crate::IndexedError`].
 ///
 /// Allocation/traversal defaults come from [`limits`](Self::limits). Explicit
 /// per-call options override them; neither is a process-wide memory cap.
@@ -91,7 +91,7 @@ pub trait Vfsi {
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, AttrsOptions, Attributes, WriteOp};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
+    /// # fn example(fs: &impl Vfsi) -> std::result::Result<(), vfsi_core::IndexedError> {
     /// let entries = fs.getattrs_all(&["/file-1", "/link"],
     ///     AttrsOptions::new().with_fields(Attributes::MODE | Attributes::SIZE)
     ///         .with_follow_final_symlink(false))?;
@@ -126,7 +126,7 @@ pub trait Vfsi {
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, Permissions, SetAttrsOp};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
+    /// # fn example(fs: &impl Vfsi) -> std::result::Result<(), vfsi_core::IndexedError> {
     /// fs.setattrs_all(&[
     ///     SetAttrsOp::new("/file-1").permissions(Permissions::from_mode(0o640)).len(1024),
     ///     SetAttrsOp::new("/file-2").len(0),
@@ -138,7 +138,7 @@ pub trait Vfsi {
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, Target, SetAttrsOp};
-    /// # fn example<F: Vfsi>(fs: &F, file: &F::File) -> vfsi_core::api::Result<()> {
+    /// # fn example<F: Vfsi>(fs: &F, file: &F::File) -> std::result::Result<(), vfsi_core::IndexedError> {
     /// fs.setattrs_all(&[
     ///     SetAttrsOp::file(file).len(1024),
     ///     SetAttrsOp::new(Target::Path(std::path::Path::new("/other"))).len(0)
@@ -182,7 +182,7 @@ pub trait Vfsi {
         if paths.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(crate::api::Error::unsupported(None))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
 
@@ -200,7 +200,7 @@ pub trait Vfsi {
         if dirs.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(crate::api::Error::unsupported(None))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
 
@@ -333,7 +333,7 @@ pub trait Vfsi {
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, FileHandle, OpenFlags, OpenOp, WriteOp};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
+    /// # fn example(fs: &impl Vfsi) -> std::result::Result<(), vfsi_core::IndexedError> {
     /// let files = fs.open_batch(&[
     ///     OpenOp::new("/file-1", OpenFlags::WRITE),
     ///     OpenOp::new("/file-2", OpenFlags::WRITE),
@@ -364,7 +364,7 @@ pub trait Vfsi {
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, FileHandle, OpenFlags, OpenOp, WriteOp};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
+    /// # fn example(fs: &impl Vfsi) -> std::result::Result<(), vfsi_core::IndexedError> {
     /// let mut files = fs.open_batch(&[OpenOp::new("/file-1", OpenFlags::READ)])?;
     /// if let Err(error) = fs.close_batch(&mut files) {
     ///     let retained = files.iter().filter(|file| !file.is_closed()).count();
@@ -384,8 +384,8 @@ pub trait Vfsi {
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, MkDirOp};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
-    /// fs.create_dir_all("/workspace")?;
+    /// # fn example(fs: &impl Vfsi) -> std::result::Result<(), vfsi_core::IndexedError> {
+    /// fs.create_dir_all("/workspace").map_err(vfsi_core::IndexedError::unattributed)?;
     /// fs.mkdirs_all(&[MkDirOp::new("/workspace/input", 0o750), MkDirOp::new("/workspace/output", 0o700)])?;
     /// # Ok(())
     /// # }
@@ -407,7 +407,7 @@ pub trait Vfsi {
     ///
     /// ```no_run
     /// use vfsi_core::api::{CopyOptions, Vfsi, VfsiExt, WriteOp};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
+    /// # fn example(fs: &impl Vfsi) -> std::result::Result<(), vfsi_core::IndexedError> {
     /// fs.copies_all(&[
     ///     ("/input/file-1", "/output/file-1"),
     ///     ("/input/file-2", "/output/file-2"),
@@ -430,7 +430,7 @@ pub trait Vfsi {
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, RemoveMode, RemoveOptions};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
+    /// # fn example(fs: &impl Vfsi) -> std::result::Result<(), vfsi_core::IndexedError> {
     /// fs.removes_all(&["/scratch-1", "/scratch-2"],
     ///     RemoveMode::Contents, RemoveOptions::new())?;
     /// # Ok(())
@@ -451,7 +451,7 @@ pub trait Vfsi {
     ///
     /// ```no_run
     /// use vfsi_core::api::{RenameMode, Vfsi, VfsiExt};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
+    /// # fn example(fs: &impl Vfsi) -> std::result::Result<(), vfsi_core::IndexedError> {
     /// fs.renames_all(
     ///     &[("/old-1", "/new-1"), ("/old-2", "/new-2")],
     ///     Default::default(), // ordinary replacement semantics
@@ -491,7 +491,7 @@ pub trait Vfsi {
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, ListDirOptions, ControlFlow};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
+    /// # fn example(fs: &impl Vfsi) -> std::result::Result<(), vfsi_core::IndexedError> {
     /// fs.listdirs_all(&["/tree-1", "/tree-2"],
     ///     ListDirOptions::new().with_recursive(true).with_max_depth(vfsi_core::api::DepthLimit::new(8).expect("finite depth")),
     ///     |index, page| {
@@ -553,7 +553,7 @@ pub trait Vfsi {
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, StreamOptions};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
+    /// # fn example(fs: &impl Vfsi) -> std::result::Result<(), vfsi_core::IndexedError> {
     /// fs.streams_all(&["/large-1", "/large-2"],
     ///     StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(1024 * 1024).unwrap()), |index, offset, data| {
     ///         println!("{index}: {} bytes at {offset}", data.len());

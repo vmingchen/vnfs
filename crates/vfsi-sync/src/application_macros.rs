@@ -76,8 +76,7 @@ macro_rules! __vfsi_client_methods {
                     metadata.remove(0).and_then(|metadata| {
                         if metadata.is_dir() { Ok(()) } else {
                             Err(vfsi_core::OpError::failed(
-                                vfsi_core::api::Error::errno(None, libc::ENOTDIR as u32)
-                                    .with_context("visit_dirs", path), None))
+                                vfsi_core::internal::errors::with_context(std::io::Error::from_raw_os_error(libc::ENOTDIR), "visit_dirs", path), None))
                         }
                     })
                 },

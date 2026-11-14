@@ -10,8 +10,7 @@ use std::collections::VecDeque;
 
 fn validate_entry_name(name: &str) -> VfRes {
     if name.is_empty() || matches!(name, "." | "..") || name.bytes().any(|b| b == b'/' || b == 0) {
-        return Err(VfError::invalid_reply(
-            None,
+        return Err(vfsi_core::internal::errors::invalid_reply(
             "invalid SMB directory entry name",
         ));
     }
@@ -112,16 +111,20 @@ impl SmbVecFs {
         }
         match outcome.result {
             Ok(actual) if actual == identity => Ok(()),
-            Ok(_) => Err(VfError::errno(0, libc::ESTALE as u32)
-                .with_message("SMB directory probe path no longer names the retained directory")),
+            Ok(_) => Err(vfsi_core::internal::errors::with_message(
+                std::io::Error::from_raw_os_error(libc::ESTALE),
+                "SMB directory probe path no longer names the retained directory",
+            )),
             Err(error)
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
                 ) =>
             {
-                Err(VfError::errno(0, libc::ESTALE as u32)
-                    .with_message(format!("SMB directory probe path is unavailable: {error}")))
+                Err(vfsi_core::internal::errors::with_message(
+                    std::io::Error::from_raw_os_error(libc::ESTALE),
+                    format!("SMB directory probe path is unavailable: {error}"),
+                ))
             }
             Err(error) => Err(error),
         }
@@ -146,14 +149,14 @@ impl SmbVecFs {
         probe_files: bool,
     ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
         if page_size == 0 {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         let directory = self.abs_path(dir);
         let mut state = match cursor {
             Some(cursor) => {
                 let state = cursor.into_state::<SmbDirectoryCursor>()?;
                 if state.directory != directory || state.probe_files != probe_files {
-                    return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+                    return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
                 }
                 state
             }
@@ -350,7 +353,7 @@ mod tests {
         ] {
             let error = validate_entry_name(name).unwrap_err();
             assert_eq!(
-                error.transport_kind(),
+                vfsi_core::transport_kind(&(error)),
                 Some(vfsi_core::TransportKind::InvalidReply),
                 "invalid directory entry {name:?}",
             );

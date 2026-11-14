@@ -26,7 +26,19 @@ fn copy_write_transport_maps_filtered_source_indices_without_replay() {
             std::fs::write(root.0.join(name), b"ok").unwrap();
         }
         let mut backend = FaultBackend::new(&root.0, None);
-        backend.write_error = Some(VfError::transport(subset_index, "write disconnected"));
+        backend.write_error = Some(match subset_index {
+            Some(index) => IndexedError::at(
+                index,
+                vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "write disconnected",
+                ),
+            ),
+            None => IndexedError::unattributed(vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "write disconnected",
+            )),
+        });
         let calls = backend.write_calls.clone();
         Python::attach(|py| {
             let error = client(backend)
@@ -56,8 +68,16 @@ fn copy_write_transport_maps_filtered_source_indices_without_replay() {
             }
         });
         assert_eq!(calls.lock().unwrap().len(), 1);
-        assert!(!root.0.join("x").exists());
-        assert!(!root.0.join("y").exists());
+        for (slot, name) in ["x", "y"].into_iter().enumerate() {
+            if subset_index.is_some_and(|index| index < 2 && index != slot) {
+                // A per-input fault retains independently successful siblings.
+                // The single recorded vector proves they were not replayed.
+                assert_eq!(std::fs::read(root.0.join(name)).unwrap(), b"ok");
+            } else {
+                // Whole-call rejection, malformed fault, or the failed input.
+                assert!(!root.0.join(name).exists());
+            }
+        }
     }
 }
 
@@ -72,11 +92,17 @@ fn copy_write_transport_maps_again_after_an_earlier_semantic_failure() {
     backend.write_item_errors.extend([
         (
             0,
-            vfsi_core::OpError::failed(VfError::errno(None, ERR_ACCES), None),
+            vfsi_core::OpError::failed(std::io::Error::from_raw_os_error((ERR_ACCES) as i32), None),
         ),
         (
             1,
-            vfsi_core::OpError::unknown(VfError::transport(None, "later write disconnected"), None),
+            vfsi_core::OpError::unknown(
+                vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "later write disconnected",
+                ),
+                None,
+            ),
         ),
     ]);
     let calls = backend.write_calls.clone();
@@ -106,8 +132,14 @@ fn descriptor_read_transport_keeps_original_position_without_replay() {
     let root = TestRoot::new();
     let mut backend = FaultBackend::new(&root.0, None);
     backend.read_item_errors.extend([
-        (0, VfError::errno(0, ERR_NOENT)),
-        (2, VfError::transport(Some(2), "read disconnected")),
+        (0, std::io::Error::from_raw_os_error((ERR_NOENT) as i32)),
+        (
+            2,
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "read disconnected",
+            ),
+        ),
     ]);
     let calls = backend.read_calls.clone();
     Python::attach(|py| {
@@ -125,8 +157,14 @@ fn attribute_transport_keeps_original_slot_without_replay_for_both_follow_modes(
     for follow in [false, true] {
         let mut backend = FaultBackend::new(&root.0, None);
         backend.attrs_item_errors.extend([
-            (0, VfError::errno(0, ERR_NOENT)),
-            (2, VfError::transport(Some(2), "attrs disconnected")),
+            (0, std::io::Error::from_raw_os_error((ERR_NOENT) as i32)),
+            (
+                2,
+                vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "attrs disconnected",
+                ),
+            ),
         ]);
         let error = attrs_many_impl(
             &mut backend,
@@ -135,7 +173,7 @@ fn attribute_transport_keeps_original_slot_without_replay_for_both_follow_modes(
             follow,
         )
         .unwrap_err();
-        assert!(error.is_transport());
+        assert!(vfsi_core::transport_kind(error.cause()).is_some());
         assert_eq!(error.index(), Some(2));
         assert_eq!(backend.attrs_calls.lock().unwrap().len(), 1);
     }
@@ -147,8 +185,14 @@ fn range_size_lookup_transport_uses_original_path_index() {
     let root = TestRoot::new();
     let mut backend = FaultBackend::new(&root.0, None);
     backend.attrs_item_errors.extend([
-        (0, VfError::errno(0, ERR_NOENT)),
-        (1, VfError::transport(Some(1), "range attrs disconnected")),
+        (0, std::io::Error::from_raw_os_error((ERR_NOENT) as i32)),
+        (
+            1,
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "range attrs disconnected",
+            ),
+        ),
     ]);
     let reads = backend.read_calls.clone();
     Python::attach(|py| {
@@ -169,8 +213,14 @@ fn copy_identity_transport_maps_flattened_and_filtered_attribute_indices() {
     }
     let mut backend = FaultBackend::new(&root.0, None);
     backend.attrs_item_errors.extend([
-        (0, VfError::errno(0, ERR_NOENT)),
-        (2, VfError::transport(Some(2), "copy identity disconnected")),
+        (0, std::io::Error::from_raw_os_error((ERR_NOENT) as i32)),
+        (
+            2,
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "copy identity disconnected",
+            ),
+        ),
     ]);
     let writes = backend.write_calls.clone();
     Python::attach(|py| {
@@ -206,9 +256,12 @@ fn oversized_source_attribute_transport_maps_back_to_copy_index() {
     Python::initialize();
     let root = TestRoot::new();
     let mut backend = oversized_backend(&root);
-    backend.attrs_errors.push_back(Some(VfError::transport(
-        Some(0),
-        "source attrs disconnected",
+    backend.attrs_errors.push_back(Some(IndexedError::at(
+        0,
+        vfsi_core::internal::errors::transport(
+            vfsi_core::TransportKind::Other,
+            "source attrs disconnected",
+        ),
     )));
     Python::attach(|py| {
         let error = client(backend)
@@ -226,9 +279,12 @@ fn oversized_destination_attribute_transport_maps_back_to_copy_index() {
     let mut backend = oversized_backend(&root);
     backend.attrs_errors.extend([
         None,
-        Some(VfError::transport(
-            Some(0),
-            "destination attrs disconnected",
+        Some(IndexedError::at(
+            0,
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "destination attrs disconnected",
+            ),
         )),
     ]);
     Python::attach(|py| {
@@ -245,9 +301,13 @@ fn oversized_extent_transport_maps_back_to_copy_index_without_replay() {
     Python::initialize();
     let root = TestRoot::new();
     let mut backend = oversized_backend(&root);
-    backend
-        .extent_errors
-        .push_back(VfError::transport(Some(0), "extent disconnected"));
+    backend.extent_errors.push_back(IndexedError::at(
+        0,
+        vfsi_core::internal::errors::transport(
+            vfsi_core::TransportKind::Other,
+            "extent disconnected",
+        ),
+    ));
     let calls = backend.extent_calls.clone();
     Python::attach(|py| {
         let error = client(backend)
@@ -268,12 +328,15 @@ fn oversized_extent_transport_maps_again_after_semantic_filtering() {
     backend.extent_item_errors.extend([
         (
             0,
-            vfsi_core::OpError::failed(VfError::errno(None, ERR_ACCES), None),
+            vfsi_core::OpError::failed(std::io::Error::from_raw_os_error((ERR_ACCES) as i32), None),
         ),
         (
             1,
             vfsi_core::OpError::unknown(
-                VfError::transport(None, "later extent disconnected"),
+                vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "later extent disconnected",
+                ),
                 None,
             ),
         ),

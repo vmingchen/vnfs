@@ -1,9 +1,8 @@
 //! Independent vector outcomes. Result position identifies the input.
-use crate::VfError;
 
 /// Rejection before dispatch, or one outcome for every accepted input.
 /// After dispatch, infrastructure failures belong in the affected input slots.
-pub type VecResult<T> = Result<Vec<OpResult<T>>, VfError>;
+pub type VecResult<T> = Result<Vec<OpResult<T>>, std::io::Error>;
 pub type OpResult<T> = Result<T, OpError>;
 
 /// Knowledge about an unsuccessful logical operation, not retry permission.
@@ -37,26 +36,25 @@ pub enum IoProgress {
 }
 
 /// One input's failure, with native cause and completion knowledge.
-/// The vector slot supplies identity; the cause's legacy index is cleared.
+/// The vector slot supplies identity; the cause has no logical input index.
 /// Progress storage is allocated only for errors with confirmed I/O progress.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct OpError {
-    cause: VfError,
+    cause: std::io::Error,
     state: FailureState,
     progress: Option<Box<IoProgress>>,
 }
 impl OpError {
-    pub fn not_attempted(cause: VfError) -> Self {
+    pub fn not_attempted(cause: std::io::Error) -> Self {
         Self::new(cause, FailureState::NotAttempted, None)
     }
-    pub fn failed(cause: VfError, progress: Option<IoProgress>) -> Self {
+    pub fn failed(cause: std::io::Error, progress: Option<IoProgress>) -> Self {
         Self::new(cause, FailureState::Failed, progress)
     }
-    pub fn unknown(cause: VfError, progress: Option<IoProgress>) -> Self {
+    pub fn unknown(cause: std::io::Error, progress: Option<IoProgress>) -> Self {
         Self::new(cause, FailureState::Unknown, progress)
     }
-    fn new(mut cause: VfError, state: FailureState, progress: Option<IoProgress>) -> Self {
-        cause.clear_input_index();
+    fn new(cause: std::io::Error, state: FailureState, progress: Option<IoProgress>) -> Self {
         Self {
             cause,
             state,
@@ -69,10 +67,10 @@ impl OpError {
         operation: &'static str,
         path: impl Into<std::path::PathBuf>,
     ) -> Self {
-        self.cause = self.cause.with_context(operation, path);
+        self.cause = crate::internal::errors::with_context(self.cause, operation, path);
         self
     }
-    pub fn cause(&self) -> &VfError {
+    pub fn cause(&self) -> &std::io::Error {
         &self.cause
     }
     pub const fn state(&self) -> FailureState {
@@ -83,7 +81,7 @@ impl OpError {
     }
     /// Move the cause, completion state and confirmed progress into an adapter
     /// without cloning an owned read prefix.
-    pub fn into_parts(self) -> (VfError, FailureState, Option<IoProgress>) {
+    pub fn into_parts(self) -> (std::io::Error, FailureState, Option<IoProgress>) {
         (
             self.cause,
             self.state,
@@ -92,7 +90,7 @@ impl OpError {
     }
     /// Deliberately discard completion/progress information for a lossy adapter.
     /// This conversion provides no execution-order or retry guarantee.
-    pub fn into_cause(self) -> VfError {
+    pub fn into_cause(self) -> std::io::Error {
         self.cause
     }
 }
@@ -105,4 +103,10 @@ impl std::error::Error for OpError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.cause)
     }
+}
+
+/// Explicitly retain a shared original without moving or copying confirmed I/O
+/// progress. Kept in backend support, outside the application error API.
+pub fn share_op_cause(error: &mut OpError) -> std::sync::Arc<std::io::Error> {
+    crate::error::standard::share_in_place(&mut error.cause)
 }

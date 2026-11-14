@@ -1,5 +1,5 @@
 //! Independent completion decoding for fixed-width logical operations in NFS compounds.
-use vfsi_core::{OpError, OpResult, VfError};
+use vfsi_core::{OpError, OpResult};
 
 /// Preserve every complete logical result before a failed protocol operation.
 /// A nonempty vector advances past both successes and the actual failed input.
@@ -10,30 +10,39 @@ pub(super) fn decode_fixed<const OPS: usize, T>(
     status: u32,
     mut op_status: impl FnMut(usize) -> u32,
     mut extract: impl FnMut(usize) -> OpResult<T>,
-) -> Result<Vec<OpResult<T>>, VfError> {
+) -> Result<Vec<OpResult<T>>, std::io::Error> {
     if nops == 0 {
         return Err(if status == 0 {
-            VfError::invalid_reply(None, "missing compound SEQUENCE")
+            vfsi_core::internal::errors::invalid_reply("missing compound SEQUENCE")
         } else {
-            VfError::nfs(None, status)
+            vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(status))
         });
     }
     let sequence = op_status(0);
     if sequence != 0 {
-        return Err(VfError::nfs(None, sequence));
+        return Err(vfsi_core::internal::errors::from_status(
+            vfsi_core::StatusCode::Nfs(sequence),
+        ));
     }
     let mut out = Vec::with_capacity(requested);
     for input in 0..requested {
         let start = 1 + OPS * input;
         for index in start..start + OPS {
             if index >= nops {
-                let cause = VfError::invalid_reply(None, "missing logical operation result");
-                out.extend((input..requested).map(|_| Err(OpError::unknown(cause.clone(), None))));
+                let cause =
+                    vfsi_core::internal::errors::invalid_reply("missing logical operation result");
+                out.extend(
+                    vfsi_core::internal::errors::fanout(cause, (input..requested).len())
+                        .map(|cause| Err(OpError::unknown(cause, None))),
+                );
                 return Ok(out);
             }
             let failed = op_status(index);
             if failed != 0 {
-                out.push(Err(OpError::failed(VfError::nfs(None, failed), None)));
+                out.push(Err(OpError::failed(
+                    vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(failed)),
+                    None,
+                )));
                 return Ok(out);
             }
         }
@@ -47,16 +56,27 @@ pub(super) fn decode_fixed<const OPS: usize, T>(
 pub(super) fn finish_slots<T>(
     mut slots: Vec<Option<OpResult<T>>>,
     submitted: &[(usize, usize, usize)],
-    cause: VfError,
+    cause: std::io::Error,
 ) -> Vec<OpResult<T>> {
+    let missing = slots.iter().filter(|slot| slot.is_none()).count();
+    let mut causes = vfsi_core::internal::errors::fanout(cause, missing);
     for &(input, _, _) in submitted {
         if slots[input].is_none() {
-            slots[input] = Some(Err(OpError::unknown(cause.clone(), None)));
+            slots[input] = Some(Err(OpError::unknown(
+                causes.next().expect("missing slot cause"),
+                None,
+            )));
         }
     }
     slots
         .into_iter()
-        .map(|slot| slot.unwrap_or_else(|| Err(OpError::not_attempted(cause.clone()))))
+        .map(|slot| {
+            slot.unwrap_or_else(|| {
+                Err(OpError::not_attempted(
+                    causes.next().expect("missing slot cause"),
+                ))
+            })
+        })
         .collect()
 }
 
@@ -72,14 +92,15 @@ impl super::NfsClient {
         mut add: impl FnMut(&mut super::Compound, &T, usize),
         mut extract: impl FnMut(&super::CompoundRes, usize, usize) -> OpResult<R>,
     ) -> vfsi_core::VecResult<R> {
-        use vfsi_core::error_from_rpc;
         let safety = if super::batch_is_read_only(tag) {
             super::RequestSafety::ReadOnly
         } else {
             super::RequestSafety::NonIdempotentMutation
         };
         if !ops.is_empty() && self.max_request_arg_bytes() <= crate::compound::SEQUENCE_XDR_BYTES {
-            return Err(VfError::nfs(None, nfsv41_sys::nfsstat4_NFS4ERR_REQ_TOO_BIG));
+            return Err(vfsi_core::internal::errors::from_status(
+                vfsi_core::StatusCode::Nfs(nfsv41_sys::nfsstat4_NFS4ERR_REQ_TOO_BIG),
+            ));
         }
         let mut out = Vec::with_capacity(ops.len());
         let mut dispatched = false;
@@ -89,12 +110,13 @@ impl super::NfsClient {
             let capacity = match self.op_budget_for(tag, 1 + OPS).batch_capacity(OPS) {
                 Ok(capacity) => capacity.min(max_items),
                 Err(error) => {
-                    let cause = error_from_rpc(error, None);
+                    let cause = vfsi_core::internal::errors::from_rpc(error);
                     if !dispatched {
                         return Err(cause);
                     }
                     out.extend(
-                        (start..ops.len()).map(|_| Err(OpError::not_attempted(cause.clone()))),
+                        vfsi_core::internal::errors::fanout(cause, (start..ops.len()).len())
+                            .map(|cause| Err(OpError::not_attempted(cause))),
                     );
                     break;
                 }
@@ -110,11 +132,16 @@ impl super::NfsClient {
                 end += 1;
             }
             if end == start {
-                let cause = VfError::nfs(None, nfsv41_sys::nfsstat4_NFS4ERR_REP_TOO_BIG);
+                let cause = vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                    nfsv41_sys::nfsstat4_NFS4ERR_REP_TOO_BIG,
+                ));
                 if !dispatched {
                     return Err(cause);
                 }
-                out.extend((start..ops.len()).map(|_| Err(OpError::not_attempted(cause.clone()))));
+                out.extend(
+                    vfsi_core::internal::errors::fanout(cause, (start..ops.len()).len())
+                        .map(|cause| Err(OpError::not_attempted(cause))),
+                );
                 break;
             }
             let mut compound = super::Compound::new();
@@ -130,31 +157,36 @@ impl super::NfsClient {
                 Ok(false) => {
                     // One oversized input is a local rejection. Continue with
                     // independent siblings and restore normal packing.
-                    out.push(Err(OpError::not_attempted(VfError::nfs(
-                        None,
-                        nfsv41_sys::nfsstat4_NFS4ERR_REQ_TOO_BIG,
-                    ))));
+                    out.push(Err(OpError::not_attempted(
+                        vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                            nfsv41_sys::nfsstat4_NFS4ERR_REQ_TOO_BIG,
+                        )),
+                    )));
                     max_items = usize::MAX;
                     continue;
                 }
                 Ok(true) => {}
                 Err(error) => {
-                    let cause = error_from_rpc(error, None);
+                    let cause = vfsi_core::internal::errors::from_rpc(error);
                     if !dispatched {
                         return Err(cause);
                     }
                     out.extend(
-                        (start..ops.len()).map(|_| Err(OpError::not_attempted(cause.clone()))),
+                        vfsi_core::internal::errors::fanout(cause, (start..ops.len()).len())
+                            .map(|cause| Err(OpError::not_attempted(cause))),
                     );
                     break;
                 }
             }
             if let Err(error) = self.ensure_usable() {
-                let cause = error_from_rpc(error, None);
+                let cause = vfsi_core::internal::errors::from_rpc(error);
                 if !dispatched {
                     return Err(cause);
                 }
-                out.extend((start..ops.len()).map(|_| Err(OpError::not_attempted(cause.clone()))));
+                out.extend(
+                    vfsi_core::internal::errors::fanout(cause, (start..ops.len()).len())
+                        .map(|cause| Err(OpError::not_attempted(cause))),
+                );
                 break;
             }
             #[cfg(feature = "test-faults")]
@@ -186,17 +218,27 @@ impl super::NfsClient {
                 if !dispatched {
                     return Err(cause);
                 }
-                out.extend((start..ops.len()).map(|_| Err(OpError::not_attempted(cause.clone()))));
+                out.extend(
+                    vfsi_core::internal::errors::fanout(cause, (start..ops.len()).len())
+                        .map(|cause| Err(OpError::not_attempted(cause))),
+                );
                 break;
             }
             dispatched = true;
             let reply = match self.call_compound_with_safety(&mut compound, safety) {
                 Ok(reply) => reply,
                 Err(error) => {
-                    let cause = error_from_rpc(error, None);
-                    out.extend((start..end).map(|_| Err(OpError::unknown(cause.clone(), None))));
+                    let cause = vfsi_core::internal::errors::from_rpc(error);
                     out.extend(
-                        (end..ops.len()).map(|_| Err(OpError::not_attempted(cause.clone()))),
+                        vfsi_core::internal::errors::fanout(cause, ops.len() - start)
+                            .enumerate()
+                            .map(|(offset, cause)| {
+                                Err(if offset < end - start {
+                                    OpError::unknown(cause, None)
+                                } else {
+                                    OpError::not_attempted(cause)
+                                })
+                            }),
                     );
                     break;
                 }
@@ -239,8 +281,17 @@ impl super::NfsClient {
                 }
                 && let Err(cause) = injector.check(&point)
             {
-                out.extend((start..end).map(|_| Err(OpError::unknown(cause.clone(), None))));
-                out.extend((end..ops.len()).map(|_| Err(OpError::not_attempted(cause.clone()))));
+                out.extend(
+                    vfsi_core::internal::errors::fanout(cause, ops.len() - start)
+                        .enumerate()
+                        .map(|(offset, cause)| {
+                            Err(if offset < end - start {
+                                OpError::unknown(cause, None)
+                            } else {
+                                OpError::not_attempted(cause)
+                            })
+                        }),
+                );
                 break;
             }
             let bad = (0..reply.nops()).find(|&index| reply.op_status(index) != 0);
@@ -291,19 +342,24 @@ impl super::NfsClient {
                         .op_budget_for(tag, 1 + OPS)
                         .batch_capacity(OPS)
                         .unwrap_or(0);
-                    if cause.status().is_some() && smaller > 0 && smaller < end - start {
+                    if vfsi_core::native_status(&(cause)).is_some()
+                        && smaller > 0
+                        && smaller < end - start
+                    {
                         max_items = smaller;
                         continue;
                     }
-                    out.extend((start..end).map(|_| {
-                        Err(if cause.is_transport() {
-                            OpError::unknown(cause.clone(), None)
-                        } else {
-                            OpError::not_attempted(cause.clone())
-                        })
-                    }));
+                    let uncertain = vfsi_core::transport_kind(&cause).is_some();
                     out.extend(
-                        (end..ops.len()).map(|_| Err(OpError::not_attempted(cause.clone()))),
+                        vfsi_core::internal::errors::fanout(cause, ops.len() - start)
+                            .enumerate()
+                            .map(|(offset, cause)| {
+                                Err(if offset < end - start && uncertain {
+                                    OpError::unknown(cause, None)
+                                } else {
+                                    OpError::not_attempted(cause)
+                                })
+                            }),
                     );
                     break;
                 }
@@ -330,7 +386,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(results.len(), 2);
-            assert_eq!(results[0], Ok(0));
+            assert_eq!((results[0]).as_ref().unwrap(), &(0));
             assert_eq!(
                 results[1].as_ref().unwrap_err().state(),
                 vfsi_core::FailureState::Failed
@@ -338,7 +394,7 @@ mod tests {
         }
         for nops in 5..9 {
             let results = decode_fixed::<4, _>(3, nops, 0, |_| 0, Ok).unwrap();
-            assert_eq!(results[0], Ok(0));
+            assert_eq!((results[0]).as_ref().unwrap(), &(0));
             assert_eq!(results.len(), 3);
             assert!(
                 results[1..]
@@ -360,7 +416,7 @@ mod tests {
                 extracted.push(index);
                 if index == 1 {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "bad READ length"),
+                        vfsi_core::internal::errors::invalid_reply("bad READ length"),
                         None,
                     ))
                 } else {
@@ -370,8 +426,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(extracted, [0, 1, 2]);
-        assert_eq!(results[0], Ok(0));
-        assert_eq!(results[2], Ok(2));
+        assert_eq!((results[0]).as_ref().unwrap(), &(0));
+        assert_eq!((results[2]).as_ref().unwrap(), &(2));
         assert_eq!(
             results[1].as_ref().unwrap_err().state(),
             vfsi_core::FailureState::Unknown
@@ -384,9 +440,9 @@ mod tests {
         let results = finish_slots(
             slots,
             &[(1, 1, 3), (2, 3, 5)],
-            VfError::transport(None, "lost reply"),
+            vfsi_core::internal::errors::transport(vfsi_core::TransportKind::Other, "lost reply"),
         );
-        assert_eq!(results[0], Ok(7));
+        assert_eq!((results[0]).as_ref().unwrap(), &(7));
         assert_eq!(
             results[1].as_ref().unwrap_err().state(),
             vfsi_core::FailureState::Unknown
@@ -406,28 +462,32 @@ mod tests {
         for statuses in [vec![0, 0, 0, 0, 13], vec![0, 0, 0, 13]] {
             let results = decode_fixed::<2, _>(3, statuses.len(), 13, |i| statuses[i], Ok).unwrap();
             assert_eq!(results.len(), 2);
-            assert_eq!(results[0], Ok(0));
-            assert_eq!(results[1].as_ref().unwrap_err().cause().raw_code(), 13);
+            assert_eq!((results[0]).as_ref().unwrap(), &(0));
+            assert_eq!(
+                crate::test_native_code(results[1].as_ref().unwrap_err().cause()),
+                13
+            );
         }
     }
     #[test]
     fn metadata_sequence_rejection_is_not_an_item_failure() {
         assert_eq!(
-            decode_fixed::<2, ()>(4, 1, 10008, |_| 10008, |_| Ok(()))
-                .unwrap_err()
-                .raw_code(),
+            crate::test_native_code(
+                &(decode_fixed::<2, ()>(4, 1, 10008, |_| 10008, |_| Ok(())).unwrap_err())
+            ),
             10008
         );
         assert!(
-            decode_fixed::<2, ()>(4, 0, 0, |_| unreachable!(), |_| Ok(()))
-                .unwrap_err()
-                .is_transport()
+            vfsi_core::transport_kind(
+                &(decode_fixed::<2, ()>(4, 0, 0, |_| unreachable!(), |_| Ok(())).unwrap_err())
+            )
+            .is_some()
         );
     }
     #[test]
     fn metadata_truncation_preserves_validated_successes() {
         let results = decode_fixed::<2, _>(3, 3, 0, |_| 0, Ok).unwrap();
-        assert_eq!(results[0], Ok(0));
+        assert_eq!((results[0]).as_ref().unwrap(), &(0));
         assert_eq!(results.len(), 3);
         for result in &results[1..] {
             assert_eq!(
@@ -439,6 +499,12 @@ mod tests {
     #[test]
     fn metadata_full_reply_keeps_cardinality_and_input_order() {
         let results = decode_fixed::<2, _>(3, 7, 0, |_| 0, |i| Ok(i * 10)).unwrap();
-        assert_eq!(results, [Ok(0), Ok(10), Ok(20)]);
+        assert_eq!(
+            (results)
+                .iter()
+                .map(|result| result.as_ref().unwrap())
+                .collect::<Vec<_>>(),
+            [&(0), &(10), &(20)]
+        );
     }
 }

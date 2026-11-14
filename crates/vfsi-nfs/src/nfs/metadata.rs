@@ -273,8 +273,8 @@ fn read_u64(buf: &[u8], off: &mut usize) -> VfResult<u64> {
     Ok(v)
 }
 
-fn attr_decode_error() -> VfError {
-    VfError::invalid_reply(0, "malformed NFS attribute list")
+fn attr_decode_error() -> std::io::Error {
+    vfsi_core::internal::errors::invalid_reply("malformed NFS attribute list")
 }
 
 /// Read an XDR `nfstime4`: `int64 seconds; uint32 nseconds` (12 bytes).
@@ -408,7 +408,8 @@ impl NfsVecFs {
             match result {
                 Ok(results) => output.extend(results),
                 Err(cause) => output.extend(
-                    (0..count).map(|_| Err(vfsi_core::OpError::not_attempted(cause.clone()))),
+                    vfsi_core::internal::errors::fanout(cause, (0..count).len())
+                        .map(|cause| Err(vfsi_core::OpError::not_attempted(cause))),
                 ),
             }
             start += count;
@@ -434,12 +435,12 @@ impl NfsVecFs {
         let mut guards = Vec::with_capacity(attrs.len());
         for (index, attr) in attrs.iter().enumerate() {
             let file = if !attr.masks.difference(SETTABLE).is_empty() {
-                Err(VfError::unsupported(None))
+                Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
             } else if let Some(fd) = attr.file.fd() {
                 self.open_files
                     .get(&fd)
                     .map(|open| crate::client::FileRef::Handle(open.fh.clone()))
-                    .ok_or_else(|| VfError::errno(None, ERR_EBADF))
+                    .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))
             } else {
                 self.server_vf_path(&attr.file)
                     .map(|path| crate::client::FileRef::Path(path_bytes(&path).to_vec()))
@@ -482,8 +483,12 @@ impl NfsVecFs {
             {
                 Ok(result) => result,
                 Err(cause) => {
-                    for &index in &indices[start..] {
-                        slots[index] = Some(Err(OpError::not_attempted(cause.clone())));
+                    {
+                        let causes =
+                            vfsi_core::internal::errors::fanout(cause, indices[start..].len());
+                        for (&index, cause) in indices[start..].iter().zip(causes) {
+                            slots[index] = Some(Err(OpError::not_attempted(cause)));
+                        }
                     }
                     break;
                 }
@@ -494,7 +499,7 @@ impl NfsVecFs {
                     .get(index)
                     .and_then(|result| result.as_ref().err())
                     .is_some_and(|error| {
-                        error.cause().status()
+                        vfsi_core::native_status(error.cause())
                             == Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_SAME))
                     })
             });
@@ -510,7 +515,9 @@ impl NfsVecFs {
                     nfs_ftype4_NF4LNK,
                     attrs[index].masks,
                 ) {
-                Some(OpError::not_attempted(VfError::unsupported(None)))
+                Some(OpError::not_attempted(std::io::Error::from(
+                    std::io::ErrorKind::Unsupported,
+                )))
             } else {
                 None
             };
@@ -520,7 +527,9 @@ impl NfsVecFs {
                     match self.vsetattrs_phased_nfs(std::slice::from_ref(&attrs[index]), follow) {
                         Ok(mut results) if results.len() == 1 => results.pop().unwrap(),
                         Ok(_) => Err(OpError::unknown(
-                            VfError::invalid_reply(None, "invalid SETATTR repair count"),
+                            vfsi_core::internal::errors::invalid_reply(
+                                "invalid SETATTR repair count",
+                            ),
                             None,
                         )),
                         Err(cause) => Err(OpError::not_attempted(cause)),
@@ -534,7 +543,7 @@ impl NfsVecFs {
             .map(|slot| {
                 slot.unwrap_or_else(|| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "missing SETATTR outcome"),
+                        vfsi_core::internal::errors::invalid_reply("missing SETATTR outcome"),
                         None,
                     ))
                 })
@@ -560,7 +569,9 @@ impl NfsVecFs {
         let mut refs = Vec::with_capacity(attrs.len());
         for (index, attr) in attrs.iter().enumerate() {
             if !attr.masks.difference(SETTABLE).is_empty() {
-                slots[index] = Some(Err(OpError::not_attempted(VfError::unsupported(None))));
+                slots[index] = Some(Err(OpError::not_attempted(std::io::Error::from(
+                    std::io::ErrorKind::Unsupported,
+                ))));
             } else {
                 candidates.push(index);
                 refs.push(&attr.file);
@@ -575,7 +586,9 @@ impl NfsVecFs {
                 Ok((_, kind))
                     if nofollow_symlink_setattr_is_unsupported(follow, kind, attr.masks) =>
                 {
-                    slots[index] = Some(Err(OpError::not_attempted(VfError::unsupported(None))));
+                    slots[index] = Some(Err(OpError::not_attempted(std::io::Error::from(
+                        std::io::ErrorKind::Unsupported,
+                    ))));
                 }
                 Ok((fh, _)) => {
                     indices.push(index);
@@ -603,9 +616,8 @@ impl NfsVecFs {
         }
         let results = match self.nfs.setattr_many(&ops) {
             Ok(results) => results,
-            Err(cause) => ops
-                .iter()
-                .map(|_| Err(OpError::not_attempted(cause.clone())))
+            Err(cause) => vfsi_core::internal::errors::fanout(cause, ops.len())
+                .map(|cause| Err(OpError::not_attempted(cause)))
                 .collect(),
         };
         for (index, result) in indices.into_iter().zip(results) {
@@ -616,7 +628,9 @@ impl NfsVecFs {
             .map(|slot| {
                 slot.unwrap_or_else(|| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "missing phased SETATTR outcome"),
+                        vfsi_core::internal::errors::invalid_reply(
+                            "missing phased SETATTR outcome",
+                        ),
                         None,
                     ))
                 })
@@ -665,9 +679,8 @@ impl NfsVecFs {
         }
         #[cfg(feature = "test-faults")]
         if let Err(cause) = self.inject_open_fault(OpenFaultPoint::BeforeGetattrDispatch) {
-            return Ok(attrs
-                .iter()
-                .map(|_| Err(OpError::not_attempted(cause.clone())))
+            return Ok(vfsi_core::internal::errors::fanout(cause, attrs.len())
+                .map(|cause| Err(OpError::not_attempted(cause)))
                 .collect());
         }
         let mut slots: Vec<Option<vfsi_core::OpResult<()>>> =
@@ -680,7 +693,7 @@ impl NfsVecFs {
                     .open_files
                     .get(fd)
                     .map(|open| crate::client::FileRef::Handle(open.fh.clone()))
-                    .ok_or_else(|| VfError::errno(index, ERR_EBADF)),
+                    .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32)),
                 _ => self.server_vf_path(&attr.file).map(|path| {
                     crate::client::FileRef::Path(vfsi_core::path::path_bytes(&path).to_vec())
                 }),
@@ -699,8 +712,11 @@ impl NfsVecFs {
         let results = match self.nfs.getattr_path_with_bitmap(&ops) {
             Ok(results) => results,
             Err(error) => {
-                for index in indices {
-                    slots[index] = Some(Err(OpError::not_attempted(error.clone())));
+                {
+                    let causes = vfsi_core::internal::errors::fanout(error, (indices).len());
+                    for (index, error) in (indices).into_iter().zip(causes) {
+                        slots[index] = Some(Err(OpError::not_attempted(error)));
+                    }
                 }
                 return Ok(slots
                     .into_iter()
@@ -721,7 +737,7 @@ impl NfsVecFs {
                     if follow && attrs[index].ftype == VfType::Symlink {
                         self.stat_one_following(index, &mut attrs[index])
                             .map_err(|error| {
-                                if error.is_transport() {
+                                if vfsi_core::transport_kind(&(error)).is_some() {
                                     vfsi_core::OpError::unknown(error, None)
                                 } else {
                                     vfsi_core::OpError::failed(error, None)
@@ -732,9 +748,9 @@ impl NfsVecFs {
                     }
                 });
             if operation.as_ref().is_err_and(|error| {
-                !error.cause().is_transport()
+                !vfsi_core::transport_kind(error.cause()).is_some()
                     && matches!(
-                        error.cause().status(),
+                        vfsi_core::native_status(error.cause()),
                         Some(vfsi_core::StatusCode::Nfs(
                             nfsstat4_NFS4ERR_INVAL | nfsstat4_NFS4ERR_SYMLINK
                         ))
@@ -761,7 +777,9 @@ impl NfsVecFs {
             .map(|slot| {
                 slot.unwrap_or_else(|| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "missing merged attribute outcome"),
+                        vfsi_core::internal::errors::invalid_reply(
+                            "missing merged attribute outcome",
+                        ),
                         None,
                     ))
                 })
@@ -780,9 +798,8 @@ impl NfsVecFs {
         let resolved = match self.resolve_files_nfs(&files, follow) {
             Ok(resolved) => resolved,
             Err(error) => {
-                return Ok(attrs
-                    .iter()
-                    .map(|_| Err(OpError::unknown(error.clone(), None)))
+                return Ok(vfsi_core::internal::errors::fanout(error, attrs.len())
+                    .map(|error| Err(OpError::unknown(error, None)))
                     .collect());
             }
         };
@@ -813,8 +830,9 @@ impl NfsVecFs {
                 }
             }
             Err(error) => {
-                for index in indices {
-                    outcomes[index] = Some(Err(OpError::not_attempted(error.clone())));
+                let causes = vfsi_core::internal::errors::fanout(error, (indices).len());
+                for (index, error) in (indices).into_iter().zip(causes) {
+                    outcomes[index] = Some(Err(OpError::not_attempted(error)));
                 }
             }
         }
@@ -823,7 +841,9 @@ impl NfsVecFs {
             .map(|result| {
                 result.unwrap_or_else(|| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "missing phased metadata result"),
+                        vfsi_core::internal::errors::invalid_reply(
+                            "missing phased metadata result",
+                        ),
                         None,
                     ))
                 })
@@ -832,18 +852,14 @@ impl NfsVecFs {
     }
 
     /// stat one path following final-component symlinks (phased).
-    fn stat_one_following(&mut self, index: usize, a: &mut VfAttrs) -> VfResult<()> {
-        let path = self
-            .server_vf_path(&a.file)
-            .map_err(|e| e.with_index(index))?;
-        let fh = self
-            .resolve_follow(&path)
-            .map_err(|e| e.with_index(index))?;
+    fn stat_one_following(&mut self, _index: usize, a: &mut VfAttrs) -> VfResult<()> {
+        let path = self.server_vf_path(&a.file)?;
+        let fh = self.resolve_follow(&path)?;
         let ids = request_mask_to_attr_list(&a.masks);
         let (bitmap, list) = self
             .nfs
             .getattr_with_bitmap(&fh, &ids)
-            .map_err(|e| vfsi_core::error_from_rpc(e, index))?;
+            .map_err(vfsi_core::internal::errors::from_rpc)?;
         let v = parse_metadata_attrs(&bitmap, &list)?;
         apply_attrs(a, &v);
         Ok(())
@@ -854,12 +870,12 @@ impl NfsVecFs {
         let (bitmap, list) = self
             .nfs
             .getattr_with_bitmap(fh, &[FATTR4_SIZE])
-            .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
+            .map_err(vfsi_core::internal::errors::from_rpc)?;
         let values = parse_returned_attrs(&bitmap, &list)?;
         if values.present.contains(AttrMask::SIZE) {
             Ok(values.size)
         } else {
-            Err(VfError::unsupported(0))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
 }
@@ -895,7 +911,7 @@ mod tests {
                     } else {
                         let error = result.unwrap_err();
                         assert_eq!(
-                            error.transport_kind(),
+                            vfsi_core::transport_kind(&(error)),
                             Some(vfsi_core::TransportKind::InvalidReply)
                         );
                     }
@@ -1143,6 +1159,7 @@ mod tests {
             .collect();
         backend
             .vwrite_impl(&borrow_writes(&writes))
+            .map_err(vfsi_core::IndexedError::unattributed)
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
@@ -1199,7 +1216,7 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.index(), Some(1));
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
         backend
             .remove_paths_impl(&[Path::new(&root)], true)
             .unwrap();
@@ -1300,12 +1317,14 @@ mod tests {
                         fs.getattrsv_impl(&mut attrs, false),
                         1,
                     )
-                    .map(|_| ()),
+                    .map(|_| ())
+                    .map_err(vfsi_core::IndexedError::into_cause),
                     "phased" => vfsi_core::internal::collect_vec_result(
                         fs.getattr_phased_results(&mut attrs, false),
                         1,
                     )
-                    .map(|_| ()),
+                    .map(|_| ())
+                    .map_err(vfsi_core::IndexedError::into_cause),
                     _ => fs.stat_one_following(0, &mut attrs[0]),
                 };
                 fs.nfs.replace_test_rpc(original);
@@ -1314,7 +1333,7 @@ mod tests {
                 if omit_type {
                     let error = result.expect_err("metadata must not invent an omitted TYPE");
                     assert_eq!(
-                        error.transport_kind(),
+                        vfsi_core::transport_kind(&error),
                         Some(vfsi_core::TransportKind::InvalidReply)
                     );
                     continue;

@@ -12,7 +12,7 @@ impl Auto {
         let clients: Vec<_> = self
             .connections
             .lock()
-            .map_err(|_| VfError::errno(0, libc::EIO as u32))?
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EIO))?
             .values()
             .map(|connection| connection.client.clone())
             .collect();
@@ -95,13 +95,18 @@ impl Auto {
         let mut resolved = Vec::with_capacity(dirs.len());
         for (index, dir) in dirs.iter().enumerate() {
             let cause = if !Arc::ptr_eq(&self.owner, &dir.owner) || dir.is_closed() {
-                Some(
-                    VfError::errno(None, libc::EBADF as u32)
-                        .with_context("vremove_dir_contents", &dir.path),
-                )
+                Some(vfsi_core::internal::errors::with_context(
+                    std::io::Error::from_raw_os_error(libc::EBADF),
+                    "vremove_dir_contents",
+                    &dir.path,
+                ))
             } else if matches!(&dir.route,Route::Nfs(connection) if AuthSysIdentity::current().as_ref()!=Some(&connection.credentials))
             {
-                Some(VfError::errno(None, libc::EACCES as u32).with_context("auto_auth", &dir.path))
+                Some(vfsi_core::internal::errors::with_context(
+                    std::io::Error::from_raw_os_error(libc::EACCES),
+                    "auto_auth",
+                    &dir.path,
+                ))
             } else {
                 None
             };
@@ -220,9 +225,8 @@ impl Auto {
                 let result = if same_route(index) {
                     outcomes.next().expect("validated hard-link route count")
                 } else {
-                    Err(OpError::not_attempted(VfError::errno(
-                        None,
-                        libc::EXDEV as u32,
+                    Err(OpError::not_attempted(std::io::Error::from_raw_os_error(
+                        libc::EXDEV,
                     )))
                 };
                 output.push(result.map_err(|error| error.with_context("vhardlink", link.as_ref())));
@@ -253,7 +257,7 @@ impl Auto {
                 Target::File(file) => {
                     let valid = self.check_owner(file, index).and_then(|()| {
                         if file.is_closed() {
-                            Err(VfError::errno(index, libc::EBADF as u32))
+                            Err(std::io::Error::from_raw_os_error(libc::EBADF))
                         } else {
                             Ok(())
                         }
@@ -299,13 +303,15 @@ impl Auto {
                 Ok(_) => (start..end)
                     .map(|_| {
                         Err(OpError::unknown(
-                            VfError::invalid_reply(None, "invalid routed statfs outcome count"),
+                            vfsi_core::internal::errors::invalid_reply(
+                                "invalid routed statfs outcome count",
+                            ),
                             None,
                         ))
                     })
                     .collect(),
-                Err(error) => (start..end)
-                    .map(|_| Err(OpError::not_attempted(error.clone())))
+                Err(error) => vfsi_core::internal::errors::fanout(error, end - start)
+                    .map(|error| Err(OpError::not_attempted(error)))
                     .collect(),
             };
             for (local, result) in results.into_iter().enumerate() {
@@ -353,7 +359,7 @@ impl Auto {
                 if let Target::File(file) = *op.target() {
                     self.check_owner(file, index)?;
                     if file.is_closed() {
-                        return Err(VfError::errno(None, libc::EBADF as u32));
+                        return Err(std::io::Error::from_raw_os_error(libc::EBADF));
                     }
                 }
                 vfsi_core::internal::validate_setattrs(op).map(|_| ())
@@ -437,7 +443,7 @@ impl Auto {
                 Target::File(file) => {
                     let valid = self.check_owner(file, index).and_then(|()| {
                         if file.is_closed() {
-                            Err(VfError::errno(index, libc::EBADF as u32))
+                            Err(std::io::Error::from_raw_os_error(libc::EBADF))
                         } else {
                             Ok(())
                         }
@@ -483,13 +489,15 @@ impl Auto {
                 Ok(_) => (start..end)
                     .map(|_| {
                         Err(OpError::unknown(
-                            VfError::invalid_reply(None, "invalid routed metadata outcome count"),
+                            vfsi_core::internal::errors::invalid_reply(
+                                "invalid routed metadata outcome count",
+                            ),
                             None,
                         ))
                     })
                     .collect(),
-                Err(error) => (start..end)
-                    .map(|_| Err(OpError::not_attempted(error.clone())))
+                Err(error) => vfsi_core::internal::errors::fanout(error, end - start)
+                    .map(|error| Err(OpError::not_attempted(error)))
                     .collect(),
             };
             for (local, result) in results.into_iter().enumerate() {
@@ -522,7 +530,7 @@ impl Auto {
                 self.check_owner(file, index)
                     .and_then(|()| {
                         if file.is_closed() {
-                            Err(VfError::errno(None, libc::EBADF as u32))
+                            Err(std::io::Error::from_raw_os_error(libc::EBADF))
                         } else {
                             Ok(())
                         }
@@ -600,8 +608,7 @@ impl Auto {
         let mut slots = (0..paths.len()).map(|_| None).collect::<Vec<_>>();
         for (index, op) in paths.iter().enumerate() {
             if !seen.insert(op.path()) {
-                slots[index] = Some(Err(OpError::not_attempted(VfError::from_kind(
-                    None,
+                slots[index] = Some(Err(OpError::not_attempted(std::io::Error::from(
                     std::io::ErrorKind::InvalidInput,
                 ))
                 .with_context("vmkdir", op.path())));
@@ -714,7 +721,7 @@ impl Auto {
         for (index, (source, target)) in sources.iter().zip(&targets).enumerate() {
             if !source.route.same_backend(&target.route) {
                 slots[index] = Some(Err(vfsi_core::OpError::not_attempted(
-                    VfError::unsupported(None),
+                    std::io::Error::from(std::io::ErrorKind::Unsupported),
                 )
                 .with_context("vcopy", pairs[index].1.as_ref())));
             }
@@ -781,7 +788,7 @@ impl Auto {
     ) -> vfsi_core::VecResult<vfsi_sync::DirectoryPage> {
         use vfsi_core::OpError;
         if paths.len() != cursors.len() || page_size == 0 {
-            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         if paths.is_empty() {
             return Ok(Vec::new());
@@ -808,13 +815,16 @@ impl Auto {
                             cursor.into_state::<RoutedDirectoryCursor>()?
                         };
                         if !Arc::ptr_eq(&saved.owner, &self.owner) || saved.public_path != *path {
-                            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+                            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
                         }
                         if let Route::Nfs(connection) = &saved.route
                             && AuthSysIdentity::current().as_ref() != Some(&connection.credentials)
                         {
-                            return Err(VfError::errno(None, libc::EACCES as u32)
-                                .with_context("auto_auth", path));
+                            return Err(vfsi_core::internal::errors::with_context(
+                                std::io::Error::from_raw_os_error(libc::EACCES),
+                                "auto_auth",
+                                path,
+                            ));
                         }
                         if child {
                             let resolved = self.resolve(path, &mounts);
@@ -886,8 +896,7 @@ impl Auto {
                         .map_err(|error| {
                             if error.progress().is_some() {
                                 OpError::unknown(
-                                    VfError::invalid_reply(
-                                        None,
+                                    vfsi_core::internal::errors::invalid_reply(
                                         "directory page cannot report byte progress",
                                     ),
                                     None,
@@ -988,7 +997,9 @@ impl Auto {
                 };
                 if bytes > remaining {
                     output.push(Err(vfsi_core::OpError::unknown(
-                        VfError::invalid_reply(None, "routed whole-file byte budget exceeded"),
+                        vfsi_core::internal::errors::invalid_reply(
+                            "routed whole-file byte budget exceeded",
+                        ),
                         None,
                     )));
                 } else {
@@ -1059,12 +1070,11 @@ impl Auto {
         Ok(output)
     }
 
-    fn check_owner(&self, file: &AutoFile, index: usize) -> VfResult<()> {
+    fn check_owner(&self, file: &AutoFile, _index: usize) -> VfResult<()> {
         if !Arc::ptr_eq(&self.owner, &file.owner) {
-            return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         file.check_credentials()
-            .map_err(|error| error.with_index(index))
     }
 
     /// Consume a batch with an explicit aggregate read budget.
@@ -1128,7 +1138,7 @@ impl Auto {
             requested = requested
                 .checked_add(request.length)
                 .filter(|bytes| *bytes <= max_bytes)
-                .ok_or_else(|| VfError::errno(index, libc::EFBIG as u32))?;
+                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EFBIG))?;
             if let Err(error) = self.check_owner(request.file, index) {
                 output[index] = Some(Err(
                     OpError::not_attempted(error).with_context("vread", &request.file.path)
@@ -1142,6 +1152,10 @@ impl Auto {
             while end < requests.len() && route.same_backend(&project(&requests[end]).file.route) {
                 end += 1;
             }
+            let count = output[start..end]
+                .iter()
+                .filter(|slot| slot.is_none())
+                .count();
             let valid = || {
                 requests[start..end]
                     .iter()
@@ -1151,14 +1165,13 @@ impl Auto {
             };
             let results = match route {
                 Route::Posix => {
-                    let batch: Vec<_> = valid()
-                        .map(|request| {
-                            let AutoFileInner::Posix(file) = &request.file.inner else {
-                                unreachable!()
-                            };
-                            file.read_request_at(request.offset, request.length)
-                        })
-                        .collect();
+                    let mut batch = Vec::with_capacity(count);
+                    batch.extend(valid().map(|request| {
+                        let AutoFileInner::Posix(file) = &request.file.inner else {
+                            unreachable!()
+                        };
+                        file.read_request_at(request.offset, request.length)
+                    }));
                     if batch.is_empty() {
                         Ok(Vec::new())
                     } else {
@@ -1166,14 +1179,13 @@ impl Auto {
                     }
                 }
                 Route::Nfs(connection) => {
-                    let batch: Vec<_> = valid()
-                        .map(|request| {
-                            let AutoFileInner::Nfs(file) = &request.file.inner else {
-                                unreachable!()
-                            };
-                            file.read_request_at(request.offset, request.length)
-                        })
-                        .collect();
+                    let mut batch = Vec::with_capacity(count);
+                    batch.extend(valid().map(|request| {
+                        let AutoFileInner::Nfs(file) = &request.file.inner else {
+                            unreachable!()
+                        };
+                        file.read_request_at(request.offset, request.length)
+                    }));
                     if batch.is_empty() {
                         Ok(Vec::new())
                     } else {
@@ -1181,10 +1193,6 @@ impl Auto {
                     }
                 }
             };
-            let count = output[start..end]
-                .iter()
-                .filter(|slot| slot.is_none())
-                .count();
             let mut results = route_results(results, count).into_iter();
             for (index, slot) in output[start..end].iter_mut().enumerate() {
                 if slot.is_none() {
@@ -1216,7 +1224,7 @@ impl Auto {
             requested = requested
                 .checked_add(request.buffer.len())
                 .filter(|bytes| *bytes <= max_bytes)
-                .ok_or_else(|| VfError::errno(index, libc::EFBIG as u32))?;
+                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EFBIG))?;
             if let Err(error) = self.check_owner(request.file, index) {
                 output[index] = Some(Err(
                     OpError::not_attempted(error).with_context("vread", &request.file.path)
@@ -1472,10 +1480,10 @@ impl Auto {
         let mut slots = (0..pairs.len()).map(|_| None).collect::<Vec<_>>();
         for (index, (source, target)) in sources.iter().zip(&targets).enumerate() {
             let cause = if !source.route.same_backend(&target.route) {
-                Some(VfError::errno(None, libc::EXDEV as u32))
+                Some(std::io::Error::from_raw_os_error(libc::EXDEV))
             } else if options != crate::RenameMode::Replace && !matches!(source.route, Route::Posix)
             {
-                Some(VfError::unsupported(None))
+                Some(std::io::Error::from(std::io::ErrorKind::Unsupported))
             } else {
                 None
             };

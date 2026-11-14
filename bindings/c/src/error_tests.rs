@@ -2,8 +2,15 @@ use super::*;
 
 #[test]
 fn native_unsupported_errors_keep_their_diagnostic_at_the_c_boundary() {
-    for error in [VfError::nfs(2, 10019), VfError::smb(2, 0xc000_0257)] {
-        let result = vfsi_result::from_error(error.with_context("vread", "/referral"));
+    for error in [
+        vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(10019)),
+        vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Smb(0xc000_0257)),
+    ] {
+        let result = vfsi_result::from_error(vfsi_core::internal::errors::with_context(
+            error,
+            "vread",
+            "/referral",
+        ));
         assert_eq!(result.category, VFSI_ERROR_UNSUPPORTED);
         let bytes: Vec<u8> = result
             .message
@@ -14,5 +21,31 @@ fn native_unsupported_errors_keep_their_diagnostic_at_the_c_boundary() {
         let message = String::from_utf8(bytes).unwrap();
         assert!(message.contains("unsupported"), "{message}");
         assert!(message.contains("/referral"), "{message}");
+    }
+}
+
+#[test]
+fn aggregate_unit_failures_keep_the_selected_item_indeterminate_category() {
+    use vfsi_core::{IoProgress, OpError};
+    for error in [
+        OpError::unknown(std::io::ErrorKind::Unsupported.into(), None),
+        OpError::unknown(std::io::Error::from_raw_os_error(libc::EACCES), None),
+        // Invalid unit-operation byte progress is quarantined as Unknown.
+        OpError::failed(
+            std::io::ErrorKind::Unsupported.into(),
+            Some(IoProgress::Write { bytes_written: 1 }),
+        ),
+    ] {
+        let mut items = [vfsi_result::item_success(0)];
+        let root = unit_results("vremove", &mut items, Ok(vec![Err(error)]), |_| {
+            panic!("failed input cannot retire ownership")
+        });
+        assert_eq!(items[0].category, VFSI_ERROR_INDETERMINATE);
+        assert_eq!(
+            root.category, items[0].category,
+            "aggregate diagnostic must not advertise fallback after uncertain effects"
+        );
+        assert_eq!(root.index, 0);
+        assert_eq!(root.err_no, items[0].err_no);
     }
 }

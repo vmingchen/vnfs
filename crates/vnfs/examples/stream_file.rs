@@ -14,7 +14,8 @@ pub fn run(fs: &impl Vfsi, path: &str) -> vnfs::Result<u64> {
             bytes += chunk.len() as u64;
             Ok(std::ops::ControlFlow::Continue(())) // false stops successfully; callback errors propagate.
         },
-    )?;
+    )
+    .map_err(vfsi_core::IndexedError::into_cause)?;
     Ok(bytes)
 }
 

@@ -124,7 +124,10 @@ fn acknowledged_copy_does_not_require_destination_verification_reads() {
     let mut backend = FaultBackend::new(&root.0, None);
     backend
         .read_all_errors_after_write
-        .push_back(VfError::errno(0, libc::EACCES as u32));
+        .push_back(IndexedError::at(
+            0,
+            std::io::Error::from_raw_os_error(libc::EACCES),
+        ));
     let calls = backend.write_calls.clone();
     let reads = backend.read_all_calls.clone();
     Python::attach(|py| {
@@ -162,10 +165,22 @@ fn copy_item_transport_maps_original_copy_index_without_verification() {
     let mut backend = FaultBackend::new(&root.0, None);
     backend
         .read_all_errors_after_write
-        .push_back(VfError::transport(Some(0), "verification disconnected"));
+        .push_back(IndexedError::at(
+            0,
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "verification disconnected",
+            ),
+        ));
     backend.write_item_errors.push((
         0,
-        vfsi_core::OpError::unknown(VfError::transport(None, "WRITE disconnected"), None),
+        vfsi_core::OpError::unknown(
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "WRITE disconnected",
+            ),
+            None,
+        ),
     ));
     let calls = backend.write_calls.clone();
     Python::attach(|py| {
@@ -202,18 +217,27 @@ fn copy_item_transport_keeps_original_position_without_semantic_replay() {
     }
     let mut backend = FaultBackend::new(&root.0, None);
     backend.read_all_errors_after_write.extend([
-        VfError::errno(0, libc::EACCES as u32),
-        VfError::transport(Some(1), "verification disconnected beside semantic failure"),
+        IndexedError::at(0, std::io::Error::from_raw_os_error(libc::EACCES)),
+        IndexedError::at(
+            1,
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "verification disconnected beside semantic failure",
+            ),
+        ),
     ]);
     backend.write_item_errors.extend([
         (
             0,
-            vfsi_core::OpError::failed(VfError::errno(None, ERR_ACCES), None),
+            vfsi_core::OpError::failed(std::io::Error::from_raw_os_error((ERR_ACCES) as i32), None),
         ),
         (
             1,
             vfsi_core::OpError::unknown(
-                VfError::transport(None, "WRITE disconnected beside semantic failure"),
+                vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "WRITE disconnected beside semantic failure",
+                ),
                 None,
             ),
         ),

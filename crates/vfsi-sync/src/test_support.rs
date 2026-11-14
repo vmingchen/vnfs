@@ -86,6 +86,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     w = w.with_creation();
     let wr = &fs
         .vwrite_impl(&borrow_writes(&[w]))
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             crate::internal::collect_vec_result(Ok(outcomes), count)
@@ -99,6 +100,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
 
     let r = &fs
         .vread_impl(&[ReadOp::from_path(&f, VfOffset::At(0), payload.len())])
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             crate::internal::collect_vec_result(Ok(outcomes), count)
@@ -116,6 +118,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         WriteOp::at(FileOperand::from_path(&whole_a), 0, b"abc".to_vec()).with_creation(),
         WriteOp::at(FileOperand::from_path(&whole_b), 0, b"def".to_vec()).with_creation(),
     ]))
+    .map_err(vfsi_core::IndexedError::unattributed)
     .and_then(|outcomes| {
         let count = outcomes.len();
         crate::internal::collect_vec_result(Ok(outcomes), count)
@@ -131,6 +134,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
             ReadOp::at(whole_files[1].clone(), 0, 3),
             ReadOp::at(whole_files[0].clone(), 0, 3),
         ])
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             crate::internal::collect_vec_result(Ok(outcomes), count)
@@ -147,6 +151,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     }
     assert_eq!(
         fs.vread_all_with_options_impl(&whole_files, ReadAllOptions::new().with_max_total_bytes(6))
+            .map_err(vfsi_core::IndexedError::unattributed)
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 crate::internal::collect_vec_result(Ok(outcomes), count)
@@ -156,13 +161,17 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     );
     let error = fs
         .vread_all_with_options_impl(&whole_files, ReadAllOptions::new().with_max_total_bytes(5))
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             crate::internal::collect_vec_result(Ok(outcomes), count)
         })
         .unwrap_err();
     assert_eq!(
-        (error.index(), error.to_errno() as u32),
+        (
+            error.index(),
+            vfsi_core::internal::errors::to_errno(error.cause()) as u32
+        ),
         (Some(1), libc::EFBIG as u32)
     );
     assert_eq!(
@@ -206,6 +215,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
             vec![b'x'; 4096],
         )
         .with_creation()]))
+            .map_err(vfsi_core::IndexedError::unattributed)
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 crate::internal::collect_vec_result(Ok(outcomes), count)
@@ -263,6 +273,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         VfOffset::At(0),
         b"hello".to_vec(),
     )]))
+    .map_err(vfsi_core::IndexedError::unattributed)
     .and_then(|outcomes| {
         let count = outcomes.len();
         crate::internal::collect_vec_result(Ok(outcomes), count)
@@ -271,6 +282,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     assert_eq!(fs.seek_raw_impl(&tf, 0, SeekFrom::Set).unwrap(), 0);
     let r = &fs
         .vread_impl(&[ReadOp::from_fd(tf.fd().unwrap(), VfOffset::Cur, 5)])
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             crate::internal::collect_vec_result(Ok(outcomes), count)
@@ -320,6 +332,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     if hardlinks {
         let hard = format!("{}/hard", dir);
         fs.vhardlink_impl(&[Path::new(&f)], &[Path::new(&hard)])
+            .map_err(vfsi_core::IndexedError::unattributed)
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
@@ -389,7 +402,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         if index == 1 {
             let error = outcome.unwrap_err();
             assert_eq!(error.state(), vfsi_core::FailureState::Failed);
-            assert_eq!(error.cause().index(), None);
+            let _: &std::io::Error = error.cause();
             assert!(error.progress().is_none());
         } else {
             let file = outcome.unwrap();
@@ -452,6 +465,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         b"ab".to_vec(),
     )
     .with_creation()]))
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             crate::internal::collect_vec_result(Ok(outcomes), count)
@@ -463,6 +477,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         b"abcdef".to_vec(),
     )
     .with_creation()]))
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             crate::internal::collect_vec_result(Ok(outcomes), count)
@@ -506,13 +521,14 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
 
     // O_CREAT | O_EXCL fails on an existing file; O_TRUNC empties it.
     assert_eq!(
-        fs.open_raw_impl(
-            Path::new(&mode_f),
-            libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
-            file_mode
-        )
-        .unwrap_err()
-        .to_errno() as u32,
+        vfsi_core::internal::errors::to_errno(
+            &(fs.open_raw_impl(
+                Path::new(&mode_f),
+                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                file_mode
+            )
+            .unwrap_err())
+        ) as u32,
         ERR_EXIST
     );
     let tfd = fs
@@ -527,17 +543,20 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
 
     // "Current position" offsets are invalid for path-based operations.
     assert_eq!(
-        fs.vread_impl(&[ReadOp::new(
-            FileOperand::from_path(&renamed),
-            VfOffset::Cur,
-            1
-        )])
-        .and_then(|outcomes| {
-            let count = outcomes.len();
-            crate::internal::collect_vec_result(Ok(outcomes), count)
-        })
-        .unwrap_err()
-        .to_errno() as u32,
+        vfsi_core::internal::errors::to_errno(
+            fs.vread_impl(&[ReadOp::new(
+                FileOperand::from_path(&renamed),
+                VfOffset::Cur,
+                1
+            )])
+            .map_err(vfsi_core::IndexedError::unattributed)
+            .and_then(|outcomes| {
+                let count = outcomes.len();
+                crate::internal::collect_vec_result(Ok(outcomes), count)
+            })
+            .unwrap_err()
+            .cause()
+        ) as u32,
         ERR_INVAL
     );
 
@@ -550,6 +569,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
             ReadOp::new(rfd.clone(), VfOffset::At(0), 2),
             ReadOp::at(FileOperand::from_path(&copy), 0, 2),
         ])
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             crate::internal::collect_vec_result(Ok(outcomes), count)
@@ -571,12 +591,19 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
             ReadOp::at(FileOperand::from_path(&copy), 0, 1),
             ReadOp::new(bad, VfOffset::At(0), 1),
         ])
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             crate::internal::collect_vec_result(Ok(outcomes), count)
         })
         .unwrap_err();
-    assert_eq!((e.index(), e.to_errno() as u32), (Some(1), ERR_EBADF));
+    assert_eq!(
+        (
+            e.index(),
+            vfsi_core::internal::errors::to_errno(e.cause()) as u32
+        ),
+        (Some(1), ERR_EBADF)
+    );
 
     // readlink/hardlink error paths.
     assert!(
@@ -588,6 +615,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
             &[Path::new("/no/such/source")],
             &[Path::new(&format!("{}/h", dir))]
         )
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
@@ -610,6 +638,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         b"x".to_vec(),
     )
     .with_creation()]))
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             crate::internal::collect_vec_result(Ok(outcomes), count)
@@ -652,6 +681,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     let mut w = WriteOp::from_path(&srcfile, VfOffset::At(0), b"xyz".to_vec());
     w = w.with_creation();
     fs.vwrite_impl(&borrow_writes(&[w]))
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             crate::internal::collect_vec_result(Ok(outcomes), count)
@@ -722,7 +752,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
 
     // chdir onto a regular file is refused (NOTDIR) by both backends.
     assert_eq!(
-        fs.chdir(Path::new(&renamed)).unwrap_err().to_errno() as u32,
+        vfsi_core::internal::errors::to_errno(&(fs.chdir(Path::new(&renamed)).unwrap_err())) as u32,
         ERR_NOTDIR,
         "chdir to a file"
     );
@@ -741,6 +771,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         VfOffset::At(0),
         b"ab".to_vec(),
     )]))
+    .map_err(vfsi_core::IndexedError::unattributed)
     .and_then(|outcomes| {
         let count = outcomes.len();
         crate::internal::collect_vec_result(Ok(outcomes), count)
@@ -751,6 +782,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         VfOffset::At(0),
         b"cd".to_vec(),
     )]))
+    .map_err(vfsi_core::IndexedError::unattributed)
     .and_then(|outcomes| {
         let count = outcomes.len();
         crate::internal::collect_vec_result(Ok(outcomes), count)
@@ -768,6 +800,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
             VfOffset::Cur,
             b"e".to_vec(),
         )]))
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             crate::internal::collect_vec_result(Ok(outcomes), count)
@@ -793,6 +826,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
             b"linkdata".to_vec(),
         )
         .with_creation()]))
+            .map_err(vfsi_core::IndexedError::unattributed)
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 crate::internal::collect_vec_result(Ok(outcomes), count)
@@ -831,16 +865,18 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
             ..VfAttrs::default()
         };
         assert_eq!(
-            {
-                let batch_updates = &[lsa];
-                vfsi_core::internal::collect_vec_result(
-                    fs.vsetattrs_raw_nofollow_impl(batch_updates),
-                    batch_updates.len(),
-                )
-                .map(|_| ())
-            }
-            .unwrap_err()
-            .to_errno() as u32,
+            vfsi_core::internal::errors::to_errno(
+                {
+                    let batch_updates = &[lsa];
+                    vfsi_core::internal::collect_vec_result(
+                        fs.vsetattrs_raw_nofollow_impl(batch_updates),
+                        batch_updates.len(),
+                    )
+                    .map(|_| ())
+                }
+                .unwrap_err()
+                .cause()
+            ) as u32,
             libc::EOPNOTSUPP as u32,
             "lsetattrsv on a symlink"
         );
@@ -848,7 +884,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
 
     // Closing an already-closed descriptor reports EBADF on both backends.
     assert_eq!(
-        fs.close_impl(&tf).unwrap_err().to_errno() as u32,
+        vfsi_core::internal::errors::to_errno(&(fs.close_impl(&tf).unwrap_err())) as u32,
         ERR_EBADF,
         "close of a closed descriptor"
     );
@@ -869,6 +905,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         VfOffset::At(0),
         b"ar".to_vec(),
     )]))
+    .map_err(vfsi_core::IndexedError::unattributed)
     .and_then(|outcomes| {
         let count = outcomes.len();
         crate::internal::collect_vec_result(Ok(outcomes), count)
@@ -887,18 +924,21 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
 
     // Writing through `Current(None)` (the cwd itself) is not a file op.
     assert_eq!(
-        fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
-            FileOperand::cwd(),
-            0,
-            b"x".to_vec()
-        )
-        .with_creation()]))
-            .and_then(|outcomes| {
-                let count = outcomes.len();
-                crate::internal::collect_vec_result(Ok(outcomes), count)
-            })
-            .unwrap_err()
-            .to_errno() as u32,
+        vfsi_core::internal::errors::to_errno(
+            fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
+                FileOperand::cwd(),
+                0,
+                b"x".to_vec()
+            )
+            .with_creation()]))
+                .map_err(vfsi_core::IndexedError::unattributed)
+                .and_then(|outcomes| {
+                    let count = outcomes.len();
+                    crate::internal::collect_vec_result(Ok(outcomes), count)
+                })
+                .unwrap_err()
+                .cause()
+        ) as u32,
         ERR_ISDIR,
         "write to Current(None)"
     );
@@ -918,6 +958,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
             b"x".to_vec(),
         )
         .with_creation()]))
+            .map_err(vfsi_core::IndexedError::unattributed)
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 crate::internal::collect_vec_result(Ok(outcomes), count)
@@ -976,16 +1017,18 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         assert!(!fs.exists_impl(Path::new(&dir)).unwrap());
     } else {
         assert_eq!(
-            {
-                let remove_roots: &[&std::path::Path] = &[Path::new(&dir)];
-                vfsi_core::internal::collect_vec_result(
-                    fs.remove_paths_impl(remove_roots, true),
-                    remove_roots.len(),
-                )
-                .map(|_| ())
-            }
-            .unwrap_err()
-            .to_errno() as u32,
+            vfsi_core::internal::errors::to_errno(
+                {
+                    let remove_roots: &[&std::path::Path] = &[Path::new(&dir)];
+                    vfsi_core::internal::collect_vec_result(
+                        fs.remove_paths_impl(remove_roots, true),
+                        remove_roots.len(),
+                    )
+                    .map(|_| ())
+                }
+                .unwrap_err()
+                .cause()
+            ) as u32,
             libc::EOPNOTSUPP as u32
         );
         assert!(fs.exists_impl(Path::new(&dir)).unwrap());
@@ -1020,6 +1063,7 @@ pub fn run_pruning_suite(
                 .map(|path| MkDirOp::new(path, 0o777))
                 .collect::<Vec<_>>(),
         )
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
@@ -1065,8 +1109,12 @@ pub fn run_pruning_suite(
         // identify the root of the rejected entry, not an assumed fetch order.
         let owner = error.index().expect("budget error retains root index");
         assert!(owner < roots.len());
-        assert!(error.path().unwrap().starts_with(&roots[owner]));
-        assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge);
+        assert!(
+            vfsi_core::internal::errors::path(error.cause())
+                .unwrap()
+                .starts_with(&roots[owner])
+        );
+        assert_eq!(error.cause().kind(), std::io::ErrorKind::FileTooLarge);
         assert!(delivered_entries <= 270);
         if policy.max_entries().is_some() {
             assert_eq!(delivered_entries, 270);
@@ -1083,7 +1131,7 @@ pub fn run_pruning_suite(
             |_, _| {
                 calls += 1;
                 if fail {
-                    Err(VfError::errno(17, libc::ECANCELED as u32))
+                    Err(std::io::Error::from_raw_os_error(libc::ECANCELED))
                 } else {
                     Ok(ListDirControl::Stop)
                 }
@@ -1097,7 +1145,10 @@ pub fn run_pruning_suite(
         if fail {
             let error = result.unwrap_err();
             assert_eq!(error.index(), Some(0));
-            assert_eq!(error.raw_code(), libc::ECANCELED as u32);
+            assert_eq!(
+                vfsi_core::internal::errors::to_errno(error.cause()),
+                libc::ECANCELED
+            );
         } else {
             assert_eq!(result.unwrap(), [TraversalCompletion::Stopped; 2]);
         }
@@ -1112,7 +1163,7 @@ pub fn run_pruning_suite(
                 },
             )
             .unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert_eq!(error.cause().kind(), std::io::ErrorKind::Unsupported);
         return;
     }
     // Pruning on *every* page precedes the depth check and all child I/O,
@@ -1181,6 +1232,7 @@ pub fn read_vector_outcomes<F: VectorBackend>(fs: &mut F, directory: &Path) {
             .with_creation()
             .with_truncate(),
     ]))
+    .map_err(vfsi_core::IndexedError::unattributed)
     .and_then(|outcomes| {
         let count = outcomes.len();
         crate::internal::collect_vec_result(Ok(outcomes), count)
@@ -1205,7 +1257,7 @@ pub fn read_vector_outcomes<F: VectorBackend>(fs: &mut F, directory: &Path) {
         outcomes[1].as_ref().unwrap_err().cause().kind(),
         std::io::ErrorKind::NotFound
     );
-    assert_eq!(outcomes[1].as_ref().unwrap_err().cause().index(), None);
+    let _: &std::io::Error = outcomes[1].as_ref().unwrap_err().cause();
     assert_eq!(
         outcomes[3].as_ref().unwrap_err().state(),
         FailureState::NotAttempted
@@ -1330,14 +1382,17 @@ pub fn public_read_outcomes<F: vfsi_core::Vfsi>(fs: &F, other: &F, directory: &s
     for index in [1, 5] {
         let error = outcomes[index].as_ref().unwrap_err();
         assert_eq!(error.state(), FailureState::NotAttempted);
-        assert_eq!(error.cause().index(), None);
+        let _: &std::io::Error = error.cause();
         assert!(error.progress().is_none());
     }
     let missing_error = outcomes[3].as_ref().unwrap_err();
     assert_eq!(missing_error.state(), FailureState::Failed);
     assert_eq!(missing_error.cause().kind(), std::io::ErrorKind::NotFound);
-    assert_eq!(missing_error.cause().path(), Some(Path::new(&missing)));
-    assert_eq!(missing_error.cause().index(), None);
+    assert_eq!(
+        vfsi_core::internal::errors::path(missing_error.cause()),
+        Some(Path::new(&missing))
+    );
+    let _: &std::io::Error = missing_error.cause();
     let mut rejected = [99; 2];
     let error = fs
         .read_batch(
@@ -1353,7 +1408,7 @@ pub fn public_read_outcomes<F: vfsi_core::Vfsi>(fs: &F, other: &F, directory: &s
         Some(0),
         "select by input order after every phase finishes"
     );
-    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
     assert_eq!(rejected, [99; 2]);
     let mut untouched = [99; 2];
     let error = fs
@@ -1366,8 +1421,8 @@ pub fn public_read_outcomes<F: vfsi_core::Vfsi>(fs: &F, other: &F, directory: &s
             ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(4).unwrap()),
         )
         .unwrap_err();
-    assert_eq!(error.raw_code(), libc::EFBIG as u32);
-    assert_eq!(error.index(), Some(2));
+    assert_eq!(vfsi_core::internal::errors::to_errno(&(error)), libc::EFBIG);
+    let _: &std::io::Error = &error;
     assert_eq!(untouched, [99; 2]);
     assert!(fs.vread([], ReadOptions::new()).unwrap().is_empty());
     live.close().unwrap();
@@ -1410,7 +1465,7 @@ pub fn public_sync_outcomes<F: vfsi_core::Vfsi>(fs: &F, other: &F, directory: &s
         for index in [1, 3] {
             let error = outcomes[index].as_ref().unwrap_err();
             assert_eq!(error.state(), FailureState::NotAttempted);
-            assert_eq!(error.cause().index(), None);
+            let _: &std::io::Error = error.cause();
             assert!(error.progress().is_none());
         }
         let error = fs.sync_batch(&[&foreign, &files[0]], mode).unwrap_err();
@@ -1442,7 +1497,7 @@ pub fn public_close_outcomes<F: vfsi_core::Vfsi>(fs: &F, other: &F, directory: &
     assert!(outcomes[0].is_ok() && outcomes[2].is_ok() && outcomes[3].is_ok());
     let error = outcomes[1].as_ref().unwrap_err();
     assert_eq!(error.state(), FailureState::NotAttempted);
-    assert_eq!(error.cause().index(), None);
+    let _: &std::io::Error = error.cause();
     assert!(error.progress().is_none());
     assert_eq!(
         files
@@ -1486,8 +1541,11 @@ fn public_owned_open_outcomes<F: vfsi_core::Vfsi>(fs: &F, directory: &str) {
     assert!(outcomes[0].is_ok() && outcomes[2].is_ok());
     let error = outcomes[1].as_ref().err().expect("missing input fails");
     assert_eq!(error.state(), FailureState::Failed);
-    assert_eq!(error.cause().index(), None);
-    assert_eq!(error.cause().path(), Some(std::path::Path::new(&paths[1])));
+    let _: &std::io::Error = error.cause();
+    assert_eq!(
+        vfsi_core::internal::errors::path(error.cause()),
+        Some(std::path::Path::new(&paths[1]))
+    );
     let files: Vec<_> = outcomes.into_iter().filter_map(Result::ok).collect();
     assert_eq!(files[0].path(), std::path::Path::new(&paths[0]));
     assert_eq!(files[1].path(), std::path::Path::new(&paths[2]));
@@ -1542,7 +1600,7 @@ pub fn write_vector_outcomes<F: VectorBackend>(
     }
     let absent = results[1].as_ref().unwrap_err();
     assert_eq!(absent.cause().kind(), std::io::ErrorKind::NotFound);
-    assert_eq!(absent.cause().index(), None);
+    let _: &std::io::Error = absent.cause();
     assert_eq!(
         results[3].as_ref().unwrap_err().state(),
         FailureState::NotAttempted
@@ -1569,7 +1627,7 @@ pub fn write_vector_outcomes<F: VectorBackend>(
     assert_eq!(rejected[2].as_ref().unwrap().bytes_written, 1);
     let error = rejected[1].as_ref().unwrap_err();
     assert_eq!(error.state(), FailureState::NotAttempted);
-    assert_eq!(error.cause().index(), None);
+    let _: &std::io::Error = error.cause();
     assert!(error.progress().is_none());
 
     let completed = fs
@@ -1584,7 +1642,7 @@ pub fn write_vector_outcomes<F: VectorBackend>(
     assert_eq!(completed[2].as_ref().unwrap().bytes_written, 1);
     let error = completed[1].as_ref().unwrap_err();
     assert_eq!(error.state(), read_only_state);
-    assert_eq!(error.cause().index(), None);
+    let _: &std::io::Error = error.cause();
     assert!(error.progress().is_none());
     assert_eq!(fs.read_raw_impl(&first, 0, 8).unwrap(), b"1Arst");
     assert_eq!(fs.read_raw_impl(&last, 0, 8).unwrap(), b"3Zst");
@@ -1663,14 +1721,20 @@ pub fn public_write_outcomes<F: vfsi_core::Vfsi>(
         for index in [1, 3, 5] {
             let error = results[index].as_ref().unwrap_err();
             assert_eq!(error.state(), FailureState::NotAttempted);
-            assert_eq!(error.cause().index(), None);
+            let _: &std::io::Error = error.cause();
             assert!(error.progress().is_none());
         }
         let error = results[4].as_ref().unwrap_err();
-        assert_eq!(error.cause().path(), Some(Path::new(&protected)));
-        assert_eq!(error.cause().operation(), Some("vwrite_native"));
+        assert_eq!(
+            vfsi_core::internal::errors::path(error.cause()),
+            Some(Path::new(&protected))
+        );
+        assert_eq!(
+            vfsi_core::internal::errors::operation(error.cause()),
+            Some("vwrite_native")
+        );
         assert_eq!(error.state(), read_only_state);
-        assert_eq!(error.cause().index(), None);
+        let _: &std::io::Error = error.cause();
         assert!(error.progress().is_none());
         assert!(
             fs.vwrite(&[], WriteOptions::new().with_write_all(complete))
@@ -1739,7 +1803,7 @@ fn check_entry_removal_results(fs: &mut impl VectorBackend, directory: &str, mod
     let error = results[1].as_ref().unwrap_err();
     assert_eq!(error.state(), FailureState::Failed);
     assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
-    assert_eq!(error.cause().index(), None);
+    let _: &std::io::Error = error.cause();
     assert!(error.progress().is_none());
     assert_eq!(
         results[3].as_ref().unwrap_err().state(),

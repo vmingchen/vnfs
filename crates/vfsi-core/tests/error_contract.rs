@@ -1,53 +1,76 @@
 use std::io::ErrorKind as K;
-use vfsi_core::{ErrorDomain, StatusCode, TransportKind, VfError};
+use vfsi_core::{StatusCode, TransportKind};
 
 #[test]
-fn io_sources_and_semantic_diagnostics_survive_cloning_and_context() {
+fn io_sources_and_semantic_diagnostics_survive_moving_and_context() {
     use std::error::Error;
-    let error = VfError::from_io(None, std::io::Error::new(K::TimedOut, "local deadline"))
-        .with_context("vread", "/file");
+    let error = vfsi_core::internal::errors::with_context(
+        std::io::Error::new(K::TimedOut, "local deadline"),
+        "vread",
+        "/file",
+    );
     assert_eq!(error.kind(), K::TimedOut);
-    assert_eq!(error.domain(), ErrorDomain::Client);
-    assert_eq!(error.status(), None);
-    let clone = error.clone().with_index(4);
-    let source = clone
+    assert_eq!(vfsi_core::transport_kind(&error), None);
+    assert_eq!(vfsi_core::native_status(&(error)), None);
+    let moved = error;
+    let source = moved
         .source()
         .unwrap()
         .downcast_ref::<std::io::Error>()
         .unwrap();
     assert_eq!(source.kind(), K::TimedOut);
     assert_eq!(source.to_string(), "local deadline");
-    let native = VfError::from_io(2, std::io::Error::from_raw_os_error(libc::EACCES));
+    let native = std::io::Error::from_raw_os_error(libc::EACCES);
     assert_eq!(
-        native.status(),
+        vfsi_core::native_status(&(native)),
         Some(StatusCode::Errno(libc::EACCES as u32))
     );
-    let semantic = VfError::nfs(3, 13).with_message("denied by export policy");
+    let semantic = vfsi_core::internal::errors::with_message(
+        vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(13)),
+        "denied by export policy",
+    );
     assert!(semantic.to_string().contains("denied by export policy"));
-    assert_eq!(semantic.status(), Some(StatusCode::Nfs(13)));
+    assert_eq!(
+        vfsi_core::native_status(&(semantic)),
+        Some(StatusCode::Nfs(13))
+    );
 }
 
 #[test]
 fn errno_translation_never_relabels_a_native_status() {
     for (error, errno) in [
-        (VfError::nfs(None, 63), libc::ENAMETOOLONG),
-        (VfError::nfs(None, 69), libc::EDQUOT),
-        (VfError::nfs(None, 70), libc::ESTALE),
-        (VfError::smb(None, 0xc000_0043), libc::EBUSY),
-        (VfError::unsupported(None), libc::EOPNOTSUPP),
+        (
+            vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(63)),
+            libc::ENAMETOOLONG,
+        ),
+        (
+            vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(69)),
+            libc::EDQUOT,
+        ),
+        (
+            vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(70)),
+            libc::ESTALE,
+        ),
+        (
+            vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Smb(0xc000_0043)),
+            libc::EBUSY,
+        ),
+        (
+            std::io::Error::from(std::io::ErrorKind::Unsupported),
+            libc::EOPNOTSUPP,
+        ),
     ] {
-        let before = error.status();
-        assert_eq!(error.to_errno(), errno);
-        assert_eq!(error.status(), before);
-        assert_eq!(error.index(), None);
+        let before = vfsi_core::native_status(&(error));
+        assert_eq!(vfsi_core::internal::errors::to_errno(&(error)), errno);
+        assert_eq!(vfsi_core::native_status(&(error)), before);
     }
 }
 
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn status_only_results_keep_cold_diagnostics_out_of_line() {
-    assert!(size_of::<VfError>() <= 48);
-    assert!(size_of::<Result<Vec<u8>, VfError>>() <= 48);
+    assert!(size_of::<std::io::Error>() <= 8);
+    assert!(size_of::<Result<Vec<u8>, std::io::Error>>() <= 32);
 }
 
 #[test]
@@ -58,28 +81,30 @@ fn common_native_statuses_have_portable_categories_without_losing_status() {
         (StatusCode::Smb(0xc000_0043), K::ResourceBusy),
         (StatusCode::Smb(0xc000_006d), K::PermissionDenied),
     ] {
-        let error = VfError::from_status(None, status);
+        let error = vfsi_core::internal::errors::from_status(status);
         assert_eq!(error.kind(), kind, "{status:?}");
-        assert_eq!(error.status(), Some(status));
-        assert_eq!(error.index(), None);
+        assert_eq!(vfsi_core::native_status(&(error)), Some(status));
     }
 }
 
 #[test]
 fn unsupported_is_a_client_category_not_a_fabricated_errno() {
-    let error = VfError::unsupported(3);
+    let error = std::io::Error::from(std::io::ErrorKind::Unsupported);
     assert_eq!(error.kind(), K::Unsupported);
-    assert_eq!(error.domain(), ErrorDomain::Client);
-    assert_eq!(error.status(), None);
-    assert!(!error.is_transport());
+    assert_eq!(vfsi_core::transport_kind(&error), None);
+    assert_eq!(vfsi_core::native_status(&(error)), None);
+    assert!(!vfsi_core::transport_kind(&(error)).is_some());
 }
 
 #[test]
 fn rpc_transport_categories_do_not_change_when_remapping_indices() {
-    let error = VfError::transport_with_kind(None, TransportKind::InvalidReply, "bad length")
-        .map_index(|i| i + 1);
+    let error = vfsi_core::IndexedError::unattributed(vfsi_core::internal::errors::transport(
+        TransportKind::InvalidReply,
+        "bad length",
+    ))
+    .map_index(|i| i + 1);
     assert_eq!(error.index(), None);
-    assert_eq!(error.kind(), K::InvalidData);
+    assert_eq!(error.cause().kind(), K::InvalidData);
 }
 
 #[test]
@@ -107,14 +132,14 @@ fn opaque_nonclone_source_is_retained_until_its_final_owner_drops() {
     }
     let drops = Arc::new(AtomicUsize::new(0));
     let source = std::io::Error::new(K::TimedOut, Opaque(drops.clone()));
-    let cause = VfError::from_io(None, source).with_context("vread", "/opaque");
+    let cause = vfsi_core::internal::errors::with_context(source, "vread", "/opaque");
     let error = vfsi_core::OpError::unknown(cause, None);
     let (cause, state, progress) = error.into_parts();
     assert_eq!(state, vfsi_core::FailureState::Unknown);
     assert!(progress.is_none());
     assert_eq!(cause.kind(), K::TimedOut);
     assert!(
-        !cause.is_transport(),
+        !vfsi_core::transport_kind(&(cause)).is_some(),
         "an OS category is not RPC provenance"
     );
     let source = cause
@@ -131,21 +156,39 @@ fn opaque_nonclone_source_is_retained_until_its_final_owner_drops() {
 #[test]
 fn context_does_not_change_native_domain_or_transport_provenance() {
     for cause in [
-        VfError::nfs(None, 13),
-        VfError::smb(None, 0xc000_0022),
-        VfError::errno(None, libc::EACCES as u32),
-        VfError::transport_with_kind(None, TransportKind::Timeout, "RPC deadline"),
+        vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(13)),
+        vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Smb(0xc000_0022)),
+        std::io::Error::from_raw_os_error(libc::EACCES),
+        vfsi_core::internal::errors::transport(TransportKind::Timeout, "RPC deadline"),
     ] {
-        let facts = (cause.kind(), cause.status(), cause.transport_kind());
-        let cause = cause
-            .with_context("first", "/first")
-            .with_context("second", "/second")
-            .with_message("detail");
+        let facts = (
+            cause.kind(),
+            vfsi_core::native_status(&(cause)),
+            vfsi_core::transport_kind(&(cause)),
+        );
+        let cause = vfsi_core::internal::errors::with_message(
+            vfsi_core::internal::errors::with_context(
+                vfsi_core::internal::errors::with_context(cause, "first", "/first"),
+                "second",
+                "/second",
+            ),
+            "detail",
+        );
         assert_eq!(
-            (cause.kind(), cause.status(), cause.transport_kind()),
+            (
+                cause.kind(),
+                vfsi_core::native_status(&(cause)),
+                vfsi_core::transport_kind(&(cause))
+            ),
             facts
         );
-        assert_eq!(cause.path(), Some(std::path::Path::new("/second")));
-        assert_eq!(cause.operation(), Some("second"));
+        assert_eq!(
+            vfsi_core::internal::errors::path(&(cause)),
+            Some(std::path::Path::new("/second"))
+        );
+        assert_eq!(
+            vfsi_core::internal::errors::operation(&(cause)),
+            Some("second")
+        );
     }
 }

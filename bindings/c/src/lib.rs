@@ -24,10 +24,10 @@ use std::sync::{Mutex, MutexGuard};
 use vfsi_local::LocalBackend;
 use vfsi_nfs::nfs::NfsVecFs;
 use vfsi_smb::SmbVecFs;
-#[cfg(test)]
-use vfsi_sync::VF_ERR_UNSUPPORTED;
+const LEGACY_ERROR_RPC: u32 = u32::MAX;
+const LEGACY_ERROR_UNSUPPORTED: u32 = u32::MAX - 1;
 use vfsi_sync::{
-    AttrMask, ExtentPair, FileOperand, ReadOp, VfAttrs, VfError, WriteOp, ERR_EBADF, ERR_NOENT,
+    AttrMask, ExtentPair, FileOperand, ReadOp, VfAttrs, WriteOp, ERR_EBADF, ERR_NOENT,
 };
 
 /// ABI version implemented by this library.
@@ -383,17 +383,36 @@ impl vfsi_result {
         )
     }
 
-    fn from_error(error: VfError) -> Self {
+    fn from_error(error: std::io::Error) -> Self {
+        Self::from_cause(&error, None)
+    }
+
+    fn from_indexed(error: vfsi_core::IndexedError) -> Self {
+        Self::from_cause(error.cause(), error.index())
+    }
+
+    fn from_cause(error: &std::io::Error, index: Option<usize>) -> Self {
+        let transport = vfsi_core::transport_kind(error).is_some();
+        let code = match vfsi_core::native_status(error) {
+            Some(
+                vfsi_core::StatusCode::Errno(code)
+                | vfsi_core::StatusCode::Nfs(code)
+                | vfsi_core::StatusCode::Smb(code),
+            ) => code,
+            _ if transport => LEGACY_ERROR_RPC,
+            _ if error.kind() == std::io::ErrorKind::Unsupported => LEGACY_ERROR_UNSUPPORTED,
+            _ => vfsi_core::internal::errors::to_errno(error) as u32,
+        };
         Self::base(
-            error.index().unwrap_or(C_INDEX_UNKNOWN),
-            if error.is_transport() {
+            index.unwrap_or(C_INDEX_UNKNOWN),
+            if transport {
                 VFSI_ERROR_TRANSPORT
             } else if error.kind() == std::io::ErrorKind::Unsupported {
                 VFSI_ERROR_UNSUPPORTED
             } else {
                 VFSI_ERROR_FILESYSTEM
             },
-            error.raw_code(),
+            code,
             &error.to_string(),
         )
     }
@@ -468,11 +487,6 @@ fn unit_results(
             })
             .collect(),
         Err(error) => {
-            let error = if error.index().is_some_and(|index| index >= results.len()) {
-                invalid_backend_reply(format!("{operation} returned an invalid error index"))
-            } else {
-                error
-            };
             let failure = vfsi_result::from_error(error);
             fail_results(results, failure, false);
             return failure;
@@ -502,12 +516,11 @@ fn unit_results(
                 } else {
                     error
                 };
-                let failure = vfsi_result::from_error(error.cause().clone().with_index(index));
-                first_error.get_or_insert(failure);
-                let mut item = failure;
+                let mut item = vfsi_result::from_cause(error.cause(), Some(index));
                 if error.state() == FailureState::Unknown {
                     item.category = VFSI_ERROR_INDETERMINATE;
                 }
+                first_error.get_or_insert(item);
                 item
             }
         };
@@ -521,11 +534,11 @@ fn complete_results(results: &mut [vfsi_result]) {
     }
 }
 
-fn invalid_backend_reply(message: impl Into<std::borrow::Cow<'static, str>>) -> VfError {
-    VfError::transport_with_kind(None, vfsi_sync::TransportKind::InvalidReply, message)
+fn invalid_backend_reply(message: impl Into<std::borrow::Cow<'static, str>>) -> std::io::Error {
+    vfsi_core::internal::errors::transport(vfsi_sync::TransportKind::InvalidReply, message)
 }
 
-fn invalid_backend_result_count(operation: &str, expected: usize, actual: usize) -> VfError {
+fn invalid_backend_result_count(operation: &str, expected: usize, actual: usize) -> std::io::Error {
     invalid_backend_reply(format!(
         "{operation} returned {actual} results for {expected} requests",
     ))
@@ -639,14 +652,14 @@ fn mask() -> AttrMask {
         | AttrMask::CTIME
 }
 
-fn vf_code(e: &VfError) -> c_int {
-    e.to_errno()
+fn vf_code(e: &std::io::Error) -> c_int {
+    vfsi_core::internal::errors::to_errno(e)
 }
 
-fn lock_or_io<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, VfError> {
+fn lock_or_io<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, std::io::Error> {
     mutex
         .lock()
-        .map_err(|_| VfError::errno(0, libc::EIO as u32))
+        .map_err(|_| std::io::Error::from_raw_os_error(libc::EIO))
 }
 
 /// # Safety
@@ -691,8 +704,8 @@ fn path_for(fs: &vfsi_fs, path: &Path) -> Option<PathBuf> {
     Some(mapped)
 }
 
-fn vpath_for(fs: &vfsi_fs, path: &std::path::Path) -> Result<PathBuf, VfError> {
-    path_for(fs, path).ok_or_else(|| VfError::errno(0, ERR_NOENT))
+fn vpath_for(fs: &vfsi_fs, path: &std::path::Path) -> Result<PathBuf, std::io::Error> {
+    path_for(fs, path).ok_or_else(|| std::io::Error::from_raw_os_error((ERR_NOENT) as i32))
 }
 
 /// Version of the additive validated Linux NFS mount discovery callback.
@@ -723,8 +736,8 @@ trait BindingBackend: vfsi_sync::backend::VectorBackend {
         None
     }
     #[cfg(test)]
-    fn reconnect_for_test(&mut self) -> Result<(), VfError> {
-        Err(VfError::unsupported(0))
+    fn reconnect_for_test(&mut self) -> Result<(), std::io::Error> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
     fn nfs_minorversion(&self) -> Option<u32> {
         None
@@ -743,7 +756,7 @@ impl BindingBackend for NfsVecFs {
         Some(format!("nfs:{}", NfsVecFs::identity_namespace(self)).into())
     }
     #[cfg(test)]
-    fn reconnect_for_test(&mut self) -> Result<(), VfError> {
+    fn reconnect_for_test(&mut self) -> Result<(), std::io::Error> {
         self.reconnect()
     }
     fn nfs_minorversion(&self) -> Option<u32> {

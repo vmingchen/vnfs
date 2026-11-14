@@ -41,9 +41,9 @@ impl vfsi_object_id {
             fileid: 0,
         }
     }
-    pub(super) fn from_attrs(namespace_id: u64, attrs: &VfAttrs) -> Result<Self, VfError> {
+    pub(super) fn from_attrs(namespace_id: u64, attrs: &VfAttrs) -> Result<Self, std::io::Error> {
         if !attrs.returned.contains(AttrMask::identity()) {
-            return Err(VfError::unsupported(0));
+            return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
         }
         Ok(Self {
             namespace_id,
@@ -195,11 +195,9 @@ pub unsafe extern "C" fn vfsi_get_object_idv(
                 let path = Path::new(std::ffi::OsStr::from_bytes(path.to_bytes()));
                 let path = match vpath_for(fs, path) {
                     Ok(path) => path,
-                    Err(error) => fail_batch!(
-                        results,
-                        vfsi_result::from_error(error.with_index(index)),
-                        false
-                    ),
+                    Err(error) => {
+                        fail_batch!(results, vfsi_result::from_cause(&error, Some(index)), false)
+                    }
                 };
                 bytes = match path
                     .as_os_str()
@@ -225,7 +223,10 @@ pub unsafe extern "C" fn vfsi_get_object_idv(
                     Some(file) => file.file.clone(),
                     None => fail_batch!(
                         results,
-                        vfsi_result::from_error(VfError::errno(index, ERR_EBADF)),
+                        vfsi_result::from_cause(
+                            &std::io::Error::from_raw_os_error(ERR_EBADF as i32),
+                            Some(index),
+                        ),
                         false
                     ),
                 }
@@ -276,7 +277,7 @@ pub unsafe extern "C" fn vfsi_get_object_idv(
             if let Err(error) = vfsi_sync::internal::collect_vec_result(result, end - start) {
                 fail_batch!(
                     results,
-                    vfsi_result::from_error(error.map_index(|index| start + index)),
+                    vfsi_result::from_indexed(error.map_index(|index| start + index)),
                     true
                 );
             }

@@ -12,13 +12,13 @@ impl SmbVecFs {
             return Ok(Vec::new());
         }
         if length > isize::MAX as usize {
-            return Err(OpError::not_attempted(VfError::errno(
-                None,
-                libc::EFBIG as u32,
+            return Err(OpError::not_attempted(std::io::Error::from_raw_os_error(
+                libc::EFBIG,
             )));
         }
-        let length_u64 = u64::try_from(length)
-            .map_err(|_| OpError::not_attempted(VfError::errno(None, libc::EOVERFLOW as u32)))?;
+        let length_u64 = u64::try_from(length).map_err(|_| {
+            OpError::not_attempted(std::io::Error::from_raw_os_error(libc::EOVERFLOW))
+        })?;
         checked_offset(offset, length_u64, 0).map_err(OpError::not_attempted)?;
         let max_read = self
             .client
@@ -103,15 +103,17 @@ impl SmbVecFs {
         if data.is_empty() {
             return Ok(0);
         }
-        let length = u64::try_from(data.len())
-            .map_err(|_| OpError::not_attempted(VfError::errno(None, libc::EOVERFLOW as u32)))?;
+        let length = u64::try_from(data.len()).map_err(|_| {
+            OpError::not_attempted(std::io::Error::from_raw_os_error(libc::EOVERFLOW))
+        })?;
         checked_offset(offset, length, 0).map_err(OpError::not_attempted)?;
         if self.client.is_disconnected() {
-            return Err(OpError::not_attempted(VfError::transport_with_kind(
-                None,
-                vfsi_core::TransportKind::Connection,
-                "SMB connection is disconnected",
-            )));
+            return Err(OpError::not_attempted(
+                vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Connection,
+                    "SMB connection is disconnected",
+                ),
+            ));
         }
         let max_write = self
             .client
@@ -168,7 +170,7 @@ impl SmbVecFs {
             let count = response.count as usize;
             if count == 0 {
                 return Err(OpError::failed(
-                    VfError::errno(None, ERR_IO),
+                    std::io::Error::from_raw_os_error((ERR_IO) as i32),
                     (written != 0).then_some(IoProgress::Write {
                         bytes_written: written,
                     }),
@@ -176,8 +178,7 @@ impl SmbVecFs {
             }
             if count > chunk.len() {
                 return Err(write_wire_error(
-                    VfError::invalid_reply(
-                        None,
+                    vfsi_core::internal::errors::invalid_reply(
                         "SMB server reported writing more bytes than requested",
                     ),
                     written,
@@ -316,20 +317,23 @@ impl SmbVecFs {
         let mut prefix = match progress {
             Some(IoProgress::Read(read)) => read.into_data().ok_or_else(|| {
                 OpError::unknown(
-                    VfError::invalid_reply(None, "SMB path read returned buffered progress"),
+                    vfsi_core::internal::errors::invalid_reply(
+                        "SMB path read returned buffered progress",
+                    ),
                     None,
                 )
             })?,
             Some(_) => {
                 return Err(OpError::unknown(
-                    VfError::invalid_reply(None, "invalid SMB read progress"),
+                    vfsi_core::internal::errors::invalid_reply("invalid SMB read progress"),
                     None,
                 ));
             }
             None => Vec::new(),
         };
         if let Err(cause) = self.client_stat(path) {
-            let uncertain = cause.is_transport() || original_state == FailureState::Unknown;
+            let uncertain = vfsi_core::transport_kind(&(cause)).is_some()
+                || original_state == FailureState::Unknown;
             let progress = (!prefix.is_empty()).then(|| {
                 IoProgress::Read(vfsi_core::api::ReadResult::owned(offset, prefix, false))
             });
@@ -357,7 +361,9 @@ impl SmbVecFs {
                     eof = read.eof();
                     let Some(data) = read.into_data() else {
                         return Err(OpError::unknown(
-                            VfError::invalid_reply(None, "invalid SMB retry progress"),
+                            vfsi_core::internal::errors::invalid_reply(
+                                "invalid SMB retry progress",
+                            ),
                             None,
                         ));
                     };
@@ -383,9 +389,8 @@ impl SmbVecFs {
 
     pub(super) fn read_one(&mut self, op: &ReadOp) -> OpResult<ReadResult> {
         if op.length > isize::MAX as usize {
-            return Err(OpError::not_attempted(VfError::errno(
-                None,
-                libc::EFBIG as u32,
+            return Err(OpError::not_attempted(std::io::Error::from_raw_os_error(
+                libc::EFBIG,
             )));
         }
         if let VfOffset::At(offset) = op.offset {
@@ -393,7 +398,9 @@ impl SmbVecFs {
         }
         let Some(fd) = op.file.fd() else {
             if matches!(op.file, FileOperand::Saved) {
-                return Err(OpError::not_attempted(VfError::unsupported(None)));
+                return Err(OpError::not_attempted(std::io::Error::from(
+                    std::io::ErrorKind::Unsupported,
+                )));
             }
             let path = self
                 .path_string(&self.file_path(&op.file).map_err(OpError::not_attempted)?)
@@ -406,8 +413,7 @@ impl SmbVecFs {
                         .size
                 }
                 _ => {
-                    return Err(OpError::not_attempted(VfError::from_kind(
-                        None,
+                    return Err(OpError::not_attempted(std::io::Error::from(
                         std::io::ErrorKind::InvalidInput,
                     )));
                 }
@@ -432,7 +438,9 @@ impl SmbVecFs {
         };
         let open = self.live_file(fd).map_err(OpError::not_attempted)?;
         if !open.readable {
-            return Err(OpError::not_attempted(VfError::errno(None, ERR_EBADF)));
+            return Err(OpError::not_attempted(std::io::Error::from_raw_os_error(
+                (ERR_EBADF) as i32,
+            )));
         }
         let file_id = open.file_id;
         let size = self
@@ -474,7 +482,9 @@ impl SmbVecFs {
     pub(super) fn write_one(&mut self, op: WriteOp<&FileOperand, &[u8]>) -> OpResult<WriteResult> {
         let Some(fd) = op.file().fd() else {
             if matches!(op.file(), FileOperand::Saved) {
-                return Err(OpError::not_attempted(VfError::unsupported(None)));
+                return Err(OpError::not_attempted(std::io::Error::from(
+                    std::io::ErrorKind::Unsupported,
+                )));
             }
             let path = self
                 .file_path(op.file())
@@ -488,14 +498,12 @@ impl SmbVecFs {
                         .size
                 }
                 VfOffset::Cur => {
-                    return Err(OpError::not_attempted(VfError::from_kind(
-                        None,
+                    return Err(OpError::not_attempted(std::io::Error::from(
                         std::io::ErrorKind::InvalidInput,
                     )));
                 }
                 _ => {
-                    return Err(OpError::not_attempted(VfError::from_kind(
-                        None,
+                    return Err(OpError::not_attempted(std::io::Error::from(
                         std::io::ErrorKind::InvalidInput,
                     )));
                 }
@@ -511,7 +519,9 @@ impl SmbVecFs {
         };
         let open = self.live_file(fd).map_err(OpError::not_attempted)?;
         if !open.writable {
-            return Err(OpError::not_attempted(VfError::errno(None, ERR_EBADF)));
+            return Err(OpError::not_attempted(std::io::Error::from_raw_os_error(
+                (ERR_EBADF) as i32,
+            )));
         }
         let (file_id, append) = (open.file_id, open.append);
         let size = if append || op.offset() == VfOffset::End {
@@ -560,8 +570,8 @@ impl SmbVecFs {
             VfOffset::End => Ok(size),
             VfOffset::Cur => fd
                 .and_then(|fd| self.open_files.get(&fd).map(|open| open.cur_offset))
-                .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
-            _ => Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput)),
+            _ => Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
         }
     }
 }

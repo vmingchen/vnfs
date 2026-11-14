@@ -13,9 +13,11 @@ impl NfsClient {
         mut repairable: impl FnMut(u32, u32) -> bool,
         mut readiness: impl FnMut(usize) -> vfsi_core::VfResult<()>,
     ) -> vfsi_core::VfResult<PathMutationRun<T>> {
-        use vfsi_core::{OpError, VfError, error_from_rpc};
+        use vfsi_core::OpError;
         if count != 0 && self.max_ops < 3 {
-            return Err(VfError::nfs(None, nfsstat4_NFS4ERR_TOO_MANY_OPS));
+            return Err(vfsi_core::internal::errors::from_status(
+                vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_TOO_MANY_OPS),
+            ));
         }
         let mut slots = (0..count).map(|_| None).collect::<Vec<_>>();
         let mut submitted = Vec::new();
@@ -70,16 +72,17 @@ impl NfsClient {
                     if global == count {
                         break;
                     }
-                    slots[global] = Some(Err(OpError::not_attempted(VfError::nfs(
-                        None,
-                        nfsstat4_NFS4ERR_TOO_MANY_OPS,
-                    ))));
+                    slots[global] = Some(Err(OpError::not_attempted(
+                        vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                            nfsstat4_NFS4ERR_TOO_MANY_OPS,
+                        )),
+                    )));
                     global += 1;
                     continue;
                 }
                 if self
                     .merged_paths_need_repack(tag, 1 + per_file, &compound, map.ranges.len())
-                    .map_err(|error| error_from_rpc(error, None))?
+                    .map_err(vfsi_core::internal::errors::from_rpc)?
                 {
                     max_items = if tag == b"removev" {
                         (map.ranges.len() / 2).max(1)
@@ -91,30 +94,34 @@ impl NfsClient {
                 }
                 if let Err(error) = CompoundBudget::new(self.max_ops).ensure(&compound) {
                     if map.ranges.len() == 1 {
-                        slots[map.ranges[0].0] =
-                            Some(Err(OpError::not_attempted(error_from_rpc(error, None))));
+                        slots[map.ranges[0].0] = Some(Err(OpError::not_attempted(
+                            vfsi_core::internal::errors::from_rpc(error),
+                        )));
                         max_items = usize::MAX;
                         continue;
                     }
-                    return Err(error_from_rpc(error, None));
+                    return Err(vfsi_core::internal::errors::from_rpc(error));
                 }
                 if !self
                     .compound_request_fits(&compound)
-                    .map_err(|error| error_from_rpc(error, None))?
+                    .map_err(vfsi_core::internal::errors::from_rpc)?
                 {
                     if map.ranges.len() == 1 {
                         let index = map.ranges[0].0;
-                        slots[index] = Some(Err(OpError::not_attempted(VfError::nfs(
-                            None,
-                            nfsstat4_NFS4ERR_REQ_TOO_BIG,
-                        ))));
+                        slots[index] = Some(Err(OpError::not_attempted(
+                            vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                                nfsstat4_NFS4ERR_REQ_TOO_BIG,
+                            )),
+                        )));
                         max_items = usize::MAX;
                         continue;
                     }
-                    return Err(VfError::nfs(None, nfsstat4_NFS4ERR_REQ_TOO_BIG));
+                    return Err(vfsi_core::internal::errors::from_status(
+                        vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_REQ_TOO_BIG),
+                    ));
                 }
                 self.ensure_usable()
-                    .map_err(|error| error_from_rpc(error, None))?;
+                    .map_err(vfsi_core::internal::errors::from_rpc)?;
                 readiness(chunk_start)?;
                 #[cfg(feature = "test-faults")]
                 if let Some(injector) = &self.fault_injector {
@@ -134,7 +141,7 @@ impl NfsClient {
                 dispatched = true;
                 let reply = self
                     .call_compound_with_safety(&mut compound, RequestSafety::NonIdempotentMutation)
-                    .map_err(|error| error_from_rpc(error, None))?;
+                    .map_err(vfsi_core::internal::errors::from_rpc)?;
                 #[cfg(feature = "test-faults")]
                 if let Some(injector) = &self.fault_injector {
                     let point = match tag {
@@ -157,7 +164,9 @@ impl NfsClient {
                     continue;
                 }
                 let report = map.analyze(&reply).map_err(|cause| {
-                    VfError::invalid_reply(None, format!("malformed path mutation reply: {cause}"))
+                    vfsi_core::internal::errors::invalid_reply(format!(
+                        "malformed path mutation reply: {cause}"
+                    ))
                 })?;
                 for &(input, start, end) in map.completed_ranges(&report) {
                     slots[input] = Some(decode(&reply, start, end));
@@ -165,7 +174,9 @@ impl NfsClient {
                 max_items = usize::MAX;
                 if let Some(failure) = report.failure {
                     slots[failure.caller] = Some(Err(OpError::failed(
-                        VfError::nfs(None, failure.status),
+                        vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                            failure.status,
+                        )),
                         None,
                     )));
                     let failed_op = reply.op(failure.op_index).resop;
@@ -179,7 +190,9 @@ impl NfsClient {
                     global = failure.caller + 1;
                 } else if let Some(status) = report.compound_failure {
                     submitted.clear();
-                    return Err(VfError::nfs(None, status));
+                    return Err(vfsi_core::internal::errors::from_status(
+                        vfsi_core::StatusCode::Nfs(status),
+                    ));
                 }
             }
             Ok(())
@@ -191,12 +204,13 @@ impl NfsClient {
             return Ok((completion::finish_slots(slots, &submitted, cause), None));
         }
         if let Some(repair_point) = repair {
-            let cause = slots[repair_point.input]
-                .as_ref()
-                .and_then(|result| result.as_ref().err())
-                .expect("repair has a failed lookup or guard")
-                .cause()
-                .clone();
+            let error = slots[repair_point.input]
+                .as_mut()
+                .and_then(|result| result.as_mut().err())
+                .expect("repair has a failed lookup or guard");
+            let cause = vfsi_core::internal::errors::from_shared(
+                &vfsi_core::internal::errors::share_op_cause(error),
+            );
             Ok((completion::finish_slots(slots, &[], cause), repair))
         } else {
             Ok((
@@ -205,7 +219,9 @@ impl NfsClient {
                     .map(|slot| {
                         slot.unwrap_or_else(|| {
                             Err(OpError::unknown(
-                                VfError::invalid_reply(None, "missing path mutation result"),
+                                vfsi_core::internal::errors::invalid_reply(
+                                    "missing path mutation result",
+                                ),
                                 None,
                             ))
                         })

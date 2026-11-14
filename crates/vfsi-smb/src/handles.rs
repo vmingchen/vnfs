@@ -10,12 +10,12 @@ impl HandleBackend for SmbVecFs {
         let jobs = files.iter().enumerate().map(|(index, file)| {
             let prepared = file
                 .fd()
-                .ok_or_else(|| VfError::from_kind(None, std::io::ErrorKind::InvalidInput))
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))
                 .and_then(|fd| {
                     self.open_files
                         .get(&fd)
                         .map(|open| (fd, open.file_id, open.tree.clone()))
-                        .ok_or_else(|| VfError::errno(None, ERR_EBADF))
+                        .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))
                 });
             #[cfg(not(feature = "test-faults"))]
             let _ = index;
@@ -68,7 +68,7 @@ impl HandleBackend for SmbVecFs {
     fn close_deferred(&mut self, file: &FileOperand) -> VfResult<()> {
         let fd = file
             .fd()
-            .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
         if self.open_files.contains_key(&fd) {
             self.close_impl(file)
         } else {
@@ -138,6 +138,7 @@ impl HandleBackend for SmbVecFs {
             self.vclose_impl(std::slice::from_ref(file)),
             1,
         )
+        .map_err(vfsi_core::IndexedError::into_cause)
         .map(|_| ());
         if result.is_err()
             && let Some(open) = file.fd().and_then(|fd| self.open_files.remove(&fd))
@@ -169,7 +170,7 @@ impl HandleBackend for SmbVecFs {
         for (index, file) in files.iter().enumerate() {
             let prepared = file
                 .fd()
-                .ok_or_else(|| VfError::from_kind(None, std::io::ErrorKind::InvalidInput))
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))
                 .and_then(|fd| self.live_file(fd).map(|open| open.file_id));
             match prepared {
                 Err(error) => output[index] = Some(Err(OpError::not_attempted(error))),
@@ -214,7 +215,7 @@ impl HandleBackend for SmbVecFs {
     fn chdir(&mut self, path: &Path) -> VfResult<()> {
         let attrs = self.stat_impl(path)?;
         if attrs.ftype != VfType::Directory {
-            return Err(VfError::errno(0, ERR_NOTDIR));
+            return Err(std::io::Error::from_raw_os_error((ERR_NOTDIR) as i32));
         }
         self.cwd = self.abs_path(path);
         Ok(())
@@ -232,17 +233,17 @@ impl HandleBackend for SmbVecFs {
     ) -> VfResult<i64> {
         let fd = file
             .fd()
-            .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
         let open = self.live_file(fd)?;
         let base = match whence {
             SeekFrom::Set => 0i128,
             SeekFrom::Cur => open.cur_offset as i128,
             SeekFrom::End => self.query_size(open.file_id)? as i128,
-            _ => return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
+            _ => return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
         };
         let new = base + offset as i128;
         if !(0..=i64::MAX as i128).contains(&new) {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         self.open_files
             .get_mut(&fd)

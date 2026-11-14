@@ -6,7 +6,7 @@ use vfsi_sync::VfsiExt;
 use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::{
     FileOperand, FsClient, OpenFlags, OpenOp, ReadOp, ReadResult, SetAttrsOp, Target, VfAttrs,
-    VfError, VfOffset, VfPathBase, VfResult, WriteOp, WriteResult,
+    VfOffset, VfPathBase, VfResult, WriteOp, WriteResult,
 };
 
 struct Sink {
@@ -71,29 +71,31 @@ impl HandleBackend for Sink {
         Ok(())
     }
     fn read_impl(&mut self, _: &ReadOp) -> VfResult<ReadResult> {
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
     fn write_impl(&mut self, request: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult> {
         Ok(self
             .vwrite_impl(&[request])
+            .map_err(vfsi_core::IndexedError::unattributed)
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
-            })?
+            })
+            .map_err(vfsi_core::IndexedError::into_cause)?
             .remove(0))
     }
     fn seek_impl(&mut self, _: &FileOperand, _: std::io::SeekFrom) -> VfResult<u64> {
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
     fn metadata_impl(
         &mut self,
         _: Target<'_, FileOperand>,
         _: vfsi_core::api::AttrsOptions,
     ) -> VfResult<VfAttrs> {
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
     fn set_attributes_impl(&mut self, _: &SetAttrsOp<Target<'_, FileOperand>>) -> VfResult<()> {
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
 }
 
@@ -105,10 +107,7 @@ impl VectorBackend for Sink {
         modes: &[u32],
     ) -> vfsi_sync::VecResult<vfsi_sync::FileOperand> {
         if paths.len() != flags.len() || paths.len() != modes.len() {
-            return Err(vfsi_sync::VfError::from_kind(
-                None,
-                std::io::ErrorKind::InvalidInput,
-            ));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         Ok(paths
             .iter()
@@ -116,7 +115,7 @@ impl VectorBackend for Sink {
             .zip(modes)
             .map(|((path, flags), mode)| {
                 self.open_raw_impl(path, *flags, *mode).map_err(|cause| {
-                    if cause.is_transport() {
+                    if vfsi_core::transport_kind(&(cause)).is_some() {
                         vfsi_sync::OpError::unknown(cause, None)
                     } else {
                         vfsi_sync::OpError::failed(cause, None)
@@ -127,7 +126,8 @@ impl VectorBackend for Sink {
     }
 
     fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
-        let result: VfResult<Vec<ReadResult>> = { Err(VfError::unsupported(0)) };
+        let result: VfResult<Vec<ReadResult>> =
+            { Err(std::io::Error::from(std::io::ErrorKind::Unsupported)) };
         result.map(|results| results.into_iter().map(Ok).collect())
     }
     fn vwrite_impl(
@@ -260,6 +260,7 @@ fn measure<F: VectorBackend + 'static>(
     // outside the timed region. Both binaries run the same monomorphized API.
     let before = client
         .vwrite_all_native(&requests)
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
@@ -276,6 +277,7 @@ fn measure<F: VectorBackend + 'static>(
         black_box(
             client
                 .vwrite_all_native(black_box(&requests))
+                .map_err(vfsi_core::IndexedError::unattributed)
                 .and_then(|outcomes| {
                     let count = outcomes.len();
                     vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
@@ -288,6 +290,7 @@ fn measure<F: VectorBackend + 'static>(
         black_box(
             client
                 .vwrite_all_native(black_box(&requests))
+                .map_err(vfsi_core::IndexedError::unattributed)
                 .and_then(|outcomes| {
                     let count = outcomes.len();
                     vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
@@ -298,6 +301,7 @@ fn measure<F: VectorBackend + 'static>(
     let elapsed = start.elapsed().as_nanos();
     let after = client
         .vwrite_all_native(&requests)
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)

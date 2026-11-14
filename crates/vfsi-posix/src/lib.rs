@@ -33,9 +33,7 @@ impl DescriptorIo for PosixIo {
                 let count = op
                     .file
                     .read_at(&mut op.buffer, op.offset)
-                    .map_err(|error| {
-                        vfsi_core::OpError::failed(vfsi_core::VfError::from_io(None, error), None)
-                    })?;
+                    .map_err(|error| vfsi_core::OpError::failed(error, None))?;
                 op.buffer.truncate(count);
                 Ok(op.buffer)
             })

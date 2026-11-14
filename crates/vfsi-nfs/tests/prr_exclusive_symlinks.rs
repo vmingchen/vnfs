@@ -42,6 +42,7 @@ fn reject_final_symlink(target_exists: bool, looping: bool) {
         &[Path::new(if looping { "link" } else { "target" })],
         &[Path::new(&link)],
     )
+    .map_err(vfsi_core::IndexedError::unattributed)
     .and_then(|outcomes| {
         let count = outcomes.len();
         vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
@@ -79,13 +80,19 @@ fn reject_final_symlink(target_exists: bool, looping: bool) {
     }
     .unwrap();
 
-    assert_eq!(result.unwrap_err().raw_code(), libc::EEXIST as u32);
+    assert_eq!(
+        test_native_code(&(result.unwrap_err())),
+        libc::EEXIST as u32
+    );
     assert_eq!(link_type, VfType::Symlink);
     if target_exists {
         assert_eq!(contents.unwrap(), b"keep");
         assert_eq!(target_result.unwrap().mode & 0o777, 0o640);
     } else {
-        assert_eq!(target_result.unwrap_err().raw_code(), libc::ENOENT as u32);
+        assert_eq!(
+            test_native_code(&(target_result.unwrap_err())),
+            libc::ENOENT as u32
+        );
     }
     #[cfg(feature = "test-faults")]
     assert!(
@@ -117,6 +124,7 @@ fn ordinary_create_still_follows_dangling_final_symlink() {
     let target = format!("{root}/target");
     fs.ensure_dir_impl(Path::new(&root), 0o755).unwrap();
     fs.vsymlink_impl(&[Path::new("target")], &[Path::new(&link)])
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
@@ -157,6 +165,7 @@ fn exclusive_create_still_follows_intermediate_symlink() {
     let target = format!("{dir}/new");
     fs.ensure_dir_impl(Path::new(&dir), 0o755).unwrap();
     fs.vsymlink_impl(&[Path::new("dir")], &[Path::new(&link)])
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
@@ -201,6 +210,7 @@ fn ordinary_create_still_follows_intermediate_symlink() {
     let target = format!("{dir}/new");
     fs.ensure_dir_impl(Path::new(&dir), 0o755).unwrap();
     fs.vsymlink_impl(&[Path::new("dir")], &[Path::new(&link)])
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
@@ -252,6 +262,7 @@ fn grouped_remove_error(prefix: bool, earlier_in_group: bool, missing_parent: bo
     let adir = format!("{root}/adir");
     fs.ensure_dir_impl(Path::new(&zdir), 0o755).unwrap();
     fs.vsymlink_impl(&[Path::new("zdir")], &[Path::new(&zlink)])
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
@@ -296,7 +307,7 @@ fn grouped_remove_error(prefix: bool, earlier_in_group: bool, missing_parent: bo
     }
     .unwrap();
     let error = result.unwrap_err();
-    assert_eq!(error.raw_code(), libc::ENOENT as u32);
+    assert_eq!(test_native_code(error.cause()), libc::ENOENT as u32);
     assert_eq!(
         error.index(),
         Some(expected),
@@ -335,6 +346,7 @@ fn grouped_remove_keeps_same_parent_names_batched() {
     let link = format!("{root}/link");
     fs.ensure_dir_impl(Path::new(&dir), 0o755).unwrap();
     fs.vsymlink_impl(&[Path::new("dir")], &[Path::new(&link)])
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
@@ -385,4 +397,15 @@ fn grouped_remove_keeps_same_parent_names_batched() {
         compounds <= 7,
         "fallback should resolve once and remove one batch: {compounds}"
     );
+}
+
+fn test_native_code(error: &std::io::Error) -> u32 {
+    match vfsi_core::native_status(error) {
+        Some(
+            vfsi_core::StatusCode::Errno(code)
+            | vfsi_core::StatusCode::Nfs(code)
+            | vfsi_core::StatusCode::Smb(code),
+        ) => code,
+        _ => panic!("expected a native error, got {error:?}"),
+    }
 }

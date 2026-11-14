@@ -55,7 +55,7 @@ fn native_page_results_keep_siblings_and_anchored_children_after_rename() {
     let seed = children.remove(0).expect("anchored child");
     let error = results.next().unwrap().err().expect("failed page");
     assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
-    assert_eq!(error.cause().index(), None);
+    let _: &std::io::Error = error.cause();
     let (_, next, _) = results.next().unwrap().unwrap();
     let next = next.expect("retain buffered sibling entries");
     let moved = base.join("moved");
@@ -145,7 +145,10 @@ fn native_page_results_preserve_buffered_success_after_child_reply_loss() {
             first: 0,
             count: 2,
         },
-        VfError::transport(None, "anchored child READDIR reply lost"),
+        vfsi_core::internal::errors::transport(
+            vfsi_core::TransportKind::Other,
+            "anchored child READDIR reply lost",
+        ),
     ));
     fs.set_fault_injector(fault.clone());
     let results = fs
@@ -201,8 +204,7 @@ fn fresh_page_recovery_retries_only_failed_and_untouched_directories() {
             first: 2,
             count: 2,
         },
-        VfError::transport_with_kind(
-            None,
+        vfsi_core::internal::errors::transport(
             vfsi_core::TransportKind::Connection,
             "fresh READDIR reply lost",
         ),

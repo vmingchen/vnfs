@@ -29,7 +29,10 @@ mod live_shutdown_tests {
             .unwrap();
         let script = Arc::new(FaultScript::new([(
             OpenFaultPoint::BeforePathCloseBatch,
-            vfsi_core::VfError::transport(None, "defer cleanup"),
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "defer cleanup",
+            ),
         )]));
         client.set_fault_injector(script.clone());
         client.close_path_or_defer(vec![CloseOp { fh, stateid }]);
@@ -57,7 +60,10 @@ mod live_shutdown_tests {
                 if matches!(point, OpenFaultPoint::BeforePathClose)
                     && self.0.fetch_add(1, Ordering::SeqCst) == 1
                 {
-                    return Err(vfsi_core::VfError::transport(None, "second CLOSE failed"));
+                    return Err(vfsi_core::internal::errors::transport(
+                        vfsi_core::TransportKind::Other,
+                        "second CLOSE failed",
+                    ));
                 }
                 Ok(())
             }
@@ -88,7 +94,10 @@ mod live_shutdown_tests {
         }
         let defer = Arc::new(FaultScript::one(
             OpenFaultPoint::BeforePathCloseBatch,
-            vfsi_core::VfError::transport(None, "queue deferred closes"),
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "queue deferred closes",
+            ),
         ));
         client.set_fault_injector(defer.clone());
         client.close_path_or_defer(opens);
@@ -267,7 +276,7 @@ mod unaddressed_open_tests {
             )
             .err()
             .expect("quarantined READ is rejected before submission");
-        assert!(rejection.is_transport());
+        assert!(vfsi_core::transport_kind(&(rejection)).is_some());
         assert_eq!(crate::compound::thread_compound_stats().0, 0);
 
         assert!(client.getattr_path_compound(&[]).unwrap().is_empty());
@@ -277,7 +286,7 @@ mod unaddressed_open_tests {
                 attrs: vec![FATTR4_TYPE],
             }])
             .expect_err("quarantined GETATTR is rejected before submission");
-        assert!(rejection.is_transport());
+        assert!(vfsi_core::transport_kind(&(rejection)).is_some());
         assert_eq!(crate::compound::thread_compound_stats().0, 0);
 
         // Test-only teardown uses the exact FH pinned before this OPEN. The

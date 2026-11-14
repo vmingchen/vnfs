@@ -111,10 +111,13 @@ fn uncached_reply_marks_every_submitted_mutation_unknown_without_suffix_replay()
             }
         );
         assert_eq!(
-            error.cause().status(),
+            vfsi_core::native_status(error.cause()),
             Some(StatusCode::Nfs(nfsstat4_NFS4ERR_RETRY_UNCACHED_REP))
         );
-        assert!(!error.cause().is_transport(), "retain the native NFS cause");
+        assert!(
+            !vfsi_core::transport_kind(error.cause()).is_some(),
+            "retain the native NFS cause"
+        );
     }
     assert_eq!(
         transmissions, 1,
@@ -176,13 +179,14 @@ fn uncached_status_is_uncertain_for_short_write_repair() {
     let error = io_progress::write_rpc_error(RpcError::op(1, nfsstat4_NFS4ERR_RETRY_UNCACHED_REP));
     assert_eq!(error.state(), FailureState::Unknown);
     assert_eq!(
-        error.cause().status(),
+        vfsi_core::native_status(error.cause()),
         Some(StatusCode::Nfs(nfsstat4_NFS4ERR_RETRY_UNCACHED_REP))
     );
-    assert!(!uncertain_completion(&vfsi_core::VfError::nfs(
-        None,
-        nfsstat4_NFS4ERR_ACCESS
-    )));
+    assert!(!uncertain_completion(
+        &vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+            nfsstat4_NFS4ERR_ACCESS
+        ))
+    ));
 }
 
 #[test]
@@ -235,7 +239,7 @@ fn uncached_reply_keeps_merged_read_and_write_inputs_unknown() {
         for error in errors {
             assert_eq!(error.state(), FailureState::Unknown);
             assert_eq!(
-                error.cause().status(),
+                vfsi_core::native_status(error.cause()),
                 Some(StatusCode::Nfs(nfsstat4_NFS4ERR_RETRY_UNCACHED_REP))
             );
         }

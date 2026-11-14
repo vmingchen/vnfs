@@ -1,6 +1,7 @@
 //! Native page/read contracts and validation of backend I/O replies.
 
 use super::*;
+use vfsi_core::IndexedError;
 
 /// Backend-owned continuation state, shared with the portable paging adapter.
 #[doc(hidden)]
@@ -57,11 +58,14 @@ fn contract_error(
     operation: &str,
     index: Option<usize>,
     detail: impl std::fmt::Display,
-) -> VfError {
-    VfError::invalid_reply(
-        index,
-        format!("{operation} backend contract violation: {detail}"),
-    )
+) -> IndexedError {
+    let cause = vfsi_core::internal::errors::invalid_reply(format!(
+        "{operation} backend contract violation: {detail}"
+    ));
+    match index {
+        Some(index) => IndexedError::at(index, cause),
+        None => IndexedError::unattributed(cause),
+    }
 }
 
 pub(crate) fn take_single_result<T>(operation: &str, mut results: Vec<T>) -> VfResult<T> {
@@ -70,7 +74,8 @@ pub(crate) fn take_single_result<T>(operation: &str, mut results: Vec<T>) -> VfR
             operation,
             None,
             format!("returned {} results for one request", results.len()),
-        ));
+        )
+        .into_cause());
     }
     Ok(results.pop().expect("validated one result"))
 }
@@ -79,7 +84,7 @@ pub(crate) fn validate_read_results(
     operation: &str,
     requests: &[ReadOp],
     results: &[ReadResult],
-) -> VfResult<()> {
+) -> Result<(), IndexedError> {
     if results.len() != requests.len() {
         return Err(contract_error(
             operation,
@@ -134,7 +139,7 @@ pub(crate) fn validate_read_into_results(
     operation: &str,
     requests: &[ReadOp],
     results: &[ReadIntoResult],
-) -> VfResult<()> {
+) -> Result<(), IndexedError> {
     if results.len() != requests.len() {
         return Err(contract_error(
             operation,
@@ -188,7 +193,7 @@ pub(crate) fn validate_write_results(
     operation: &str,
     requests: &[WriteOp<&FileOperand, &[u8]>],
     results: &[WriteResult],
-) -> VfResult<()> {
+) -> Result<(), IndexedError> {
     if results.len() != requests.len() {
         return Err(contract_error(
             operation,
@@ -236,10 +241,13 @@ pub(crate) fn validate_write_results(
 mod contract_tests {
     use super::*;
 
-    fn assert_contract_error(error: VfError, index: Option<usize>, detail: &str) {
-        assert_eq!(error.domain(), vfsi_core::ErrorDomain::Transport);
+    fn assert_contract_error(error: IndexedError, index: Option<usize>, detail: &str) {
+        assert_eq!(
+            vfsi_core::transport_kind(error.cause()),
+            Some(vfsi_core::TransportKind::InvalidReply)
+        );
         assert_eq!(error.index(), index);
-        assert_eq!(error.status(), None);
+        assert_eq!(vfsi_core::native_status(error.cause()), None);
         let message = error.to_string();
         assert!(message.contains("backend contract violation"), "{message}");
         assert!(message.contains(detail), "{message}");
@@ -393,12 +401,14 @@ mod contract_tests {
     #[test]
     fn scalar_result_cardinality_is_checked_without_panicking() {
         assert_contract_error(
-            take_single_result::<u8>("readlink", Vec::new()).unwrap_err(),
+            IndexedError::unattributed(
+                take_single_result::<u8>("readlink", Vec::new()).unwrap_err(),
+            ),
             None,
             "readlink",
         );
         assert_contract_error(
-            take_single_result("readlink", vec![1u8, 2]).unwrap_err(),
+            IndexedError::unattributed(take_single_result("readlink", vec![1u8, 2]).unwrap_err()),
             None,
             "readlink",
         );

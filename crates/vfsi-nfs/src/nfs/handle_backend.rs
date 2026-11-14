@@ -24,8 +24,8 @@ fn open_after_create_probe<T>(
         Ok(opened) => Ok((opened, true)),
         Err(error)
             if !excl
-                && error.domain() == vfsi_core::ErrorDomain::Nfs
-                && error.raw_code() == nfsstat4_NFS4ERR_EXIST =>
+                && vfsi_core::native_status(&error)
+                    == Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_EXIST)) =>
         {
             open(false, false).map(|opened| (opened, false))
         }
@@ -39,14 +39,14 @@ impl HandleBackend for NfsVecFs {
             .retain(|fd, _| self.open_files.contains_key(fd));
         let mut first = None;
         let mut same = true;
-        for (index, file) in files.iter().enumerate() {
+        for file in files.iter() {
             let fd = file
                 .fd()
-                .ok_or_else(|| VfError::from_kind(index, std::io::ErrorKind::InvalidInput))?;
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
             let fh = &self
                 .open_files
                 .get(&fd)
-                .ok_or_else(|| VfError::errno(index, ERR_EBADF))?
+                .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?
                 .fh;
             if let Some(original) = first {
                 same &= original == fh;
@@ -77,7 +77,9 @@ impl HandleBackend for NfsVecFs {
         }
         vfsi_core::internal::collect_vec_result(self.vgetattrs_impl(&mut attrs), attrs.len())
             .map_err(|error| {
-                error.map_index(|index| indices.get(index).copied().unwrap_or(index))
+                error
+                    .map_index(|index| indices.get(index).copied().unwrap_or(index))
+                    .into_cause()
             })?;
         for attr in attrs {
             let fd = attr.file.fd().unwrap();
@@ -93,11 +95,11 @@ impl HandleBackend for NfsVecFs {
     ) -> VfResult<Option<vfsi_sync::backend::OpenObjectRef<'_>>> {
         let fd = file
             .fd()
-            .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
         let open = self
             .open_files
             .get(&fd)
-            .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
+            .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?;
         Ok(object_ref_for_group(
             open.fh.as_bytes(),
             self.open_object_ids.get(&fd).copied().flatten(),
@@ -129,9 +131,8 @@ impl HandleBackend for NfsVecFs {
         let resolved = match self.resolve_files_nfs(&refs, true) {
             Ok(resolved) => resolved,
             Err(error) => {
-                return Ok(files
-                    .iter()
-                    .map(|_| Err(OpError::unknown(error.clone(), None)))
+                return Ok(vfsi_core::internal::errors::fanout(error, files.len())
+                    .map(|error| Err(OpError::unknown(error, None)))
                     .collect());
             }
         };
@@ -168,8 +169,12 @@ impl HandleBackend for NfsVecFs {
                 }
             }
             Err(error) => {
-                for index in indices {
-                    output[index] = Some(Err(OpError::not_attempted(error.clone())));
+                for (index, error) in indices
+                    .iter()
+                    .copied()
+                    .zip(vfsi_core::internal::errors::fanout(error, indices.len()))
+                {
+                    output[index] = Some(Err(OpError::not_attempted(error)));
                 }
             }
         }
@@ -178,7 +183,7 @@ impl HandleBackend for NfsVecFs {
             .map(|slot| {
                 slot.unwrap_or_else(|| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "missing statfs outcome"),
+                        vfsi_core::internal::errors::invalid_reply("missing statfs outcome"),
                         None,
                     ))
                 })
@@ -196,12 +201,12 @@ impl HandleBackend for NfsVecFs {
         for (index, file) in files.iter().enumerate() {
             let fd = file
                 .fd()
-                .ok_or_else(|| VfError::errno(None, libc::EINVAL as u32));
+                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL));
             let open = fd.and_then(|fd| {
                 self.open_files
                     .get(&fd)
                     .map(|open| (fd, open))
-                    .ok_or_else(|| VfError::errno(None, ERR_EBADF))
+                    .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))
             });
             match open {
                 Ok((fd, open)) => {
@@ -225,9 +230,8 @@ impl HandleBackend for NfsVecFs {
         let outcomes = match self.nfs.close_descriptors(&ops) {
             Ok(outcomes) => outcomes,
             Err(error) if prepared.len() == files.len() => return Err(error),
-            Err(error) => ops
-                .iter()
-                .map(|_| Err(OpError::not_attempted(error.clone())))
+            Err(error) => vfsi_core::internal::errors::fanout(error, ops.len())
+                .map(|error| Err(OpError::not_attempted(error)))
                 .collect(),
         };
         for ((index, fd), outcome) in prepared.into_iter().zip(outcomes) {
@@ -250,7 +254,7 @@ impl HandleBackend for NfsVecFs {
     fn close_deferred(&mut self, file: &FileOperand) -> VfResult<()> {
         let fd = file
             .fd()
-            .ok_or_else(|| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
         if self.open_files.contains_key(&fd) {
             self.close_impl(file)
         } else {
@@ -321,8 +325,8 @@ impl HandleBackend for NfsVecFs {
         } else {
             self.follow_target_path(&full)?
         };
-        let (dir, name) =
-            split_path_bytes(path_bytes(&full)).map_err(|_| VfError::errno(0, ERR_NOENT))?;
+        let (dir, name) = split_path_bytes(path_bytes(&full))
+            .map_err(|_| std::io::Error::from_raw_os_error((ERR_NOENT) as i32))?;
         let access = Self::flags_to_access(flags);
         // The mode only applies when O_CREAT actually creates the file
         // (POSIX ignores it for existing files).
@@ -332,7 +336,7 @@ impl HandleBackend for NfsVecFs {
             } else {
                 match self.resolve_path(&full, false) {
                     Ok(_) => false,
-                    Err(error) if error.raw_code() == nfsstat4_NFS4ERR_NOENT => true,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
                     Err(error) => return Err(error),
                 }
             }
@@ -358,12 +362,12 @@ impl HandleBackend for NfsVecFs {
             if created && !excl {
                 self.nfs
                     .setattr(&fh, Some(mode & 0o7777), None)
-                    .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
+                    .map_err(vfsi_core::internal::errors::from_rpc)?;
             }
             if flags & O_TRUNC != 0 {
                 self.nfs
                     .setattr(&fh, None, Some(0))
-                    .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
+                    .map_err(vfsi_core::internal::errors::from_rpc)?;
             }
             #[cfg(feature = "test-faults")]
             self.inject_open_fault(OpenFaultPoint::BeforeRegister { index: 0 })?;
@@ -394,13 +398,15 @@ impl HandleBackend for NfsVecFs {
 
     fn close_impl(&mut self, tcf: &FileOperand) -> VfResult<()> {
         if !tcf.is_fd() {
-            return Err(VfError::errno(0, nfsstat4_NFS4ERR_INVAL));
+            return Err(std::io::Error::from_raw_os_error(
+                (nfsstat4_NFS4ERR_INVAL) as i32,
+            ));
         }
         let fd = tcf.fd().unwrap();
         let open = self
             .open_files
             .remove(&fd)
-            .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
+            .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?;
         #[cfg(feature = "test-faults")]
         if let Err(error) = self.inject_open_fault(OpenFaultPoint::BeforeCloseDispatch { index: 0 })
         {
@@ -411,7 +417,7 @@ impl HandleBackend for NfsVecFs {
             Ok(()) => Ok(()),
             Err(error) => {
                 self.deferred_descriptor_closes.push(open);
-                Err(vfsi_core::error_from_rpc(error, 0))
+                Err(vfsi_core::internal::errors::from_rpc(error))
             }
         }
     }
@@ -427,17 +433,16 @@ impl HandleBackend for NfsVecFs {
             .iter()
             .map(|file| {
                 let fd = file.fd().ok_or_else(|| {
-                    vfsi_core::OpError::not_attempted(VfError::from_kind(
-                        None,
+                    vfsi_core::OpError::not_attempted(std::io::Error::from(
                         std::io::ErrorKind::InvalidInput,
                     ))
                 })?;
                 if self.open_files.contains_key(&fd) {
                     Ok(())
                 } else {
-                    Err(vfsi_core::OpError::not_attempted(VfError::errno(
-                        None, ERR_EBADF,
-                    )))
+                    Err(vfsi_core::OpError::not_attempted(
+                        std::io::Error::from_raw_os_error((ERR_EBADF) as i32),
+                    ))
                 }
             })
             .collect())
@@ -446,7 +451,7 @@ impl HandleBackend for NfsVecFs {
     fn chdir(&mut self, path: &Path) -> VfResult<()> {
         let st = self.stat_impl(path)?;
         if st.ftype != VfType::Directory {
-            return Err(VfError::errno(0, ERR_NOTDIR));
+            return Err(std::io::Error::from_raw_os_error((ERR_NOTDIR) as i32));
         }
         self.cwd = self.abs_path(path);
         Ok(())
@@ -461,19 +466,21 @@ impl HandleBackend for NfsVecFs {
             return self.read_with_recovery(|client| client.seek_raw_impl(tcf, offset, whence));
         }
         if !tcf.is_fd() {
-            return Err(VfError::errno(0, nfsstat4_NFS4ERR_INVAL));
+            return Err(std::io::Error::from_raw_os_error(
+                (nfsstat4_NFS4ERR_INVAL) as i32,
+            ));
         }
         let cur = self
             .open_files
             .get(&tcf.fd().unwrap())
             .map(|o| o.cur_offset)
-            .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
+            .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?;
         let new = match whence {
             SeekFrom::Set => offset,
             SeekFrom::Cur => i64::try_from(cur)
                 .ok()
                 .and_then(|cur| cur.checked_add(offset))
-                .ok_or_else(|| VfError::errno(0, libc::EOVERFLOW as u32))?,
+                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?,
             SeekFrom::End => {
                 let fh = self
                     .open_files
@@ -484,12 +491,18 @@ impl HandleBackend for NfsVecFs {
                 i64::try_from(size)
                     .ok()
                     .and_then(|size| size.checked_add(offset))
-                    .ok_or_else(|| VfError::errno(0, libc::EOVERFLOW as u32))?
+                    .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?
             }
-            _ => return Err(VfError::errno(0, nfsstat4_NFS4ERR_INVAL)),
+            _ => {
+                return Err(std::io::Error::from_raw_os_error(
+                    (nfsstat4_NFS4ERR_INVAL) as i32,
+                ));
+            }
         };
         if new < 0 {
-            return Err(VfError::errno(0, nfsstat4_NFS4ERR_INVAL));
+            return Err(std::io::Error::from_raw_os_error(
+                (nfsstat4_NFS4ERR_INVAL) as i32,
+            ));
         }
         let new = new as u64;
         self.advance_offset(tcf, new);
@@ -546,7 +559,9 @@ mod tests {
             if create {
                 // A competing client created the file after the existence
                 // probe and before our guarded OPEN.
-                Err(VfError::nfs(0, nfsstat4_NFS4ERR_EXIST))
+                Err(vfsi_core::internal::errors::from_status(
+                    vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_EXIST),
+                ))
             } else {
                 Ok("winner")
             }
@@ -566,12 +581,17 @@ mod tests {
         let mut attempts = Vec::new();
         let error = open_after_create_probe(true, |create, excl| {
             attempts.push((create, excl));
-            Err::<(), _>(VfError::nfs(0, nfsstat4_NFS4ERR_EXIST))
+            Err::<(), _>(vfsi_core::internal::errors::from_status(
+                vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_EXIST),
+            ))
         })
         .unwrap_err();
 
-        assert_eq!(error.domain(), vfsi_core::ErrorDomain::Nfs);
-        assert_eq!(error.raw_code(), nfsstat4_NFS4ERR_EXIST);
+        assert_eq!(
+            vfsi_core::native_status(&error),
+            Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_EXIST))
+        );
+        assert_eq!(crate::test_native_code(&(error)), nfsstat4_NFS4ERR_EXIST);
         assert_eq!(attempts, [(true, true)]);
     }
 }

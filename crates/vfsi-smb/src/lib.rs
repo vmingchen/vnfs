@@ -113,7 +113,8 @@ impl SmbConnectOptions {
 
 fn check_share_routing(is_dfs: bool, share: &str) -> VfRes {
     if is_dfs {
-        return Err(VfError::unsupported(0).with_context(
+        return Err(vfsi_core::internal::errors::with_context(
+            std::io::Error::from(std::io::ErrorKind::Unsupported),
             "SMB DFS referrals are unsupported; connect directly to the destination server/share",
             share,
         ));
@@ -121,9 +122,9 @@ fn check_share_routing(is_dfs: bool, share: &str) -> VfRes {
     Ok(())
 }
 
-fn checked_offset(base: u64, delta: u64, index: usize) -> VfResult<u64> {
+fn checked_offset(base: u64, delta: u64, _index: usize) -> VfResult<u64> {
     base.checked_add(delta)
-        .ok_or_else(|| VfError::errno(index, libc::EOVERFLOW as u32))
+        .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))
 }
 
 #[derive(Debug, Clone)]
@@ -165,7 +166,12 @@ fn smb_runtime() -> VfResult<Runtime> {
         .worker_threads(1)
         .enable_all()
         .build()
-        .map_err(|error| VfError::transport(None, format!("create SMB runtime: {error}")))
+        .map_err(|error| {
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                format!("create SMB runtime: {error}"),
+            )
+        })
 }
 
 impl Drop for SmbVecFs {
@@ -188,8 +194,6 @@ mod vector;
 
 use protocol::*;
 
-#[cfg(test)]
-use vfsi_core::ERR_INVAL;
 #[cfg(test)]
 mod error_tests;
 

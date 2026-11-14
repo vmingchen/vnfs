@@ -47,6 +47,7 @@ fn stable_owner_reconnect_preserves_independent_opens_and_shutdown() {
         }
         assert_eq!(
             fs.vread_impl(&[ReadOp::new(first.clone(), VfOffset::Cur, 1)])
+                .map_err(vfsi_core::IndexedError::unattributed)
                 .and_then(|outcomes| {
                     let count = outcomes.len();
                     vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
@@ -165,7 +166,10 @@ fn reconnect_cleanup_failure_is_retained_and_retried_at_shutdown() {
     fs.write_raw_impl(&file, 0, b"alive").unwrap();
     let script = Arc::new(FaultScript::new([(
         OpenFaultPoint::BeforePathCloseBatch,
-        vfsi_core::VfError::transport(None, "obsolete state cleanup failure"),
+        vfsi_core::internal::errors::transport(
+            vfsi_core::TransportKind::Other,
+            "obsolete state cleanup failure",
+        ),
     )]));
     fs.set_fault_injector(script.clone());
     fs.reconnect().unwrap();

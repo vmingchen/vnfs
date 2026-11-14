@@ -11,6 +11,7 @@ pub fn check<C: Vfsi>(fs: &C, other: &C, namespace: &impl Vfsi, verify: &impl Vf
             vnfs::directory::MkDirOp::new("/b", 0o755),
             vnfs::directory::MkDirOp::new("/outside", 0o755),
         ])
+        .map_err(vfsi_core::IndexedError::unattributed)
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
@@ -29,7 +30,7 @@ pub fn check<C: Vfsi>(fs: &C, other: &C, namespace: &impl Vfsi, verify: &impl Vf
     assert!(outcomes[0].is_ok() && outcomes[2].is_ok());
     for index in [1, 3, 4] {
         let error = outcomes[index].as_ref().err().expect("failed input");
-        assert_eq!(error.cause().index(), None);
+
         assert!(error.progress().is_none());
     }
     let mut dirs: Vec<_> = outcomes.into_iter().filter_map(Result::ok).collect();
@@ -49,7 +50,7 @@ pub fn check<C: Vfsi>(fs: &C, other: &C, namespace: &impl Vfsi, verify: &impl Vf
         assert_eq!(outcomes.len(), 2);
         assert!(outcomes[0].is_ok());
         assert_eq!(
-            outcomes[1].as_ref().unwrap_err().cause().raw_code(),
+            test_native_code(outcomes[1].as_ref().unwrap_err().cause()),
             libc::EBADF as u32
         );
         assert!(verify.read_dir("/moved").unwrap().is_empty());
@@ -64,7 +65,7 @@ pub fn check<C: Vfsi>(fs: &C, other: &C, namespace: &impl Vfsi, verify: &impl Vf
     assert_eq!(outcomes.len(), 2);
     let error = outcomes[0].as_ref().unwrap_err();
     assert_eq!(error.state(), vfsi_core::FailureState::NotAttempted);
-    assert_eq!(error.cause().raw_code(), libc::EBADF as u32);
+    assert_eq!(test_native_code(error.cause()), libc::EBADF as u32);
     assert!(outcomes[1].is_ok());
     assert!(verify.read_dir("/moved").unwrap().is_empty());
     // Successful borrowed owners stay live and can empty the renamed directory again.
@@ -87,4 +88,15 @@ pub fn check<C: Vfsi>(fs: &C, other: &C, namespace: &impl Vfsi, verify: &impl Vf
     }
     second.close().unwrap();
     foreign.close().unwrap();
+}
+
+fn test_native_code(error: &std::io::Error) -> u32 {
+    match vfsi_core::native_status(error) {
+        Some(
+            vfsi_core::StatusCode::Errno(code)
+            | vfsi_core::StatusCode::Nfs(code)
+            | vfsi_core::StatusCode::Smb(code),
+        ) => code,
+        _ => panic!("expected a native error, got {error:?}"),
+    }
 }

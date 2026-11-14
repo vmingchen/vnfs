@@ -20,7 +20,10 @@ fn page_faults_do_not_replay_transport_failures_and_reject_malformed_shapes() {
                     |_, _, _, _, _| {
                         calls += 1;
                         match malformed {
-                            0 => Err(crate::Error::transport(None, "lost reply")),
+                            0 => Err(vfsi_core::internal::errors::transport(
+                                vfsi_core::TransportKind::Other,
+                                "lost reply",
+                            )),
                             1 => Ok(Vec::new()),
                             2 => Ok(vec![Ok((
                                 DirectoryListing {
@@ -47,7 +50,7 @@ fn page_faults_do_not_replay_transport_failures_and_reject_malformed_shapes() {
                 page_inputs.len(),
             )
         };
-        assert!(result.unwrap_err().is_transport());
+        assert!(vfsi_core::transport_kind(result.unwrap_err().cause()).is_some());
         assert_eq!(calls, 1);
     }
     let mut calls = 0;
@@ -69,7 +72,7 @@ fn page_faults_do_not_replay_transport_failures_and_reject_malformed_shapes() {
                     vec![],
                 )),
                 Err(vfsi_core::OpError::failed(
-                    crate::Error::errno(None, libc::ENOENT as u32),
+                    std::io::Error::from_raw_os_error(libc::ENOENT),
                     None,
                 )),
             ])
@@ -82,9 +85,12 @@ fn page_faults_do_not_replay_transport_failures_and_reject_malformed_shapes() {
     )
     .unwrap();
     assert_eq!(result.len(), 2);
-    assert_eq!(result[0], Ok(crate::TraversalCompletion::Stopped));
     assert_eq!(
-        result[1].as_ref().unwrap_err().cause().raw_code(),
+        *result[0].as_ref().unwrap(),
+        crate::TraversalCompletion::Stopped
+    );
+    assert_eq!(
+        crate::test_native_code(result[1].as_ref().unwrap_err().cause()),
         libc::ENOENT as u32
     );
     assert_eq!(
@@ -149,20 +155,20 @@ fn directory_continuations_run_in_vector_waves_and_cancellation_marks_unfinished
         if stop {
             assert_eq!(widths, [2, 2]);
             assert_eq!(
-                result,
-                [
-                    Ok(crate::TraversalCompletion::Stopped),
-                    Ok(crate::TraversalCompletion::Stopped)
-                ]
+                result
+                    .into_iter()
+                    .map(|outcome| outcome.unwrap())
+                    .collect::<Vec<_>>(),
+                [crate::TraversalCompletion::Stopped; 2]
             );
         } else {
             assert_eq!(widths, [2, 2, 2]);
             assert_eq!(
-                result,
-                [
-                    Ok(crate::TraversalCompletion::Complete),
-                    Ok(crate::TraversalCompletion::Complete)
-                ]
+                result
+                    .into_iter()
+                    .map(|outcome| outcome.unwrap())
+                    .collect::<Vec<_>>(),
+                [crate::TraversalCompletion::Complete; 2]
             );
         }
     }
@@ -347,7 +353,7 @@ fn unified_visiting_preserves_depth_defaults_fields_and_failures() {
     let error = fs
         .visit_entries_with_options(&["/other", "/tree"], recursive, |index, _| {
             if index == 1 {
-                Err(crate::Error::errno(0, libc::EIO as u32))
+                Err(std::io::Error::from_raw_os_error(libc::EIO))
             } else {
                 Ok(ControlFlow::Continue(()))
             }
@@ -453,7 +459,10 @@ impl Probe {
             return self.mounted.vread(ops, options);
         }
         if self.shape.get() == 6 {
-            return Err(crate::Error::transport(None, "lost reply"));
+            return Err(vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "lost reply",
+            ));
         }
         let mut results = self.mounted.vread(ops, options)?;
         match self.shape.get() {
@@ -514,7 +523,10 @@ fn blanket_helpers_preserve_order_empty_files_limits_and_error_indices() {
     );
     assert!(fs.read_files::<&str>(&[]).unwrap().is_empty());
     assert_eq!(
-        fs.read_files(&["/a", "/b", "/a"]).unwrap_err().kind(),
+        fs.read_files(&["/a", "/b", "/a"])
+            .unwrap_err()
+            .cause()
+            .kind(),
         crate::ErrorKind::FileTooLarge
     );
     assert_eq!(
@@ -595,7 +607,10 @@ impl WritePolicyProbe {
                 .iter()
                 .map(|_| {
                     Err(vfsi_core::OpError::unknown(
-                        crate::Error::transport(None, "injected lost write reply"),
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
+                            "injected lost write reply",
+                        ),
                         None,
                     ))
                 })
@@ -657,7 +672,7 @@ fn write_options_select_completion_without_replaying_ambiguous_errors() {
     let error = fs
         .write_batch(&[crate::WriteOp::at(&file, 0, b"UVWXYZ")], complete)
         .unwrap_err();
-    assert!(error.is_transport());
+    assert!(vfsi_core::transport_kind(error.cause()).is_some());
     assert_eq!(error.index(), Some(0));
     assert_eq!(fs.partial_calls.get(), 4);
     assert_eq!(
@@ -683,7 +698,10 @@ fn read_files_rejects_malformed_replies_and_never_replays_transport_errors() {
         fs.shape.set(shape);
         let before = fs.calls.get();
         let error = fs.read_files(&["/a"]).unwrap_err();
-        assert!(error.is_transport(), "shape {shape}: {error}");
+        assert!(
+            vfsi_core::transport_kind(error.cause()).is_some(),
+            "shape {shape}: {error}"
+        );
         assert_eq!(fs.calls.get(), before + 1, "shape {shape} must not replay");
         if matches!(shape, 2..=5) {
             assert_eq!(error.index(), Some(0));
@@ -748,7 +766,9 @@ fn vector_walk_budgets_count_entries_not_listing_containers() {
     ])
     .and_then(|outcomes| {
         let count = outcomes.len();
-        vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+        vfsi_core::internal::collect_vec_result(Ok(outcomes), count)
+            .map(|_| ())
+            .map_err(vfsi_core::IndexedError::into_cause)
     })
     .unwrap();
     fs.write_files(&[("/a/f", b"x"), ("/b/f", b"y")]).unwrap();
@@ -815,7 +835,9 @@ fn vector_walk_visitors_charge_root_paths_once_and_honor_cancellation() {
     ])
     .and_then(|outcomes| {
         let count = outcomes.len();
-        vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+        vfsi_core::internal::collect_vec_result(Ok(outcomes), count)
+            .map(|_| ())
+            .map_err(vfsi_core::IndexedError::into_cause)
     })
     .unwrap();
     let options = crate::ListDirOptions::new()
@@ -1044,7 +1066,7 @@ fn blanket_scalar_helpers_and_new_vectors_preserve_limits_stop_and_indices() {
         &crate::StreamCompletion::Stopped { next_offset: 2 }
     );
     let error = completion[1].as_ref().unwrap_err();
-    assert_eq!(error.cause().index(), None);
+
     assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
     assert_eq!(seen, [0]);
     let error = fs

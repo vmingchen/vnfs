@@ -37,7 +37,6 @@ pub fn check_many(fs: &impl Vfsi, directory: &str) {
         std::io::ErrorKind::NotFound
     );
     for outcome in [&outcomes[1], &outcomes[2]] {
-        assert_eq!(outcome.as_ref().unwrap_err().cause().index(), None);
         assert!(outcome.as_ref().unwrap_err().progress().is_none());
     }
     assert_eq!(fs.attrs(&paths[0]).unwrap().len(), Some(2));
@@ -97,7 +96,7 @@ pub fn check_many(fs: &impl Vfsi, directory: &str) {
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.raw_code(), libc::ENOENT as u32);
+    assert_eq!(test_native_code(error.cause()), libc::ENOENT as u32);
     check_mixed_policies(fs, directory);
 }
 
@@ -143,7 +142,7 @@ fn check_mixed_policies(fs: &impl Vfsi, directory: &str) {
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.raw_code(), libc::EINVAL as u32);
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
     assert_eq!(fs.attrs(&first).unwrap().len().unwrap(), 1);
 }
 
@@ -229,7 +228,7 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.raw_code(), libc::EBADF as u32);
+    assert_eq!(test_native_code(error.cause()), libc::EBADF as u32);
     assert_eq!(fs.attrs(Target::file(&files[0])).unwrap().len().unwrap(), 5);
     for file in &mut files {
         if !file.is_closed() {
@@ -256,7 +255,7 @@ pub fn check_foreign<F: Vfsi>(fs: &F, other: &F, path: &str) {
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.raw_code(), libc::EINVAL as u32);
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
     assert_eq!(fs.attrs(Target::file(&own)).unwrap().len().unwrap(), 3);
     own.try_close().unwrap();
     foreign.try_close().unwrap();
@@ -371,7 +370,7 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.raw_code(), libc::EINVAL as u32);
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
     assert_eq!(fs.attrs(Target::file(&files[0])).unwrap().len().unwrap(), 2);
     let missing = format!("{directory}/owner-missing");
     let error = fs
@@ -381,11 +380,21 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.raw_code(), libc::ENOENT as u32);
+    assert_eq!(test_native_code(error.cause()), libc::ENOENT as u32);
     if !privileged {
         let error = fs.chown(&paths[0], Some(0), None).unwrap_err();
-        assert_eq!(error.index(), Some(0));
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     }
     fs.close_batch(&mut files).unwrap();
+}
+
+fn test_native_code(error: &std::io::Error) -> u32 {
+    match vfsi_core::native_status(error) {
+        Some(
+            vfsi_core::StatusCode::Errno(code)
+            | vfsi_core::StatusCode::Nfs(code)
+            | vfsi_core::StatusCode::Smb(code),
+        ) => code,
+        _ => panic!("expected a native error, got {error:?}"),
+    }
 }

@@ -19,22 +19,24 @@ pub(super) fn listdir<F: Vfsi + ?Sized>(
     // Keep the native paging engine, including anchored child cursors, linear
     // deep-path traversal, sibling batching, recovery and aggregate budgets.
     let mut stopped = false;
-    let mut callback_error = None;
     let completions = fs
         .listdirs_all(&[root], options, |index, page| {
             if index != 0 {
-                return Err(Error::invalid_reply(None, "invalid listdir page index"));
+                return Err(crate::internal::errors::invalid_reply(
+                    "invalid listdir page index",
+                ));
             }
-            let relative = page
-                .path
-                .strip_prefix(root)
-                .map_err(|_| Error::invalid_reply(None, "invalid listdir page parent"))?;
+            let relative = page.path.strip_prefix(root).map_err(|_| {
+                crate::internal::errors::invalid_reply("invalid listdir page parent")
+            })?;
             if (!options.recursive() && page.path != root)
                 || relative
                     .components()
                     .any(|component| !matches!(component, std::path::Component::Normal(_)))
             {
-                return Err(Error::invalid_reply(None, "invalid listdir page parent"));
+                return Err(crate::internal::errors::invalid_reply(
+                    "invalid listdir page parent",
+                ));
             }
             let depth = relative.components().count() + 1;
             for entry in page.entries {
@@ -43,9 +45,7 @@ pub(super) fn listdir<F: Vfsi + ?Sized>(
                     entry,
                     depth,
                 };
-                let decision = visitor(&event).inspect_err(|error| {
-                    callback_error = Some(error.clone());
-                })?;
+                let decision = visitor(&event)?;
                 match decision {
                     WalkControl::Stop => {
                         stopped = true;
@@ -61,24 +61,14 @@ pub(super) fn listdir<F: Vfsi + ?Sized>(
             }
             Ok(ControlFlow::Continue(()))
         })
-        .map_err(|error| {
-            if let Some(error) = callback_error {
-                // Nested callback work has its own operation indices.
-                error
-            } else if error.index().is_some_and(|index| index != 0) {
-                Error::invalid_reply(None, "invalid listdir backend error index")
-            } else {
-                error
-            }
-        })?;
+        .map_err(crate::IndexedError::into_cause)?;
     let expected = if stopped {
         TraversalCompletion::Stopped
     } else {
         TraversalCompletion::Complete
     };
     if completions.as_slice() != [expected] {
-        return Err(Error::invalid_reply(
-            None,
+        return Err(crate::internal::errors::invalid_reply(
             "invalid listdir completion count",
         ));
     }
@@ -86,12 +76,19 @@ pub(super) fn listdir<F: Vfsi + ?Sized>(
 }
 
 fn pruning_error(path: &Path) -> Error {
-    Error::from_kind(0, std::io::ErrorKind::InvalidInput)
-        .with_context("listdir: set enter_leave(true) for SkipSubtree", path)
+    crate::internal::errors::with_context(
+        std::io::Error::from(std::io::ErrorKind::InvalidInput),
+        "listdir: set enter_leave(true) for SkipSubtree",
+        path,
+    )
 }
 
 fn limit_error(path: &Path) -> Error {
-    Error::errno(0, libc::EFBIG as u32).with_context("listdir", path)
+    crate::internal::errors::with_context(
+        std::io::Error::from_raw_os_error(libc::EFBIG),
+        "listdir",
+        path,
+    )
 }
 
 pub(super) fn listdir_with_errors<F: Vfsi + ?Sized>(
@@ -132,7 +129,11 @@ fn buffered<F: Vfsi + ?Sized>(
         })
     };
     if !lifecycle && !attrs.is_dir() {
-        return Err(Error::errno(0, libc::ENOTDIR as u32).with_context("listdir", root));
+        return Err(crate::internal::errors::with_context(
+            std::io::Error::from_raw_os_error(libc::ENOTDIR),
+            "listdir",
+            root,
+        ));
     }
     let walk = options.walk_options(fs.limits());
     // The shared event walker charges the root. Entry-only listing excludes it
@@ -194,7 +195,9 @@ fn buffered<F: Vfsi + ?Sized>(
             let mut retained = seeds.borrow_mut();
             for child in children {
                 if retained.insert(child.path().to_path_buf(), child).is_some() {
-                    return Err(Error::invalid_reply(None, "duplicate child directory seed"));
+                    return Err(crate::internal::errors::invalid_reply(
+                        "duplicate child directory seed",
+                    ));
                 }
             }
             Ok(entries)

@@ -2,7 +2,7 @@
 
 use super::*;
 
-fn copy_error(cause: VfError) -> vfsi_core::OpError {
+fn copy_error(cause: std::io::Error) -> vfsi_core::OpError {
     if crate::client::uncertain_completion(&cause) {
         vfsi_core::OpError::unknown(cause, None)
     } else {
@@ -32,21 +32,21 @@ pub(super) fn copy_slots<T>(
             return (0..count)
                 .map(|_| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "excess COPY outcomes"),
+                        vfsi_core::internal::errors::invalid_reply("excess COPY outcomes"),
                         None,
                     ))
                 })
                 .collect();
         }
         Err(cause) => {
-            return (0..count)
-                .map(|_| Err(OpError::not_attempted(cause.clone())))
+            return vfsi_core::internal::errors::fanout(cause, (0..count).len())
+                .map(|cause| Err(OpError::not_attempted(cause)))
                 .collect();
         }
     };
     results.resize_with(count, || {
         Err(OpError::unknown(
-            VfError::invalid_reply(None, "missing COPY outcomes"),
+            vfsi_core::internal::errors::invalid_reply("missing COPY outcomes"),
             None,
         ))
     });
@@ -70,7 +70,7 @@ fn copy_rejection_allows_fallback(result: &vfsi_core::OpResult<u64>, copied: u64
     copied == 0 && result.as_ref().err().is_some_and(|error| {
         error.state() != vfsi_core::FailureState::Unknown
             && error.progress().is_none()
-            && matches!(error.cause().status(), Some(vfsi_core::StatusCode::Nfs(status)) if is_server_copy_fallback_status(status))
+            && matches!(vfsi_core::native_status(error.cause()), Some(vfsi_core::StatusCode::Nfs(status)) if is_server_copy_fallback_status(status))
     })
 }
 
@@ -78,8 +78,7 @@ fn effective_copy_length(pair: &ExtentPair, source: &VfAttrs) -> VfResult<Option
     match pair.length {
         Some(requested) if requested > 0 => {
             if !source.returned.contains(AttrMask::SIZE) {
-                return Err(VfError::invalid_reply(
-                    None,
+                return Err(vfsi_core::internal::errors::invalid_reply(
                     "COPY source size was not returned",
                 ));
             }
@@ -113,7 +112,7 @@ fn open_destination_with_create_fallback<C, T>(
 ) -> VfResult<T> {
     let destination = match open(client, crate::client::OpenCreate::NoCreate) {
         Ok(destination) => return Ok(destination),
-        Err(error) if error.raw_code() == ERR_NOENT => {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             open(client, crate::client::OpenCreate::Guarded)
         }
         Err(error) => Err(error),
@@ -142,29 +141,29 @@ fn copy_extent_data<C>(
         let chunk_len = remaining.min(1 << 20) as u32;
         let (chunk, eof) = read(client, so, chunk_len)?;
         if chunk.len() > chunk_len as usize {
-            return Err(VfError::errno(0, ERR_IO));
+            return Err(std::io::Error::from_raw_os_error((ERR_IO) as i32));
         }
         if chunk.is_empty() {
             return if eof {
                 Ok(doff)
             } else {
-                Err(VfError::errno(0, ERR_IO))
+                Err(std::io::Error::from_raw_os_error((ERR_IO) as i32))
             };
         }
-        let chunk_size =
-            u64::try_from(chunk.len()).map_err(|_| VfError::errno(0, libc::EOVERFLOW as u32))?;
+        let chunk_size = u64::try_from(chunk.len())
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
         super::io::write_all_at(client, 0, doff, &chunk, |client, offset, suffix| {
             write(client, offset, suffix)
         })?;
         so = so
             .checked_add(chunk_size)
-            .ok_or_else(|| VfError::errno(0, libc::EOVERFLOW as u32))?;
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
         doff = doff
             .checked_add(chunk_size)
-            .ok_or_else(|| VfError::errno(0, libc::EOVERFLOW as u32))?;
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
         copied = copied
             .checked_add(chunk_size)
-            .ok_or_else(|| VfError::errno(0, libc::EOVERFLOW as u32))?;
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
         if eof {
             return Ok(doff);
         }
@@ -178,16 +177,12 @@ impl NfsVecFs {
         dst_root_rel: &Path,
         p: &ExtentPair,
     ) -> VfResult<()> {
-        let (sdir, sname) =
-            split_path_bytes(path_bytes(src_root_rel)).map_err(|_| VfError::errno(0, ERR_NOENT))?;
-        let (ddir, dname) =
-            split_path_bytes(path_bytes(dst_root_rel)).map_err(|_| VfError::errno(0, ERR_NOENT))?;
-        let sdirfh = self
-            .resolve_path(&path_from_bytes(sdir), true)
-            .map_err(|e| e.with_index(0))?;
-        let ddirfh = self
-            .resolve_path(&path_from_bytes(ddir), true)
-            .map_err(|e| e.with_index(0))?;
+        let (sdir, sname) = split_path_bytes(path_bytes(src_root_rel))
+            .map_err(|_| std::io::Error::from_raw_os_error((ERR_NOENT) as i32))?;
+        let (ddir, dname) = split_path_bytes(path_bytes(dst_root_rel))
+            .map_err(|_| std::io::Error::from_raw_os_error((ERR_NOENT) as i32))?;
+        let sdirfh = self.resolve_path(&path_from_bytes(sdir), true)?;
+        let ddirfh = self.resolve_path(&path_from_bytes(ddir), true)?;
         let (sfh, ssid) = self
             .nfs
             .open_path(
@@ -196,7 +191,7 @@ impl NfsVecFs {
                 OPEN4_SHARE_ACCESS_READ,
                 crate::client::OpenCreate::NoCreate,
             )
-            .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
+            .map_err(vfsi_core::internal::errors::from_rpc)?;
         // Kernel nfsd rejects CREATE_GUARDED on an existing file, so open the
         // destination without create and fall back to create only on NOENT.
         // Any failed destination open must release the already-open source.
@@ -204,7 +199,7 @@ impl NfsVecFs {
             &mut self.nfs,
             |nfs, create| {
                 nfs.open_path(&ddirfh, dname, OPEN4_SHARE_ACCESS_WRITE, create)
-                    .map_err(|error| vfsi_core::error_from_rpc(error, 0))
+                    .map_err(vfsi_core::internal::errors::from_rpc)
             },
             |nfs| {
                 let _ = nfs.close_temporary_path(&sfh, &ssid);
@@ -219,12 +214,12 @@ impl NfsVecFs {
         } else {
             self.nfs
                 .close_temporary_path(&sfh, &ssid)
-                .map_err(|e| vfsi_core::error_from_rpc(e, 0))
+                .map_err(vfsi_core::internal::errors::from_rpc)
         };
         let destination_close = self
             .nfs
             .close_temporary_path(&dfh, &dsid)
-            .map_err(|e| vfsi_core::error_from_rpc(e, 0));
+            .map_err(vfsi_core::internal::errors::from_rpc);
         result.and(source_close).and(destination_close)
     }
 
@@ -242,7 +237,7 @@ impl NfsVecFs {
                 // Forward writes can extend their own source. Bound both the
                 // overlap check and every READ by the original available data.
                 let Some(length) = p.length else {
-                    return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+                    return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
                 };
                 let length = if length == 0 {
                     0
@@ -250,7 +245,7 @@ impl NfsVecFs {
                     length.min(self.file_size(sfh)?.saturating_sub(p.src_offset))
                 };
                 if p.dst_offset - p.src_offset < length {
-                    return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+                    return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
                 }
                 Some(length)
             } else {
@@ -263,18 +258,18 @@ impl NfsVecFs {
                 length,
                 |nfs, offset, count| {
                     nfs.read(sfh, ssid, offset, count)
-                        .map_err(|error| vfsi_core::error_from_rpc(error, 0))
+                        .map_err(vfsi_core::internal::errors::from_rpc)
                 },
                 |nfs, offset, data| {
                     nfs.write(dfh, dsid, offset, data)
                         .map(|(written, _)| written as usize)
-                        .map_err(|error| vfsi_core::error_from_rpc(error, 0))
+                        .map_err(vfsi_core::internal::errors::from_rpc)
                 },
             )?;
             // Truncate any stale tail beyond what was copied (cp semantics).
             self.nfs
                 .setattr(dfh, None, Some(final_size))
-                .map_err(|error| vfsi_core::error_from_rpc(error, 0))
+                .map_err(vfsi_core::internal::errors::from_rpc)
         })()
     }
 
@@ -290,8 +285,8 @@ impl NfsVecFs {
             ),
             pairs.len(),
         );
-        let mut src = vec![None; pairs.len()];
-        let mut dst = vec![None; pairs.len()];
+        let mut src = (0..pairs.len()).map(|_| None).collect::<Vec<_>>();
+        let mut dst = (0..pairs.len()).map(|_| None).collect::<Vec<_>>();
         let mut active = Vec::new();
         for (index, result) in opened.into_iter().enumerate() {
             match result {
@@ -369,7 +364,7 @@ impl NfsVecFs {
             .map(|slot| {
                 slot.unwrap_or_else(|| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "missing COPY outcome"),
+                        vfsi_core::internal::errors::invalid_reply("missing COPY outcome"),
                         None,
                     ))
                 })
@@ -472,7 +467,9 @@ impl NfsVecFs {
             let op = &copies[position];
             let index = indices[position];
             if op.src_fh == op.dst_fh {
-                output[index] = Some(Err(OpError::not_attempted(VfError::errno(None, ERR_INVAL))));
+                output[index] = Some(Err(OpError::not_attempted(
+                    std::io::Error::from_raw_os_error((ERR_INVAL) as i32),
+                )));
                 false
             } else if !self.server_copy_enabled {
                 output[index] = Some(
@@ -539,7 +536,7 @@ impl NfsVecFs {
                         });
                         let Some(total) = updated else {
                             output[index] = Some(Err(OpError::unknown(
-                                VfError::errno(None, libc::EOVERFLOW as u32),
+                                std::io::Error::from_raw_os_error(libc::EOVERFLOW),
                                 None,
                             )));
                             continue;
@@ -663,20 +660,19 @@ mod tests {
             &mut client,
             |client, create| {
                 client.attempts.push(create);
-                Err::<(), _>(VfError::nfs(
-                    0,
-                    match create {
+                Err::<(), _>(vfsi_core::internal::errors::from_status(
+                    vfsi_core::StatusCode::Nfs(match create {
                         crate::client::OpenCreate::NoCreate => nfsstat4_NFS4ERR_NOENT,
                         crate::client::OpenCreate::Guarded => nfsstat4_NFS4ERR_EXIST,
                         _ => unreachable!(),
-                    },
+                    }),
                 ))
             },
             |client| client.source_closed = true,
         )
         .unwrap_err();
 
-        assert_eq!(error.raw_code(), nfsstat4_NFS4ERR_EXIST);
+        assert_eq!(crate::test_native_code(&(error)), nfsstat4_NFS4ERR_EXIST);
         assert_eq!(
             client.attempts,
             [
@@ -704,7 +700,7 @@ mod tests {
         source.size = 999; // A stale payload cannot substitute for a returned field.
         let error = effective_copy_length(&pair, &source).unwrap_err();
         assert_eq!(
-            error.transport_kind(),
+            vfsi_core::transport_kind(&(error)),
             Some(vfsi_core::TransportKind::InvalidReply)
         );
         for length in [None, Some(0)] {
@@ -716,7 +712,12 @@ mod tests {
     #[test]
     fn copy_fallback_requires_an_individual_rejection_without_confirmed_progress() {
         use vfsi_core::{IoProgress, OpError};
-        let rejected = |status| Err(OpError::failed(VfError::nfs(None, status), None));
+        let rejected = |status| {
+            Err(OpError::failed(
+                vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(status)),
+                None,
+            ))
+        };
         let unsupported = nfsstat4_NFS4ERR_OFFLOAD_DENIED;
         assert!(copy_rejection_allows_fallback(&rejected(unsupported), 0));
         assert!(!copy_rejection_allows_fallback(&rejected(unsupported), 8));
@@ -727,12 +728,15 @@ mod tests {
             );
         }
         assert!(!copy_rejection_allows_fallback(
-            &Err(OpError::unknown(VfError::nfs(None, unsupported), None)),
+            &Err(OpError::unknown(
+                vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(unsupported)),
+                None
+            )),
             0
         ));
         assert!(!copy_rejection_allows_fallback(
             &Err(OpError::failed(
-                VfError::nfs(None, unsupported),
+                vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(unsupported)),
                 Some(IoProgress::Write { bytes_written: 1 })
             )),
             0
@@ -796,7 +800,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(error.raw_code(), ERR_IO);
+        assert_eq!(crate::test_native_code(&(error)), ERR_IO);
         assert_eq!(writes, 0);
     }
 
@@ -817,7 +821,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(error.raw_code(), ERR_IO);
+        assert_eq!(crate::test_native_code(&(error)), ERR_IO);
         assert_eq!(writes, 1);
     }
 }
@@ -828,14 +832,13 @@ mod uncached_reply_tests {
 
     #[test]
     fn lost_cached_copy_reply_is_unknown_and_cannot_fall_back() {
-        let result = Err(copy_error(VfError::nfs(
-            None,
-            nfsstat4_NFS4ERR_RETRY_UNCACHED_REP,
+        let result = Err(copy_error(vfsi_core::internal::errors::from_status(
+            vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_RETRY_UNCACHED_REP),
         )));
         let error = result.as_ref().unwrap_err();
         assert_eq!(error.state(), vfsi_core::FailureState::Unknown);
         assert_eq!(
-            error.cause().status(),
+            vfsi_core::native_status(error.cause()),
             Some(vfsi_core::StatusCode::Nfs(
                 nfsstat4_NFS4ERR_RETRY_UNCACHED_REP
             ))
@@ -860,7 +863,9 @@ mod copy_metadata_recovery_tests {
             if matches!(point, OpenFaultPoint::BeforeGetattrDispatch)
                 && self.calls.fetch_add(1, Ordering::Relaxed) == self.fail_on
             {
-                return Err(VfError::nfs(None, nfsstat4_NFS4ERR_BADSESSION));
+                return Err(vfsi_core::internal::errors::from_status(
+                    vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_BADSESSION),
+                ));
             }
             Ok(())
         }

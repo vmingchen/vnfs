@@ -68,7 +68,7 @@ pub trait HandleBackend {
         if files.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(VfError::unsupported(0))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
 
@@ -95,7 +95,7 @@ pub trait HandleBackend {
         _flags: i32,
         _mode: u32,
     ) -> VfResult<FileOperand> {
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
 
     /// Independent synchronization outcomes. Native implementations retain
@@ -111,6 +111,7 @@ pub trait HandleBackend {
             self.vfsync_impl(std::slice::from_ref(file), vfsi_core::api::SyncMode::Data),
             1,
         )
+        .map_err(vfsi_core::IndexedError::into_cause)
         .map(|_| ())
     }
 
@@ -119,11 +120,12 @@ pub trait HandleBackend {
             self.vfsync_impl(std::slice::from_ref(file), vfsi_core::api::SyncMode::All),
             1,
         )
+        .map_err(vfsi_core::IndexedError::into_cause)
         .map(|_| ())
     }
 
     fn chdir(&mut self, _path: &Path) -> VfResult<()> {
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
 
     fn getcwd(&self) -> PathBuf {
@@ -136,7 +138,7 @@ pub trait HandleBackend {
         _offset: i64,
         _whence: SeekFrom,
     ) -> VfResult<i64> {
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
 
     fn vf_path(&self, file: &FileOperand) -> VfResult<PathBuf> {
@@ -239,7 +241,7 @@ pub trait VectorBackend: HandleBackend {
         writes: &[WriteOp<&FileOperand, &[u8]>],
     ) -> vfsi_core::VecResult<WriteResult> {
         let _ = writes;
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
 
     /// Validate a strict-open request before dispatch. An error guarantees
@@ -248,7 +250,7 @@ pub trait VectorBackend: HandleBackend {
     #[doc(hidden)]
     fn vopen_preflight_impl(&mut self, paths: &[&Path], flags: &[i32], modes: &[u32]) -> VfRes {
         if paths.len() != flags.len() || paths.len() != modes.len() {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         Ok(())
     }
@@ -286,7 +288,7 @@ pub trait VectorBackend: HandleBackend {
         if attrs.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(VfError::unsupported(None))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
 
@@ -294,7 +296,7 @@ pub trait VectorBackend: HandleBackend {
         if attrs.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(VfError::unsupported(None))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
 
@@ -302,7 +304,7 @@ pub trait VectorBackend: HandleBackend {
         if attrs.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(VfError::unsupported(None))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
 
@@ -310,7 +312,7 @@ pub trait VectorBackend: HandleBackend {
         if attrs.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(VfError::unsupported(None))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
 
@@ -351,7 +353,7 @@ pub trait VectorBackend: HandleBackend {
         recursive: bool,
     ) -> VfResult<Vec<VfAttrs>> {
         let _ = (dir, masks, max_count, recursive);
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
 
     /// False requires resolving every component without following symlinks;
@@ -481,7 +483,7 @@ pub trait VectorBackend: HandleBackend {
         max_entries: usize,
         recursive: bool,
         cb: &mut dyn FnMut(&VfAttrs, &Path) -> bool,
-    ) -> VfRes {
+    ) -> Result<(), vfsi_core::IndexedError> {
         crate::backend::helpers::vlistdirs_impl_default(
             self,
             dirs,
@@ -507,7 +509,7 @@ pub trait VectorBackend: HandleBackend {
         if pairs.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(VfError::unsupported(None))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
 
@@ -522,7 +524,7 @@ pub trait VectorBackend: HandleBackend {
         } else if pairs.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(VfError::unsupported(None))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
 
@@ -533,7 +535,7 @@ pub trait VectorBackend: HandleBackend {
         if files.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(VfError::unsupported(None))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
 
@@ -541,7 +543,7 @@ pub trait VectorBackend: HandleBackend {
         if dirs.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(VfError::unsupported(None))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
 
@@ -580,12 +582,12 @@ pub trait VectorBackend: HandleBackend {
         newpaths: &[&Path],
     ) -> vfsi_core::VecResult<()> {
         if oldpaths.len() != newpaths.len() {
-            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         if oldpaths.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(VfError::unsupported(None))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
 
@@ -593,7 +595,7 @@ pub trait VectorBackend: HandleBackend {
         if paths.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(VfError::unsupported(None))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
 
@@ -603,12 +605,12 @@ pub trait VectorBackend: HandleBackend {
         newpaths: &[&Path],
     ) -> vfsi_core::VecResult<()> {
         if oldpaths.len() != newpaths.len() {
-            return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         if oldpaths.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(VfError::unsupported(None))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
 
@@ -637,7 +639,7 @@ pub trait VectorBackend: HandleBackend {
         if pairs.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(VfError::unsupported(None))
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
 
@@ -657,7 +659,7 @@ pub trait VectorBackend: HandleBackend {
         use_server_side_copy: bool,
     ) -> VfRes {
         let _ = (src_dir, dst, symlinks, use_server_side_copy);
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
 
     // Bounded whole-file reads and streams.
@@ -679,7 +681,7 @@ pub trait VectorBackend: HandleBackend {
         chunk_size: usize,
         memory_limit: usize,
         cb: &mut ReadStreamCallback<'_>,
-    ) -> VfRes {
+    ) -> Result<(), vfsi_core::IndexedError> {
         crate::backend::helpers::vstream_impl_default(self, files, |_| chunk_size, memory_limit, cb)
     }
 
@@ -759,7 +761,7 @@ pub trait VectorBackend: HandleBackend {
     // Optional application-data-block writes.
     fn vwrite_adb_impl(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
         let _ = (patterns,);
-        Err(VfError::unsupported(0))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
 }
 pub(crate) fn metadata_mask() -> AttrMask {
@@ -788,9 +790,6 @@ pub(crate) fn bytes_to_path(bytes: Vec<u8>) -> PathBuf {
 pub(crate) fn translate_open_flags(requests: &[OpenOp]) -> VfResult<Vec<i32>> {
     requests
         .iter()
-        .enumerate()
-        .map(|(index, request)| {
-            vfsi_core::open_flags_to_libc(request.flags()).map_err(|error| error.with_index(index))
-        })
+        .map(|request| vfsi_core::open_flags_to_libc(request.flags()))
         .collect()
 }

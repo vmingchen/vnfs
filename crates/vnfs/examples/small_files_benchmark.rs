@@ -64,6 +64,7 @@ impl BenchmarkFs {
                 let results = fs.vwrite_impl(&operations).and_then(|outcomes| {
                     let count = outcomes.len();
                     vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                        .map_err(vfsi_core::IndexedError::into_cause)
                 })?;
                 if results.len() != paths.len()
                     || results.iter().any(|r| r.bytes_written != payload.len())
@@ -99,6 +100,7 @@ impl BenchmarkFs {
                     .and_then(|outcomes| {
                         let count = outcomes.len();
                         vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                            .map_err(vfsi_core::IndexedError::into_cause)
                     })?
                     .into_iter()
                     .map(|result| result.data)

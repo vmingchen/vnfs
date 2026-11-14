@@ -1,6 +1,6 @@
 //! Private read dispatch projections and their regression tests.
 #[cfg(test)]
-use crate::{Error, ReadOp};
+use crate::ReadOp;
 #[cfg(test)]
 use vfsi_core::api::internal::OwnedReadResult;
 pub(crate) use vfsi_core::api::internal::consume_ops;
@@ -40,7 +40,7 @@ mod tests {
                 )
                 .unwrap(),
             );
-            assert!(error.cause().is_transport());
+            assert!(vfsi_core::transport_kind(error.cause()).is_some());
             assert_eq!(error.state(), FailureState::Unknown);
         }
         let root = tempfile::tempdir().unwrap();
@@ -57,19 +57,20 @@ mod tests {
                     |_, _, buffer| buffer,
                     |_, _| panic!("no owned reads"),
                     |_, _| {
-                        Ok(vec![
-                            Ok(crate::ReadIntoResult {
-                                offset: 0,
-                                bytes_read: read,
-                                eof: false,
-                            });
-                            count
-                        ])
+                        Ok((0..count)
+                            .map(|_| {
+                                Ok(crate::ReadIntoResult {
+                                    offset: 0,
+                                    bytes_read: read,
+                                    eof: false,
+                                })
+                            })
+                            .collect())
                     },
                 )
                 .unwrap(),
             );
-            assert!(error.cause().is_transport());
+            assert!(vfsi_core::transport_kind(error.cause()).is_some());
             assert_eq!(error.state(), FailureState::Unknown);
         }
         let mut calls = 0;
@@ -90,7 +91,10 @@ mod tests {
             },
             |_, _| {
                 calls += 1;
-                Err(Error::transport(None, "rejected before buffer dispatch"))
+                Err(vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "rejected before buffer dispatch",
+                ))
             },
         )
         .unwrap();
@@ -99,7 +103,7 @@ mod tests {
         assert_eq!(outcomes[0].as_ref().unwrap().data().unwrap(), b"abc");
         let error = outcomes[1].as_ref().unwrap_err();
         assert_eq!(error.state(), FailureState::NotAttempted);
-        assert_eq!(error.cause().index(), None);
+
         assert_eq!(buffer, [99]);
         buffer.fill(7);
     }
@@ -126,18 +130,18 @@ mod tests {
                 )
                 .unwrap(),
             );
-            assert!(error.cause().is_transport());
+            assert!(vfsi_core::transport_kind(error.cause()).is_some());
             assert_eq!(error.state(), FailureState::Unknown);
             let error = failure(
                 read_batch::<()>(
                     &[ReadRequest::whole_file("/a")],
                     1,
                     |_, _| panic!("no ranges"),
-                    |_, _| Ok(vec![Ok(vec![]); count]),
+                    |_, _| Ok((0..count).map(|_| Ok(vec![])).collect()),
                 )
                 .unwrap(),
             );
-            assert!(error.cause().is_transport());
+            assert!(vfsi_core::transport_kind(error.cause()).is_some());
             assert_eq!(error.state(), FailureState::Unknown);
         }
         let error = failure(
@@ -149,7 +153,7 @@ mod tests {
             )
             .unwrap(),
         );
-        assert!(error.cause().is_transport());
+        assert!(vfsi_core::transport_kind(error.cause()).is_some());
         assert_eq!(error.state(), FailureState::Unknown);
     }
 
@@ -163,8 +167,8 @@ mod tests {
                 |_, _| panic!("no ranges"),
                 |_, _| {
                     calls += 1;
-                    Err(Error::transport(
-                        None,
+                    Err(vfsi_core::internal::errors::transport(
+                        vfsi_core::TransportKind::Other,
                         "connection rejected before dispatch",
                     ))
                 },
@@ -173,23 +177,23 @@ mod tests {
         );
         assert_eq!(calls, 1);
         assert_eq!(error.state(), FailureState::NotAttempted);
-        assert_eq!(error.cause().index(), None);
+
         let error = failure(
             read_batch::<()>(
                 &[ReadRequest::whole_file("/a")],
                 1,
                 |_, _| panic!("no ranges"),
-                |_, _| Err(Error::transport(Some(9), "bad index")),
+                |_, _| {
+                    Err(vfsi_core::internal::errors::transport(
+                        vfsi_core::TransportKind::Other,
+                        "opaque rejection",
+                    ))
+                },
             )
             .unwrap(),
         );
-        assert_eq!(error.cause().index(), None);
-        assert!(
-            error
-                .cause()
-                .to_string()
-                .contains("invalid read backend error index")
-        );
+
+        assert!(error.cause().to_string().contains("opaque rejection"));
         let mut calls = 0;
         let error = failure(
             read_batch::<()>(
@@ -199,7 +203,10 @@ mod tests {
                 |_, _| {
                     calls += 1;
                     Ok(vec![Err(OpError::unknown(
-                        Error::transport(None, "lost reply"),
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Other,
+                            "lost reply",
+                        ),
                         None,
                     ))])
                 },
@@ -208,7 +215,6 @@ mod tests {
         );
         assert_eq!(calls, 1);
         assert_eq!(error.state(), FailureState::Unknown);
-        assert_eq!(error.cause().index(), None);
     }
 
     #[test]

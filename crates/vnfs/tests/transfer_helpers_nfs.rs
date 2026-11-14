@@ -35,12 +35,13 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
             TreeBuilder::new()
                 .add_file("a", vec![19; 97])
                 .add_file("b", b"second")
-                .create(&fs, format!("{src}/nested/files"))?;
+                .create(&fs, format!("{src}/nested/files"))
+                .map_err(vfsi_core::IndexedError::into_cause)?;
             let destination = format!("{root}/no-replace");
             let error = fs
                 .renames_all(&[(&src, &destination)], RenameMode::NoReplace)
                 .unwrap_err();
-            assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+            assert_eq!(error.cause().kind(), std::io::ErrorKind::Unsupported);
             // Default conflict-safe copying uses bounded descriptor vectors.
             let s = copy_tree(
                 &fs,
@@ -55,7 +56,9 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
             let s = tree_stats(&fs, format!("{root}/descriptor"), ListDirOptions::new())?;
             assert_eq!((s.files, s.directories, s.file_bytes), (2, 3, 103));
             let path = format!("{root}/descriptor/nested/files/a");
-            let data = fs.read_batch([ReadOp::whole(&path)], ReadOptions::new())?;
+            let data = fs
+                .read_batch([ReadOp::whole(&path)], ReadOptions::new())
+                .map_err(vfsi_core::IndexedError::into_cause)?;
             assert_eq!(data[0].data().unwrap(), vec![19; 97]);
             // Replace selects the server COPY path on v4.2, with v4.1 fallback.
             let s = copy_tree(
@@ -74,14 +77,17 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
                 TransferOptions::new().with_existing(Existing::Replace),
             )?;
             let path = format!("{root}/native/nested/files/b");
-            let data = fs.read_batch([ReadOp::whole(&path)], ReadOptions::new())?;
+            let data = fs
+                .read_batch([ReadOp::whole(&path)], ReadOptions::new())
+                .map_err(vfsi_core::IndexedError::into_cause)?;
             assert_eq!(data[0].data().unwrap(), b"second");
             let s = move_items(
                 &fs,
                 &[format!("{root}/descriptor")],
                 format!("{root}/moved"),
                 TransferOptions::new(),
-            )?;
+            )
+            .map_err(vfsi_core::IndexedError::into_cause)?;
             assert_eq!(s.roots_removed, 1);
             assert_eq!(
                 fs.attrs(format!("{root}/descriptor")).unwrap_err().kind(),
@@ -92,7 +98,9 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
                 builder = builder.add_file(format!("f-{i}"), format!("payload-{i}"));
             }
             let batchsrc = format!("{root}/batch-source");
-            builder.create(&fs, &batchsrc)?;
+            builder
+                .create(&fs, &batchsrc)
+                .map_err(vfsi_core::IndexedError::into_cause)?;
             vnfs::diagnostics::take_and_reset();
             copy_tree(
                 &fs,

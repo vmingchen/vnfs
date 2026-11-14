@@ -264,3 +264,63 @@ fn shared_transport_diagnostics_survive_context_and_repeated_fanout() {
         }
     }
 }
+
+#[test]
+fn sharing_an_operation_cause_keeps_progress_owned_and_does_not_nest_groups() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let data = vec![1, 2, 3];
+    let pointer = data.as_ptr();
+    let mut error = vfsi_core::OpError::unknown(
+        io::Error::new(K::TimedOut, Opaque(drops.clone())),
+        Some(vfsi_core::IoProgress::Read(
+            vfsi_core::api::ReadResult::owned(7, data, false),
+        )),
+    );
+    let first = share_op_cause(&mut error);
+    let payload = error.cause().get_ref().unwrap() as *const _ as *const ();
+    let second = share_op_cause(&mut error);
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(
+        error.cause().get_ref().unwrap() as *const _ as *const (),
+        payload
+    );
+    assert_eq!(error.state(), vfsi_core::FailureState::Unknown);
+    let Some(vfsi_core::IoProgress::Read(read)) = error.progress() else {
+        panic!("missing progress")
+    };
+    assert_eq!(read.data().unwrap().as_ptr(), pointer);
+    let sibling = from_shared(&first);
+    assert_eq!(sibling.kind(), K::TimedOut);
+    assert_eq!(transport_kind(&sibling), None);
+    drop(first);
+    drop(second);
+    drop(error);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    drop(sibling);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn standard_io_interruption_suppression_keeps_the_original_cause() {
+    let error = suppress_interrupted(io::Error::from_raw_os_error(libc::EINTR));
+    assert_eq!(error.kind(), K::Other);
+    assert_eq!(
+        native_status(&error),
+        Some(StatusCode::Errno(libc::EINTR as u32))
+    );
+    let original = error
+        .get_ref()
+        .unwrap()
+        .source()
+        .unwrap()
+        .downcast_ref::<io::Error>()
+        .unwrap();
+    assert_eq!(original.raw_os_error(), Some(libc::EINTR));
+    let drops = Arc::new(AtomicUsize::new(0));
+    let original = io::Error::new(K::PermissionDenied, Opaque(drops.clone()));
+    let pointer = original.get_ref().unwrap() as *const _ as *const ();
+    let error = suppress_interrupted(original);
+    assert_eq!(error.get_ref().unwrap() as *const _ as *const (), pointer);
+    drop(error);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}

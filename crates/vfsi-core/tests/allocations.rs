@@ -10,6 +10,7 @@ use vfsi_core::api::*;
 struct TrackingAllocator;
 thread_local! {
     static ALLOCATIONS: Cell<Option<usize>> = const { Cell::new(None) };
+    static ALLOCATED_BYTES: Cell<Option<usize>> = const { Cell::new(None) };
 }
 #[global_allocator]
 static ALLOCATOR: TrackingAllocator = TrackingAllocator;
@@ -19,6 +20,11 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         let _ = ALLOCATIONS.try_with(|counter| {
             if let Some(count) = counter.get() {
                 counter.set(Some(count + 1));
+            }
+        });
+        let _ = ALLOCATED_BYTES.try_with(|counter| {
+            if let Some(bytes) = counter.get() {
+                counter.set(Some(bytes + layout.size()));
             }
         });
         // SAFETY: forward the allocator contract unchanged to the system.
@@ -32,6 +38,11 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         let _ = ALLOCATIONS.try_with(|counter| {
             if let Some(count) = counter.get() {
                 counter.set(Some(count + 1));
+            }
+        });
+        let _ = ALLOCATED_BYTES.try_with(|counter| {
+            if let Some(bytes) = counter.get() {
+                counter.set(Some(bytes + size));
             }
         });
         // SAFETY: preserve the delegated allocation and reallocation contract.
@@ -231,7 +242,7 @@ fn mixed_dispatch_keeps_order_and_error_indices_with_unknown_iterator_lengths() 
                 let complete = |offset| -> vfsi_core::OpResult<_> {
                     if fail && offset as usize == count - 1 {
                         Err(vfsi_core::OpError::failed(
-                            vfsi_core::VfError::errno(0, libc::ENOENT as u32),
+                            std::io::Error::from_raw_os_error(libc::ENOENT),
                             None,
                         ))
                     } else {
@@ -275,7 +286,7 @@ fn mixed_dispatch_keeps_order_and_error_indices_with_unknown_iterator_lengths() 
                     assert!(outcomes[..count - 1].iter().all(|result| result.is_ok()));
                     let error = outcomes[count - 1].as_ref().unwrap_err();
                     assert_eq!(error.state(), vfsi_core::FailureState::Failed);
-                    assert_eq!(error.cause().index(), None);
+                    assert_eq!(error.cause().raw_os_error(), Some(libc::ENOENT));
                     let error =
                         vfsi_core::internal::collect_vec_result(Ok(outcomes), count).unwrap_err();
                     assert_eq!(error.index(), Some(count - 1));
@@ -306,22 +317,22 @@ fn singleton_preflight_and_backend_indices_do_not_replay_or_mutate() {
         |_, _| panic!("budget failure must precede dispatch"),
     )
     .unwrap_err();
-    assert_eq!(error.index(), Some(0));
+    assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge);
     assert_eq!(buffer, [9]);
     let error = consume_ops::<File, (), ()>(
         [ReadOp::whole("/a")],
         0,
         |_, _, _| (),
         |_, _, _| (),
-        |_, _| Err(Error::errno(1, 5)),
+        |_, _| Err(std::io::Error::from_raw_os_error(5_i32)),
         |_, _| panic!("no buffered request"),
     )
     .unwrap()
     .remove(0)
     .unwrap_err();
-    assert!(error.cause().is_transport());
+    assert_eq!(error.cause().raw_os_error(), Some(libc::EIO));
+    assert_eq!(vfsi_core::transport_kind(error.cause()), None);
     assert_eq!(error.state(), vfsi_core::FailureState::NotAttempted);
-    assert_eq!(error.cause().index(), None);
 }
 
 #[test]
@@ -412,7 +423,7 @@ fn singleton_reads_reject_progress_beyond_request_even_with_spare_budget() {
                         .unwrap()
                         .remove(0)
                         .expect_err("oversized progress must be rejected");
-                    assert!(error.cause().is_transport());
+                    assert!(vfsi_core::transport_kind(error.cause()).is_some());
                     assert_eq!(error.state(), vfsi_core::FailureState::Unknown);
                 } else {
                     assert_eq!(result.unwrap()[0].as_ref().unwrap().bytes_read(), length);
@@ -440,7 +451,7 @@ fn singleton_reads_reject_progress_beyond_request_even_with_spare_budget() {
 
 #[test]
 fn multi_reads_validate_each_request_and_keep_valid_siblings() {
-    use vfsi_core::{IoProgress, OpError, OpResult, VfError};
+    use vfsi_core::{IoProgress, OpError, OpResult};
     for mixed in [false, true] {
         for buffered_bad in [false, true] {
             for prefix in [false, true] {
@@ -492,7 +503,7 @@ fn multi_reads_validate_each_request_and_keep_valid_siblings() {
                                         let data = vec![0; bad_count];
                                         if prefix {
                                             return Err(OpError::failed(
-                                                VfError::errno(None, libc::EIO as u32),
+                                                std::io::Error::from_raw_os_error(libc::EIO),
                                                 Some(IoProgress::Read(ReadResult::owned(
                                                     bad_offset, data, eof,
                                                 ))),
@@ -520,7 +531,7 @@ fn multi_reads_validate_each_request_and_keep_valid_siblings() {
                                     if *offset == 7 {
                                         if prefix {
                                             return Err(OpError::failed(
-                                                VfError::errno(None, libc::EIO as u32),
+                                                std::io::Error::from_raw_os_error(libc::EIO),
                                                 Some(IoProgress::Read(ReadResult::buffered(
                                                     bad_offset, bad_count, eof,
                                                 ))),
@@ -553,7 +564,7 @@ fn multi_reads_validate_each_request_and_keep_valid_siblings() {
                             let error = outcome
                                 .as_ref()
                                 .expect_err("malformed input must be rejected");
-                            assert!(error.cause().is_transport());
+                            assert!(vfsi_core::transport_kind(error.cause()).is_some());
                             assert!(
                                 error.progress().is_none(),
                                 "malformed prefix must not escape"
@@ -570,7 +581,7 @@ fn multi_reads_validate_each_request_and_keep_valid_siblings() {
 
 #[test]
 fn multi_whole_reads_validate_start_and_completion_without_losing_error_prefixes() {
-    use vfsi_core::{IoProgress, OpError, VfError};
+    use vfsi_core::{IoProgress, OpError};
     for (offset, eof, failure, valid) in [
         (1, true, false, false),
         (0, false, false, false),
@@ -584,7 +595,7 @@ fn multi_whole_reads_validate_start_and_completion_without_losing_error_prefixes
             |_, _| {
                 let first = if failure {
                     Err(OpError::failed(
-                        VfError::errno(None, libc::EIO as u32),
+                        std::io::Error::from_raw_os_error(libc::EIO),
                         Some(IoProgress::Read(ReadResult::owned(offset, vec![1], eof))),
                     ))
                 } else {
@@ -608,7 +619,7 @@ fn multi_whole_reads_validate_start_and_completion_without_losing_error_prefixes
         .unwrap();
         let error = results[0].as_ref().unwrap_err();
         assert_eq!(error.progress().is_some(), valid);
-        assert_eq!(error.cause().is_transport(), !valid);
+        assert_eq!(vfsi_core::transport_kind(error.cause()).is_some(), !valid);
         assert!(results[1].is_ok());
     }
 }
@@ -631,11 +642,11 @@ fn normalized_deep_paths_allocate_output_once_at_the_final_size() {
 
 #[test]
 fn simple_native_causes_and_moving_read_progress_do_not_allocate() {
-    use vfsi_core::{IoProgress, OpError, VfError};
+    use vfsi_core::{IoProgress, OpError};
     let (causes, allocations) = measured(|| {
         [
-            VfError::errno(None, libc::ENOENT as u32),
-            VfError::from_kind(None, std::io::ErrorKind::Unsupported),
+            std::io::Error::from_raw_os_error(libc::ENOENT),
+            std::io::Error::from(std::io::ErrorKind::Unsupported),
         ]
     });
     assert_eq!(allocations, 0);
@@ -643,7 +654,7 @@ fn simple_native_causes_and_moving_read_progress_do_not_allocate() {
     let bytes = vec![1, 2, 3];
     let pointer = bytes.as_ptr();
     let error = OpError::failed(
-        VfError::errno(None, libc::EIO as u32),
+        std::io::Error::from_raw_os_error(libc::EIO),
         Some(IoProgress::Read(ReadResult::owned(4, bytes, false))),
     );
     let ((_, _, progress), allocations) = measured(|| error.into_parts());
@@ -687,5 +698,47 @@ fn standard_protocol_payloads_use_only_their_required_boxing() {
             "extra protocol-error storage: {allocations}"
         );
         assert_eq!(vfsi_core::native_status(&cause), Some(status));
+    }
+}
+
+#[test]
+fn owned_only_ranges_keep_compact_bounds_storage() {
+    for count in [32, 128] {
+        ALLOCATED_BYTES.with(|counter| counter.set(Some(0)));
+        let results = consume_ops::<File, (u64, usize), ()>(
+            (0..count).map(|_| ReadOp::range(&File, 7, 1)),
+            count,
+            |_, offset, length| (offset, length),
+            |_, _, _| (),
+            |requests, _| {
+                Ok(requests
+                    .iter()
+                    .map(|_| {
+                        Ok(OwnedReadResult {
+                            offset: 7,
+                            data: Vec::new(),
+                            eof: true,
+                        })
+                    })
+                    .collect())
+            },
+            |_, _| panic!("no buffered requests"),
+        )
+        .unwrap();
+        let bytes = ALLOCATED_BYTES.with(|counter| counter.replace(None).unwrap());
+        let per_input = size_of::<ReadRequest<(u64, usize)>>()
+            + size_of::<(u64, usize)>()
+            + size_of::<OpResult<OwnedReadResult>>();
+        assert!(
+            bytes <= count * per_input,
+            "{count} ranges allocated {bytes} bytes; compact staging bound {}",
+            count * per_input
+        );
+        assert_eq!(results.len(), count);
+        assert!(results.iter().all(|result| {
+            result
+                .as_ref()
+                .is_ok_and(|read| read.bytes_read() == 0 && read.eof())
+        }));
     }
 }

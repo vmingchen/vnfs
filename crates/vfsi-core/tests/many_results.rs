@@ -1,5 +1,5 @@
 use proptest::prelude::*;
-use vfsi_core::{VfError, internal::ManyResults};
+use vfsi_core::internal::ManyResults;
 
 #[cfg(feature = "test-faults")]
 use vfsi_core::internal::faults::{FaultInjector, FaultScript, OpenFaultPoint};
@@ -14,14 +14,14 @@ fn complete_results_collect_in_request_order() {
 }
 
 #[test]
-fn vector_position_overrides_a_stale_backend_error_index() {
+fn vector_position_attributes_an_index_free_backend_cause() {
     let results = ManyResults::new(
         3,
-        vec![Ok(10), Err(VfError::errno(99, libc::EACCES as u32))],
+        vec![Ok(10), Err(std::io::Error::from_raw_os_error(libc::EACCES))],
     );
     let error = results.try_collect().unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.raw_code(), libc::EACCES as u32);
+    assert_eq!(error.cause().raw_os_error(), Some(libc::EACCES));
 }
 
 #[test]
@@ -29,7 +29,7 @@ fn short_success_prefix_is_a_transport_contract_error() {
     let error = ManyResults::new(3, vec![Ok(10), Ok(20)])
         .try_collect()
         .unwrap_err();
-    assert!(error.is_transport());
+    assert!(vfsi_core::transport_kind(error.cause()).is_some());
     assert_eq!(error.index(), None);
 }
 
@@ -38,7 +38,7 @@ fn overlong_backend_result_is_a_contract_error_not_a_panic() {
     let error = ManyResults::new(1, vec![Ok(1), Ok(2)])
         .try_collect()
         .unwrap_err();
-    assert!(error.is_transport());
+    assert!(vfsi_core::transport_kind(error.cause()).is_some());
     assert_eq!(error.index(), None);
     assert!(error.to_string().contains("2 results for 1 requests"));
 }
@@ -52,7 +52,7 @@ fn overlong_open_result_cleans_every_returned_handle() {
             Ok(())
         })
         .unwrap_err();
-    assert!(error.is_transport());
+    assert!(vfsi_core::transport_kind(error.cause()).is_some());
     assert_eq!(error.index(), None);
     assert_eq!(closed, [(0, 10), (1, 20)]);
 }
@@ -66,7 +66,7 @@ fn backend_cannot_override_the_callers_request_count() {
             Ok(())
         })
         .unwrap_err();
-    assert!(error.is_transport());
+    assert!(vfsi_core::transport_kind(error.cause()).is_some());
     assert_eq!(error.index(), None);
     assert!(
         error
@@ -80,7 +80,11 @@ fn backend_cannot_override_the_callers_request_count() {
 fn strict_open_policy_cleans_successful_prefix_on_failure() {
     let results = ManyResults::new(
         4,
-        vec![Ok(10), Ok(20), Err(VfError::errno(88, libc::ENOENT as u32))],
+        vec![
+            Ok(10),
+            Ok(20),
+            Err(std::io::Error::from_raw_os_error(libc::ENOENT)),
+        ],
     );
     let mut closed = Vec::new();
     let error = results
@@ -100,7 +104,7 @@ fn strict_open_policy_cleans_successes_after_concurrent_failure() {
         4,
         vec![
             Ok(10),
-            Err(VfError::errno(91, libc::EACCES as u32)),
+            Err(std::io::Error::from_raw_os_error(libc::EACCES)),
             Ok(30),
             Ok(40),
         ],
@@ -122,9 +126,9 @@ fn concurrent_failures_report_the_lowest_request_position() {
         5,
         vec![
             Ok(10),
-            Err(VfError::errno(99, libc::EACCES as u32)),
+            Err(std::io::Error::from_raw_os_error(libc::EACCES)),
             Ok(30),
-            Err(VfError::errno(0, libc::ENOENT as u32)),
+            Err(std::io::Error::from_raw_os_error(libc::ENOENT)),
             Ok(50),
         ],
     );
@@ -136,18 +140,26 @@ fn concurrent_failures_report_the_lowest_request_position() {
         })
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.raw_code(), libc::EACCES as u32);
+    assert_eq!(error.cause().raw_os_error(), Some(libc::EACCES));
     assert_eq!(closed, [(0, 10), (2, 30), (4, 50)]);
 }
 
 #[test]
 fn cleanup_failure_does_not_mask_primary_error() {
-    let results = ManyResults::new(2, vec![Ok(10), Err(VfError::errno(0, libc::ENOENT as u32))]);
+    let results = ManyResults::new(
+        2,
+        vec![Ok(10), Err(std::io::Error::from_raw_os_error(libc::ENOENT))],
+    );
     let error = results
-        .try_collect_with_cleanup(2, |_, _| Err(VfError::transport(None, "close failed")))
+        .try_collect_with_cleanup(2, |_, _| {
+            Err(vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "close failed",
+            ))
+        })
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.raw_code(), libc::ENOENT as u32);
+    assert_eq!(error.cause().raw_os_error(), Some(libc::ENOENT));
 }
 
 #[test]
@@ -160,7 +172,7 @@ fn short_success_prefix_is_cleaned_before_contract_error() {
             Ok(())
         })
         .unwrap_err();
-    assert!(error.is_transport());
+    assert!(vfsi_core::transport_kind(error.cause()).is_some());
     assert_eq!(error.index(), None);
     assert_eq!(closed, [10, 20]);
 }
@@ -171,13 +183,16 @@ fn fault_script_fires_once_at_the_exact_point() {
     let point = OpenFaultPoint::BeforeRegister { index: 2 };
     let script = FaultScript::one(
         point.clone(),
-        VfError::transport(None, "injected registration failure"),
+        vfsi_core::internal::errors::transport(
+            vfsi_core::TransportKind::Other,
+            "injected registration failure",
+        ),
     );
     script
         .check(&OpenFaultPoint::BeforeRegister { index: 1 })
         .unwrap();
     let error = script.check(&point).unwrap_err();
-    assert!(error.is_transport());
+    assert!(vfsi_core::transport_kind(&error).is_some());
     assert!(script.is_consumed());
     script.check(&point).unwrap();
     assert_eq!(script.visited().len(), 3);
@@ -190,9 +205,9 @@ proptest! {
         selector in any::<usize>(),
     ) {
         let failed = selector % requested;
-        let mut outcomes: Vec<Result<usize, VfError>> =
+        let mut outcomes: Vec<Result<usize, std::io::Error>> =
             (0..failed).map(Ok).collect();
-        outcomes.push(Err(VfError::errno(usize::MAX, libc::ENOENT as u32)));
+        outcomes.push(Err(std::io::Error::from_raw_os_error(libc::ENOENT)));
         let mut closed = Vec::new();
         let error = ManyResults::new(requested, outcomes)
             .try_collect_with_cleanup(requested, |_, handle| {
@@ -213,7 +228,7 @@ proptest! {
         let outcomes = (0..requested)
             .map(|index| {
                 if index == failed {
-                    Err(VfError::errno(usize::MAX, libc::EACCES as u32))
+                    Err(std::io::Error::from_raw_os_error(libc::EACCES))
                 } else {
                     Ok(index)
                 }
@@ -236,12 +251,15 @@ proptest! {
 fn short_failure_reports_do_not_reserve_the_declared_request_count() {
     let error = ManyResults::new(
         usize::MAX,
-        vec![Ok(10u8), Err(VfError::errno(0, libc::EACCES as u32))],
+        vec![
+            Ok(10u8),
+            Err(std::io::Error::from_raw_os_error(libc::EACCES)),
+        ],
     )
     .try_collect()
     .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.raw_code(), libc::EACCES as u32);
+    assert_eq!(error.cause().raw_os_error(), Some(libc::EACCES));
 }
 
 #[test]
@@ -253,6 +271,6 @@ fn short_owned_reports_clean_every_value_without_reserving_the_missing_suffix() 
             Ok(())
         })
         .unwrap_err();
-    assert!(error.is_transport());
+    assert!(vfsi_core::transport_kind(error.cause()).is_some());
     assert_eq!(closed, [(0, 10), (1, 20)]);
 }

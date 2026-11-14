@@ -5,8 +5,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 fn record_cleanup_error(
-    diagnostics: &Mutex<(std::collections::VecDeque<VfError>, u64)>,
-    error: VfError,
+    diagnostics: &Mutex<(std::collections::VecDeque<std::io::Error>, u64)>,
+    error: std::io::Error,
 ) {
     let mut diagnostics = diagnostics.lock().unwrap_or_else(|e| e.into_inner());
     if diagnostics.0.len() == 32 {
@@ -32,7 +32,7 @@ pub(super) struct SharedBackend<F: HandleBackend> {
     pub(super) cursor_owner: Arc<()>,
     pending: Mutex<Vec<PendingClose<F>>>,
     has_pending: AtomicBool,
-    diagnostics: Mutex<(std::collections::VecDeque<VfError>, u64)>,
+    diagnostics: Mutex<(std::collections::VecDeque<std::io::Error>, u64)>,
 }
 impl<F: HandleBackend> SharedBackend<F> {
     pub(super) fn new(backend: F) -> Self {
@@ -66,7 +66,7 @@ impl<F: HandleBackend> SharedBackend<F> {
             })
             .map_err(|_| ())
     }
-    pub(super) fn take_cleanup_errors(&self) -> (Vec<VfError>, u64) {
+    pub(super) fn take_cleanup_errors(&self) -> (Vec<std::io::Error>, u64) {
         let mut diagnostics = self.diagnostics.lock().unwrap_or_else(|e| e.into_inner());
         let dropped = std::mem::take(&mut diagnostics.1);
         (diagnostics.0.drain(..).collect(), dropped)
@@ -147,7 +147,7 @@ pub(super) struct BackendGuard<'a, F: HandleBackend> {
     guard: Option<std::sync::MutexGuard<'a, Option<F>>>,
     pending: &'a Mutex<Vec<PendingClose<F>>>,
     has_pending: &'a AtomicBool,
-    diagnostics: &'a Mutex<(std::collections::VecDeque<VfError>, u64)>,
+    diagnostics: &'a Mutex<(std::collections::VecDeque<std::io::Error>, u64)>,
 }
 impl<F: HandleBackend> std::ops::Deref for BackendGuard<'_, F> {
     type Target = F;
@@ -172,7 +172,9 @@ impl<F: HandleBackend> BackendGuard<'_, F> {
     pub(super) fn drain_cleanup(&mut self) -> VfResult<()> {
         let outcomes = self.drain_cleanup_outcomes();
         let count = outcomes.len();
-        vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+        vfsi_core::internal::collect_vec_result(Ok(outcomes), count)
+            .map_err(vfsi_core::IndexedError::into_cause)
+            .map(|_| ())
     }
 
     pub(super) fn drain_cleanup_outcomes(&mut self) -> Vec<vfsi_core::OpResult<()>> {
@@ -185,10 +187,14 @@ impl<F: HandleBackend> BackendGuard<'_, F> {
         for close in pending {
             match (close.close)(self, &close.target) {
                 Ok(()) => outcomes.push(Ok(())),
-                Err(error) => {
+                Err(mut error) => {
                     // This bounded diagnostic history never owns cleanup targets.
                     // Keep ownership in pending, and preserve the operation's primary error.
-                    record_cleanup_error(self.diagnostics, error.clone());
+                    let source = vfsi_core::internal::errors::share_in_place(&mut error);
+                    record_cleanup_error(
+                        self.diagnostics,
+                        vfsi_core::internal::errors::from_shared(&source),
+                    );
                     outcomes.push(Err(vfsi_core::OpError::unknown(error, None)));
                     failed.push(close);
                 }

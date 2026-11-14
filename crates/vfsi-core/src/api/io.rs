@@ -84,40 +84,34 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
         let position = self.known_position()?;
         let length = buffer.len().min(budget);
         if !buffer.is_empty() && length == 0 {
-            return Err(Error::errno(0, libc::EFBIG as u32).into());
+            return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
         }
         position
             .checked_add(length as u64)
-            .ok_or_else(|| Error::errno(0, libc::EOVERFLOW as u32))?;
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
         let values = self.client.vread(
             [ReadOp::into(self.file, position, &mut buffer[..length])],
             ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(budget).unwrap()),
         )?;
         if values.len() != 1 {
-            return Err(invalid("invalid read count").into());
+            return Err(invalid("invalid read count"));
         }
         let mut pending = None;
         let value = match values.into_iter().next().expect("validated read count") {
             Ok(value) => value,
             Err(error) => {
-                match error.progress() {
+                let (cause, _, progress) = error.into_parts();
+                match progress {
                     Some(crate::IoProgress::Read(prefix))
                         if prefix.is_buffered()
                             && prefix.offset() == position
                             && prefix.bytes_read() > 0
                             && prefix.bytes_read() <= length =>
                     {
-                        let prefix = prefix.clone();
-                        let mut kind = error.cause().kind();
-                        // A collector may retry zero-progress interruptions, but
-                        // this logical failure already delivered a prefix.
-                        if kind == io::ErrorKind::Interrupted {
-                            kind = io::ErrorKind::Other;
-                        }
-                        pending = Some(io::Error::new(kind, error));
+                        pending = Some(crate::internal::errors::suppress_interrupted(cause));
                         prefix
                     }
-                    _ => return Err(error.into_cause().with_index(0).into()),
+                    _ => return Err(cause),
                 }
             }
         };
@@ -126,7 +120,7 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
             || value.bytes_read() > length
             || (length != 0 && value.bytes_read() == 0 && !value.eof())
         {
-            return Err(invalid("invalid read progress").into());
+            return Err(invalid("invalid read progress"));
         }
         let eof = pending.is_none() && value.eof();
         self.cursor = Cursor::At {
@@ -157,7 +151,7 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
             WriteOptions::new(),
         )?;
         if values.len() != 1 {
-            return Err(invalid("invalid write count").into());
+            return Err(invalid("invalid write count"));
         }
         let value = match values.pop().expect("one write outcome") {
             Ok(value) => value,
@@ -171,21 +165,22 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
                     Some(crate::IoProgress::Read(_) | crate::IoProgress::Stream { .. }) => false,
                 };
                 if !valid {
-                    return Err(invalid("invalid write failure progress").into());
+                    return Err(invalid("invalid write failure progress"));
                 }
-                let mut kind = error.cause().kind();
                 // The standard write_all implementation retries Interrupted.
                 // Never let that replay an uncertain or acknowledged prefix.
-                if kind == io::ErrorKind::Interrupted
-                    && (error.state() == crate::FailureState::Unknown || error.progress().is_some())
-                {
-                    kind = io::ErrorKind::Other;
-                }
+                let suppress =
+                    error.state() == crate::FailureState::Unknown || error.progress().is_some();
                 let confirmed = match error.progress() {
                     Some(crate::IoProgress::Write { bytes_written }) => *bytes_written,
                     _ => 0,
                 };
-                let error = io::Error::new(kind, error);
+                let cause = error.into_cause();
+                let error = if suppress {
+                    crate::internal::errors::suppress_interrupted(cause)
+                } else {
+                    cause
+                };
                 if confirmed > 0 {
                     // Write must acknowledge consumed bytes. Surface the saved
                     // failure before another operation can replay its suffix.
@@ -198,7 +193,7 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
             }
         };
         if value.bytes_written > buffer.len() {
-            return Err(invalid("invalid write progress").into());
+            return Err(invalid("invalid write progress"));
         }
         // Append descriptors report the actual position selected by the backend.
         self.cursor = Cursor::at(
@@ -211,7 +206,7 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
     }
 }
 fn invalid(message: &'static str) -> Error {
-    Error::transport_with_kind(None, crate::TransportKind::InvalidReply, message)
+    crate::internal::errors::transport(crate::TransportKind::InvalidReply, message)
 }
 impl<C: Vfsi + ?Sized> Read for StdIo<'_, C> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
@@ -235,7 +230,7 @@ impl<C: Vfsi + ?Sized> Read for StdIo<'_, C> {
                 return if count == 0 {
                     Ok(added)
                 } else {
-                    Err(Error::errno(0, libc::EFBIG as u32).into())
+                    Err(std::io::Error::from_raw_os_error(libc::EFBIG))
                 };
             }
             // Reserve before I/O and fill caller storage directly. Reuse the
@@ -289,7 +284,7 @@ impl<C: Vfsi + ?Sized> Write for StdIo<'_, C> {
 
     fn flush(&mut self) -> io::Result<()> {
         self.report_pending_error()?;
-        self.client.sync_data(self.file).map_err(Into::into)
+        self.client.sync_data(self.file)
     }
 }
 impl<C: Vfsi + ?Sized> Seek for StdIo<'_, C> {
@@ -302,14 +297,22 @@ impl<C: Vfsi + ?Sized> Seek for StdIo<'_, C> {
             }
             SeekFrom::Current(offset) => (self.known_position()?, offset),
             SeekFrom::End(offset) => {
-                let values = self.client.getattrs_all(
-                    &[Target::file(self.file)],
-                    AttrsOptions::new().with_fields(Attributes::SIZE),
-                )?;
+                let values = self
+                    .client
+                    .getattrs_all(
+                        &[Target::file(self.file)],
+                        AttrsOptions::new().with_fields(Attributes::SIZE),
+                    )
+                    .map_err(crate::IndexedError::into_cause)?;
                 let [value] = values.as_slice() else {
-                    return Err(invalid("invalid metadata count").into());
+                    return Err(invalid("invalid metadata count"));
                 };
-                (value.len().ok_or_else(|| Error::unsupported(0))?, offset)
+                (
+                    value
+                        .len()
+                        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::Unsupported))?,
+                    offset,
+                )
             }
         };
         let position = i128::from(base) + i128::from(offset);

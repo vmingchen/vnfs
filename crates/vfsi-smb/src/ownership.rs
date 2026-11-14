@@ -128,7 +128,10 @@ impl DeferredClose {
     pub(super) async fn attempt(&mut self) -> OpResult<()> {
         if !self.can_attempt() {
             return Err(vfsi_core::OpError::unknown(
-                VfError::transport(None, "SMB CLOSE retained for session teardown"),
+                vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "SMB CLOSE retained for session teardown",
+                ),
                 None,
             ));
         }

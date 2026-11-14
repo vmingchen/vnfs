@@ -68,6 +68,7 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
             Default::default()
         )
         .unwrap_err()
+        .cause()
         .kind(),
         ErrorKind::FileTooLarge
     );
@@ -91,7 +92,8 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
             Default::default(),
         )
         .unwrap_err();
-    assert_eq!(error.index(), Some(1));
+    assert_eq!(error.index(), None);
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::FileTooLarge);
     assert_eq!(buffer, [0xaa; 3]);
     let error = fs
         .read_batch(
@@ -120,7 +122,7 @@ fn failure_indices_and_buffer_borrows_survive_consumption() {
             Default::default(),
         )
         .unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::NotFound);
+    assert_eq!(error.cause().kind(), ErrorKind::NotFound);
     assert_eq!(error.index(), Some(2));
     buffer.fill(7);
     let other = Posix::new(temp.path()).unwrap();
@@ -135,7 +137,7 @@ fn failure_indices_and_buffer_borrows_survive_consumption() {
         )
         .unwrap_err();
     assert_eq!(error.index(), Some(0));
-    assert_eq!(error.kind(), ErrorKind::NotFound);
+    assert_eq!(error.cause().kind(), ErrorKind::NotFound);
     assert_eq!(buffer, [7]);
 }
 #[test]
@@ -252,13 +254,13 @@ fn an_exhausted_internal_budget_never_restores_the_default() {
             Default::default(),
         )
         .unwrap_err();
-    assert_eq!(error.kind(), vnfs::error::ErrorKind::FileTooLarge);
+    assert_eq!(error.cause().kind(), vnfs::error::ErrorKind::FileTooLarge);
     assert_eq!(error.index(), Some(1));
     assert_eq!(&buffer, b"abc");
     let fs = fs.with_limits(vnfs::files::ResourceLimits::new().with_max_read_bytes(0));
     assert_eq!(fs.read_files(&["/empty"]).unwrap(), vec![Vec::<u8>::new()]);
     assert_eq!(
-        fs.read_files(&["/extra"]).unwrap_err().kind(),
+        fs.read_files(&["/extra"]).unwrap_err().cause().kind(),
         vnfs::error::ErrorKind::FileTooLarge
     );
     assert_eq!(fs.read_to_string("/empty").unwrap(), "");

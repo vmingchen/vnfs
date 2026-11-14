@@ -1,7 +1,7 @@
 //! C file-handle registration, opening, and closing.
 use super::*;
 
-fn validate_c_open_results(opened: &[FileOperand], expected: usize) -> Result<(), VfError> {
+fn validate_c_open_results(opened: &[FileOperand], expected: usize) -> Result<(), std::io::Error> {
     if opened.len() != expected {
         return Err(invalid_backend_result_count(
             "vopen_raw_impl",
@@ -50,7 +50,7 @@ fn insert_c_file(
     fs: &vfsi_fs,
     files: &mut std::collections::HashMap<i32, CFile>,
     file: CFile,
-) -> Result<i32, VfError> {
+) -> Result<i32, std::io::Error> {
     for _ in 0..i32::MAX {
         let fd = loop {
             let current = fs.next_fd.load(Ordering::Relaxed);
@@ -68,7 +68,7 @@ fn insert_c_file(
             return Ok(fd);
         }
     }
-    Err(VfError::errno(0, libc::EMFILE as u32))
+    Err(std::io::Error::from_raw_os_error(libc::EMFILE))
 }
 
 fn open_impl(
@@ -76,7 +76,7 @@ fn open_impl(
     path: &std::path::Path,
     flags: c_int,
     mode: u32,
-) -> Result<i32, VfError> {
+) -> Result<i32, std::io::Error> {
     let vpath = vpath_for(fs, path)?;
     let file = lock_or_io(&fs.fs)?.open_raw_impl(&vpath, flags, mode)?;
     let mut files = lock_or_io(&fs.files)?;
@@ -117,10 +117,10 @@ pub unsafe extern "C" fn vfsi_open(
     })
 }
 
-fn close_impl(fs: &vfsi_fs, fd: i32) -> Result<(), VfError> {
+fn close_impl(fs: &vfsi_fs, fd: i32) -> Result<(), std::io::Error> {
     let file = lock_or_io(&fs.files)?
         .remove(&fd)
-        .ok_or_else(|| VfError::errno(0, ERR_EBADF))?;
+        .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?;
     lock_or_io(&fs.fs)?.close_impl(&file.file)
 }
 
@@ -196,11 +196,9 @@ pub unsafe extern "C" fn vfsi_openv(
             };
             match vpath_for(fs, &path) {
                 Ok(path) => paths.push(path),
-                Err(error) => fail_batch!(
-                    results,
-                    vfsi_result::from_error(error.with_index(index)),
-                    false
-                ),
+                Err(error) => {
+                    fail_batch!(results, vfsi_result::from_cause(&error, Some(index)), false)
+                }
             }
             flags.push(op.flags);
             modes.push(op.mode);
@@ -220,7 +218,7 @@ pub unsafe extern "C" fn vfsi_openv(
             {
                 Ok(opened) => opened,
                 Err(error) => {
-                    let failure = vfsi_result::from_error(error);
+                    let failure = vfsi_result::from_indexed(error);
                     fail_results(results, failure, true);
                     return failure;
                 }
@@ -240,8 +238,8 @@ pub unsafe extern "C" fn vfsi_openv(
             fail_batch!(results, vfsi_result::from_error(error), true);
         }
         let mut registered = Vec::with_capacity(count);
-        let registration = (|| -> Result<(), VfError> {
-            let mut files = lock_or_io(&fs.files)?;
+        let registration = (|| -> Result<(), vfsi_core::IndexedError> {
+            let mut files = lock_or_io(&fs.files).map_err(vfsi_core::IndexedError::unattributed)?;
             for (index, (op, file)) in ops.iter_mut().zip(&opened).enumerate() {
                 let fd = insert_c_file(
                     fs,
@@ -251,7 +249,7 @@ pub unsafe extern "C" fn vfsi_openv(
                         append: op.flags & libc::O_APPEND != 0,
                     },
                 )
-                .map_err(|error| error.with_index(index))?;
+                .map_err(|error| vfsi_core::IndexedError::at(index, error))?;
                 op.fd = fd;
                 registered.push(fd);
             }
@@ -266,7 +264,7 @@ pub unsafe extern "C" fn vfsi_openv(
             if let Ok(mut backend) = fs.fs.lock() {
                 let _ = backend.vclose_impl(&opened);
             }
-            fail_batch!(results, vfsi_result::from_error(error), true);
+            fail_batch!(results, vfsi_result::from_indexed(error), true);
         }
         complete_results(results);
         vfsi_result::success(count)
@@ -320,7 +318,10 @@ pub unsafe extern "C" fn vfsi_closev(
                 let Some(file) = table.get(fd).cloned() else {
                     fail_batch!(
                         results,
-                        vfsi_result::from_error(VfError::errno(index, ERR_EBADF)),
+                        vfsi_result::from_cause(
+                            &std::io::Error::from_raw_os_error(ERR_EBADF as i32),
+                            Some(index),
+                        ),
                         false
                     );
                 };

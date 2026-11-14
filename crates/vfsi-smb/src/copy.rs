@@ -38,8 +38,7 @@ fn copy_acknowledged(chunks: &[CopyChunk], result: SrvCopychunkResponse) -> VfRe
         || result.chunk_bytes_written != 0
         || u64::from(result.total_bytes_written) != requested
     {
-        return Err(VfError::invalid_reply(
-            None,
+        return Err(vfsi_core::internal::errors::invalid_reply(
             "invalid SMB COPYCHUNK acknowledgement",
         ));
     }
@@ -52,7 +51,9 @@ fn smaller_copy_limits(
 ) -> VfResult<ServerSideCopyLimits> {
     if advertised.max_chunks == 0 || advertised.max_chunk_size == 0 || advertised.max_data_size == 0
     {
-        return Err(VfError::invalid_reply(None, "zero SMB COPYCHUNK limit"));
+        return Err(vfsi_core::internal::errors::invalid_reply(
+            "zero SMB COPYCHUNK limit",
+        ));
     }
     let limits = ServerSideCopyLimits {
         max_chunks: current.max_chunks.min(advertised.max_chunks),
@@ -60,8 +61,7 @@ fn smaller_copy_limits(
         max_data_size: current.max_data_size.min(advertised.max_data_size),
     };
     if limits == current {
-        return Err(VfError::invalid_reply(
-            None,
+        return Err(vfsi_core::internal::errors::invalid_reply(
             "SMB COPYCHUNK rejection did not reduce limits",
         ));
     }
@@ -78,7 +78,7 @@ fn copy_frame_response(
     frame: &smb2::client::Frame,
     dst_id: FileId,
     chunks: &[CopyChunk],
-) -> Result<CopyChunkOutcome, (VfError, bool)> {
+) -> Result<CopyChunkOutcome, (std::io::Error, bool)> {
     require_command(frame, Command::Ioctl, 0).map_err(|cause| (cause, false))?;
     copy_response(frame.header.status, &frame.body, dst_id, chunks)
 }
@@ -88,7 +88,7 @@ fn copy_response(
     body: &[u8],
     dst_id: FileId,
     chunks: &[CopyChunk],
-) -> Result<CopyChunkOutcome, (VfError, bool)> {
+) -> Result<CopyChunkOutcome, (std::io::Error, bool)> {
     let wire_error = || SmbError::Protocol {
         status,
         command: Command::Ioctl,
@@ -100,7 +100,7 @@ fn copy_response(
             u32::from_le_bytes(body[4..8].try_into().expect("validated SMB error header")) as usize;
         if bytes > body.len() - 8 {
             return Err((
-                VfError::invalid_reply(None, "truncated SMB COPYCHUNK error data"),
+                vfsi_core::internal::errors::invalid_reply("truncated SMB COPYCHUNK error data"),
                 false,
             ));
         }
@@ -112,13 +112,13 @@ fn copy_response(
         .map_err(|error| (smb_error(error, None), false))?;
     if output.ctl_code != FSCTL_SRV_COPYCHUNK || output.file_id != dst_id {
         return Err((
-            VfError::invalid_reply(None, "mismatched SMB COPYCHUNK response"),
+            vfsi_core::internal::errors::invalid_reply("mismatched SMB COPYCHUNK response"),
             false,
         ));
     }
     if output.output_data.len() != SrvCopychunkResponse::SIZE {
         return Err((
-            VfError::invalid_reply(None, "invalid SMB COPYCHUNK response size"),
+            vfsi_core::internal::errors::invalid_reply("invalid SMB COPYCHUNK response size"),
             false,
         ));
     }
@@ -192,13 +192,13 @@ impl SmbVecFs {
                 })
                 .collect::<VfResult<_>>()?;
             let index = buffers[0].get(..8).ok_or_else(|| {
-                VfError::invalid_reply(None, "short SMB copy file-index response")
+                vfsi_core::internal::errors::invalid_reply("short SMB copy file-index response")
             })?;
-            let volume = buffers[1]
-                .get(8..12)
-                .ok_or_else(|| VfError::invalid_reply(None, "short SMB copy volume response"))?;
+            let volume = buffers[1].get(8..12).ok_or_else(|| {
+                vfsi_core::internal::errors::invalid_reply("short SMB copy volume response")
+            })?;
             if index == [0; 8] || volume == [0; 4] {
-                return Err(VfError::unsupported(0));
+                return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
             }
             // File indices are volume-local; a share can span several volumes.
             *identity = (
@@ -241,7 +241,7 @@ impl SmbVecFs {
                 && pair.dst_offset - pair.src_offset < length
                 && self.copy_handles_alias([src_id, dst_id])?
             {
-                return Err(VfError::from_kind(None, std::io::ErrorKind::InvalidInput));
+                return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
             }
             let server_result = if server {
                 self.copy_server_range(src_id, dst_id, pair, length)?
@@ -305,7 +305,7 @@ impl SmbVecFs {
         dst_id: FileId,
         key: &smb2::client::copy::ResumeKey,
         chunks: &[CopyChunk],
-    ) -> Result<CopyChunkOutcome, (VfError, bool)> {
+    ) -> Result<CopyChunkOutcome, (std::io::Error, bool)> {
         let mut packed = WriteCursor::new();
         SrvCopychunkCopy {
             source_key: *key.as_bytes(),
@@ -649,7 +649,7 @@ mod copy_results_tests {
             };
             let (cause, fallback) = copy_frame_response(&frame, id, &chunks).unwrap_err();
             assert_eq!(
-                cause.transport_kind(),
+                vfsi_core::transport_kind(&(cause)),
                 Some(vfsi_core::TransportKind::InvalidReply)
             );
             assert!(!fallback);
@@ -686,7 +686,7 @@ mod copy_results_tests {
             )
             .unwrap_err();
             assert_eq!(
-                cause.transport_kind(),
+                vfsi_core::transport_kind(&(cause)),
                 Some(vfsi_core::TransportKind::InvalidReply)
             );
             assert!(!fallback);

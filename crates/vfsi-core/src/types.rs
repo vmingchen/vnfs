@@ -46,9 +46,7 @@ pub const NF4FIFO: u32 = 7;
 // Result types
 // ---------------------------------------------------------------------------
 
-pub use crate::error::{
-    ErrorDomain, StatusCode, VfError, VfRes, VfResult, error_from_rpc, error_from_rpc_indexed,
-};
+pub use crate::error::{StatusCode, VfRes, VfResult};
 
 /// Callback used by vectorized streaming reads.
 pub type ReadStreamCallback<'a> = dyn FnMut(usize, u64, &[u8], bool) -> bool + 'a;
@@ -76,20 +74,20 @@ bitflags::bitflags! {
 /// Translate the typed flags for compatibility backends.
 pub fn open_flags_to_libc(flags: OpenFlags) -> VfResult<i32> {
     if flags.bits() & !OpenFlags::all().bits() != 0 {
-        return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
     }
     let writable = flags.intersects(OpenFlags::WRITE | OpenFlags::APPEND);
     let mut raw = match (flags.contains(OpenFlags::READ), writable) {
         (true, true) => libc::O_RDWR,
         (true, false) => libc::O_RDONLY,
         (false, true) => libc::O_WRONLY,
-        (false, false) => return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
+        (false, false) => return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
     };
     if flags.contains(OpenFlags::TRUNCATE) && !writable {
-        return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
     }
     if flags.intersects(OpenFlags::CREATE | OpenFlags::CREATE_NEW) && !writable {
-        return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
     }
     if flags.contains(OpenFlags::APPEND) {
         raw |= libc::O_APPEND;
@@ -171,7 +169,7 @@ pub fn insert_fd<T>(
             return Ok(candidate);
         }
     }
-    Err(VfError::errno(0, libc::EMFILE as u32))
+    Err(std::io::Error::from_raw_os_error(libc::EMFILE))
 }
 
 // ---------------------------------------------------------------------------
@@ -754,8 +752,10 @@ impl Attrs {
         .into_iter()
         .any(|(field, value)| fields.contains(field) && value.is_none());
         if !self.contains(fields) || invalid_time {
-            return Err(crate::VfError::unsupported(None)
-                .with_message("required attributes are missing or cannot be represented"));
+            return Err(crate::internal::errors::with_message(
+                std::io::Error::from(std::io::ErrorKind::Unsupported),
+                "required attributes are missing or cannot be represented",
+            ));
         }
         Ok(self)
     }

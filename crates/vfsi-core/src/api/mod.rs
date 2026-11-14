@@ -15,13 +15,12 @@
 //! standard builder-style verbs.
 
 pub type Result<T> = crate::VfResult<T>;
-pub type Error = crate::VfError;
+pub type Error = std::io::Error;
 pub use crate::{
-    AttrMask as Attributes, Attrs, Capabilities, CopyOptions, DirEntry, ErrorDomain,
-    FilesystemStats, FsObjId, OpenFlags, OpenOp, Permissions, RemoveOptions, StatusCode,
-    TransportKind, VfType as FileType,
+    AttrMask as Attributes, Attrs, Capabilities, CopyOptions, DirEntry, FilesystemStats, FsObjId,
+    OpenFlags, OpenOp, Permissions, RemoveOptions, StatusCode, TransportKind, VfType as FileType,
 };
-pub use crate::{FailureState, IoProgress, OpError, OpResult, VecResult};
+pub use crate::{FailureState, IndexedError, IoProgress, OpError, OpResult, VecResult};
 /// Per-pair rename semantics requested by [`Vfsi::vrename`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RenameMode {

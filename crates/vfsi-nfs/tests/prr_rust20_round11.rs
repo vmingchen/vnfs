@@ -63,6 +63,7 @@ fn mixed_append(mode: &str) {
                 .and_then(|outcomes| {
                     let count = outcomes.len();
                     vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                        .map_err(vfsi_core::IndexedError::into_cause)
                 })
                 .unwrap();
             let actual = fs.read_raw_impl(&file, 0, 8).unwrap();
@@ -88,6 +89,18 @@ fn mixed_append(mode: &str) {
         }
     }
 }
+#[cfg(feature = "test-faults")]
+fn test_native_code(error: &std::io::Error) -> u32 {
+    match vfsi_core::native_status(error) {
+        Some(
+            vfsi_core::StatusCode::Errno(code)
+            | vfsi_core::StatusCode::Nfs(code)
+            | vfsi_core::StatusCode::Smb(code),
+        ) => code,
+        _ => panic!("expected a native error, got {error:?}"),
+    }
+}
+
 #[test]
 fn mixed_append_full() {
     mixed_append("full");
@@ -270,7 +283,7 @@ mod short_merged {
             };
             let script = Arc::new(FaultScript::one(
                 OpenFaultPoint::BeforeReadRepair { index: 0 },
-                vfsi_core::VfError::errno(None, libc::EACCES as u32),
+                std::io::Error::from_raw_os_error(libc::EACCES),
             ));
             client.set_fault_injector(script.clone());
             client.test_short_merged_read_once(7);
@@ -299,7 +312,7 @@ mod short_merged {
             assert_eq!(outcome.results.len(), 2);
             let error = outcome.results[0].as_ref().unwrap_err();
             assert_eq!(error.state(), vfsi_core::FailureState::Failed);
-            assert_eq!(error.cause().raw_code(), libc::EACCES as u32);
+            assert_eq!(test_native_code(error.cause()), libc::EACCES as u32);
             let Some(vfsi_core::IoProgress::Read(prefix)) = error.progress() else {
                 panic!("missing prefix")
             };
@@ -472,9 +485,9 @@ mod short_merged {
                     opened = outcome.opened;
                     let error = outcome.results[0].as_ref().unwrap_err();
                     assert_eq!(error.state(), vfsi_core::FailureState::Failed);
-                    assert_eq!(error.cause().index(), None);
+                    let _: &std::io::Error = error.cause();
                     assert!(error.progress().is_none());
-                    (error.cause().raw_code(), 0)
+                    (test_native_code(error.cause()), 0)
                 } else {
                     client.test_short_merged_read_once(0);
                     let outcome = client
@@ -491,8 +504,8 @@ mod short_merged {
                     opened = outcome.opened;
                     let error = outcome.results[0].as_ref().unwrap_err();
                     assert_eq!(error.state(), vfsi_core::FailureState::Failed);
-                    assert_eq!(error.cause().index(), None);
-                    (error.cause().raw_code(), 0)
+                    let _: &std::io::Error = error.cause();
+                    (test_native_code(error.cause()), 0)
                 };
                 assert!(!client.test_merged_short_pending());
                 cleanup(&mut client, &dir, &path, opened);
@@ -637,8 +650,11 @@ mod short_merged {
         let error = outcome.results[0]
             .as_ref()
             .expect_err("a later attempted alias prevents safe earlier repair");
-        assert_eq!(error.cause().raw_code(), nfsv41_sys::nfsstat4_NFS4ERR_IO);
-        assert_eq!(error.cause().index(), None);
+        assert_eq!(
+            test_native_code(error.cause()),
+            nfsv41_sys::nfsstat4_NFS4ERR_IO
+        );
+        let _: &std::io::Error = error.cause();
         assert_eq!(
             error.progress(),
             Some(&vfsi_core::IoProgress::Write { bytes_written: 7 })
@@ -721,6 +737,7 @@ fn ordinary_mixed_vectors_keep_one_merged_compound() {
         .and_then(|outcomes| {
             let count = outcomes.len();
             vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                .map_err(vfsi_core::IndexedError::into_cause)
         })
         .unwrap();
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
@@ -772,6 +789,7 @@ fn mixed_append_queries_size_only_once_per_independent_descriptor() {
             .and_then(|outcomes| {
                 let count = outcomes.len();
                 vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                    .map_err(vfsi_core::IndexedError::into_cause)
             })
             .unwrap();
         counts.push(vfsi_nfs::compound::thread_compound_stats().0);
@@ -820,7 +838,9 @@ fn mixed_append_respects_later_path_truncation_boundaries() {
                     fs.vhardlink_impl(&[Path::new(&first)], &[Path::new(&link)])
                         .and_then(|outcomes| {
                             let count = outcomes.len();
-                            vfsi_core::internal::collect_vec_result(Ok(outcomes), count).map(|_| ())
+                            vfsi_core::internal::collect_vec_result(Ok(outcomes), count)
+                                .map(|_| ())
+                                .map_err(vfsi_core::IndexedError::into_cause)
                         })
                         .unwrap();
                 }
@@ -840,6 +860,7 @@ fn mixed_append_respects_later_path_truncation_boundaries() {
                     .and_then(|outcomes| {
                         let count = outcomes.len();
                         vfsi_sync::internal::collect_vec_result(Ok(outcomes), count)
+                            .map_err(vfsi_core::IndexedError::into_cause)
                     })
                     .unwrap();
                 let actual = fs.read_raw_impl(&file, 0, 32).unwrap();

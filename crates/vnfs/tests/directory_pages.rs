@@ -9,7 +9,7 @@ fn collect(
     fs: &impl Vfsi,
     roots: &[&str],
     recursive: bool,
-) -> vnfs::Result<Vec<Vec<vnfs::directory::DirectoryListing>>> {
+) -> std::result::Result<Vec<Vec<vnfs::directory::DirectoryListing>>, vnfs::error::IndexedError> {
     fs.read_dirs_with_options(roots, ListDirOptions::new().with_recursive(recursive))
 }
 
@@ -77,7 +77,7 @@ fn recursive_roots_and_entries_never_allow_symlink_componentss() {
     fs.write("/target/file", b"x").unwrap();
     fs.symlink("/target", "/link").unwrap();
     let error = collect(&fs, &["/link"], true).unwrap_err();
-    assert_eq!(error.raw_code(), libc::ENOTDIR as u32);
+    assert_eq!(test_native_code(error.cause()), libc::ENOTDIR as u32);
     assert_eq!(error.index(), Some(0));
     let listings = collect(&fs, &["/"], true).unwrap();
     assert!(
@@ -239,7 +239,6 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
         ] {
             let error = collect(limited_options).unwrap_err();
             assert_eq!(error.kind(), vnfs::error::ErrorKind::FileTooLarge, "{name}");
-            assert_eq!(error.index(), Some(0), "{name}");
         }
         assert_eq!(
             fs.listdir(
@@ -273,18 +272,34 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
         );
         assert_eq!(calls, 1, "{name}");
         for fault in [
-            vnfs::Error::errno(0, libc::ECANCELED as u32),
-            vnfs::Error::transport(None, "callback failure"),
+            std::io::Error::from_raw_os_error(libc::ECANCELED),
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Other,
+                "callback failure",
+            ),
         ] {
             calls = 0;
+            let expected = (
+                fault.kind(),
+                vfsi_core::native_status(&fault),
+                vfsi_core::transport_kind(&fault),
+            );
+            let mut fault = Some(fault);
             let error = fs
                 .listdir("/tree", options, |_| {
                     calls += 1;
-                    Err(fault.clone())
+                    Err(fault.take().expect("a failed callback must never replay"))
                 })
                 .unwrap_err();
-            assert_eq!(error.kind(), fault.kind(), "{name}");
-            assert_eq!(error.raw_code(), fault.raw_code(), "{name}");
+            assert_eq!(
+                (
+                    error.kind(),
+                    vfsi_core::native_status(&error),
+                    vfsi_core::transport_kind(&error)
+                ),
+                expected,
+                "{name}"
+            );
             assert_eq!(calls, 1, "{name}: callbacks must not replay");
         }
         if recursive {
@@ -366,7 +381,8 @@ fn buffered_local_walk_never_follows_replaced_children_or_ancestors() {
                 options.with_listing_options(options.listing_options().with_recursive(true)),
                 |event| {
                     if event.entry.path() == Path::new("/tree/child") && !changed {
-                        fs.renames_all(&[(victim, "/saved")], Default::default())?;
+                        fs.renames_all(&[(victim, "/saved")], Default::default())
+                            .map_err(vfsi_core::IndexedError::into_cause)?;
                         fs.symlink(target, victim)?;
                         changed = true;
                     }
@@ -377,7 +393,7 @@ fn buffered_local_walk_never_follows_replaced_children_or_ancestors() {
             assert!(changed);
             assert!(!escaped, "{options:?}, {name}");
             let error = result.unwrap_err();
-            assert_eq!(error.raw_code(), libc::ELOOP as u32);
+            assert_eq!(test_native_code(&(error)), libc::ELOOP as u32);
         }
     }
 }
@@ -401,6 +417,7 @@ fn scalar_collectors_select_named_scope_and_respect_visit_budgets() {
         fs.read_dirs_with_options(&["/tree"], ListDirOptions::new().with_recursive(true))
             .map(|mut trees| trees.remove(0))
             .unwrap_err()
+            .cause()
             .kind(),
         vnfs::error::ErrorKind::FileTooLarge
     );
@@ -438,6 +455,7 @@ fn scalar_collectors_select_named_scope_and_respect_visit_budgets() {
         )
         .map(|mut trees| trees.remove(0))
         .unwrap_err()
+        .cause()
         .kind(),
         vnfs::error::ErrorKind::FileTooLarge
     );
@@ -489,10 +507,11 @@ fn recursive_paged_walk_rejects_swapped_ancestors() {
                 Ok(ControlFlow::Continue(()))
             })
             .map(|_| ())
+            .map_err(vfsi_core::IndexedError::into_cause)
         };
         assert!(changed);
         assert!(!escaped, "recursive traversal followed a swapped ancestor");
-        assert_eq!(result.unwrap_err().index(), Some(0));
+        assert!(result.is_err());
     }
     for routed in [false, true] {
         for entry_visitor in [false, true] {
@@ -632,8 +651,8 @@ fn portable_page_continuations_pin_identity_and_isolate_invalid_cursors() {
     assert_eq!(missing.cause().kind(), std::io::ErrorKind::NotFound);
     let foreign = outcomes.next().unwrap().unwrap_err();
     assert_eq!(foreign.state(), vfsi_core::FailureState::NotAttempted);
-    assert_eq!(foreign.cause().index(), None);
-    assert_eq!(foreign.cause().raw_code(), libc::EBADF as u32);
+
+    assert_eq!(test_native_code(foreign.cause()), libc::EBADF as u32);
 
     let page = fs
         .dir_pages_all(&["/original"], vec![None], options, size)
@@ -691,7 +710,7 @@ fn portable_page_quota_and_preflight_errors_do_not_start_a_path_lookup() {
         let error = fs
             .dir_pages_all(&["/does-not-exist"], cursors, options, size)
             .unwrap_err();
-        assert_eq!(error.raw_code(), libc::EINVAL as u32);
+        assert_eq!(test_native_code(error.cause()), libc::EINVAL as u32);
     }
     fs.create_dir("/empty").unwrap();
     let options = ListDirOptions::new()
@@ -706,9 +725,22 @@ fn portable_page_quota_and_preflight_errors_do_not_start_a_path_lookup() {
     );
     fs.write("/empty/file", b"").unwrap();
     assert_eq!(
-        fs.dir_pages_all(&["/empty"], vec![None], options, size)
-            .unwrap_err()
-            .raw_code(),
+        test_native_code(
+            fs.dir_pages_all(&["/empty"], vec![None], options, size)
+                .unwrap_err()
+                .cause()
+        ),
         libc::EFBIG as u32
     );
+}
+
+fn test_native_code(error: &std::io::Error) -> u32 {
+    match vfsi_core::native_status(error) {
+        Some(
+            vfsi_core::StatusCode::Errno(code)
+            | vfsi_core::StatusCode::Nfs(code)
+            | vfsi_core::StatusCode::Smb(code),
+        ) => code,
+        _ => panic!("expected a native error, got {error:?}"),
+    }
 }

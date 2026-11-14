@@ -19,7 +19,7 @@ enum Fault {
     Close,
     CrossDevice,
     Rename,
-    IndexedRead,
+    MiddleReadFailure,
     PartialCrossDevice,
     NonprefixCrossDevice,
     UnknownCrossDevice,
@@ -33,16 +33,20 @@ enum Fault {
     NoReadProgress,
     OversizedOwnedRead,
     LostRead,
-    BadReadIndex,
+    ExtraReadOutcome,
     ReadAfter(usize, usize),
     ReadAfterOpen(usize, usize),
     BadOpenCount,
-    BadOpenIndex,
-    BadCloseIndex,
+    ExtraOpenOutcome,
+    ExtraCloseOutcome,
+    DirectoryBackendFirst,
+    DirectoryCallbacksReverse,
+    DirectoryCallbacksForward,
 }
 #[derive(Default)]
 struct Calls {
     read_attempts: usize,
+    directory_waves: Vec<Vec<std::path::PathBuf>>,
     stream_calls: usize,
     metadata: Vec<usize>,
     syncs: Vec<(SyncMode, usize)>,
@@ -149,10 +153,10 @@ impl Vfsi for Harness {
     fn vopen(&self, r: &[OpenOp]) -> vnfs::VecResult<Self::File> {
         self.calls.borrow_mut().opens += 1;
         self.calls.borrow_mut().open_batches.push(r.len());
-        if self.fault.get() == Fault::BadOpenIndex {
-            return Err(Error::errno(r.len(), libc::EIO as u32));
-        }
         let mut files = self.fs.vopen(r)?;
+        if self.fault.get() == Fault::ExtraOpenOutcome {
+            files.push(Ok(self.fs.open(r[0].path())?));
+        }
         if self.fault.get() == Fault::BadOpenCount {
             files.pop();
         }
@@ -178,21 +182,37 @@ impl Vfsi for Harness {
             && at == attempt
         {
             self.read_failure.set(None);
-            return Err(Error::errno(0, errno));
+            return Err(std::io::Error::from_raw_os_error((errno) as i32));
         }
-        if self.fault.get() == Fault::IndexedRead {
-            return Err(Error::errno(1, libc::EIO as u32));
-        }
-        match self.fault.get() {
-            Fault::ReadAfter(at, index) if at == attempt => {
-                return Err(Error::errno(index, libc::EIO as u32));
+        let failure = match self.fault.get() {
+            Fault::MiddleReadFailure => Some(1),
+            Fault::ReadAfter(at, index) if at == attempt => Some(index),
+            Fault::ReadAfterOpen(at, index) if at == self.calls.borrow().opens => Some(index),
+            Fault::LostRead => {
+                return Err(vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "lost read reply",
+                ));
             }
-            Fault::ReadAfterOpen(at, index) if at == self.calls.borrow().opens => {
-                return Err(Error::errno(index, libc::EIO as u32));
-            }
-            Fault::LostRead => return Err(Error::transport(None, "lost read reply")),
-            Fault::BadReadIndex => return Err(Error::errno(r.len(), libc::EIO as u32)),
-            _ => {}
+            _ => None,
+        };
+        if let Some(failed) = failure {
+            assert!(failed < r.len());
+            // A known rejected input has its own slot; healthy siblings still
+            // execute. Keep the existing outer-rejection fixture above for std_io.
+            let mut outcomes = self.fs.vread(
+                r.into_iter()
+                    .enumerate()
+                    .filter_map(|(index, request)| (index != failed).then_some(request)),
+                o,
+            )?;
+            outcomes.insert(
+                failed,
+                Err(OpError::not_attempted(std::io::Error::from_raw_os_error(
+                    libc::EIO,
+                ))),
+            );
+            return Ok(outcomes);
         }
         let mut out = self.fs.vread(r, o)?;
         let mut c = self.calls.borrow_mut();
@@ -231,6 +251,9 @@ impl Vfsi for Harness {
         if self.fault.get() == Fault::BadRead {
             out.pop();
         }
+        if self.fault.get() == Fault::ExtraReadOutcome {
+            out.push(Ok(ReadResult::owned(0, Vec::new(), true)));
+        }
         if self.fault.get() == Fault::WrongOffset
             && let Some(Ok(read)) = out.first_mut()
         {
@@ -250,8 +273,7 @@ impl Vfsi for Harness {
                 .into_iter()
                 .map(|_| {
                     Err(vnfs::error::OpError::unknown(
-                        Error::transport_with_kind(
-                            None,
+                        vfsi_core::internal::errors::transport(
                             TransportKind::InvalidReply,
                             "lost write reply",
                         ),
@@ -267,12 +289,15 @@ impl Vfsi for Harness {
     }
     fn vclose(&self, f: &mut [Self::File]) -> vnfs::VecResult<()> {
         self.calls.borrow_mut().closes += f.len();
-        let outcomes = self.fs.vclose(f)?;
-        if self.fault.get() == Fault::BadCloseIndex {
-            return Err(Error::errno(f.len(), libc::EIO as u32));
+        let mut outcomes = self.fs.vclose(f)?;
+        if self.fault.get() == Fault::ExtraCloseOutcome {
+            outcomes.push(Ok(()));
         }
-        if self.fault.get() == Fault::Close {
-            return Err(Error::errno(0, libc::EIO as u32));
+        if self.fault.get() == Fault::Close && !outcomes.is_empty() {
+            outcomes[0] = Err(OpError::failed(
+                std::io::Error::from_raw_os_error(libc::EIO),
+                None,
+            ));
         }
         Ok(outcomes)
     }
@@ -306,34 +331,36 @@ impl Vfsi for Harness {
         match self.fault.get() {
             Fault::PartialCrossDevice => {
                 self.fs
-                    .renames_all(&[(p[0].0.as_ref(), p[0].1.as_ref())], options)?;
+                    .renames_all(&[(p[0].0.as_ref(), p[0].1.as_ref())], options)
+                    .map_err(vfsi_core::IndexedError::into_cause)?;
                 Ok((0..p.len())
                     .map(|index| {
                         if index == 0 {
                             Ok(())
                         } else {
-                            Err(OpError::not_attempted(Error::errno(
-                                None,
-                                libc::EXDEV as u32,
+                            Err(OpError::not_attempted(std::io::Error::from_raw_os_error(
+                                libc::EXDEV,
                             )))
                         }
                     })
                     .collect())
             }
             Fault::NonprefixCrossDevice => {
-                self.fs.renames_all(
-                    &[
-                        (p[0].0.as_ref(), p[0].1.as_ref()),
-                        (p[2].0.as_ref(), p[2].1.as_ref()),
-                    ],
-                    options,
-                )?;
+                self.fs
+                    .renames_all(
+                        &[
+                            (p[0].0.as_ref(), p[0].1.as_ref()),
+                            (p[2].0.as_ref(), p[2].1.as_ref()),
+                        ],
+                        options,
+                    )
+                    .map_err(vfsi_core::IndexedError::into_cause)?;
                 Ok(p.iter()
                     .enumerate()
                     .map(|(index, _)| {
                         if index == 1 {
                             Err(OpError::failed(
-                                Error::errno(None, libc::EXDEV as u32),
+                                std::io::Error::from_raw_os_error(libc::EXDEV),
                                 None,
                             ))
                         } else {
@@ -346,30 +373,31 @@ impl Vfsi for Harness {
                 .iter()
                 .map(|_| {
                     Err(OpError::unknown(
-                        Error::errno(None, libc::EXDEV as u32),
+                        std::io::Error::from_raw_os_error(libc::EXDEV),
                         None,
                     ))
                 })
                 .collect()),
-            Fault::ShortRename => Ok(vec![Ok(()); p.len().saturating_sub(1)]),
-            Fault::LongRename => Ok(vec![Ok(()); p.len() + 1]),
+            Fault::ShortRename => Ok((0..p.len().saturating_sub(1)).map(|_| Ok(())).collect()),
+            Fault::LongRename => Ok((0..p.len() + 1).map(|_| Ok(())).collect()),
             Fault::RenameProgress => Ok(p
                 .iter()
                 .map(|_| {
                     Err(OpError::failed(
-                        Error::errno(None, libc::EXDEV as u32),
+                        std::io::Error::from_raw_os_error(libc::EXDEV),
                         Some(vnfs::error::IoProgress::Write { bytes_written: 1 }),
                     ))
                 })
                 .collect()),
-            Fault::RejectedRename => Err(Error::unsupported(None)),
+            Fault::RejectedRename => Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
             Fault::LostRename => {
-                self.fs.renames_all(p, options)?;
+                self.fs
+                    .renames_all(p, options)
+                    .map_err(vfsi_core::IndexedError::into_cause)?;
                 Ok(p.iter()
                     .map(|_| {
                         Err(OpError::unknown(
-                            Error::transport_with_kind(
-                                None,
+                            vfsi_core::internal::errors::transport(
                                 TransportKind::InvalidReply,
                                 "lost rename reply",
                             ),
@@ -382,14 +410,19 @@ impl Vfsi for Harness {
                 .iter()
                 .map(|_| {
                     Err(OpError::failed(
-                        Error::errno(None, libc::EXDEV as u32),
+                        std::io::Error::from_raw_os_error(libc::EXDEV),
                         None,
                     ))
                 })
                 .collect()),
             Fault::Rename => Ok(p
                 .iter()
-                .map(|_| Err(OpError::failed(Error::errno(None, libc::EIO as u32), None)))
+                .map(|_| {
+                    Err(OpError::failed(
+                        std::io::Error::from_raw_os_error(libc::EIO),
+                        None,
+                    ))
+                })
                 .collect()),
             _ => self.fs.vrename(p, options),
         }
@@ -400,6 +433,51 @@ impl Vfsi for Harness {
         o: ListDirOptions,
         c: impl FnMut(usize, DirectoryListing) -> Result<C>,
     ) -> vfsi_core::VecResult<TraversalCompletion> {
+        self.calls
+            .borrow_mut()
+            .directory_waves
+            .push(p.iter().map(|path| path.as_ref().to_path_buf()).collect());
+        let fault = self.fault.get();
+        if matches!(
+            fault,
+            Fault::DirectoryBackendFirst
+                | Fault::DirectoryCallbacksReverse
+                | Fault::DirectoryCallbacksForward
+        ) {
+            assert_eq!(p.len(), 2);
+            let mut callback = c;
+            let mut outcomes: Vec<_> = (0..p.len())
+                .map(|_| Ok(TraversalCompletion::Complete))
+                .collect();
+            // Independent inputs can call back in reverse completion order.
+            let order = if fault == Fault::DirectoryCallbacksForward {
+                [0, 1]
+            } else {
+                [1, 0]
+            };
+            for index in order {
+                if index == 0 && fault == Fault::DirectoryBackendFirst {
+                    outcomes[0] = Err(OpError::failed(
+                        vfsi_core::internal::errors::with_context(
+                            vfsi_core::internal::errors::with_message(
+                                std::io::Error::from_raw_os_error(libc::EACCES),
+                                "selected backend failure",
+                            ),
+                            "vlistdirs",
+                            p[0].as_ref(),
+                        ),
+                        None,
+                    ));
+                } else {
+                    let mut result = self
+                        .fs
+                        .vlistdirs(&[p[index].as_ref()], o, |_, page| callback(index, page))?;
+                    assert_eq!(result.len(), 1);
+                    outcomes[index] = result.pop().unwrap();
+                }
+            }
+            return Ok(outcomes);
+        }
         self.fs.vlistdirs(p, o, c)
     }
     fn vstream<P: AsRef<Path>>(
@@ -517,9 +595,12 @@ fn zero_read_budget_rejects_nonempty_descriptor_copies_before_file_mutation() {
             copy_items(&fs, &["/file"], "/dest", TransferOptions::new())
         }
         .unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge);
+        assert_eq!(error.cause().kind(), std::io::ErrorKind::FileTooLarge);
         assert_eq!(error.index(), Some(0));
-        assert_eq!(error.path(), Some(Path::new("/file")));
+        assert_eq!(
+            vfsi_core::internal::errors::path(error.cause()),
+            Some(Path::new("/file"))
+        );
         assert_eq!(std::fs::read(root.path().join("file")).unwrap(), b"payload");
         assert!(!root.path().join("dest/file").exists());
         let calls = fs.calls.borrow();
@@ -793,7 +874,7 @@ fn skipped_move_and_callback_error_keep_source() {
     assert!(t.path().join("src/a").exists());
     assert!(
         move_items_with_progress(&fs, &["/src/a"], "/error", TransferOptions::new(), |_| Err(
-            Error::errno(0, libc::ECANCELED as u32)
+            std::io::Error::from_raw_os_error(libc::ECANCELED)
         ))
         .is_err()
     );
@@ -843,7 +924,7 @@ fn vector_counts_and_storage_follow_cohort_limits() {
 fn vector_errors_map_to_original_mixed_root_index() {
     let (t, fs) = fixture();
     std::fs::write(t.path().join("other"), b"other").unwrap();
-    fs.fault.set(Fault::IndexedRead);
+    fs.fault.set(Fault::MiddleReadFailure);
     let e = copy_items(
         &fs,
         &["/src/nested", "/src/a", "/other"],
@@ -853,7 +934,10 @@ fn vector_errors_map_to_original_mixed_root_index() {
     )
     .unwrap_err();
     assert_eq!(e.index(), Some(2));
-    assert_eq!(e.path(), Some(Path::new("/other")));
+    assert_eq!(
+        vfsi_core::internal::errors::path(e.cause()),
+        Some(Path::new("/other"))
+    );
     assert_eq!(fs.calls.borrow().closes, 4);
 }
 
@@ -926,7 +1010,167 @@ fn recursive_callback_errors_keep_original_root_index_and_path() {
     )
     .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(error.path(), Some(Path::new("/src/nested/link")));
+    assert_eq!(
+        vfsi_core::internal::errors::path(error.cause()),
+        Some(Path::new("/src/nested/link"))
+    );
+}
+
+#[derive(Debug)]
+struct CallbackSource(std::sync::Arc<usize>);
+impl std::fmt::Display for CallbackSource {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "callback source {}", self.0)
+    }
+}
+impl std::error::Error for CallbackSource {}
+
+fn check_recursive_callback_selection(backend_first: bool, reverse: bool) {
+    let (root, fs) = fixture();
+    std::fs::create_dir(root.path().join("other")).unwrap();
+    std::fs::write(root.path().join("other/c"), b"third").unwrap();
+    fs.fault.set(if backend_first {
+        Fault::DirectoryBackendFirst
+    } else if reverse {
+        Fault::DirectoryCallbacksReverse
+    } else {
+        Fault::DirectoryCallbacksForward
+    });
+    let sources = [std::sync::Arc::new(1), std::sync::Arc::new(3)];
+    let mut callbacks = Vec::new();
+    let error = copy_items_with_progress(
+        &fs,
+        &["/src/a", "/src/nested", "/src/empty", "/other"],
+        "/out",
+        TransferOptions::new(),
+        |progress| {
+            let source = if progress.source == Path::new("/src/nested/b") {
+                Some(0)
+            } else if progress.source == Path::new("/other/c") {
+                Some(1)
+            } else {
+                None
+            };
+            if let Some(source) = source {
+                callbacks.push(*sources[source]);
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    CallbackSource(sources[source].clone()),
+                ))
+            } else {
+                Ok(ControlFlow::Continue(()))
+            }
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.index(),
+        Some(1),
+        "wave slot zero belongs to original root one"
+    );
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        callbacks,
+        if backend_first {
+            vec![3]
+        } else if reverse {
+            vec![3, 1]
+        } else {
+            vec![1, 3]
+        }
+    );
+    assert_eq!(
+        vfsi_core::internal::errors::path(error.cause()),
+        Some(Path::new(if backend_first {
+            "/src/nested"
+        } else {
+            "/src/nested/b"
+        }))
+    );
+    if backend_first {
+        assert_eq!(
+            vfsi_core::native_status(error.cause()),
+            Some(StatusCode::Errno(libc::EACCES as u32))
+        );
+        assert!(error.to_string().contains("selected backend failure"));
+        assert_eq!(std::sync::Arc::strong_count(&sources[0]), 1);
+        assert!(!root.path().join("out/nested/b").exists());
+    } else {
+        assert_eq!(vfsi_core::native_status(error.cause()), None);
+        let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error.cause());
+        let mut found = false;
+        for _ in 0..8 {
+            let Some(current) = source else { break };
+            // io::Error exposes its opaque payload through get_ref; a payload
+            // does not have to expose itself again as its own source.
+            let payload = current
+                .downcast_ref::<std::io::Error>()
+                .and_then(std::io::Error::get_ref);
+            if let Some(tag) = current
+                .downcast_ref::<CallbackSource>()
+                .or_else(|| payload.and_then(|payload| payload.downcast_ref::<CallbackSource>()))
+            {
+                assert!(std::sync::Arc::ptr_eq(&tag.0, &sources[0]));
+                found = true;
+                break;
+            }
+            source = current.source();
+        }
+        assert!(
+            found,
+            "the original opaque callback source must remain reachable"
+        );
+        assert_eq!(std::sync::Arc::strong_count(&sources[0]), 2);
+        assert_eq!(
+            std::fs::read(root.path().join("out/nested/b")).unwrap(),
+            b"second"
+        );
+    }
+    assert_eq!(
+        std::sync::Arc::strong_count(&sources[1]),
+        1,
+        "discarded callback causes release their source"
+    );
+    drop(error);
+    assert_eq!(std::sync::Arc::strong_count(&sources[0]), 1);
+    assert_eq!(
+        std::fs::read(root.path().join("out/other/c")).unwrap(),
+        b"third"
+    );
+    assert_eq!(
+        std::fs::read(root.path().join("src/nested/b")).unwrap(),
+        b"second"
+    );
+    assert_eq!(
+        std::fs::read(root.path().join("other/c")).unwrap(),
+        b"third"
+    );
+    let calls = fs.calls.borrow();
+    assert_eq!(
+        calls.directory_waves,
+        [vec![
+            std::path::PathBuf::from("/src/nested"),
+            "/other".into()
+        ]],
+        "no traversal replay"
+    );
+    assert_eq!(
+        calls.open_batches.iter().sum::<usize>(),
+        calls.closes,
+        "all opened handles close on callback failure"
+    );
+}
+
+#[test]
+fn recursive_backend_failure_wins_over_a_later_callback_failure() {
+    check_recursive_callback_selection(true, true);
+}
+
+#[test]
+fn recursive_callbacks_select_lowest_wave_slot_and_keep_original_root_and_source() {
+    for reverse in [false, true] {
+        check_recursive_callback_selection(false, reverse);
+    }
 }
 
 #[test]
@@ -1000,7 +1244,7 @@ fn no_replace_is_atomic_and_reports_existing_destination() {
     let error = fs
         .renames_all(&[("/source", "/exists")], RenameMode::NoReplace)
         .unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::AlreadyExists);
     assert_eq!(std::fs::read(t.path().join("source")).unwrap(), b"source");
     assert_eq!(std::fs::read(t.path().join("exists")).unwrap(), b"existing");
     fs.renames_all(&[("/source", "/new")], RenameMode::NoReplace)
@@ -1038,7 +1282,7 @@ fn exchange_requires_both_names_to_exist() {
         .renames_all(&[("/source", "/missing")], RenameMode::Exchange)
         .unwrap_err();
 
-    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::NotFound);
     assert_eq!(
         std::fs::read(root.path().join("source")).unwrap(),
         b"source data"
@@ -1102,7 +1346,7 @@ fn lost_batch_rename_reply_never_falls_back_or_replays() {
         "/out",
         TransferOptions::new().with_existing(Existing::Replace),
     );
-    assert!(result.unwrap_err().is_transport());
+    assert!(vfsi_core::transport_kind(result.unwrap_err().cause()).is_some());
     let calls = fs.calls.borrow();
     assert_eq!(calls.renames, 1);
     assert_eq!(calls.opens, 0);
@@ -1222,6 +1466,7 @@ fn absent_sizes_make_copy_and_tree_statistics_fail_instead_of_reporting_zero() {
     assert_eq!(
         copy_items(&fs, &["/source"], "/dest", TransferOptions::new())
             .unwrap_err()
+            .cause()
             .kind(),
         std::io::ErrorKind::Unsupported
     );
@@ -1373,10 +1618,13 @@ fn move_never_falls_back_on_unknown_or_malformed_rename_outcomes() {
         )
         .unwrap_err();
         if fault == Fault::UnknownCrossDevice {
-            assert_eq!(error.kind(), std::io::ErrorKind::CrossesDevices);
+            assert_eq!(error.cause().kind(), std::io::ErrorKind::CrossesDevices);
             assert_eq!(error.index(), Some(0));
         } else {
-            assert_eq!(error.transport_kind(), Some(TransportKind::InvalidReply));
+            assert_eq!(
+                vfsi_core::transport_kind(error.cause()),
+                Some(TransportKind::InvalidReply)
+            );
         }
         let calls = fs.calls.borrow();
         assert_eq!(calls.renames, 1);
@@ -1453,7 +1701,10 @@ fn single_writer_rejects_discontinuous_stream_offsets_before_writing_them() {
             assert_eq!(output, b"abcdef");
         } else {
             let error = result.unwrap_err();
-            assert_eq!(error.transport_kind(), Some(TransportKind::InvalidReply));
+            assert_eq!(
+                vfsi_core::transport_kind(&(error)),
+                Some(TransportKind::InvalidReply)
+            );
             assert_eq!(
                 output, b"abc",
                 "never append a repeated, overlapping or gapped chunk"

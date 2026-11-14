@@ -120,7 +120,13 @@ fn copy_transport_failure_remains_connection_error_without_replay() {
     let root = TestRoot::new();
     std::fs::write(root.0.join("src"), b"abcdef").unwrap();
     let mut backend = FaultBackend::new(&root.0, None);
-    backend.write_error = Some(VfError::transport(Some(0), "ambiguous copy write"));
+    backend.write_error = Some(IndexedError::at(
+        0,
+        vfsi_core::internal::errors::transport(
+            vfsi_core::TransportKind::Other,
+            "ambiguous copy write",
+        ),
+    ));
     let calls = backend.write_calls.clone();
     let client = client(backend);
     Python::attach(|py| {

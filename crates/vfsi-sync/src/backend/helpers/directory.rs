@@ -11,10 +11,10 @@ pub fn listdir_page_impl_default<F: VectorBackend + ?Sized>(
 ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
     if !follow_symlinks && cursor.is_none() {
         // The legacy whole-listing hook has no atomic no-follow contract.
-        return Err(VfError::unsupported(0));
+        return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
     }
     if page_size == 0 {
-        return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
     }
     let mut remaining = match cursor {
         Some(cursor) => cursor.into_state::<std::vec::IntoIter<VfAttrs>>()?,
@@ -45,16 +45,18 @@ pub fn vlistdir_pages_impl_default<F: VectorBackend + ?Sized>(
     follow_symlinks: bool,
 ) -> vfsi_core::VecResult<BackendDirectoryPage> {
     if dirs.len() != cursors.len() || page_size == 0 {
-        return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput));
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
     }
-    let mut fatal: Option<VfError> = None;
+    let mut fatal: Option<std::sync::Arc<std::io::Error>> = None;
     Ok(dirs
         .iter()
         .zip(cursors)
         .map(|(dir, cursor)| {
             use vfsi_core::OpError;
             if let Some(cause) = &fatal {
-                return Err(OpError::not_attempted(cause.clone()));
+                return Err(OpError::not_attempted(
+                    vfsi_core::internal::errors::from_shared(cause),
+                ));
             }
             backend
                 .listdir_page_impl(dir, masks, cursor, page_size, max_entries, follow_symlinks)
@@ -62,9 +64,9 @@ pub fn vlistdir_pages_impl_default<F: VectorBackend + ?Sized>(
                     let children = (0..entries.len()).map(|_| None).collect();
                     (entries, next, children)
                 })
-                .map_err(|cause| {
-                    if cause.is_transport() {
-                        fatal = Some(cause.clone());
+                .map_err(|mut cause| {
+                    if vfsi_core::transport_kind(&(cause)).is_some() {
+                        fatal = Some(vfsi_core::internal::errors::share_in_place(&mut cause));
                         OpError::unknown(cause, None)
                     } else {
                         OpError::failed(cause, None)
@@ -109,19 +111,29 @@ pub fn walk_with_options_impl_default<F: VectorBackend + ?Sized>(
         let request_count = remaining.saturating_add(1);
         let mut entries = backend.listdir_impl(&dir, masks, request_count, false)?;
         if entries.len() > remaining {
-            return Err(VfError::errno(entry_count, libc::EFBIG as u32).with_context("walk", &dir));
+            return Err(vfsi_core::internal::errors::with_context(
+                std::io::Error::from_raw_os_error(libc::EFBIG),
+                "walk",
+                &dir,
+            ));
         }
         for entry in &entries {
             let bytes = entry.file.path().map_or(0, |path| path.as_os_str().len());
             path_bytes = path_bytes.checked_add(bytes).ok_or_else(|| {
-                VfError::errno(entry_count, libc::EFBIG as u32).with_context("walk", &dir)
+                vfsi_core::internal::errors::with_context(
+                    std::io::Error::from_raw_os_error(libc::EFBIG),
+                    "walk",
+                    &dir,
+                )
             })?;
             if path_bytes
                 > options.max_path_bytes_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES)
             {
-                return Err(
-                    VfError::errno(entry_count, libc::EFBIG as u32).with_context("walk", &dir)
-                );
+                return Err(vfsi_core::internal::errors::with_context(
+                    std::io::Error::from_raw_os_error(libc::EFBIG),
+                    "walk",
+                    &dir,
+                ));
             }
             entry_count += 1;
         }
@@ -135,7 +147,11 @@ pub fn walk_with_options_impl_default<F: VectorBackend + ?Sized>(
             && depth >= options.max_depth_or(Default::default()).get()
             && !options.truncate_at_max_depth()
         {
-            return Err(VfError::errno(entry_count, libc::EFBIG as u32).with_context("walk", &dir));
+            return Err(vfsi_core::internal::errors::with_context(
+                std::io::Error::from_raw_os_error(libc::EFBIG),
+                "walk",
+                &dir,
+            ));
         }
         if depth < options.max_depth_or(Default::default()).get() {
             for s in subdirs.into_iter().rev() {
@@ -154,7 +170,7 @@ pub fn vlistdirs_impl_default<F: VectorBackend + ?Sized>(
     max_entries: usize,
     recursive: bool,
     cb: &mut dyn FnMut(&VfAttrs, &Path) -> bool,
-) -> VfRes {
+) -> Result<(), vfsi_core::IndexedError> {
     let mut count = 0usize;
     for (i, d) in dirs.iter().enumerate() {
         if max_entries != 0 && count >= max_entries {
@@ -176,7 +192,7 @@ pub fn vlistdirs_impl_default<F: VectorBackend + ?Sized>(
                     }
                     true
                 })
-                .map_err(|e| e.with_index(i))?;
+                .map_err(|cause| vfsi_core::IndexedError::at(i, cause))?;
             if stopped {
                 return Ok(());
             }
@@ -184,7 +200,7 @@ pub fn vlistdirs_impl_default<F: VectorBackend + ?Sized>(
         }
         let entries = backend
             .listdir_impl(d, masks, remaining, true)
-            .map_err(|e| e.with_index(i))?;
+            .map_err(|cause| vfsi_core::IndexedError::at(i, cause))?;
         for e in &entries {
             /* A recursive list contains descendants too, so report each
              * entry's actual parent rather than attributing every row to the
@@ -222,42 +238,57 @@ pub fn native_read_dir_impl_default<F: VectorBackend + ?Sized>(
 ) -> VfResult<Vec<DirEntry>> {
     if !options.allow_symlink_components() {
         // Whole-listing backends cannot guarantee atomic no-follow resolution.
-        return Err(VfError::unsupported(0).with_context("read_dir", path));
+        return Err(vfsi_core::internal::errors::with_context(
+            std::io::Error::from(std::io::ErrorKind::Unsupported),
+            "read_dir",
+            path,
+        ));
     }
     let requested = options
         .max_entries_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_ENTRIES)
         .saturating_add(1);
     let entries = backend
         .listdir_impl(path, options.fields(), requested, false)
-        .map_err(|error| error.with_context("read_dir", path))?;
+        .map_err(|error| vfsi_core::internal::errors::with_context(error, "read_dir", path))?;
     if entries.len() > options.max_entries_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_ENTRIES) {
-        return Err(VfError::errno(
-            options.max_entries_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_ENTRIES),
-            libc::EFBIG as u32,
-        )
-        .with_context("read_dir", path));
+        return Err(vfsi_core::internal::errors::with_context(
+            std::io::Error::from_raw_os_error(libc::EFBIG),
+            "read_dir",
+            path,
+        ));
     }
     let mut path_bytes = 0usize;
     entries
         .into_iter()
-        .enumerate()
-        .map(|(index, attributes)| {
+        .map(|attributes| {
             let entry_path = attributes
                 .file
                 .path()
                 .map(std::path::Path::to_path_buf)
-                .ok_or_else(|| VfError::errno(index, ERR_IO).with_context("read_dir", path))?;
+                .ok_or_else(|| {
+                    vfsi_core::internal::errors::with_context(
+                        std::io::Error::from_raw_os_error((ERR_IO) as i32),
+                        "read_dir",
+                        path,
+                    )
+                })?;
             path_bytes = path_bytes
                 .checked_add(entry_path.as_os_str().len())
                 .ok_or_else(|| {
-                    VfError::errno(index, libc::EFBIG as u32).with_context("read_dir", path)
+                    vfsi_core::internal::errors::with_context(
+                        std::io::Error::from_raw_os_error(libc::EFBIG),
+                        "read_dir",
+                        path,
+                    )
                 })?;
             if path_bytes
                 > options.max_path_bytes_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES)
             {
-                return Err(
-                    VfError::errno(index, libc::EFBIG as u32).with_context("read_dir", path)
-                );
+                return Err(vfsi_core::internal::errors::with_context(
+                    std::io::Error::from_raw_os_error(libc::EFBIG),
+                    "read_dir",
+                    path,
+                ));
             }
             Ok(DirEntry::new(
                 entry_path,
@@ -294,22 +325,26 @@ pub fn native_read_dir_page_with_fields_impl_default<F: VectorBackend + ?Sized>(
             max_entries,
             true,
         )
-        .map_err(|error| error.with_context("visit_dir", path))?;
+        .map_err(|error| vfsi_core::internal::errors::with_context(error, "visit_dir", path))?;
     if attributes.len() > page_size {
-        return Err(VfError::invalid_reply(
-            None,
+        return Err(vfsi_core::internal::errors::invalid_reply(
             "listdir_page_impl returned more entries than requested",
         ));
     }
     let entries = attributes
         .into_iter()
-        .enumerate()
-        .map(|(index, attributes)| {
+        .map(|attributes| {
             let entry_path = attributes
                 .file
                 .path()
                 .map(std::path::Path::to_path_buf)
-                .ok_or_else(|| VfError::errno(index, ERR_IO).with_context("visit_dir", path))?;
+                .ok_or_else(|| {
+                    vfsi_core::internal::errors::with_context(
+                        std::io::Error::from_raw_os_error((ERR_IO) as i32),
+                        "visit_dir",
+                        path,
+                    )
+                })?;
             Ok(DirEntry::new(
                 entry_path,
                 vfsi_core::metadata_from_attrs(attributes),

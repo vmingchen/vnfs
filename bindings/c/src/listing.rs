@@ -76,8 +76,8 @@ impl<'a> ListingBudget<'a> {
         &mut self,
         path: Option<&Path>,
         copies: usize,
-        index: Option<usize>,
-    ) -> Result<(), VfError> {
+        _index: Option<usize>,
+    ) -> Result<(), std::io::Error> {
         let entries = self.entries.checked_add(copies);
         let bytes = path
             .and_then(|p| p.as_os_str().len().checked_mul(copies))
@@ -85,7 +85,7 @@ impl<'a> ListingBudget<'a> {
         if entries.is_none_or(|n| n > self.options.max_entries)
             || bytes.is_none_or(|n| n > self.options.max_path_bytes)
         {
-            return Err(VfError::errno(index, libc::EFBIG as u32));
+            return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
         }
         self.entries = entries.expect("validated entry budget");
         self.bytes = bytes.expect("validated path budget");
@@ -96,17 +96,17 @@ impl<'a> ListingBudget<'a> {
 pub(super) fn prepare_listing_entry(
     attrs: &VfAttrs,
     fields: AttrMask,
-    index: Option<usize>,
-) -> Result<(vfsi_attrs, CString), VfError> {
+    _index: Option<usize>,
+) -> Result<(vfsi_attrs, CString), std::io::Error> {
     if !attrs.returned.contains(fields | AttrMask::MODE) {
-        return Err(VfError::unsupported(index));
+        return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
     }
     let name = attrs
         .file
         .path()
         .and_then(Path::file_name)
         .and_then(|name| cstr_from_os(name.as_bytes()))
-        .ok_or_else(|| VfError::invalid_reply(index, "invalid listing entry name"))?;
+        .ok_or_else(|| vfsi_core::internal::errors::invalid_reply("invalid listing entry name"))?;
     Ok((vfsi_attrs::from_vf(attrs), name))
 }
 
@@ -288,46 +288,48 @@ unsafe fn listdirs_snapshot(
                 for cohort in refs.chunks(DIRECTORY_COHORT) {
                     // Never pass zero: native zero means unlimited enumeration.
                     let probe = budget.probe();
-                    result = backend.vlistdirs_impl(
-                        cohort,
-                        fields | AttrMask::MODE,
-                        probe,
-                        false,
-                        &mut |attrs, dir| {
-                            let Some(indices) = index.get(dir) else {
-                                overflow = true;
-                                return false;
-                            };
-                            if budget
-                                .charge(attrs.file.path(), indices.len(), None)
-                                .is_err()
-                            {
-                                overflow = true;
-                                return false;
-                            }
-                            if projection_error.is_none() {
-                                let prepared =
-                                    prepare_listing_entry(attrs, fields, None).and_then(|entry| {
-                                        if let Some(identities) = &mut identities {
-                                            identities.push(vfsi_object_id::from_attrs(
-                                                fs.namespace_id,
-                                                attrs,
-                                            )?);
-                                        }
-                                        Ok(entry)
-                                    });
-                                match prepared {
-                                    Ok((attrs, name)) => {
-                                        rows.push((attrs, name, indices.as_slice()));
-                                    }
-                                    Err(error) => projection_error = Some(error),
+                    result = backend
+                        .vlistdirs_impl(
+                            cohort,
+                            fields | AttrMask::MODE,
+                            probe,
+                            false,
+                            &mut |attrs, dir| {
+                                let Some(indices) = index.get(dir) else {
+                                    overflow = true;
+                                    return false;
+                                };
+                                if budget
+                                    .charge(attrs.file.path(), indices.len(), None)
+                                    .is_err()
+                                {
+                                    overflow = true;
+                                    return false;
                                 }
-                            }
-                            // Continue read-only collection after a projection
-                            // error: backend and quota errors retain precedence.
-                            true
-                        },
-                    );
+                                if projection_error.is_none() {
+                                    let prepared = prepare_listing_entry(attrs, fields, None)
+                                        .and_then(|entry| {
+                                            if let Some(identities) = &mut identities {
+                                                identities.push(vfsi_object_id::from_attrs(
+                                                    fs.namespace_id,
+                                                    attrs,
+                                                )?);
+                                            }
+                                            Ok(entry)
+                                        });
+                                    match prepared {
+                                        Ok((attrs, name)) => {
+                                            rows.push((attrs, name, indices.as_slice()));
+                                        }
+                                        Err(error) => projection_error = Some(error),
+                                    }
+                                }
+                                // Continue read-only collection after a projection
+                                // error: backend and quota errors retain precedence.
+                                true
+                            },
+                        )
+                        .map_err(vfsi_core::IndexedError::into_cause);
                     if result.is_err() || overflow {
                         break;
                     }
@@ -372,7 +374,7 @@ fn bounded_listdir(
     fields: AttrMask,
     max_entries: usize,
     max_path_bytes: usize,
-) -> Result<Vec<VfAttrs>, VfError> {
+) -> Result<Vec<VfAttrs>, std::io::Error> {
     let probe = if max_entries == usize::MAX {
         0
     } else {
@@ -386,8 +388,8 @@ fn bounded_listdir(
 pub(super) fn collect_bounded_entries(
     max_entries: usize,
     max_path_bytes: usize,
-    visit: impl FnOnce(&mut dyn FnMut(&VfAttrs) -> bool) -> Result<(), VfError>,
-) -> Result<Vec<VfAttrs>, VfError> {
+    visit: impl FnOnce(&mut dyn FnMut(&VfAttrs) -> bool) -> Result<(), std::io::Error>,
+) -> Result<Vec<VfAttrs>, std::io::Error> {
     let mut entries = Vec::new();
     let mut bytes = 0usize;
     let mut overflow = false;
@@ -402,7 +404,7 @@ pub(super) fn collect_bounded_entries(
         true
     })?;
     if overflow {
-        return Err(VfError::errno(0, libc::EFBIG as u32));
+        return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
     }
     Ok(entries)
 }
@@ -450,7 +452,7 @@ pub unsafe extern "C" fn vfsi_walk(
             };
             depth
         };
-        let result = (|| -> Result<(), VfError> {
+        let result = (|| -> Result<(), std::io::Error> {
             let path = vpath_for(fs, &root)?;
             let mut root_attrs = VfAttrs {
                 file: FileOperand::from_os_path(&path),
@@ -460,9 +462,10 @@ pub unsafe extern "C" fn vfsi_walk(
             vfsi_sync::internal::collect_vec_result(
                 lock_or_io(&fs.fs)?.vgetattrs_nofollow_impl(std::slice::from_mut(&mut root_attrs)),
                 1,
-            )?;
+            )
+            .map_err(vfsi_core::IndexedError::into_cause)?;
             if !root_attrs.returned.contains(fields) {
-                return Err(VfError::errno(0, libc::ENOTSUP as u32));
+                return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
             }
             let metadata = vfsi_sync::metadata_from_attrs(root_attrs);
             let walk_options = vfsi_sync::ListDirOptions::new()
@@ -484,15 +487,14 @@ pub unsafe extern "C" fn vfsi_walk(
                     )?;
                     entries
                         .into_iter()
-                        .enumerate()
-                        .map(|(index, attrs)| {
+                        .map(|attrs| {
                             if !attrs.returned.contains(fields) {
-                                return Err(VfError::errno(index, libc::ENOTSUP as u32));
+                                return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
                             }
                             let path = attrs
                                 .file
                                 .path()
-                                .ok_or_else(|| VfError::errno(0, libc::EIO as u32))?
+                                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EIO))?
                                 .to_path_buf();
                             Ok(vfsi_sync::DirEntry::new(
                                 path,
@@ -506,9 +508,9 @@ pub unsafe extern "C" fn vfsi_walk(
                         .entry
                         .path()
                         .strip_prefix(&fs.backend_root)
-                        .map_err(|_| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
+                        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
                     let path = CString::new(fs.mountpoint.join(relative).as_os_str().as_bytes())
-                        .map_err(|_| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
+                        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
                     let attrs = attrs_from_metadata(event.entry.attrs());
                     let kind = match event.kind {
                         vfsi_sync::WalkEventKind::Enter => 0,
@@ -521,7 +523,7 @@ pub unsafe extern "C" fn vfsi_walk(
                         0 => Ok(vfsi_sync::WalkControl::Continue),
                         1 => Ok(vfsi_sync::WalkControl::SkipSubtree),
                         2 => Ok(vfsi_sync::WalkControl::Stop),
-                        _ => Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)),
+                        _ => Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
                     }
                 },
             )?;
@@ -588,7 +590,7 @@ pub unsafe extern "C" fn vfsi_listdir_with_limits(
             let dir = vpath_for(fs, &dir)?;
             let entries = bounded_listdir(fs, &dir, mask(), max_entries, max_path_bytes)?;
             if entries.iter().any(|attrs| !attrs.returned.contains(mask())) {
-                return Err(VfError::errno(0, libc::ENOTSUP as u32));
+                return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
             }
             for a in entries {
                 let (attrs, name) = prepare_listing_entry(&a, mask(), Some(0))?;
@@ -598,7 +600,7 @@ pub unsafe extern "C" fn vfsi_listdir_with_limits(
                     break;
                 }
             }
-            Ok::<_, VfError>(())
+            Ok::<_, std::io::Error>(())
         }));
         match res {
             Ok(Ok(())) => 0,
@@ -647,7 +649,7 @@ pub unsafe extern "C" fn vfsi_listdirv(
         }
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let original_paths = paths.clone();
-            let vpaths: Result<Vec<PathBuf>, VfError> =
+            let vpaths: Result<Vec<PathBuf>, std::io::Error> =
                 paths.iter().map(|p| vpath_for(fs, p)).collect();
             let vpaths = vpaths?;
             let refs: Vec<&Path> = vpaths.iter().map(PathBuf::as_path).collect();
@@ -662,22 +664,18 @@ pub unsafe extern "C" fn vfsi_listdirv(
             let mut rows = Vec::new();
             {
                 let mut backend = lock_or_io(&fs.fs)?;
-                backend.vlistdirs_impl(
-                    &refs,
-                    mask(),
-                    max_entries,
-                    recursive,
-                    &mut |attrs, dir| {
+                backend
+                    .vlistdirs_impl(&refs, mask(), max_entries, recursive, &mut |attrs, dir| {
                         rows.push((attrs.clone(), dir.to_path_buf()));
                         true
-                    },
-                )?;
+                    })
+                    .map_err(vfsi_core::IndexedError::into_cause)?;
             }
             if rows
                 .iter()
                 .any(|(attrs, _)| !attrs.returned.contains(mask()))
             {
-                return Err(VfError::errno(0, libc::ENOTSUP as u32));
+                return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
             }
             for (attrs, dir) in rows {
                 let kernel_dir = match vpath_index.get(&dir) {
@@ -685,13 +683,13 @@ pub unsafe extern "C" fn vfsi_listdirv(
                     None => {
                         let rel = dir
                             .strip_prefix(&backend_root)
-                            .map_err(|_| VfError::from_kind(0, std::io::ErrorKind::InvalidInput))?;
+                            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
                         mountpoint.join(rel)
                     }
                 };
                 let dir = kernel_dir.as_os_str().as_bytes();
                 let dir = cstr_from_os(dir).ok_or_else(|| {
-                    VfError::invalid_reply(None, "invalid listing directory name")
+                    vfsi_core::internal::errors::invalid_reply("invalid listing directory name")
                 })?;
                 let (a, name) = prepare_listing_entry(&attrs, mask(), None)?;
                 // SAFETY: `c_cb` was provided by C and is invoked from the same
@@ -700,7 +698,7 @@ pub unsafe extern "C" fn vfsi_listdirv(
                     break;
                 }
             }
-            Ok::<_, VfError>(())
+            Ok::<_, std::io::Error>(())
         }));
         match res {
             Ok(Ok(())) => 0,

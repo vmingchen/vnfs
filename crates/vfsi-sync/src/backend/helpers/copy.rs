@@ -9,7 +9,7 @@ pub fn vcopy_impl_default<F: VectorBackend + ?Sized>(
         return Ok(Vec::new());
     }
     if !options.follow_source_symlinks() {
-        return Err(VfError::unsupported(None));
+        return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
     }
     backend.vcopy_data_impl(pairs)
 }
@@ -22,7 +22,7 @@ pub fn copy_tree_with<F: VectorBackend + ?Sized>(
     symlinks: bool,
     masks: AttrMask,
     mut copy_file: impl FnMut(&mut F, &ExtentPair) -> VfRes,
-    map_error: impl Fn(VfError) -> VfError,
+    map_error: impl Fn(std::io::Error) -> std::io::Error,
 ) -> VfRes {
     copy_tree_batches_with(
         backend,
@@ -50,7 +50,7 @@ pub fn copy_tree_with_listdir<F: VectorBackend + ?Sized>(
     masks: AttrMask,
     mut list_directory: impl FnMut(&mut F, &Path, AttrMask) -> VfResult<Vec<VfAttrs>>,
     mut copy_file: impl FnMut(&mut F, &ExtentPair) -> VfRes,
-    map_error: impl Fn(VfError) -> VfError,
+    map_error: impl Fn(std::io::Error) -> std::io::Error,
 ) -> VfRes {
     copy_tree_batches_with_pages(
         backend,
@@ -88,7 +88,7 @@ pub fn copy_tree_batches_with<F: VectorBackend + ?Sized>(
     symlinks: bool,
     masks: AttrMask,
     copy_files: impl FnMut(&mut F, &[ExtentPair]) -> VfRes,
-    map_error: impl Fn(VfError) -> VfError,
+    map_error: impl Fn(std::io::Error) -> std::io::Error,
 ) -> VfRes {
     copy_tree_batches_with_pages(
         backend,
@@ -100,7 +100,8 @@ pub fn copy_tree_batches_with<F: VectorBackend + ?Sized>(
             let mut pages = vfsi_core::internal::collect_vec_result(
                 backend.vlistdir_pages_impl(&[path], masks, vec![cursor], 256, usize::MAX, true),
                 1,
-            )?;
+            )
+            .map_err(vfsi_core::IndexedError::into_cause)?;
             Ok(pages.pop().expect("validated one page"))
         },
         copy_files,
@@ -124,15 +125,14 @@ pub fn copy_tree_batches_with_pages<F: VectorBackend + ?Sized>(
         Option<DirPageCursor>,
     ) -> VfResult<BackendDirectoryPage>,
     mut copy_files: impl FnMut(&mut F, &[ExtentPair]) -> VfRes,
-    map_error: impl Fn(VfError) -> VfError,
+    map_error: impl Fn(std::io::Error) -> std::io::Error,
 ) -> VfRes {
     let source_abs = backend.abs_path(source);
     let destination_abs = backend.abs_path(destination);
     // Copying into an ancestor merely merges this directory's children there.
     // Only an equal/descendant destination can recursively consume its own output.
     if destination_abs.starts_with(&source_abs) {
-        return Err(map_error(VfError::from_kind(
-            0,
+        return Err(map_error(std::io::Error::from(
             std::io::ErrorKind::InvalidInput,
         )));
     }
@@ -157,8 +157,7 @@ pub fn copy_tree_batches_with_pages<F: VectorBackend + ?Sized>(
         .map_err(&map_error)?;
     let destination_identity = identity(&backend.stat_impl(destination).map_err(&map_error)?);
     if source_identity.is_some() && source_identity == destination_identity {
-        return Err(map_error(VfError::from_kind(
-            0,
+        return Err(map_error(std::io::Error::from(
             std::io::ErrorKind::InvalidInput,
         )));
     }
@@ -183,14 +182,13 @@ pub fn copy_tree_batches_with_pages<F: VectorBackend + ?Sized>(
                 || seeds.len() != entries.len()
                 || (entries.is_empty() && next.is_some())
             {
-                return Err(map_error(VfError::invalid_reply(
-                    None,
+                return Err(map_error(vfsi_core::internal::errors::invalid_reply(
                     "invalid tree-copy page progress",
                 )));
             }
             for (entry, seed) in entries.into_iter().zip(seeds) {
                 let name = entry.file.path().and_then(Path::file_name).ok_or_else(|| {
-                    map_error(VfError::from_kind(0, std::io::ErrorKind::InvalidInput))
+                    map_error(std::io::Error::from(std::io::ErrorKind::InvalidInput))
                 })?;
                 let source_child = source.join(name);
                 let destination_child = destination.join(name);
@@ -204,8 +202,7 @@ pub fn copy_tree_batches_with_pages<F: VectorBackend + ?Sized>(
                         if destination_identity.is_some()
                             && identity(&entry) == destination_identity
                         {
-                            return Err(map_error(VfError::from_kind(
-                                0,
+                            return Err(map_error(std::io::Error::from(
                                 std::io::ErrorKind::InvalidInput,
                             )));
                         }

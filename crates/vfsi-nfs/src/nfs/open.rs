@@ -13,13 +13,19 @@ pub(super) fn open_flags_mutate(flags: i32) -> bool {
 
 #[cfg(test)]
 trait PathBatchTruncateClient {
-    fn setattr_many(&mut self, ops: &[crate::client::SetattrOp]) -> VfResult<()>;
+    fn setattr_many(
+        &mut self,
+        ops: &[crate::client::SetattrOp],
+    ) -> Result<(), vfsi_core::IndexedError>;
     fn close_many_path(&mut self, ops: &[crate::client::CloseOp]) -> vfsi_core::RpcResult<()>;
 }
 
 #[cfg(test)]
 impl PathBatchTruncateClient for crate::client::NfsClient {
-    fn setattr_many(&mut self, ops: &[crate::client::SetattrOp]) -> VfResult<()> {
+    fn setattr_many(
+        &mut self,
+        ops: &[crate::client::SetattrOp],
+    ) -> Result<(), vfsi_core::IndexedError> {
         vfsi_core::internal::collect_vec_result(
             crate::client::NfsClient::setattr_many(self, ops),
             ops.len(),
@@ -38,7 +44,7 @@ fn truncate_path_opens<C: PathBatchTruncateClient>(
     opened: &[(NfsFh, stateid4)],
     setattr_ops: &[crate::client::SetattrOp],
     subset: &[usize],
-) -> VfResult<()> {
+) -> Result<(), vfsi_core::IndexedError> {
     crate::client::prepare_path_opens(
         opened,
         client,
@@ -82,7 +88,7 @@ impl NfsVecFs {
                         // A lost reply can leave an already-closed state in the
                         // queue. Its terminal status is a cleanup completion.
                         if matches!(
-                            error.cause().status(),
+                            vfsi_core::native_status(error.cause()),
                             Some(vfsi_core::StatusCode::Nfs(
                                 nfsstat4_NFS4ERR_BAD_STATEID | nfsstat4_NFS4ERR_OLD_STATEID
                             ))
@@ -99,7 +105,9 @@ impl NfsVecFs {
                 self.deferred_descriptor_closes.extend(pending);
                 Err(match result {
                     Err(error) => error,
-                    Ok(_) => VfError::invalid_reply(None, "invalid deferred CLOSE outcome count"),
+                    Ok(_) => vfsi_core::internal::errors::invalid_reply(
+                        "invalid deferred CLOSE outcome count",
+                    ),
                 })
             }
         }
@@ -126,7 +134,7 @@ impl NfsVecFs {
         excl: bool,
         mode: u32,
     ) -> VfResult<(NfsFh, stateid4)> {
-        let dirfh = self.resolve_path(dir, true).map_err(|e| e.with_index(0))?;
+        let dirfh = self.resolve_path(dir, true)?;
         let create_mode = match (create, excl) {
             (false, _) => OpenCreate::NoCreate,
             (true, true) => OpenCreate::Exclusive,
@@ -144,9 +152,11 @@ impl NfsVecFs {
             // already followed above, so this status identifies the existing
             // final entry and has POSIX exclusive-create semantics: EEXIST.
             if create && excl && error.status == nfsstat4_NFS4ERR_SYMLINK {
-                VfError::nfs(0, nfsstat4_NFS4ERR_EXIST)
+                vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                    nfsstat4_NFS4ERR_EXIST,
+                ))
             } else {
-                vfsi_core::error_from_rpc(error, 0)
+                vfsi_core::internal::errors::from_rpc(error)
             }
         })
     }
@@ -186,6 +196,10 @@ impl NfsVecFs {
         let outcomes = self.nfs.openv_path_compound(&ops)?;
         #[cfg(feature = "test-faults")]
         if let Err(error) = self.inject_open_fault(OpenFaultPoint::AfterReply { chunk: 0 }) {
+            let affected = outcomes.iter().filter(|outcome| {
+                !matches!(outcome, Err(error) if error.state() == vfsi_core::FailureState::NotAttempted)
+            }).count();
+            let mut causes = vfsi_core::internal::errors::fanout(error, affected);
             let mut closes = Vec::new();
             let results = outcomes
                 .into_iter()
@@ -197,7 +211,10 @@ impl NfsVecFs {
                         }
                         Err(_) => {}
                     }
-                    Err(vfsi_core::OpError::unknown(error.clone(), None))
+                    Err(vfsi_core::OpError::unknown(
+                        causes.next().expect("one cause per affected OPEN"),
+                        None,
+                    ))
                 })
                 .collect();
             self.nfs.close_path_or_defer(closes);
@@ -294,10 +311,15 @@ mod tests {
     }
 
     impl PathBatchTruncateClient for FailingTruncateClient {
-        fn setattr_many(&mut self, ops: &[SetattrOp]) -> VfResult<()> {
+        fn setattr_many(&mut self, ops: &[SetattrOp]) -> Result<(), vfsi_core::IndexedError> {
             self.setattr_calls.set(self.setattr_calls.get() + 1);
             assert_eq!(ops.len(), 1);
-            Err(VfError::nfs(0, nfsstat4_NFS4ERR_ACCESS))
+            Err(vfsi_core::IndexedError::at(
+                0,
+                vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                    nfsstat4_NFS4ERR_ACCESS,
+                )),
+            ))
         }
 
         fn close_many_path(&mut self, ops: &[CloseOp]) -> vfsi_core::RpcResult<()> {
@@ -348,7 +370,10 @@ mod tests {
 
         assert_eq!(client.setattr_calls.get(), 1);
         assert_eq!(error.index(), Some(8));
-        assert_eq!(error.raw_code(), nfsstat4_NFS4ERR_ACCESS);
+        assert_eq!(
+            crate::test_native_code(error.cause()),
+            nfsstat4_NFS4ERR_ACCESS
+        );
         assert_eq!(
             client.closed,
             vec![(vec![1, 2], 3, [4; 12]), (vec![5], 6, [7; 12])]

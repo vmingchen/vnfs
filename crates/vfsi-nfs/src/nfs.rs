@@ -264,8 +264,11 @@ impl NfsClientBuilder {
     pub fn connect_pool(self, size: usize) -> VfResult<Vec<NfsVecFs>> {
         self.validate()?;
         if !(1..=64).contains(&size) {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)
-                .with_context("connect_pool", Path::new(self.host.as_ref())));
+            return Err(vfsi_core::internal::errors::with_context(
+                std::io::Error::from(std::io::ErrorKind::InvalidInput),
+                "connect_pool",
+                Path::new(self.host.as_ref()),
+            ));
         }
         let pool_id = NEXT_CLIENT_POOL_ID.fetch_add(1, Ordering::Relaxed);
         (0..size)
@@ -318,22 +321,25 @@ impl NfsClientBuilder {
             .as_ref()
             .is_some_and(|owner| owner.is_empty() || owner.len() > 1024)
         {
-            return Err(VfError::from_kind(0, std::io::ErrorKind::InvalidInput)
-                .with_context("connect", Path::new(self.host.as_ref())));
+            return Err(vfsi_core::internal::errors::with_context(
+                std::io::Error::from(std::io::ErrorKind::InvalidInput),
+                "connect",
+                Path::new(self.host.as_ref()),
+            ));
         }
         Ok(())
     }
 }
 
 /// Operational lifecycle events emitted outside the transport hot path.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum NfsEvent {
     Connected { minor_version: u32 },
     ReconnectStarted,
     ReconnectSucceeded,
-    ReconnectFailed { error: VfError },
-    Shutdown { result: Result<(), VfError> },
+    ReconnectFailed { error: std::io::Error },
+    Shutdown { result: Result<(), std::io::Error> },
 }
 
 /// Observer hook which does not impose a logging or metrics framework.
@@ -488,7 +494,7 @@ enum MergedIoMode {
 
 fn check_mount_write(read_only: bool, count: usize) -> VfResult<()> {
     if read_only && count != 0 {
-        Err(VfError::errno(0, libc::EROFS as u32))
+        Err(std::io::Error::from_raw_os_error(libc::EROFS))
     } else {
         Ok(())
     }

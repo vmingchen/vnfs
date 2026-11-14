@@ -16,9 +16,10 @@ fn small_copy_identity_failures_prevent_mutation_and_keep_original_indices() {
         std::fs::hard_link(&source, root.0.join("alias")).unwrap();
         std::fs::write(root.0.join("other"), b"healthy").unwrap();
         let mut backend = FaultBackend::new(&root.0, None);
-        backend
-            .attrs_errors
-            .push_back(Some(VfError::errno(position, code)));
+        backend.attrs_errors.push_back(Some(IndexedError::at(
+            position,
+            std::io::Error::from_raw_os_error((code) as i32),
+        )));
         let writes = backend.write_calls.clone();
         Python::attach(|py| {
             let (copied, errors) = client(backend)
@@ -102,7 +103,7 @@ fn large_copy_keeps_nonprefix_successes_without_replaying_or_claiming_failed_inp
     let mut backend = FaultBackend::new(&root.0, None);
     backend.extent_item_errors.push((
         1,
-        vfsi_core::OpError::failed(VfError::errno(None, ERR_ACCES), None),
+        vfsi_core::OpError::failed(std::io::Error::from_raw_os_error((ERR_ACCES) as i32), None),
     ));
     let calls = backend.extent_calls.clone();
     Python::attach(|py| {
@@ -144,7 +145,7 @@ fn small_copy_keeps_nonprefix_successes_without_replaying_truncating_writes() {
             std::fs::write(root.0.join(name), name.as_bytes()).unwrap();
         }
         let mut backend = FaultBackend::new(&root.0, None);
-        let cause = VfError::errno(None, ERR_ACCES);
+        let cause = std::io::Error::from_raw_os_error((ERR_ACCES) as i32);
         let error = if uncertain {
             vfsi_core::OpError::unknown(cause, None)
         } else {

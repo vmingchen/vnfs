@@ -27,8 +27,7 @@ impl SmbVecFs {
         let response = QueryInfoResponse::unpack(&mut ReadCursor::new(&frame.body))
             .map_err(|e| smb_error(e, 0))?;
         if response.output_buffer.len() < 16 {
-            return Err(VfError::invalid_reply(
-                None,
+            return Err(vfsi_core::internal::errors::invalid_reply(
                 "short SMB FileStandardInformation response",
             ));
         }
@@ -95,9 +94,9 @@ impl SmbVecFs {
         require_status(&frame, Command::SetInfo, 0)
     }
 
-    pub(super) fn filetime_value(seconds: i64, nanoseconds: u32, index: usize) -> VfResult<u64> {
+    pub(super) fn filetime_value(seconds: i64, nanoseconds: u32, _index: usize) -> VfResult<u64> {
         if nanoseconds >= 1_000_000_000 {
-            return Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         const WINDOWS_EPOCH_SECONDS: i128 = 11_644_473_600;
         let ticks = (i128::from(seconds) + WINDOWS_EPOCH_SECONDS)
@@ -106,7 +105,7 @@ impl SmbVecFs {
             // FileBasicInformation timestamps are signed. Zero and the
             // negative values select update policies rather than a date.
             .filter(|value| (1..=i128::from(i64::MAX)).contains(value))
-            .ok_or_else(|| VfError::from_kind(index, std::io::ErrorKind::InvalidInput))?;
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
         Ok(ticks as u64)
     }
 
@@ -183,9 +182,7 @@ impl SmbVecFs {
         let response = CreateResponse::unpack(&mut ReadCursor::new(&frame.body))
             .map_err(|e| smb_error(e, index))?;
         let result = self.set_times_handle(response.file_id, atime, mtime, index);
-        let close = self
-            .close_temporary_handle(response.file_id)
-            .map_err(|e| e.with_index(index));
+        let close = self.close_temporary_handle(response.file_id);
         result.and(close)
     }
 

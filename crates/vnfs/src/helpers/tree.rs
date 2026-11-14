@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-use crate::{Error, OpenFlags, OpenOp, Result, WriteOp};
+use crate::{OpenFlags, OpenOp, WriteOp};
+use vfsi_core::IndexedError;
 
 /// A successfully created tree. Dropping this value does not delete files.
 /// Use the owning client's `remove_dir_all(tree.root())` for explicit cleanup.
@@ -43,7 +44,7 @@ struct Entry {
 /// ```no_run
 /// use vnfs::files::{Vfsi, VfsiExt};
 /// use vnfs::helpers::TreeBuilder;
-/// # fn example(fs: &impl Vfsi) -> vnfs::Result<()> {
+/// # fn example(fs: &impl Vfsi) -> Result<(), Box<dyn std::error::Error>> {
 /// let tree = TreeBuilder::new()
 ///     .add_file("config/app.conf", "host = localhost")
 ///     .add_empty_file("logs/app.log")
@@ -64,7 +65,7 @@ pub struct TreeBuilder {
     entries: Vec<Entry>,
     directories: HashSet<PathBuf>,
     declarations: usize,
-    error: Option<Error>,
+    error: Option<IndexedError>,
     max_entries: usize,
     max_total_bytes: usize,
     batch_size: usize,
@@ -133,14 +134,20 @@ impl TreeBuilder {
         }
         let index = self.declarations;
         let Some(next) = self.declarations.checked_add(1) else {
-            self.error = Some(Error::errno(index, libc::EOVERFLOW as u32));
+            self.error = Some(IndexedError::at(
+                index,
+                std::io::Error::from_raw_os_error(libc::EOVERFLOW),
+            ));
             return self;
         };
         self.declarations = next;
         let result = (|| {
             // Do not copy an oversized caller-owned path into error context.
             if path.as_os_str().len() > self.max_total_bytes {
-                return Err(Error::errno(index, libc::EFBIG as u32));
+                return Err(IndexedError::at(
+                    index,
+                    std::io::Error::from_raw_os_error(libc::EFBIG),
+                ));
             }
             let normalized = relative_path(path).map_err(|()| error(index, libc::EINVAL, path))?;
             // Repeated directory spellings are one planned object. Suppress
@@ -179,13 +186,19 @@ impl TreeBuilder {
     /// path; entry indices refer to the original declarations (inferred parents
     /// use the first declaration requiring them), not to vector batch positions.
     /// Root-creation errors identify the root, not an entry declaration.
-    pub fn create<C: Vfsi>(self, fs: &C, root: impl AsRef<Path>) -> Result<Tree> {
+    pub fn create<C: Vfsi>(
+        self,
+        fs: &C,
+        root: impl AsRef<Path>,
+    ) -> std::result::Result<Tree, IndexedError> {
         let root = root.as_ref();
         if let Some(error) = self.error {
             return Err(error);
         }
         if root.as_os_str().len() > self.max_total_bytes {
-            return Err(Error::errno(0, libc::EFBIG as u32));
+            return Err(IndexedError::unattributed(
+                std::io::Error::from_raw_os_error(libc::EFBIG),
+            ));
         }
         if root.as_os_str().is_empty()
             || root.as_os_str().as_encoded_bytes().contains(&0)
@@ -193,7 +206,7 @@ impl TreeBuilder {
                 .components()
                 .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
         {
-            return Err(error(0, libc::EINVAL, root));
+            return Err(error(None, libc::EINVAL, root));
         }
         // Map each planned path to its declaring entry. Infer every ancestor
         // once, checking collisions independently of declaration order.
@@ -201,7 +214,7 @@ impl TreeBuilder {
         let mut bytes = self.entries.iter().try_fold(0usize, |bytes, entry| {
             bytes
                 .checked_add(entry.data.as_deref().map_or(0, <[u8]>::len))
-                .ok_or_else(|| error(0, libc::EFBIG, root))
+                .ok_or_else(|| error(None, libc::EFBIG, root))
         })?;
         for (position, entry) in self.entries.iter().enumerate() {
             let index = entry.declaration_index;
@@ -241,8 +254,13 @@ impl TreeBuilder {
                     .push((root.join(path), index));
             }
         }
-        fs.create_dir(root)
-            .map_err(|e| e.with_context("create_tree", root))?;
+        fs.create_dir(root).map_err(|e| {
+            IndexedError::unattributed(vfsi_core::internal::errors::with_context(
+                e,
+                "create_tree",
+                root,
+            ))
+        })?;
         for level in directories.values() {
             for batch in level.chunks(self.batch_size) {
                 let paths: Vec<_> = batch
@@ -310,15 +328,28 @@ fn relative_path(path: &Path) -> std::result::Result<PathBuf, ()> {
     Ok(normalized)
 }
 
-fn error(index: usize, errno: i32, path: &Path) -> Error {
-    Error::errno(index, errno as u32).with_context("create_tree", path)
+fn error(index: impl Into<Option<usize>>, errno: i32, path: &Path) -> IndexedError {
+    let cause = vfsi_core::internal::errors::with_context(
+        std::io::Error::from_raw_os_error(errno),
+        "create_tree",
+        path,
+    );
+    match index.into() {
+        Some(index) => IndexedError::at(index, cause),
+        None => IndexedError::unattributed(cause),
+    }
 }
 
-fn entry_error(error: Error, batch: &[(PathBuf, usize)], entries: &[Entry]) -> Error {
-    match error.index().and_then(|index| batch.get(index)) {
-        Some((path, position)) => error
-            .with_index(entries[*position].declaration_index)
-            .with_context("create_tree", path),
+fn entry_error(error: IndexedError, batch: &[(PathBuf, usize)], entries: &[Entry]) -> IndexedError {
+    match error.index() {
+        Some(index) => match batch.get(index) {
+            Some((path, position)) => error
+                .map_index(|_| entries[*position].declaration_index)
+                .with_context("create_tree", path),
+            None => IndexedError::unattributed(vfsi_core::internal::errors::invalid_reply(
+                "invalid tree entry error index",
+            )),
+        },
         None => error,
     }
 }
@@ -357,7 +388,10 @@ mod tests {
         let mut backend = vfsi_posix::backend(root.path()).unwrap();
         let script = Arc::new(FaultScript::one(
             OpenFaultPoint::BeforeRegister { index: 1 },
-            Error::transport_with_kind(777, crate::TransportKind::Timeout, "injected OPEN failure"),
+            vfsi_core::internal::errors::transport(
+                crate::TransportKind::Timeout,
+                "injected OPEN failure",
+            ),
         ));
         backend.set_fault_injector(script.clone());
         let client = crate::Posix {
@@ -375,8 +409,14 @@ mod tests {
             .create(&client, "/fixture")
             .unwrap_err();
         assert_eq!(error.index(), Some(2));
-        assert_eq!(error.path(), Some(Path::new("/fixture/b")));
-        assert_eq!(error.transport_kind(), Some(crate::TransportKind::Timeout));
+        assert_eq!(
+            vfsi_core::internal::errors::path(error.cause()),
+            Some(Path::new("/fixture/b"))
+        );
+        assert_eq!(
+            vfsi_core::transport_kind(error.cause()),
+            Some(crate::TransportKind::Timeout)
+        );
         assert!(script.is_consumed());
         assert_eq!(
             script
@@ -399,7 +439,7 @@ mod tests {
         let mut backend = vfsi_posix::backend(root.path()).unwrap();
         let script = Arc::new(FaultScript::one(
             OpenFaultPoint::BeforeSetPermissions { index: 1 },
-            Error::errno(1, libc::EACCES as u32),
+            std::io::Error::from_raw_os_error(libc::EACCES),
         ));
         backend.set_fault_injector(script.clone());
         let client = crate::Posix {
@@ -413,8 +453,11 @@ mod tests {
             .create(&client, "/fixture")
             .unwrap_err();
         assert_eq!(error.index(), Some(2));
-        assert_eq!(error.path(), Some(Path::new("/fixture/b")));
-        assert_eq!(error.kind(), crate::ErrorKind::PermissionDenied);
+        assert_eq!(
+            vfsi_core::internal::errors::path(error.cause()),
+            Some(Path::new("/fixture/b"))
+        );
+        assert_eq!(error.cause().kind(), crate::ErrorKind::PermissionDenied);
         assert!(script.is_consumed());
         assert!(root.path().join("fixture/a").is_dir());
         assert!(root.path().join("fixture/b").is_dir());

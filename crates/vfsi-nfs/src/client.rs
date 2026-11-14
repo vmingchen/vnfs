@@ -31,9 +31,9 @@ use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 /// An uncached duplicate reply hides the entire original compound, even
 /// though its SEQUENCE succeeded. Keep the native NFS cause independently of
 /// certainty instead of pretending this protocol status is a transport error.
-pub(crate) fn uncertain_completion(cause: &vfsi_core::VfError) -> bool {
-    cause.is_transport()
-        || cause.status()
+pub(crate) fn uncertain_completion(cause: &std::io::Error) -> bool {
+    vfsi_core::transport_kind(cause).is_some()
+        || vfsi_core::native_status(cause)
             == Some(vfsi_core::StatusCode::Nfs(
                 nfsstat4_NFS4ERR_RETRY_UNCACHED_REP,
             ))
@@ -382,7 +382,7 @@ fn validate_copy_result(op: &CopyOp, reply: &COPY4resok) -> vfsi_core::OpResult<
         || op.dst_offset.checked_add(count).is_none()
     {
         return Err(vfsi_core::OpError::unknown(
-            vfsi_core::VfError::invalid_reply(None, "invalid synchronous COPY response"),
+            vfsi_core::internal::errors::invalid_reply("invalid synchronous COPY response"),
             None,
         ));
     }
@@ -845,7 +845,7 @@ impl CfhCursor {
 fn validate_create_mode(mode: Option<u32>, set: &bitmap4) -> vfsi_core::OpResult<()> {
     if mode.is_some() && (set.bitmap4_len < 2 || set.map[1] & (1 << (FATTR4_MODE % 32)) == 0) {
         return Err(vfsi_core::OpError::unknown(
-            vfsi_core::VfError::invalid_reply(None, "CREATE did not acknowledge requested mode"),
+            vfsi_core::internal::errors::invalid_reply("CREATE did not acknowledge requested mode"),
             None,
         ));
     }
@@ -889,13 +889,11 @@ pub(crate) fn collect_rpc_results<T>(
     expected: usize,
 ) -> RpcResult<Vec<T>> {
     vfsi_core::internal::collect_vec_result(result, expected).map_err(|cause| {
-        if let Some(vfsi_core::StatusCode::Nfs(status)) = cause.status() {
+        if let Some(vfsi_core::StatusCode::Nfs(status)) = vfsi_core::native_status(cause.cause()) {
             RpcError::op(cause.index().unwrap_or(0), status)
         } else {
             RpcError::transport_with_kind(
-                cause
-                    .transport_kind()
-                    .unwrap_or(vfsi_core::TransportKind::Other),
+                vfsi_core::transport_kind(cause.cause()).unwrap_or(vfsi_core::TransportKind::Other),
                 cause.to_string(),
             )
         }
@@ -1763,7 +1761,7 @@ impl NfsClient {
                 let bytes = reply.getattr(start + 3);
                 if bytes.len() != 4 {
                     return Err(vfsi_core::OpError::unknown(
-                        vfsi_core::VfError::invalid_reply(None, "invalid LOOKUP type attribute"),
+                        vfsi_core::internal::errors::invalid_reply("invalid LOOKUP type attribute"),
                         None,
                     ));
                 }
@@ -1967,7 +1965,9 @@ impl NfsClient {
             .iter()
             .any(|op| (op.count as usize).saturating_add(128) > byte_budget)
         {
-            return Err(vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_REP_TOO_BIG));
+            return Err(vfsi_core::internal::errors::from_status(
+                vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_REP_TOO_BIG),
+            ));
         }
         self.fixed_results::<2, _, _>(
             b"readv",
@@ -1983,7 +1983,10 @@ impl NfsClient {
                 Self::validate_read_length(ok.data.data_len as usize, ops[original].count as usize)
                     .and_then(|()| decode(original, reply.read_data(2 + 2 * local), ok.eof != 0))
                     .map_err(|error| {
-                        vfsi_core::OpError::unknown(vfsi_core::error_from_rpc(error, None), None)
+                        vfsi_core::OpError::unknown(
+                            vfsi_core::internal::errors::from_rpc(error),
+                            None,
+                        )
                     })
             },
         )
@@ -1998,7 +2001,9 @@ impl NfsClient {
         // requires the acknowledgement to provide at least that durability.
         if count as usize > requested || committed != stable_how4_FILE_SYNC4 {
             Err(vfsi_core::OpError::unknown(
-                vfsi_core::VfError::invalid_reply(None, "invalid NFS FILE_SYNC WRITE completion"),
+                vfsi_core::internal::errors::invalid_reply(
+                    "invalid NFS FILE_SYNC WRITE completion",
+                ),
                 None,
             ))
         } else {
@@ -2013,9 +2018,11 @@ impl NfsClient {
         let byte_budget = self.max_request_arg_bytes().saturating_sub(128);
         let rejection = |op: &WriteOp<'_>| {
             if op.offset.checked_add(op.data.len() as u64).is_none() {
-                Some(vfsi_core::VfError::errno(None, libc::EOVERFLOW as u32))
+                Some(std::io::Error::from_raw_os_error(libc::EOVERFLOW))
             } else if op.data.len().saturating_add(256) > byte_budget {
-                Some(vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_REQ_TOO_BIG))
+                Some(vfsi_core::internal::errors::from_status(
+                    vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_REQ_TOO_BIG),
+                ))
             } else {
                 None
             }
@@ -2023,7 +2030,7 @@ impl NfsClient {
         if ops.iter().any(|op| rejection(op).is_some()) {
             // Allocate remapping only for rejected inputs; the common batch
             // borrows the original operations directly without copying payloads.
-            let mut slots = vec![None; ops.len()];
+            let mut slots = (0..ops.len()).map(|_| None).collect::<Vec<_>>();
             let mut valid = Vec::new();
             let mut indices = Vec::new();
             for (index, op) in ops.iter().enumerate() {
@@ -2041,8 +2048,8 @@ impl NfsClient {
             }
             if !valid.is_empty() {
                 let results = self.writev(&valid).unwrap_or_else(|cause| {
-                    (0..valid.len())
-                        .map(|_| Err(vfsi_core::OpError::not_attempted(cause.clone())))
+                    vfsi_core::internal::errors::fanout(cause, (0..valid.len()).len())
+                        .map(|cause| Err(vfsi_core::OpError::not_attempted(cause)))
                         .collect()
                 });
                 for (index, result) in indices.into_iter().zip(results) {
@@ -2083,7 +2090,9 @@ impl NfsClient {
             |compound, _, index| {
                 let name = &names[index];
                 if name.is_empty() || name.contains(&0) || name.contains(&b'/') {
-                    return Err(vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_INVAL));
+                    return Err(vfsi_core::internal::errors::from_status(
+                        vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_INVAL),
+                    ));
                 }
                 let first = compound.op_count() == 0;
                 if first {
@@ -2779,7 +2788,9 @@ impl NfsClient {
                 }
                 complete_write_suffix(client, offset, data, |client, offset, data| {
                     client.ensure_usable().map_err(|error| {
-                        vfsi_core::OpError::not_attempted(vfsi_core::error_from_rpc(error, None))
+                        vfsi_core::OpError::not_attempted(vfsi_core::internal::errors::from_rpc(
+                            error,
+                        ))
                     })?;
                     client
                         .write(fh, stateid, offset, data)
@@ -2825,19 +2836,19 @@ impl NfsClient {
         mut close_in_compound: bool,
         recover_path_errors: bool,
     ) -> vfsi_core::VfResult<(PathWriteOutcome, Option<PathWriteRepair>)> {
-        use vfsi_core::{FailureState, IoProgress, OpError, error_from_rpc};
+        use vfsi_core::{FailureState, IoProgress, OpError};
         let n = ops.len();
         let reject = |op: &PathWriteOp<'_>| {
             if op.offset.checked_add(op.data.len() as u64).is_none() {
-                Some(vfsi_core::VfError::errno(None, libc::EOVERFLOW as u32))
+                Some(std::io::Error::from_raw_os_error(libc::EOVERFLOW))
             } else if matches!(&op.file, FileRef::Path(path) if split_path_bytes(path).is_err()) {
-                Some(vfsi_core::VfError::errno(None, libc::EISDIR as u32))
+                Some(std::io::Error::from_raw_os_error(libc::EISDIR))
             } else {
                 None
             }
         };
         if ops.iter().any(|op| reject(op).is_some()) {
-            let mut slots = vec![None; n];
+            let mut slots = (0..n).map(|_| None).collect::<Vec<_>>();
             let mut valid = Vec::new();
             let mut indices = Vec::new();
             for (index, op) in ops.iter().enumerate() {
@@ -2873,9 +2884,11 @@ impl NfsClient {
                             close_failed = outcome.close_failed;
                             outcome.results
                         }
-                        Err(cause) => (0..valid.len())
-                            .map(|_| Err(OpError::not_attempted(cause.clone())))
-                            .collect(),
+                        Err(cause) => {
+                            vfsi_core::internal::errors::fanout(cause, (0..valid.len()).len())
+                                .map(|cause| Err(OpError::not_attempted(cause)))
+                                .collect()
+                        }
                     };
                 for (index, result) in indices.into_iter().zip(results) {
                     slots[index] = Some(result);
@@ -2893,10 +2906,10 @@ impl NfsClient {
                 repair,
             ));
         }
-        let mut counts: Vec<Option<usize>> = vec![None; n];
-        let mut committed: Vec<Option<u32>> = vec![None; n];
+        let mut counts: Vec<Option<usize>> = (0..n).map(|_| None).collect::<Vec<_>>();
+        let mut committed: Vec<Option<u32>> = (0..n).map(|_| None).collect::<Vec<_>>();
         let mut opened: Vec<(NfsFh, stateid4)> = Vec::new();
-        let mut errors: Vec<Option<OpError>> = vec![None; n];
+        let mut errors: Vec<Option<OpError>> = (0..n).map(|_| None).collect::<Vec<_>>();
         let mut submitted = Vec::new();
         let mut dispatched = false;
         let mut repair = None;
@@ -3099,10 +3112,11 @@ impl NfsClient {
                     if global == n {
                         break;
                     }
-                    errors[chunk_start] = Some(OpError::not_attempted(vfsi_core::VfError::nfs(
-                        None,
-                        nfsstat4_NFS4ERR_TOO_MANY_OPS,
-                    )));
+                    errors[chunk_start] = Some(OpError::not_attempted(
+                        vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                            nfsstat4_NFS4ERR_TOO_MANY_OPS,
+                        )),
+                    ));
                     global = chunk_start + 1;
                     part_off = 0;
                     continue;
@@ -3226,8 +3240,7 @@ impl NfsClient {
                         }
                         if counts[*caller].unwrap_or(0) != part {
                             errors[*caller] = Some(OpError::unknown(
-                                vfsi_core::VfError::invalid_reply(
-                                    None,
+                                vfsi_core::internal::errors::invalid_reply(
                                     "noncontiguous merged WRITE completion",
                                 ),
                                 None,
@@ -3242,7 +3255,9 @@ impl NfsClient {
                         );
                         if received == 0 && requested != 0 {
                             errors[*caller] = Some(OpError::failed(
-                                vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_IO),
+                                vfsi_core::internal::errors::from_status(
+                                    vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_IO),
+                                ),
                                 None,
                             ));
                             continue;
@@ -3290,8 +3305,12 @@ impl NfsClient {
                 if let Some((caller, status)) = range_failed
                     && errors[caller].is_none()
                 {
-                    errors[caller] =
-                        Some(OpError::failed(vfsi_core::VfError::nfs(None, status), None));
+                    errors[caller] = Some(OpError::failed(
+                        vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                            status,
+                        )),
+                        None,
+                    ));
                 }
                 // The trailing CLOSE (close_in_compound form) sits outside any
                 // file range; report it without replaying acknowledged WRITEs.
@@ -3324,7 +3343,7 @@ impl NfsClient {
                     && matches!(ops[failure.caller].file, FileRef::Path(_))
                     && errors[failure.caller].as_ref().is_some_and(|error| {
                         error.state() == FailureState::Failed
-                            && error.cause().status()
+                            && vfsi_core::native_status(error.cause())
                                 == Some(vfsi_core::StatusCode::Nfs(failure.status))
                     })
                 {
@@ -3366,9 +3385,8 @@ impl NfsClient {
                 if chunk_start == global && part_off == 0 {
                     // No progress (capacity check failed even for one op): bail.
                     errors[chunk_start].get_or_insert_with(|| {
-                        OpError::not_attempted(vfsi_core::VfError::nfs(
-                            None,
-                            nfsstat4_NFS4ERR_TOO_MANY_OPS,
+                        OpError::not_attempted(vfsi_core::internal::errors::from_status(
+                            vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_TOO_MANY_OPS),
                         ))
                     });
                     global = chunk_start + 1;
@@ -3376,7 +3394,7 @@ impl NfsClient {
             }
             Ok(())
         })();
-        let fatal = operation.err().map(|error| error_from_rpc(error, None));
+        let fatal = operation.err().map(vfsi_core::internal::errors::from_rpc);
         if !dispatched && let Some(cause) = fatal {
             return Err(cause);
         }
@@ -3384,6 +3402,7 @@ impl NfsClient {
             self.close_path_or_defer(latest_path_open_closes(&opened));
             opened.clear();
         }
+        let fatal = fatal.map(vfsi_core::internal::errors::shared_source);
         let results = counts
             .into_iter()
             .zip(committed)
@@ -3396,9 +3415,16 @@ impl NfsClient {
                 }
                 let error = error.unwrap_or_else(|| {
                     let cause = fatal
-                        .clone()
-                        .unwrap_or_else(|| vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_IO));
-                    if fatal.as_ref().is_some_and(uncertain_completion)
+                        .as_ref()
+                        .map(vfsi_core::internal::errors::from_shared)
+                        .unwrap_or_else(|| {
+                            vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                                nfsstat4_NFS4ERR_IO,
+                            ))
+                        });
+                    if fatal
+                        .as_ref()
+                        .is_some_and(|cause| uncertain_completion(cause))
                         && submitted.iter().any(|&(caller, _, _)| caller == index)
                     {
                         OpError::unknown(cause, None)
@@ -3436,7 +3462,7 @@ impl NfsClient {
         ops: &[PathReadOp],
         close_in_compound: bool,
     ) -> vfsi_core::VfResult<PathReadOutcome> {
-        use vfsi_core::{FailureState, IoProgress, OpError, error_from_rpc};
+        use vfsi_core::{FailureState, IoProgress, OpError};
         let mut results = Vec::with_capacity(ops.len());
         let mut opened = Vec::new();
         let mut close_failed = None;
@@ -3447,24 +3473,23 @@ impl NfsClient {
                 && results.is_empty()
                 && let Some(error) = wave.fatal
             {
-                return Err(error_from_rpc(error, None));
+                return Err(vfsi_core::internal::errors::from_rpc(error));
             }
-            let fatal = wave.fatal.map(|error| error_from_rpc(error, None));
+            let fatal = wave
+                .fatal
+                .map(vfsi_core::internal::errors::from_rpc)
+                .map(vfsi_core::internal::errors::shared_source);
             let end = if fatal.is_none() && wave.close_failed.is_none() {
                 wave.failed
                     .map_or(ops.len() - start, |(index, _)| index + 1)
             } else {
                 ops.len() - start
             };
-            let fallback = fatal.clone().unwrap_or_else(|| {
-                vfsi_core::VfError::nfs(
-                    None,
-                    wave.failed
-                        .map(|(_, status)| status)
-                        .or(wave.close_failed)
-                        .unwrap_or(nfsstat4_NFS4ERR_IO),
-                )
-            });
+            let fallback_status = wave
+                .failed
+                .map(|(_, status)| status)
+                .or(wave.close_failed)
+                .unwrap_or(nfsstat4_NFS4ERR_IO);
             for (index, ((data, eof), error)) in wave
                 .data
                 .into_iter()
@@ -3483,13 +3508,25 @@ impl NfsClient {
                     continue;
                 }
                 let error = error.unwrap_or_else(|| {
+                    let cause = fatal
+                        .as_ref()
+                        .map(vfsi_core::internal::errors::from_shared)
+                        .unwrap_or_else(|| {
+                            vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                                fallback_status,
+                            ))
+                        });
                     let submitted = wave.submitted.iter().any(|&(caller, _, _)| caller == index);
-                    if fatal.as_ref().is_some_and(uncertain_completion) && submitted {
-                        OpError::unknown(fallback.clone(), None)
+                    if fatal
+                        .as_ref()
+                        .is_some_and(|cause| uncertain_completion(cause))
+                        && submitted
+                    {
+                        OpError::unknown(cause, None)
                     } else if data.is_empty() {
-                        OpError::not_attempted(fallback.clone())
+                        OpError::not_attempted(cause)
                     } else {
-                        OpError::failed(fallback.clone(), None)
+                        OpError::failed(cause, None)
                     }
                 });
                 let (cause, mut state, _) = error.into_parts();
@@ -3767,7 +3804,7 @@ impl NfsClient {
                                     )
                                     .with_op_index(*caller);
                                     errors[*caller] = Some(vfsi_core::OpError::unknown(
-                                        vfsi_core::error_from_rpc(error, None),
+                                        vfsi_core::internal::errors::from_rpc(error),
                                         None,
                                     ));
                                     continue;
@@ -3780,7 +3817,7 @@ impl NfsClient {
                             if let Err(error) = Self::validate_read_length(len, requested as usize)
                             {
                                 errors[*caller] = Some(vfsi_core::OpError::unknown(
-                                    vfsi_core::error_from_rpc(error, None),
+                                    vfsi_core::internal::errors::from_rpc(error),
                                     None,
                                 ));
                                 continue;
@@ -3795,7 +3832,9 @@ impl NfsClient {
                             output.extend_from_slice(bytes);
                             if len == 0 && requested != 0 && !end_of_file {
                                 errors[*caller] = Some(vfsi_core::OpError::failed(
-                                    vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_IO),
+                                    vfsi_core::internal::errors::from_status(
+                                        vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_IO),
+                                    ),
                                     None,
                                 ));
                                 continue;
@@ -3820,7 +3859,7 @@ impl NfsClient {
                                 ) {
                                     Ok(end) => end_of_file = end,
                                     Err(error) => {
-                                        let cause = vfsi_core::error_from_rpc(error, None);
+                                        let cause = vfsi_core::internal::errors::from_rpc(error);
                                         errors[*caller] = Some(if uncertain_completion(&cause) {
                                             vfsi_core::OpError::unknown(cause, None)
                                         } else {
@@ -3837,7 +3876,9 @@ impl NfsClient {
                     && errors[caller].is_none()
                 {
                     errors[caller] = Some(vfsi_core::OpError::failed(
-                        vfsi_core::VfError::nfs(None, status),
+                        vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                            status,
+                        )),
                         None,
                     ));
                 }
@@ -3913,10 +3954,10 @@ impl NfsClient {
         &mut self,
         ops: &[PathGetattrOp],
     ) -> vfsi_core::VecResult<ReturnedAttrs> {
-        use vfsi_core::{OpError, VfError, error_from_rpc};
+        use vfsi_core::OpError;
         if !ops.is_empty() {
             self.ensure_usable()
-                .map_err(|error| error_from_rpc(error, None))?;
+                .map_err(vfsi_core::internal::errors::from_rpc)?;
         }
         let mut slots: Vec<Option<vfsi_core::OpResult<ReturnedAttrs>>> =
             (0..ops.len()).map(|_| None).collect();
@@ -3956,10 +3997,11 @@ impl NfsClient {
                     FileRef::Path(path) => {
                         let Some((leaf, count)) = cursor.set_parent(&mut c, path) else {
                             map.ranges.pop();
-                            slots[global] = Some(Err(OpError::not_attempted(VfError::nfs(
-                                None,
-                                nfsstat4_NFS4ERR_INVAL,
-                            ))));
+                            slots[global] = Some(Err(OpError::not_attempted(
+                                vfsi_core::internal::errors::from_status(
+                                    vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_INVAL),
+                                ),
+                            )));
                             global += 1;
                             break;
                         };
@@ -3983,7 +4025,9 @@ impl NfsClient {
                 if global > chunk_start {
                     continue;
                 }
-                let error = VfError::nfs(None, nfsstat4_NFS4ERR_TOO_MANY_OPS);
+                let error = vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                    nfsstat4_NFS4ERR_TOO_MANY_OPS,
+                ));
                 if !dispatched {
                     return Err(error);
                 }
@@ -3997,7 +4041,7 @@ impl NfsClient {
                 }
                 Ok(false) => {}
                 Err(error) => {
-                    let error = error_from_rpc(error, None);
+                    let error = vfsi_core::internal::errors::from_rpc(error);
                     if !dispatched {
                         return Err(error);
                     }
@@ -4011,8 +4055,12 @@ impl NfsClient {
                 if !matches!(fits, Ok(true)) {
                     let cause = fits
                         .err()
-                        .map(|error| error_from_rpc(error, None))
-                        .unwrap_or_else(|| VfError::nfs(None, nfsstat4_NFS4ERR_REQ_TOO_BIG));
+                        .map(vfsi_core::internal::errors::from_rpc)
+                        .unwrap_or_else(|| {
+                            vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                                nfsstat4_NFS4ERR_REQ_TOO_BIG,
+                            ))
+                        });
                     if !dispatched {
                         return Err(cause);
                     }
@@ -4027,7 +4075,7 @@ impl NfsClient {
                     return Ok(completion::finish_slots(
                         slots,
                         &map.ranges,
-                        error_from_rpc(error, None),
+                        vfsi_core::internal::errors::from_rpc(error),
                     ));
                 }
             };
@@ -4037,7 +4085,9 @@ impl NfsClient {
                     return Ok(completion::finish_slots(
                         slots,
                         &map.ranges,
-                        VfError::invalid_reply(None, format!("malformed metadata reply: {error}")),
+                        vfsi_core::internal::errors::invalid_reply(format!(
+                            "malformed metadata reply: {error}"
+                        )),
                     ));
                 }
             };
@@ -4047,7 +4097,9 @@ impl NfsClient {
                     .map(|index| res.getattr_with_bitmap(index))
                     .ok_or_else(|| {
                         OpError::unknown(
-                            VfError::invalid_reply(None, "missing completed GETATTR payload"),
+                            vfsi_core::internal::errors::invalid_reply(
+                                "missing completed GETATTR payload",
+                            ),
                             None,
                         )
                     });
@@ -4064,7 +4116,9 @@ impl NfsClient {
                     global = failure.caller;
                 } else {
                     slots[failure.caller] = Some(Err(OpError::failed(
-                        VfError::nfs(None, failure.status),
+                        vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                            failure.status,
+                        )),
                         None,
                     )));
                     global = failure.caller + 1;
@@ -4084,7 +4138,7 @@ impl NfsClient {
                 return Ok(completion::finish_slots(
                     slots,
                     &[],
-                    VfError::nfs(None, status),
+                    vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(status)),
                 ));
             }
         }
@@ -4093,7 +4147,9 @@ impl NfsClient {
             .map(|slot| {
                 slot.unwrap_or_else(|| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "missing merged metadata outcome"),
+                        vfsi_core::internal::errors::invalid_reply(
+                            "missing merged metadata outcome",
+                        ),
                         None,
                     ))
                 })
@@ -4120,10 +4176,7 @@ impl NfsClient {
         guards: &[bool],
     ) -> vfsi_core::VfResult<PathMutationRun<Option<u32>>> {
         if ops.len() != guards.len() {
-            return Err(vfsi_core::VfError::from_kind(
-                None,
-                std::io::ErrorKind::InvalidInput,
-            ));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
         self.setattr_path_compound_inner(ops, Some(guards))
     }
@@ -4133,7 +4186,7 @@ impl NfsClient {
         ops: &[PathSetattrOp],
         guards: Option<&[bool]>,
     ) -> vfsi_core::VfResult<PathMutationRun<Option<u32>>> {
-        use vfsi_core::{OpError, VfError};
+        use vfsi_core::OpError;
         self.path_mutation_results(
             b"setattrv1",
             5,
@@ -4142,9 +4195,11 @@ impl NfsClient {
                 let op = &ops[index];
                 let mut count = match &op.file {
                     FileRef::Path(path) => {
-                        let (name, count) = cursor
-                            .set_parent(compound, path)
-                            .ok_or_else(|| VfError::nfs(None, nfsstat4_NFS4ERR_INVAL))?;
+                        let (name, count) = cursor.set_parent(compound, path).ok_or_else(|| {
+                            vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                                nfsstat4_NFS4ERR_INVAL,
+                            ))
+                        })?;
                         compound.lookup(name);
                         count + 1
                     }
@@ -4180,7 +4235,9 @@ impl NfsClient {
                         let bytes = reply.getattr(index);
                         if bytes.len() != 4 {
                             Err(OpError::unknown(
-                                VfError::invalid_reply(None, "invalid SETATTR type attribute"),
+                                vfsi_core::internal::errors::invalid_reply(
+                                    "invalid SETATTR type attribute",
+                                ),
                                 None,
                             ))
                         } else {
@@ -4208,7 +4265,7 @@ impl NfsClient {
         let owners: Vec<_> = (0..ops.len())
             .map(|_| self.next_public_open_owner_name())
             .collect();
-        let mut opened = vec![None; ops.len()];
+        let mut opened = (0..ops.len()).map(|_| None).collect::<Vec<_>>();
         let mut global = 0;
         let mut max_items = usize::MAX;
         let attempt = (|| -> RpcResult<Option<(usize, u32)>> {
@@ -4288,10 +4345,15 @@ impl NfsClient {
             paths.len(),
             |compound, cursor, index| {
                 if paths[index].contains(&0) {
-                    return Err(vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_INVAL));
+                    return Err(vfsi_core::internal::errors::from_status(
+                        vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_INVAL),
+                    ));
                 }
-                split_path_bytes(&paths[index])
-                    .map_err(|_| vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_INVAL))?;
+                split_path_bytes(&paths[index]).map_err(|_| {
+                    vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                        nfsstat4_NFS4ERR_INVAL,
+                    ))
+                })?;
                 let (name, count) = cursor
                     .set_parent(compound, &paths[index])
                     .expect("validated REMOVE path");
@@ -4334,10 +4396,16 @@ impl NfsClient {
                 let pair = &pairs[index];
                 // Validate BOTH names before either directory walk appends operations.
                 // A rejected destination must not leave orphaned source operations.
-                split_path_bytes(&pair.src)
-                    .map_err(|_| vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_INVAL))?;
-                split_path_bytes(&pair.dst)
-                    .map_err(|_| vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_INVAL))?;
+                split_path_bytes(&pair.src).map_err(|_| {
+                    vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                        nfsstat4_NFS4ERR_INVAL,
+                    ))
+                })?;
+                split_path_bytes(&pair.dst).map_err(|_| {
+                    vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+                        nfsstat4_NFS4ERR_INVAL,
+                    ))
+                })?;
                 let (source, source_ops) = cursor
                     .set_parent(compound, &pair.src)
                     .expect("validated source");
@@ -4457,7 +4525,9 @@ impl NfsClient {
             {
                 rejected.push((
                     index,
-                    OpError::not_attempted(vfsi_core::VfError::nfs(None, nfsstat4_NFS4ERR_INVAL)),
+                    OpError::not_attempted(vfsi_core::internal::errors::from_status(
+                        vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_INVAL),
+                    )),
                 ));
             } else {
                 prepared.push((index, op));
@@ -4489,9 +4559,8 @@ impl NfsClient {
         }
         let results = match result {
             Ok(results) => results,
-            Err(cause) => prepared
-                .iter()
-                .map(|_| Err(OpError::not_attempted(cause.clone())))
+            Err(cause) => vfsi_core::internal::errors::fanout(cause, prepared.len())
+                .map(|cause| Err(OpError::not_attempted(cause)))
                 .collect(),
         };
         let mut slots = (0..ops.len()).map(|_| None).collect::<Vec<_>>();
@@ -4886,7 +4955,7 @@ impl NfsClient {
         max_page_bytes: usize,
     ) -> vfsi_core::VecResult<ChildListing> {
         let response_bytes = self.read_compound_bytes();
-        let results = self.fixed_results::<4, _, _>(
+        let mut results = self.fixed_results::<4, _, _>(
             b"readdir_children",
             ops,
             usize::MAX,
@@ -4902,7 +4971,10 @@ impl NfsClient {
             |reply, local, _| {
                 let (entries, cookie) = Self::collect_readdir(reply.readdir(4 + 4 * local))
                     .map_err(|cause| {
-                        vfsi_core::OpError::unknown(vfsi_core::error_from_rpc(cause, None), None)
+                        vfsi_core::OpError::unknown(
+                            vfsi_core::internal::errors::from_rpc(cause),
+                            None,
+                        )
                     })?;
                 Ok(ChildListing {
                     fh: NfsFh::from_nfs_fh(reply.getfh(3 + 4 * local)),
@@ -4912,10 +4984,10 @@ impl NfsClient {
             },
         )?;
         let mut fatal = results
-            .iter()
-            .filter_map(|result| result.as_ref().err())
+            .iter_mut()
+            .filter_map(|result| result.as_mut().err())
             .find(|error| uncertain_completion(error.cause()))
-            .map(|error| error.cause().clone());
+            .map(vfsi_core::internal::errors::share_op_cause);
         Ok(results
             .into_iter()
             .map(|result| {
@@ -4924,7 +4996,10 @@ impl NfsClient {
                         return Ok(page);
                     }
                     if let Some(cause) = &fatal {
-                        return Err(vfsi_core::OpError::failed(cause.clone(), None));
+                        return Err(vfsi_core::OpError::failed(
+                            vfsi_core::internal::errors::from_shared(cause),
+                            None,
+                        ));
                     }
                     let (entries, cookie) = self
                         .finish_readdir_page(
@@ -4935,9 +5010,10 @@ impl NfsClient {
                             max_page_bytes,
                         )
                         .map_err(|error| {
-                            let cause = vfsi_core::error_from_rpc(error, None);
+                            let mut cause = vfsi_core::internal::errors::from_rpc(error);
                             if uncertain_completion(&cause) {
-                                fatal = Some(cause.clone());
+                                fatal =
+                                    Some(vfsi_core::internal::errors::share_in_place(&mut cause));
                                 vfsi_core::OpError::unknown(cause, None)
                             } else {
                                 vfsi_core::OpError::failed(cause, None)
@@ -4971,7 +5047,7 @@ impl NfsClient {
         max_page_bytes: usize,
     ) -> vfsi_core::VecResult<ReaddirPage> {
         let response_bytes = self.read_compound_bytes();
-        let results = self.fixed_results::<2, _, _>(
+        let mut results = self.fixed_results::<2, _, _>(
             b"readdir_pages",
             ops,
             usize::MAX,
@@ -4984,15 +5060,15 @@ impl NfsClient {
             },
             |reply, local, _| {
                 Self::collect_readdir(reply.readdir(2 + 2 * local)).map_err(|cause| {
-                    vfsi_core::OpError::unknown(vfsi_core::error_from_rpc(cause, None), None)
+                    vfsi_core::OpError::unknown(vfsi_core::internal::errors::from_rpc(cause), None)
                 })
             },
         )?;
         let mut fatal = results
-            .iter()
-            .filter_map(|result| result.as_ref().err())
+            .iter_mut()
+            .filter_map(|result| result.as_mut().err())
             .find(|error| uncertain_completion(error.cause()))
-            .map(|error| error.cause().clone());
+            .map(vfsi_core::internal::errors::share_op_cause);
         Ok(results
             .into_iter()
             .zip(ops)
@@ -5002,13 +5078,17 @@ impl NfsClient {
                         return Ok(page);
                     }
                     if let Some(cause) = &fatal {
-                        return Err(vfsi_core::OpError::failed(cause.clone(), None));
+                        return Err(vfsi_core::OpError::failed(
+                            vfsi_core::internal::errors::from_shared(cause),
+                            None,
+                        ));
                     }
                     self.finish_readdir_page(fh, *requested, page, attrs, max_page_bytes)
                         .map_err(|error| {
-                            let cause = vfsi_core::error_from_rpc(error, None);
+                            let mut cause = vfsi_core::internal::errors::from_rpc(error);
                             if uncertain_completion(&cause) {
-                                fatal = Some(cause.clone());
+                                fatal =
+                                    Some(vfsi_core::internal::errors::share_in_place(&mut cause));
                                 vfsi_core::OpError::unknown(cause, None)
                             } else {
                                 vfsi_core::OpError::failed(cause, None)
@@ -5159,14 +5239,16 @@ mod tests {
                     .expect_err("FILE_SYNC writes cannot acknowledge weaker durability");
                 assert_eq!(error.state(), vfsi_core::FailureState::Unknown);
                 assert_eq!(
-                    error.cause().transport_kind(),
+                    vfsi_core::transport_kind(error.cause()),
                     Some(vfsi_core::TransportKind::InvalidReply)
                 );
             }
         }
         assert_eq!(
-            NfsClient::validate_write_completion(2, stable_how4_FILE_SYNC4, 4),
-            Ok((2, stable_how4_FILE_SYNC4))
+            (NfsClient::validate_write_completion(2, stable_how4_FILE_SYNC4, 4))
+                .as_ref()
+                .unwrap(),
+            &(2, stable_how4_FILE_SYNC4)
         );
     }
 
@@ -5190,12 +5272,12 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(results[0], Ok((4, stable_how4_FILE_SYNC4)));
+        assert_eq!((results[0]).as_ref().unwrap(), &(4, stable_how4_FILE_SYNC4));
         for index in [1, 2, 3, 4] {
             let error = results[index].as_ref().unwrap_err();
             assert_eq!(error.state(), FailureState::Unknown);
-            assert!(error.cause().is_transport());
-            assert_eq!(error.cause().index(), None);
+            assert!(vfsi_core::transport_kind(error.cause()).is_some());
+            let _: &std::io::Error = error.cause();
             assert!(error.progress().is_none());
         }
     }

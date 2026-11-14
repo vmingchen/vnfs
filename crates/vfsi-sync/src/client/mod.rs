@@ -15,25 +15,8 @@ use crate::backend::{HandleBackend, VectorBackend};
 use crate::contracts::{validate_read_into_results, validate_read_results, validate_write_results};
 use crate::{
     AttrMask, Attrs, Capabilities, DirEntry, FileOperand, OpenFlags, OpenOp, ReadAllOptions,
-    ReadOp, ReadResult, RemoveOptions, VfDir, VfError, VfOffset, VfResult, WriteOp, WriteResult,
+    ReadOp, ReadResult, RemoveOptions, VfDir, VfOffset, VfResult, WriteOp, WriteResult,
 };
-
-fn with_indexed_context<'a>(
-    error: VfError,
-    operation: &'static str,
-    path: impl FnOnce(usize) -> Option<&'a Path>,
-) -> VfError {
-    match error.index() {
-        Some(index) => match path(index) {
-            Some(path) => error.with_context(operation, path),
-            None => VfError::invalid_reply(
-                None,
-                format!("{operation} backend returned an invalid error index"),
-            ),
-        },
-        None => error,
-    }
-}
 
 fn read_result(result: ReadResult) -> FsReadResult {
     FsReadResult {
@@ -51,8 +34,8 @@ fn write_result(result: WriteResult) -> FsWriteResult {
     }
 }
 
-fn poisoned() -> VfError {
-    VfError::errno(0, crate::ERR_IO)
+fn poisoned() -> std::io::Error {
+    std::io::Error::from_raw_os_error((crate::ERR_IO) as i32)
 }
 
 /// Cloneable owner of one synchronous backend connection.
@@ -100,11 +83,11 @@ impl<F: HandleBackend> FsClient<F> {
         self.limits
     }
 
-    fn validate_owner(&self, file: &OpenFile<F>, index: usize) -> VfResult<()> {
+    fn validate_owner(&self, file: &OpenFile<F>, _index: usize) -> VfResult<()> {
         if Arc::ptr_eq(&self.inner, &file.inner) {
             Ok(())
         } else {
-            Err(VfError::from_kind(index, std::io::ErrorKind::InvalidInput))
+            Err(std::io::Error::from(std::io::ErrorKind::InvalidInput))
         }
     }
 
@@ -140,7 +123,7 @@ impl<F: HandleBackend> FsClient<F> {
     /// Take bounded diagnostics from previous cleanup attempts, including implicit
     /// drains before ordinary I/O. The second value counts older diagnostics
     /// evicted since the previous call. Taking diagnostics never retires targets.
-    pub fn take_cleanup_errors(&self) -> (Vec<VfError>, u64) {
+    pub fn take_cleanup_errors(&self) -> (Vec<std::io::Error>, u64) {
         self.inner.take_cleanup_errors()
     }
 
@@ -169,11 +152,7 @@ impl<F: VectorBackend> FsClient<F> {
             return Ok(Vec::new());
         }
         let mut filesystem = self.lock()?;
-        let mut outcomes = filesystem.vopen_impl(requests).map_err(|error| {
-            with_indexed_context(error, "vopen", |index| {
-                requests.get(index).map(|request| request.path())
-            })
-        })?;
+        let mut outcomes = filesystem.vopen_impl(requests)?;
         let own = |file, index: usize| OpenFile {
             inner: Arc::clone(&self.inner),
             file: Some(file),
@@ -200,7 +179,7 @@ impl<F: VectorBackend> FsClient<F> {
                 .iter()
                 .map(|request| {
                     Err(OpError::unknown(
-                        VfError::invalid_reply(None, "too many open outcomes"),
+                        vfsi_core::internal::errors::invalid_reply("too many open outcomes"),
                         None,
                     )
                     .with_context("vopen", request.path()))
@@ -233,10 +212,14 @@ impl<F: VectorBackend> FsClient<F> {
                     continue;
                 };
                 if let Some(&first) = seen.get(&fd) {
-                    let cause = VfError::invalid_reply(None, "duplicate open descriptor");
+                    let cause =
+                        vfsi_core::internal::errors::invalid_reply("duplicate open descriptor");
                     let original = std::mem::replace(
                         &mut outcomes[first],
-                        Err(OpError::unknown(cause.clone(), None)),
+                        Err(OpError::unknown(
+                            vfsi_core::internal::errors::invalid_reply("duplicate open descriptor"),
+                            None,
+                        )),
                     );
                     if let Ok(file) = original {
                         drop(own(file, first));
@@ -249,7 +232,7 @@ impl<F: VectorBackend> FsClient<F> {
         }
         outcomes.resize_with(requests.len(), || {
             Err(OpError::unknown(
-                VfError::invalid_reply(None, "missing open outcome"),
+                vfsi_core::internal::errors::invalid_reply("missing open outcome"),
                 None,
             ))
         });
@@ -260,11 +243,15 @@ impl<F: VectorBackend> FsClient<F> {
                 match result {
                     Ok(file) if file.fd().is_some_and(|fd| fd >= 0) => Ok(own(file, index)),
                     Ok(_) => Err(OpError::unknown(
-                        VfError::invalid_reply(None, "open did not return a valid descriptor"),
+                        vfsi_core::internal::errors::invalid_reply(
+                            "open did not return a valid descriptor",
+                        ),
                         None,
                     )),
                     Err(error) if error.progress().is_some() => Err(OpError::unknown(
-                        VfError::invalid_reply(None, "open cannot report I/O byte progress"),
+                        vfsi_core::internal::errors::invalid_reply(
+                            "open cannot report I/O byte progress",
+                        ),
                         None,
                     )),
                     Err(error) => Err(error),
@@ -313,44 +300,32 @@ impl<F: VectorBackend> FsClient<F> {
                     .iter()
                     .map(|_| {
                         Err(OpError::unknown(
-                            VfError::invalid_reply(None, "too many close outcomes"),
+                            vfsi_core::internal::errors::invalid_reply("too many close outcomes"),
                             None,
                         ))
                     })
                     .collect(),
                 Err(error) => {
-                    let error = if error
-                        .index()
-                        .is_some_and(|index| index >= descriptors.len())
-                    {
-                        VfError::invalid_reply(
-                            None,
-                            "close backend returned an invalid error index",
-                        )
-                    } else {
-                        error
-                    };
                     if positions.len() == files.len() {
-                        return Err(with_indexed_context(error, "vclose", |index| {
-                            files.get(index).map(|file| file.path())
-                        }));
+                        return Err(error);
                     }
-                    descriptors
-                        .iter()
-                        .map(|_| Err(OpError::not_attempted(error.clone())))
+                    vfsi_core::internal::errors::fanout(error, descriptors.len())
+                        .map(|error| Err(OpError::not_attempted(error)))
                         .collect()
                 }
             };
             results.resize_with(descriptors.len(), || {
                 Err(OpError::unknown(
-                    VfError::invalid_reply(None, "missing close outcome"),
+                    vfsi_core::internal::errors::invalid_reply("missing close outcome"),
                     None,
                 ))
             });
             for (index, result) in positions.into_iter().zip(results) {
                 let result = match result {
                     Err(error) if error.progress().is_some() => Err(OpError::unknown(
-                        VfError::invalid_reply(None, "close cannot report I/O byte progress"),
+                        vfsi_core::internal::errors::invalid_reply(
+                            "close cannot report I/O byte progress",
+                        ),
                         None,
                     )),
                     result => result,
@@ -370,17 +345,9 @@ impl<F: VectorBackend> FsClient<F> {
 
     /// Consume handles after selecting the first error in input order.
     #[doc(hidden)]
-    pub fn vclose_owned(&self, mut files: Vec<OpenFile<F>>) -> VfResult<()> {
+    pub fn vclose_owned(&self, mut files: Vec<OpenFile<F>>) -> Result<(), vfsi_core::IndexedError> {
         let expected = files.len();
         vfsi_core::internal::collect_vec_result(self.vclose(&mut files), expected).map(|_| ())
-    }
-}
-
-fn link_error(error: VfError, paths: &[&Path], operation: &'static str) -> VfError {
-    match error.index() {
-        Some(index) if index < paths.len() => error.with_context(operation, paths[index]),
-        Some(_) => VfError::invalid_reply(None, "link backend returned an invalid error index"),
-        None => error,
     }
 }
 

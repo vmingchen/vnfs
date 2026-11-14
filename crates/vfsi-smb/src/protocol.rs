@@ -1,7 +1,7 @@
 use super::*;
 use vfsi_core::{FailureState, IoProgress, OpError, OpResult};
 
-pub(super) struct CompoundOutcome<T, E = VfError> {
+pub(super) struct CompoundOutcome<T, E = std::io::Error> {
     pub(super) result: Result<T, E>,
     pub(super) deferred_close: Option<CloseState>,
 }
@@ -64,8 +64,7 @@ pub(super) fn paths_are_independent(paths: &[PathBuf]) -> bool {
 
 pub(super) fn handle_info(basic: &[u8], standard: &[u8]) -> VfResult<smb2::client::FileInfo> {
     if basic.len() < 40 || standard.len() < 24 {
-        return Err(VfError::invalid_reply(
-            None,
+        return Err(vfsi_core::internal::errors::invalid_reply(
             "short SMB handle metadata response",
         ));
     }
@@ -391,7 +390,9 @@ pub(super) async fn concurrent_file_identity_inner(
                 .output_buffer
                 .get(..8)
                 .ok_or_else(|| {
-                    VfError::invalid_reply(None, "short SMB FileInternalInformation response")
+                    vfsi_core::internal::errors::invalid_reply(
+                        "short SMB FileInternalInformation response",
+                    )
                 })?
                 .try_into()
                 .expect("eight-byte slice");
@@ -413,7 +414,10 @@ pub(super) async fn concurrent_file_identity_inner(
 pub(super) fn close_can_fallback(result: &OpResult<()>) -> bool {
     result.as_ref().is_err_and(|error| {
         error.state() == FailureState::Failed
-            && matches!(error.cause().raw_code(), 0xc0000008 | 0xc000000d)
+            && matches!(
+                vfsi_core::native_status(error.cause()),
+                Some(vfsi_core::StatusCode::Smb(0xc0000008 | 0xc000000d))
+            )
     })
 }
 
@@ -456,15 +460,15 @@ pub(super) async fn flush_file(
     require_status(&frame, Command::Flush, 0).map_err(|error| wire_failure(error, None))
 }
 
-pub(super) fn wire_failure(cause: VfError, progress: Option<IoProgress>) -> OpError {
-    if cause.is_transport() {
+pub(super) fn wire_failure(cause: std::io::Error, progress: Option<IoProgress>) -> OpError {
+    if vfsi_core::transport_kind(&(cause)).is_some() {
         OpError::unknown(cause, progress)
     } else {
         OpError::failed(cause, progress)
     }
 }
 
-pub(super) fn write_wire_error(cause: VfError, written: usize) -> OpError {
+pub(super) fn write_wire_error(cause: std::io::Error, written: usize) -> OpError {
     wire_failure(
         cause,
         (written != 0).then_some(IoProgress::Write {
@@ -478,14 +482,17 @@ pub(super) fn write_wire_error(cause: VfError, written: usize) -> OpError {
 pub(super) fn finish_write_result(
     result: OpResult<usize>,
     close: VfResult<()>,
-    structural_error: Option<VfError>,
+    structural_error: Option<std::io::Error>,
 ) -> OpResult<usize> {
     let close = close.and(structural_error.map_or(Ok(()), Err));
     match (result, close) {
         (Ok(written), Ok(())) => Ok(written),
         (Ok(written), Err(cause)) => Err(write_wire_error(cause, written)),
         (Err(error), close) => {
-            let uncertain_close = close.as_ref().err().is_some_and(VfError::is_transport);
+            let uncertain_close = close
+                .as_ref()
+                .err()
+                .is_some_and(|cause| vfsi_core::transport_kind(cause).is_some());
             let (cause, state, progress) = error.into_parts();
             Err(if state == FailureState::Unknown || uncertain_close {
                 OpError::unknown(cause, progress)
@@ -496,7 +503,11 @@ pub(super) fn finish_write_result(
     }
 }
 
-pub(super) fn read_wire_error(cause: VfError, offset: u64, data: Option<Vec<u8>>) -> OpError {
+pub(super) fn read_wire_error(
+    cause: std::io::Error,
+    offset: u64,
+    data: Option<Vec<u8>>,
+) -> OpError {
     wire_failure(
         cause,
         data.map(|data| IoProgress::Read(vfsi_core::api::ReadResult::owned(offset, data, false))),
@@ -507,7 +518,7 @@ pub(super) fn read_wire_error(cause: VfError, offset: u64, data: Option<Vec<u8>>
 pub(super) fn finish_read_result(
     result: OpResult<Vec<u8>>,
     close: VfResult<()>,
-    structural_error: Option<VfError>,
+    structural_error: Option<std::io::Error>,
     offset: u64,
     requested: usize,
 ) -> OpResult<Vec<u8>> {
@@ -519,7 +530,7 @@ pub(super) fn finish_read_result(
             let progress = Some(IoProgress::Read(vfsi_core::api::ReadResult::owned(
                 offset, data, eof,
             )));
-            Err(if cause.is_transport() {
+            Err(if vfsi_core::transport_kind(&(cause)).is_some() {
                 OpError::unknown(cause, progress)
             } else {
                 OpError::failed(cause, progress)
@@ -528,7 +539,10 @@ pub(super) fn finish_read_result(
         (Err(error), close) => {
             // OPEN and cleanup have already executed around this read. A local
             // READ rejection is no longer a wholly untouched logical input.
-            let uncertain_close = close.as_ref().err().is_some_and(VfError::is_transport);
+            let uncertain_close = close
+                .as_ref()
+                .err()
+                .is_some_and(|cause| vfsi_core::transport_kind(cause).is_some());
             let (cause, state, progress) = error.into_parts();
             Err(if state == FailureState::Unknown || uncertain_close {
                 OpError::unknown(cause, progress)
@@ -614,7 +628,7 @@ pub(super) async fn concurrent_compound_read_inner(
         file_id,
         operation_responses,
         close_result,
-        cardinality_error,
+        mut cardinality_error,
         ..
     } = decode_open_compound_responses(
         responses,
@@ -637,7 +651,7 @@ pub(super) async fn concurrent_compound_read_inner(
         Some(Ok(response)) => decode_read_response(&response, length, 0),
         Some(Err(error)) => Err(smb_error(error, 0)),
         None => Err(cardinality_error
-            .clone()
+            .take()
             .unwrap_or_else(|| compound_cardinality_error(1, operations.len()))),
     };
     let close = close_compound_on_connection(&tree, file_id, close_result, deferred_close).await;
@@ -665,8 +679,7 @@ pub(super) fn decode_write_flush(
             .map_err(|error| smb_error(error, 0))?
             .count as usize;
         if count > requested_length {
-            return Err(VfError::invalid_reply(
-                None,
+            return Err(vfsi_core::internal::errors::invalid_reply(
                 "SMB server reported writing more bytes than requested",
             ));
         }
@@ -829,11 +842,10 @@ pub(super) fn normalize_server(server: &str) -> String {
 pub(super) fn checked_read_data(
     data: Vec<u8>,
     requested: usize,
-    index: usize,
+    _index: usize,
 ) -> VfResult<Vec<u8>> {
     if data.len() > requested {
-        return Err(VfError::transport_with_kind(
-            Some(index),
+        return Err(vfsi_core::internal::errors::transport(
             vfsi_core::TransportKind::InvalidReply,
             format!(
                 "SMB server returned {} READ bytes for a {requested}-byte request",
@@ -867,16 +879,13 @@ pub(super) fn credit_charge(bytes: usize) -> u16 {
 pub(super) fn require_command(
     frame: &smb2::client::Frame,
     command: Command,
-    index: usize,
+    _index: usize,
 ) -> VfResult<()> {
     if frame.header.command != command {
-        return Err(VfError::invalid_reply(
-            index,
-            format!(
-                "SMB response command {:?}, expected {command:?}",
-                frame.header.command
-            ),
-        ));
+        return Err(vfsi_core::internal::errors::invalid_reply(format!(
+            "SMB response command {:?}, expected {command:?}",
+            frame.header.command
+        )));
     }
     Ok(())
 }
@@ -905,7 +914,7 @@ pub(super) struct OpenCompoundResponseState<T, E> {
     pub(super) create_response: T,
     pub(super) operation_responses: Vec<Result<T, E>>,
     pub(super) close_result: OpResult<()>,
-    pub(super) cardinality_error: Option<VfError>,
+    pub(super) cardinality_error: Option<std::io::Error>,
 }
 
 /// Keep a successful CREATE response and its FileId even when a later waiter
@@ -916,13 +925,13 @@ pub(super) fn decode_open_compound_responses<T, E>(
     expected: usize,
     parse_create: impl FnOnce(&T) -> VfResult<FileId>,
     close_result: impl Fn(&T) -> OpResult<()>,
-    mut map_error: impl FnMut(E) -> VfError,
+    mut map_error: impl FnMut(E) -> std::io::Error,
 ) -> VfResult<OpenCompoundResponseState<T, E>> {
     let response_count = responses.len();
     let mut responses = responses;
     if expected < 2 {
-        return Err(VfError::transport(
-            None,
+        return Err(vfsi_core::internal::errors::transport(
+            vfsi_core::TransportKind::Other,
             "SMB temporary-handle compound must include CREATE and CLOSE",
         ));
     }
@@ -961,11 +970,10 @@ pub(super) fn decode_open_compound_responses<T, E>(
     })
 }
 
-pub(super) fn compound_cardinality_error(actual: usize, expected: usize) -> VfError {
-    VfError::invalid_reply(
-        None,
-        format!("SMB compound returned {actual} responses, expected {expected}"),
-    )
+pub(super) fn compound_cardinality_error(actual: usize, expected: usize) -> std::io::Error {
+    vfsi_core::internal::errors::invalid_reply(format!(
+        "SMB compound returned {actual} responses, expected {expected}"
+    ))
 }
 
 #[cfg(test)]
@@ -989,17 +997,25 @@ pub(super) fn collect_compound(
         .collect()
 }
 
-pub(super) fn smb_error(error: SmbError, index: impl Into<Option<usize>>) -> VfError {
-    let index = index.into();
+pub(super) fn smb_error(error: SmbError, index: impl Into<Option<usize>>) -> std::io::Error {
+    let _index = index.into();
     if let SmbError::DfsReferralRequired { path }
     | SmbError::DfsTargetNotAllowed { path, .. }
     | SmbError::DfsTargetUnreachable { path, .. } = &error
     {
-        return VfError::smb(index, NtStatus::PATH_NOT_COVERED.0)
-            .with_context("SMB DFS referral", path);
+        return vfsi_core::internal::errors::with_context(
+            vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Smb(
+                NtStatus::PATH_NOT_COVERED.0,
+            )),
+            "SMB DFS referral",
+            path,
+        );
     }
     if let Some(status) = error.status() {
-        return VfError::smb(index, status.0).with_message(error.to_string());
+        return vfsi_core::internal::errors::with_message(
+            vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Smb(status.0)),
+            error.to_string(),
+        );
     }
     use vfsi_core::TransportKind as T;
     let kind = match error.kind() {
@@ -1011,16 +1027,19 @@ pub(super) fn smb_error(error: SmbError, index: impl Into<Option<usize>>) -> VfE
         | SmbErrorKind::NegotiateValidationFailed => T::Auth,
         SmbErrorKind::InvalidData => T::InvalidReply,
         SmbErrorKind::Unsupported => {
-            return VfError::unsupported(index).with_message(error.to_string());
+            return vfsi_core::internal::errors::with_message(
+                std::io::Error::from(std::io::ErrorKind::Unsupported),
+                error.to_string(),
+            );
         }
         _ => T::Other,
     };
-    VfError::transport_with_kind(index, kind, error.to_string())
+    vfsi_core::internal::errors::transport(kind, error.to_string())
 }
 
-pub(super) fn validate_create_mode(flags: i32, mode: u32, index: usize) -> VfResult<()> {
+pub(super) fn validate_create_mode(flags: i32, mode: u32, _index: usize) -> VfResult<()> {
     if flags & libc::O_CREAT != 0 && mode & 0o7777 != 0o666 {
-        return Err(VfError::unsupported(index));
+        return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
     }
     Ok(())
 }
@@ -1035,7 +1054,7 @@ pub(super) fn validate_open_modes(flags: &[i32], modes: &[u32]) -> VfRes {
 
 pub(super) fn validate_mkdir_mode(attrs: &VfAttrs) -> VfRes {
     if attrs.masks.contains(AttrMask::MODE) && attrs.mode & 0o7777 != 0o777 {
-        Err(VfError::unsupported(None))
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     } else {
         Ok(())
     }
@@ -1043,8 +1062,8 @@ pub(super) fn validate_mkdir_mode(attrs: &VfAttrs) -> VfRes {
 
 #[cfg(test)]
 pub(super) fn validate_mkdir_modes(dirs: &[VfAttrs]) -> VfRes {
-    for (index, dir) in dirs.iter().enumerate() {
-        validate_mkdir_mode(dir).map_err(|error| error.with_index(index))?;
+    for dir in dirs.iter() {
+        validate_mkdir_mode(dir)?;
     }
     Ok(())
 }
