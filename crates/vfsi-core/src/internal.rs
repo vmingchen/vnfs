@@ -545,3 +545,12 @@ pub fn add_write_prefix(
         FailureState::NotAttempted => OpError::not_attempted(cause),
     }
 }
+
+/// Index-free cause construction and adapter diagnostics. These implementation
+/// seams are not an application-facing replacement for std::io::Error.
+pub mod errors {
+    pub use crate::error::standard::{
+        fanout, from_rpc, from_status, invalid_reply, message, operation, path, to_errno,
+        transport, with_context, with_message,
+    };
+}

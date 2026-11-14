@@ -357,87 +357,13 @@ impl VfError {
             ErrorDetail::Transport(TransportKind::InvalidReply) => K::InvalidData,
             ErrorDetail::Transport(TransportKind::Auth) => K::PermissionDenied,
             ErrorDetail::Transport(_) => K::Other,
-            ErrorDetail::Status(StatusCode::Errno(code)) => {
-                std::io::Error::from_raw_os_error(code as i32).kind()
-            }
-            ErrorDetail::Status(StatusCode::Nfs(code)) => match code {
-                1 | 13 | 10016 => K::PermissionDenied,
-                2 => K::NotFound,
-                17 => K::AlreadyExists,
-                18 => K::CrossesDevices,
-                20 => K::NotADirectory,
-                21 => K::IsADirectory,
-                22 => K::InvalidInput,
-                27 => K::FileTooLarge,
-                28 => K::StorageFull,
-                30 => K::ReadOnlyFilesystem,
-                31 => K::TooManyLinks,
-                63 => K::InvalidFilename,
-                66 => K::DirectoryNotEmpty,
-                69 => K::QuotaExceeded,
-                70 => K::StaleNetworkFileHandle,
-                10004 | 10019 | 10032 => K::Unsupported,
-                10008 => K::WouldBlock,
-                _ => K::Other,
-            },
-            ErrorDetail::Status(StatusCode::Smb(code)) => match code {
-                0xc000_0022 | 0xc000_006d | 0xc000_006a | 0xc000_006e | 0xc000_0071
-                | 0xc000_0072 | 0xc000_0234 | 0xc000_006f | 0xc000_0070 | 0xc000_0193
-                | 0xc000_0224 => K::PermissionDenied,
-                0xc000_000f | 0xc000_0034 | 0xc000_003a | 0xc000_00cc => K::NotFound,
-                0xc000_0035 => K::AlreadyExists,
-                0xc000_000d => K::InvalidInput,
-                0xc000_0033 | 0xc000_0106 => K::InvalidFilename,
-                0xc000_0043 | 0xc000_0054 => K::ResourceBusy,
-                0xc000_007f => K::StorageFull,
-                0xc000_0044 => K::QuotaExceeded,
-                0xc000_00a2 => K::ReadOnlyFilesystem,
-                0xc000_0002 | 0xc000_0010 | 0xc000_00bb | 0xc000_0257 => K::Unsupported,
-                0xc000_0101 => K::DirectoryNotEmpty,
-                0xc000_0103 => K::NotADirectory,
-                0xc000_00ba => K::IsADirectory,
-                0xc000_00d4 => K::CrossesDevices,
-                _ => K::Other,
-            },
+            ErrorDetail::Status(status) => status_kind(status),
         }
     }
 
     /// Lossy OS errno for language/legacy boundaries. Native status stays intact.
     pub fn to_errno(&self) -> i32 {
-        if let Some(StatusCode::Errno(code)) = self.status() {
-            return code as i32;
-        }
-        use std::io::ErrorKind as K;
-        match self.kind() {
-            K::NotFound => libc::ENOENT,
-            K::PermissionDenied => libc::EACCES,
-            K::AlreadyExists => libc::EEXIST,
-            K::NotADirectory => libc::ENOTDIR,
-            K::IsADirectory => libc::EISDIR,
-            K::DirectoryNotEmpty => libc::ENOTEMPTY,
-            K::InvalidInput => libc::EINVAL,
-            K::InvalidData => libc::EBADMSG,
-            K::InvalidFilename => libc::ENAMETOOLONG,
-            K::Unsupported => libc::EOPNOTSUPP,
-            K::TimedOut => libc::ETIMEDOUT,
-            K::WouldBlock => libc::EAGAIN,
-            K::Interrupted => libc::EINTR,
-            K::StorageFull => libc::ENOSPC,
-            K::QuotaExceeded => libc::EDQUOT,
-            K::StaleNetworkFileHandle => libc::ESTALE,
-            K::FileTooLarge => libc::EFBIG,
-            K::ReadOnlyFilesystem => libc::EROFS,
-            K::ResourceBusy => libc::EBUSY,
-            K::CrossesDevices => libc::EXDEV,
-            K::TooManyLinks => libc::EMLINK,
-            K::OutOfMemory => libc::ENOMEM,
-            K::BrokenPipe => libc::EPIPE,
-            K::ConnectionRefused => libc::ECONNREFUSED,
-            K::ConnectionReset => libc::ECONNRESET,
-            K::ConnectionAborted => libc::ECONNABORTED,
-            K::NotConnected => libc::ENOTCONN,
-            _ => libc::EIO,
-        }
+        errno_for(self.kind(), self.status())
     }
 }
 
@@ -544,3 +470,90 @@ impl From<VfError> for std::io::Error {
 }
 pub type VfResult<T> = Result<T, VfError>;
 pub type VfRes = VfResult<()>;
+
+pub(crate) fn status_kind(status: StatusCode) -> std::io::ErrorKind {
+    use std::io::ErrorKind as K;
+    match status {
+        StatusCode::Errno(code) => std::io::Error::from_raw_os_error(code as i32).kind(),
+        StatusCode::Nfs(code) => match code {
+            1 | 13 | 10016 => K::PermissionDenied,
+            2 => K::NotFound,
+            17 => K::AlreadyExists,
+            18 => K::CrossesDevices,
+            20 => K::NotADirectory,
+            21 => K::IsADirectory,
+            22 => K::InvalidInput,
+            27 => K::FileTooLarge,
+            28 => K::StorageFull,
+            30 => K::ReadOnlyFilesystem,
+            31 => K::TooManyLinks,
+            63 => K::InvalidFilename,
+            66 => K::DirectoryNotEmpty,
+            69 => K::QuotaExceeded,
+            70 => K::StaleNetworkFileHandle,
+            10004 | 10019 | 10032 => K::Unsupported,
+            10008 => K::WouldBlock,
+            _ => K::Other,
+        },
+        StatusCode::Smb(code) => match code {
+            0xc000_0022 | 0xc000_006d | 0xc000_006a | 0xc000_006e | 0xc000_0071 | 0xc000_0072
+            | 0xc000_0234 | 0xc000_006f | 0xc000_0070 | 0xc000_0193 | 0xc000_0224 => {
+                K::PermissionDenied
+            }
+            0xc000_000f | 0xc000_0034 | 0xc000_003a | 0xc000_00cc => K::NotFound,
+            0xc000_0035 => K::AlreadyExists,
+            0xc000_000d => K::InvalidInput,
+            0xc000_0033 | 0xc000_0106 => K::InvalidFilename,
+            0xc000_0043 | 0xc000_0054 => K::ResourceBusy,
+            0xc000_007f => K::StorageFull,
+            0xc000_0044 => K::QuotaExceeded,
+            0xc000_00a2 => K::ReadOnlyFilesystem,
+            0xc000_0002 | 0xc000_0010 | 0xc000_00bb | 0xc000_0257 => K::Unsupported,
+            0xc000_0101 => K::DirectoryNotEmpty,
+            0xc000_0103 => K::NotADirectory,
+            0xc000_00ba => K::IsADirectory,
+            0xc000_00d4 => K::CrossesDevices,
+            _ => K::Other,
+        },
+    }
+}
+
+pub(crate) fn errno_for(kind: std::io::ErrorKind, status: Option<StatusCode>) -> i32 {
+    if let Some(StatusCode::Errno(code)) = status {
+        return code as i32;
+    }
+    use std::io::ErrorKind as K;
+    match kind {
+        K::NotFound => libc::ENOENT,
+        K::PermissionDenied => libc::EACCES,
+        K::AlreadyExists => libc::EEXIST,
+        K::NotADirectory => libc::ENOTDIR,
+        K::IsADirectory => libc::EISDIR,
+        K::DirectoryNotEmpty => libc::ENOTEMPTY,
+        K::InvalidInput => libc::EINVAL,
+        K::InvalidData => libc::EBADMSG,
+        K::InvalidFilename => libc::ENAMETOOLONG,
+        K::Unsupported => libc::EOPNOTSUPP,
+        K::TimedOut => libc::ETIMEDOUT,
+        K::WouldBlock => libc::EAGAIN,
+        K::Interrupted => libc::EINTR,
+        K::StorageFull => libc::ENOSPC,
+        K::QuotaExceeded => libc::EDQUOT,
+        K::StaleNetworkFileHandle => libc::ESTALE,
+        K::FileTooLarge => libc::EFBIG,
+        K::ReadOnlyFilesystem => libc::EROFS,
+        K::ResourceBusy => libc::EBUSY,
+        K::CrossesDevices => libc::EXDEV,
+        K::TooManyLinks => libc::EMLINK,
+        K::OutOfMemory => libc::ENOMEM,
+        K::BrokenPipe => libc::EPIPE,
+        K::ConnectionRefused => libc::ECONNREFUSED,
+        K::ConnectionReset => libc::ECONNRESET,
+        K::ConnectionAborted => libc::ECONNABORTED,
+        K::NotConnected => libc::ENOTCONN,
+        _ => libc::EIO,
+    }
+}
+
+pub(crate) mod standard;
+pub use standard::{native_status, transport_kind};

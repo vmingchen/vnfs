@@ -28,7 +28,9 @@ mod types;
 mod write;
 pub use write::WriteOp;
 
-pub use error::{RpcError, RpcResult, STATUS_TRANSPORT, TransportKind};
+pub use error::{
+    RpcError, RpcResult, STATUS_TRANSPORT, TransportKind, native_status, transport_kind,
+};
 pub use types::*;
 
 /// Portable application contracts, operations, options, and extension workflows.

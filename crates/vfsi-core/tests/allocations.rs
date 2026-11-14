@@ -653,3 +653,39 @@ fn simple_native_causes_and_moving_read_progress_do_not_allocate() {
     };
     assert_eq!(read.data().unwrap().as_ptr(), pointer);
 }
+
+#[test]
+fn standard_simple_causes_singleton_moves_and_context_updates_avoid_boxing() {
+    use vfsi_core::{StatusCode, internal::errors};
+    let (causes, allocations) = measured(|| {
+        [
+            errors::from_status(StatusCode::Errno(libc::ENOENT as u32)),
+            std::io::ErrorKind::Unsupported.into(),
+        ]
+    });
+    assert_eq!(allocations, 0);
+    let cause = causes.into_iter().next().unwrap();
+    let (mut errors, allocations) = measured(|| errors::fanout(cause, 1));
+    assert_eq!(allocations, 0);
+    let (_, allocations) = measured(|| errors.next().unwrap());
+    assert_eq!(allocations, 0);
+    let error = errors::with_context(errors::from_status(StatusCode::Nfs(13)), "vread", "/file");
+    let (_, allocations) = measured(|| errors::with_message(error, "detail"));
+    assert_eq!(
+        allocations, 0,
+        "updating existing context must not rebox it"
+    );
+}
+
+#[test]
+fn standard_protocol_payloads_use_only_their_required_boxing() {
+    use vfsi_core::{StatusCode, internal::errors};
+    for status in [StatusCode::Nfs(13), StatusCode::Smb(0xc000_0022)] {
+        let (cause, allocations) = measured(|| errors::from_status(status));
+        assert!(
+            allocations <= 2,
+            "extra protocol-error storage: {allocations}"
+        );
+        assert_eq!(vfsi_core::native_status(&cause), Some(status));
+    }
+}
