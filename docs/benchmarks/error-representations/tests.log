@@ -1,0 +1,12 @@
+   Compiling vferror-comparison v0.0.0 (/home/ubuntu/vnfs02/benchmarks/error-representations)
+    Finished `test` profile [unoptimized] target(s) in 0.69s
+     Running unittests src/main.rs (/tmp/vnfs02-boundary-compact-target.Df6hFsst/debug/deps/vferror_comparison-9ff68547d653aed4)
+
+running 5 tests
+test tests::arbitrary_io_payload_is_not_silently_cloned_or_dropped ... ok
+test tests::certainty_progress_and_attribution_are_separate_from_cause ... ok
+test tests::contextual_source_and_path_survive_reconstruction ... ok
+test tests::portable_categories_and_native_namespaces_survive ... ok
+test tests::real_posix_and_ring_shapes_preserve_work_and_errors ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s

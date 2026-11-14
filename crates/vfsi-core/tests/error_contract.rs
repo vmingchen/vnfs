@@ -81,3 +81,71 @@ fn rpc_transport_categories_do_not_change_when_remapping_indices() {
     assert_eq!(error.index(), None);
     assert_eq!(error.kind(), K::InvalidData);
 }
+
+#[test]
+fn opaque_nonclone_source_is_retained_until_its_final_owner_drops() {
+    use std::{
+        error::Error,
+        fmt,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+    #[derive(Debug)]
+    struct Opaque(Arc<AtomicUsize>);
+    impl fmt::Display for Opaque {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("opaque cause")
+        }
+    }
+    impl Error for Opaque {}
+    impl Drop for Opaque {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let drops = Arc::new(AtomicUsize::new(0));
+    let source = std::io::Error::new(K::TimedOut, Opaque(drops.clone()));
+    let cause = VfError::from_io(None, source).with_context("vread", "/opaque");
+    let error = vfsi_core::OpError::unknown(cause, None);
+    let (cause, state, progress) = error.into_parts();
+    assert_eq!(state, vfsi_core::FailureState::Unknown);
+    assert!(progress.is_none());
+    assert_eq!(cause.kind(), K::TimedOut);
+    assert!(
+        !cause.is_transport(),
+        "an OS category is not RPC provenance"
+    );
+    let source = cause
+        .source()
+        .unwrap()
+        .downcast_ref::<std::io::Error>()
+        .unwrap();
+    assert!(source.get_ref().unwrap().is::<Opaque>());
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    drop(cause);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn context_does_not_change_native_domain_or_transport_provenance() {
+    for cause in [
+        VfError::nfs(None, 13),
+        VfError::smb(None, 0xc000_0022),
+        VfError::errno(None, libc::EACCES as u32),
+        VfError::transport_with_kind(None, TransportKind::Timeout, "RPC deadline"),
+    ] {
+        let facts = (cause.kind(), cause.status(), cause.transport_kind());
+        let cause = cause
+            .with_context("first", "/first")
+            .with_context("second", "/second")
+            .with_message("detail");
+        assert_eq!(
+            (cause.kind(), cause.status(), cause.transport_kind()),
+            facts
+        );
+        assert_eq!(cause.path(), Some(std::path::Path::new("/second")));
+        assert_eq!(cause.operation(), Some("second"));
+    }
+}

@@ -628,3 +628,28 @@ fn normalized_deep_paths_allocate_output_once_at_the_final_size() {
         "returned paths must not retain geometric growth slack"
     );
 }
+
+#[test]
+fn simple_native_causes_and_moving_read_progress_do_not_allocate() {
+    use vfsi_core::{IoProgress, OpError, VfError};
+    let (causes, allocations) = measured(|| {
+        [
+            VfError::errno(None, libc::ENOENT as u32),
+            VfError::from_kind(None, std::io::ErrorKind::Unsupported),
+        ]
+    });
+    assert_eq!(allocations, 0);
+    drop(causes);
+    let bytes = vec![1, 2, 3];
+    let pointer = bytes.as_ptr();
+    let error = OpError::failed(
+        VfError::errno(None, libc::EIO as u32),
+        Some(IoProgress::Read(ReadResult::owned(4, bytes, false))),
+    );
+    let ((_, _, progress), allocations) = measured(|| error.into_parts());
+    assert_eq!(allocations, 0);
+    let Some(IoProgress::Read(read)) = progress else {
+        panic!("missing prefix")
+    };
+    assert_eq!(read.data().unwrap().as_ptr(), pointer);
+}

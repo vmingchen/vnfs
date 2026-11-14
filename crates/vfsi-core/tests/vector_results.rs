@@ -259,3 +259,64 @@ fn accepted_subgroup_normalization_retains_known_owners_and_quarantines_bad_coun
             .all(|result| result.as_ref().err().unwrap().state() == FailureState::NotAttempted)
     );
 }
+
+#[test]
+fn selected_attribution_distinguishes_outer_rejection_from_input_zero() {
+    use vfsi_core::internal::collect_vec_result;
+    let outer = collect_vec_result::<()>(Err(VfError::unsupported(None)), 1).unwrap_err();
+    assert_eq!(outer.index(), None);
+    let selected = collect_vec_result::<()>(
+        Ok(vec![Err(OpError::not_attempted(VfError::unsupported(
+            None,
+        )))]),
+        1,
+    )
+    .unwrap_err();
+    assert_eq!(selected.index(), Some(0));
+    assert_eq!(selected.map_index(|index| index + 7).index(), Some(7));
+    assert_eq!(outer.map_index(|index| index + 7).index(), None);
+}
+
+#[test]
+fn accepted_rejection_fanout_keeps_the_original_opaque_source_alive() {
+    use std::{
+        error::Error,
+        fmt,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+    #[derive(Debug)]
+    struct Opaque(Arc<AtomicUsize>);
+    impl fmt::Display for Opaque {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("group failure")
+        }
+    }
+    impl Error for Opaque {}
+    impl Drop for Opaque {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let drops = Arc::new(AtomicUsize::new(0));
+    let cause = VfError::from_io(None, std::io::Error::other(Opaque(drops.clone())));
+    let mut slots = vfsi_core::internal::vec_result_slots::<()>(Err(cause), 3);
+    for slot in &slots {
+        let error = slot.as_ref().unwrap_err();
+        assert_eq!(error.state(), FailureState::NotAttempted);
+        let original = error
+            .cause()
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        assert!(original.get_ref().unwrap().is::<Opaque>());
+    }
+    let last = slots.pop().unwrap();
+    drop(slots);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    drop(last);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
