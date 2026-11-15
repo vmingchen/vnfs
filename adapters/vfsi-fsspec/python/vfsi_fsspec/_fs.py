@@ -1536,8 +1536,7 @@ class VfsiFile(AbstractBufferedFile):
     def size(self, value):
         self._buffer_size = value
 
-    def _attach_group(self, group):
-        self._buffer_group = group
+    def _initialize_read_cache(self):
         if self._deferred_cache_type is not None:
             cache_type = self._deferred_cache_type
             self._deferred_cache_type = None
@@ -1548,6 +1547,10 @@ class VfsiFile(AbstractBufferedFile):
                 self.size,
                 **self._cache_options,
             )
+
+    def _attach_group(self, group):
+        self._buffer_group = group
+        self._initialize_read_cache()
         if self._buffered_write:
             threshold = max(
                 1,
@@ -4912,23 +4915,45 @@ class VfsiFileSystem(AbstractFileSystem):
 
     # -- batched local <-> remote transfer --------------------------------
 
-    def get_file(
-        self, rpath, lpath=None, callback=DEFAULT_CALLBACK, outfile=None, **kwargs
-    ):
-        """Download with bounded reads, complete writes, and owned cleanup."""
-        from fsspec.implementations.local import LocalFileSystem
-        from fsspec.utils import isfilelike
+    def _open_transfer_file(self, path, mode, input_index, **open_kwargs):
+        def open_native(path, native_mode, **kwargs):
+            try:
+                file = self.open(path, native_mode, _defer_cache=True, **kwargs)
+            except Exception as error:
+                _rebase_error(error, [input_index], [path])
+                raise
+            # Configurable cache factories are application code, like codecs.
+            if isinstance(file, VfsiFile):
+                try:
+                    file._initialize_read_cache()
+                except BaseException as error:
+                    _close_reader_on_exit(file, type(error), error, error.__traceback__)
+                    raise
+            return file
 
-        internal = self._checked_strip_protocol(rpath)
-        callback = Callback.as_callback(callback)
-        if outfile is None and isfilelike(lpath):
-            outfile = lpath
-        elif outfile is None and self.isdir(internal):
-            os.makedirs(lpath, exist_ok=True)
-            return
-        kwargs.setdefault("cache_type", "none")
+        # Codec construction is application code; only the bare OPEN is indexed.
+        return _open_with_wrappers(self, open_native, path, mode, **open_kwargs)
+
+    def _download_file_streamed(
+        self,
+        internal,
+        lpath,
+        callback,
+        *,
+        outfile=None,
+        input_index=None,
+        **open_kwargs,
+    ):
+        from fsspec.implementations.local import LocalFileSystem
+
+        open_kwargs.setdefault("cache_type", "none")
         with ExitStack() as stack:
-            remote = self.open(internal, "rb", **kwargs)
+            if input_index is None:
+                remote = self.open(internal, "rb", **open_kwargs)
+            else:
+                remote = self._open_transfer_file(
+                    internal, "rb", input_index, **open_kwargs
+                )
             stack.push(partial(_close_reader_on_exit, remote))
             callback.set_size(getattr(remote, "size", None))
             if outfile is None:
@@ -4939,6 +4964,23 @@ class VfsiFileSystem(AbstractFileSystem):
                 internal, outfile, on_progress=callback.relative_update, source=remote
             )
 
+    def get_file(
+        self, rpath, lpath=None, callback=DEFAULT_CALLBACK, outfile=None, **kwargs
+    ):
+        """Download with bounded reads, complete writes, and owned cleanup."""
+        from fsspec.utils import isfilelike
+
+        internal = self._checked_strip_protocol(rpath)
+        callback = Callback.as_callback(callback)
+        if outfile is None and isfilelike(lpath):
+            outfile = lpath
+        elif outfile is None and self.isdir(internal):
+            os.makedirs(lpath, exist_ok=True)
+            return
+        self._download_file_streamed(
+            internal, lpath, callback, outfile=outfile, **kwargs
+        )
+
     def get(
         self,
         rpath,
@@ -4948,9 +4990,19 @@ class VfsiFileSystem(AbstractFileSystem):
         maxdepth=None,
         **kwargs,
     ):
-        """Copy remote files to local, fetching every file in one read_allv
-        batch instead of one round trip per file."""
+        """Batch plain downloads; stream files with explicit open options."""
         callback = Callback.as_callback(callback)
+        if kwargs:
+            for option in (
+                "compression",
+                "block_size",
+                "cache_type",
+                "cache_options",
+                "write_buffering",
+                "size",
+            ):
+                if kwargs.get(option, True) is None:
+                    kwargs.pop(option)
         from fsspec.implementations.local import (
             LocalFileSystem,
             make_path_posix,
@@ -5009,6 +5061,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 flatten=not source_is_str,
             )
 
+        kwargs.pop("assume_literal", None)
         callback.set_size(len(lpaths))
         local = LocalFileSystem(auto_mkdir=True)
         if pre_stats is not None:
@@ -5034,6 +5087,18 @@ class VfsiFileSystem(AbstractFileSystem):
                     )
                 )
         if not pairs:
+            return
+        if kwargs:
+            for remote_path, local_path, _, public_index in pairs:
+                with callback.branched(remote_path, local_path) as child:
+                    self._download_file_streamed(
+                        self._checked_strip_protocol(remote_path),
+                        local_path,
+                        child,
+                        input_index=public_index,
+                        **kwargs,
+                    )
+                callback.relative_update()
             return
         read_batch_bytes = min(self.max_batch_bytes, self.read_all_max_total_bytes)
         for batch in _bounded_batches(
@@ -5092,7 +5157,7 @@ class VfsiFileSystem(AbstractFileSystem):
         mode,
         callback,
         *,
-        size=None,
+        source_size=None,
         create_parents=False,
         input_index=None,
         **open_kwargs,
@@ -5104,18 +5169,24 @@ class VfsiFileSystem(AbstractFileSystem):
         with ExitStack() as stack:
             source = stack.enter_context(open(local_path, "rb"))
             callback.set_size(
-                os.fstat(source.fileno()).st_size if size is None else size
+                os.fstat(source.fileno()).st_size
+                if source_size is None
+                else source_size
             )
-            try:
-                if create_parents:
+            if create_parents:
+                try:
                     self._ensure_dirs([posixpath.dirname(internal) or "/"])
-                remote = self.open(
-                    internal, "xb" if mode == "create" else "wb", **open_kwargs
+                except Exception as error:
+                    if input_index is not None:
+                        _rebase_error(error, [input_index], [internal])
+                    raise
+            native_mode = "xb" if mode == "create" else "wb"
+            if input_index is None:
+                remote = self.open(internal, native_mode, **open_kwargs)
+            else:
+                remote = self._open_transfer_file(
+                    internal, native_mode, input_index, **open_kwargs
                 )
-            except Exception as error:
-                if input_index is not None:
-                    _rebase_error(error, [input_index], [internal])
-                raise
             stack.push(partial(_close_reader_on_exit, remote))
             while True:
                 chunk = source.read(min(self.transfer_chunk_size, self.max_batch_bytes))
@@ -5148,9 +5219,19 @@ class VfsiFileSystem(AbstractFileSystem):
         maxdepth=None,
         **kwargs,
     ):
-        """Copy local files to remote, writing every file in one writev batch
-        instead of one round trip per file."""
-        mode = kwargs.get("mode", "overwrite")
+        """Batch plain uploads; stream files with explicit open options."""
+        mode = kwargs.pop("mode", "overwrite")
+        if kwargs:
+            for option in (
+                "compression",
+                "block_size",
+                "cache_type",
+                "cache_options",
+                "write_buffering",
+                "size",
+            ):
+                if kwargs.get(option, True) is None:
+                    kwargs.pop(option)
         _validate_write_mode(mode)
         callback = Callback.as_callback(callback)
         from fsspec.implementations.local import (
@@ -5199,6 +5280,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 flatten=not source_is_str,
             )
 
+        kwargs.pop("assume_literal", None)
         callback.set_size(len(rpaths))
         pairs = []
         remote_dirs = []
@@ -5234,8 +5316,9 @@ class VfsiFileSystem(AbstractFileSystem):
                     remote_path,
                     mode,
                     child,
-                    size=size,
+                    source_size=size,
                     input_index=public_index,
+                    **kwargs,
                 )
             callback.relative_update()
 
@@ -5257,6 +5340,10 @@ class VfsiFileSystem(AbstractFileSystem):
                     child.relative_update(len(data))
                 callback.relative_update()
 
+        if kwargs:
+            for (local_path, remote_path, public_index), size in zip(pairs, sizes):
+                upload_streamed(local_path, remote_path, size, public_index)
+            return
         for batch in _bounded_batches(sizes, self.batch_size, self.max_batch_bytes):
             if len(batch) == 1 and sizes[batch[0]] > self.max_batch_bytes:
                 i = batch[0]
@@ -5296,6 +5383,7 @@ class VfsiFileSystem(AbstractFileSystem):
         cache_options=None,
         write_buffering=None,
         size=None,
+        _defer_cache=False,
         **kwargs,
     ):
         internal = self._checked_strip_protocol(path)
@@ -5341,6 +5429,7 @@ class VfsiFileSystem(AbstractFileSystem):
                     else bool(write_buffering)
                 ),
                 size=size,
+                defer_cache=_defer_cache,
                 identity=identity,
             )
             return file
