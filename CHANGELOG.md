@@ -3,6 +3,27 @@
 This project follows [Semantic Versioning](https://semver.org/) for the
 `nfs4fs` package. Rust crate and C ABI versions are tracked independently.
 
+## 2026-11-15 — buffered I/O and failure-boundary fixes
+
+Rust releases: vnfs 0.0.37; vfsi-core/vfsi-sync and local/POSIX/io_uring/NFS/SMB
+backends 0.3.1; vfsi-c 0.3.21. Python: nfs4fs 0.3.17, vfsi-fsspec 0.1.16,
+vsmb 0.1.11 and vsmbfs 0.1.10. C ABI remains v3; nfsv41-sys and
+libntirpc-sys retain their existing versions.
+
+- Rename Rust ReadResult/WriteResult payloads to ReadOutput/WriteOutput.
+- Reject byte progress in metadata/statistics failures and preserve primary
+  callback and transaction failures during cleanup.
+- Protect configured NFS namespace roots from directory-entry mutations.
+- Pin sparse persistent-cache reads to opened identities, retain bounded vector
+  fetches, and support Unix filenames containing undecodable bytes.
+- Prevent local staging failures from replaying buffered writes; preserve
+  original input indices through preflight, recovery and mixed transfer cohorts.
+- Honor bulk-transfer compression and file-open options while retaining vector
+  fast paths for ordinary transfers and recursive traversal controls.
+- Enforce cached traversal depth limits and closed-file/shutdown checks.
+- Default local test runners to fast unit/fault coverage, preserving explicit
+  full CI coverage and focused tests for other layers.
+
 ## 2026-11-15 — standard I/O error causes
 
 Rust releases: vnfs 0.0.36; vfsi-core/vfsi-sync and local/POSIX/io_uring/NFS/SMB
