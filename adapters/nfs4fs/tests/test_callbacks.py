@@ -225,3 +225,76 @@ def test_callback_smoke_on_network_backends(request, fs_fixture, tmp_path):
     fs.get("/callback/upload", str(target), callback=get_callback)
     _assert_complete(get_callback, 1)
     assert target.read_bytes() == b"transfer"
+
+
+@pytest.mark.parametrize("large", [False, True])
+@pytest.mark.parametrize("on_error", ["raise", "return", "omit"])
+@pytest.mark.parametrize("stage", ["branch", "enter", "size", "update", "exit"])
+def test_cat_callback_oserror_is_not_a_file_error(dummy_fs, large, on_error, stage):
+    import errno
+
+    cause = PermissionError(errno.EACCES, "callback failure")
+    dummy_fs.pipe_file("/payload", b"data")
+    dummy_fs.max_batch_bytes = 1 if large else 16
+    dummy_fs.transfer_chunk_size = 2
+
+    class Child(Callback):
+        def __enter__(self):
+            if stage == "enter":
+                raise cause
+            return self
+
+        def __exit__(self, *args):
+            if stage == "exit":
+                raise cause
+
+        def set_size(self, size):
+            if stage == "size":
+                raise cause
+            super().set_size(size)
+
+        def relative_update(self, increment=1):
+            if stage == "update":
+                raise cause
+            super().relative_update(increment)
+
+    class Parent(Callback):
+        def branched(self, *args, **kwargs):
+            if stage == "branch":
+                raise cause
+            return Child()
+
+    with pytest.raises(PermissionError) as caught:
+        dummy_fs.cat(["/payload"], on_error=on_error, callback=Parent())
+    assert caught.value is cause
+    assert not hasattr(cause, "index"), "callback failures have no source-file slot"
+    assert not dummy_fs._client._fds
+
+
+@pytest.mark.parametrize("large", [False, True])
+@pytest.mark.parametrize("on_error", ["raise", "return", "omit"])
+def test_cat_real_read_errors_keep_per_file_policy(dummy_fs, large, on_error):
+    import errno
+
+    dummy_fs.pipe_file("/denied", b"data")
+    dummy_fs.max_batch_bytes = 1 if large else 16
+    dummy_fs.transfer_chunk_size = 2
+    native_path = dummy_fs._native_path("/denied")
+    dummy_fs._client.chmod(native_path, 0)
+    try:
+        if on_error == "raise":
+            with pytest.raises(PermissionError) as caught:
+                dummy_fs.cat(["/denied"], on_error=on_error)
+            error = caught.value
+        else:
+            result = dummy_fs.cat(["/denied"], on_error=on_error)
+            if on_error == "omit":
+                assert result == {}
+                return
+            error = result["/denied"]
+        assert isinstance(error, PermissionError)
+        assert error.errno == errno.EACCES
+        assert error.index == 0
+    finally:
+        dummy_fs._client.chmod(native_path, 0o600)
+    assert not dummy_fs._client._fds

@@ -338,7 +338,7 @@ def _enter_individually(open_files):
     return entered
 
 
-def _write_fully(file, data, callback=None, *, none_is_full=False):
+def _write_fully(file, data, on_progress=None, *, none_is_full=False):
     """Finish a chunk without treating a valid short write as completion."""
     offset = 0
     while offset < len(data):
@@ -348,8 +348,8 @@ def _write_fully(file, data, callback=None, *, none_is_full=False):
         if written <= 0 or written > len(data) - offset:
             raise OSError(errno.EIO, "invalid progress during streamed write")
         offset += written
-        if callback is not None:
-            callback.relative_update(written)
+        if on_progress is not None:
+            on_progress(written)
 
 
 class _TextIOWrapper(PickleableTextIOWrapper):
@@ -4084,22 +4084,37 @@ class VfsiFileSystem(AbstractFileSystem):
 
         def read_streamed(index, size, budget):
             nonlocal retained
-            try:
-                with callback.branched(paths[index], _MEMORY_PATH) as child:
-                    child.set_size(size)
+            # Callback setup/exit are application code, not per-file I/O errors.
+            with callback.branched(paths[index], _MEMORY_PATH) as child:
+                child.set_size(size)
+                callback_error = None
+
+                def progress(written):
+                    nonlocal callback_error
+                    try:
+                        child.relative_update(written)
+                    except OSError as error:
+                        callback_error = error
+                        raise
+
+                try:
                     value = self._read_one_streamed(
                         paths[index],
-                        callback=child,
+                        on_progress=progress,
                         max_bytes=budget,
                         allocation_base=retained,
                         allocation_limit=limit,
                     )
-                if retained + len(value) > limit:
-                    raise _allocation_error(paths[index], retained + len(value), limit)
-                data[index] = value
-                retained += len(value)
-            except OSError as exc:
-                failures[index] = _oserror(exc, paths[index], index=index)
+                    if retained + len(value) > limit:
+                        raise _allocation_error(
+                            paths[index], retained + len(value), limit
+                        )
+                    data[index] = value
+                    retained += len(value)
+                except OSError as exc:
+                    if exc is callback_error:
+                        raise
+                    failures[index] = _oserror(exc, paths[index], index=index)
             callback.relative_update()
             reported.add(index)
 
@@ -4173,7 +4188,7 @@ class VfsiFileSystem(AbstractFileSystem):
     def _read_one_streamed(
         self,
         path,
-        callback=DEFAULT_CALLBACK,
+        on_progress=None,
         max_bytes=None,
         allocation_base=0,
         allocation_limit=None,
@@ -4183,7 +4198,7 @@ class VfsiFileSystem(AbstractFileSystem):
         self._copy_remote_to_fileobj(
             path,
             output,
-            callback=callback,
+            on_progress=on_progress,
             max_bytes=max_bytes,
             allocation_base=allocation_base,
             allocation_limit=allocation_limit,
@@ -4509,6 +4524,7 @@ class VfsiFileSystem(AbstractFileSystem):
     def _write_one_streamed(self, path, value, callback=None, mode="wb"):
         """Write one in-memory value through the existing scalar/deferred path."""
         view = memoryview(value)
+        on_progress = callback.relative_update if callback is not None else None
         with ExitStack() as stack:
             remote = self.open(path, mode)
             stack.push(partial(_close_reader_on_exit, remote))
@@ -4516,7 +4532,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 _write_fully(
                     remote,
                     bytes(view[offset : offset + self.transfer_chunk_size]),
-                    callback=callback,
+                    on_progress=on_progress,
                 )
 
     def _write_one_exclusive(self, path, value, callback=None):
@@ -4557,7 +4573,7 @@ class VfsiFileSystem(AbstractFileSystem):
         self,
         path,
         output,
-        callback=None,
+        on_progress=None,
         max_bytes=None,
         allocation_base=0,
         allocation_limit=None,
@@ -4600,7 +4616,7 @@ class VfsiFileSystem(AbstractFileSystem):
                     raise _allocation_error(
                         path, allocation_base + streamed + len(chunk), limit
                     )
-                _write_fully(output, chunk, callback=callback, none_is_full=True)
+                _write_fully(output, chunk, on_progress=on_progress, none_is_full=True)
                 streamed += len(chunk)
 
     def pipe(self, path, value=None, callback=DEFAULT_CALLBACK, **kwargs):
@@ -4662,7 +4678,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 local.makedirs(local._parent(lpath), exist_ok=True)
                 outfile = stack.enter_context(open(lpath, "wb"))
             self._copy_remote_to_fileobj(
-                internal, outfile, callback=callback, source=remote
+                internal, outfile, on_progress=callback.relative_update, source=remote
             )
 
     def get(
@@ -4777,7 +4793,10 @@ class VfsiFileSystem(AbstractFileSystem):
                         stack.push(partial(_close_reader_on_exit, remote))
                         with open(local_path, "wb") as out:
                             self._copy_remote_to_fileobj(
-                                remote_path, out, callback=child, source=remote
+                                remote_path,
+                                out,
+                                on_progress=child.relative_update,
+                                source=remote,
                             )
                 callback.relative_update()
                 continue
@@ -4820,6 +4839,7 @@ class VfsiFileSystem(AbstractFileSystem):
     ):
         """Own upload endpoints and finish each chunk without unsafe replay."""
         _validate_write_mode(mode)
+        on_progress = callback.relative_update if callback is not None else None
         internal = self._checked_strip_protocol(remote_path)
         with ExitStack() as stack:
             source = stack.enter_context(open(local_path, "rb"))
@@ -4836,7 +4856,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 chunk = source.read(min(self.transfer_chunk_size, self.max_batch_bytes))
                 if not chunk:
                     break
-                _write_fully(remote, chunk, callback=callback)
+                _write_fully(remote, chunk, on_progress=on_progress)
 
     def put_file(
         self, lpath, rpath, callback=DEFAULT_CALLBACK, mode="overwrite", **kwargs
