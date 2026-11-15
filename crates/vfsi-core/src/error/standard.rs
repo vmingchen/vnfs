@@ -284,6 +284,7 @@ pub fn fanout(error: io::Error, count: usize) -> impl ExactSizeIterator<Item = i
                 .and_then(|e| e.downcast_ref::<NativeStatus>())
                 .map(|n| n.0)
         })
+        .filter(|status| error.kind() == status_kind(*status))
     {
         Recipe::Native(native)
     } else if error.get_ref().is_none() {
@@ -291,13 +292,7 @@ pub fn fanout(error: io::Error, count: usize) -> impl ExactSizeIterator<Item = i
     } else {
         let native = native_status(&error);
         let transport = transport_kind(&error);
-        let source = match error
-            .get_ref()
-            .and_then(|e| e.downcast_ref::<SharedCause>())
-        {
-            Some(shared) => shared.source.clone(),
-            None => Arc::new(error),
-        };
+        let source = shared_source(error);
         Recipe::Shared {
             source,
             native,
@@ -338,13 +333,15 @@ pub fn suppress_interrupted(error: io::Error) -> io::Error {
 }
 
 /// Retain one original for an explicitly shared failure group.
+/// Flatten only category-equivalent wrappers: callers may recategorize their
+/// standard error while keeping its existing payload.
 pub fn shared_source(error: io::Error) -> Arc<io::Error> {
     match error
         .get_ref()
         .and_then(|e| e.downcast_ref::<SharedCause>())
     {
-        Some(shared) => shared.source.clone(),
-        None => Arc::new(error),
+        Some(shared) if error.kind() == shared.source.kind() => shared.source.clone(),
+        _ => Arc::new(error),
     }
 }
 
@@ -366,6 +363,7 @@ pub fn share_in_place(error: &mut io::Error) -> Arc<io::Error> {
     if let Some(shared) = error
         .get_ref()
         .and_then(|e| e.downcast_ref::<SharedCause>())
+        && error.kind() == shared.source.kind()
     {
         return shared.source.clone();
     }

@@ -185,6 +185,103 @@ fn known_native_fanout_preserves_exact_status_and_category() {
     }
 }
 
+fn recategorized(error: io::Error) -> io::Error {
+    io::Error::new(K::PermissionDenied, error.into_inner().unwrap())
+}
+
+#[test]
+fn fanout_preserves_recategorized_native_and_shared_errors() {
+    for status in [StatusCode::Nfs(2), StatusCode::Smb(0xc000_0034)] {
+        for shared in [false, true] {
+            for count in [1, 2, 4] {
+                let original = from_status(status);
+                let original = if shared {
+                    from_shared(&shared_source(original))
+                } else {
+                    original
+                };
+                let original = recategorized(original);
+                let outcomes: Vec<_> = fanout(original, count).collect();
+                assert_eq!(outcomes.len(), count);
+                for error in outcomes {
+                    assert_eq!(error.kind(), K::PermissionDenied);
+                    assert_eq!(native_status(&error), Some(status));
+                    assert_eq!(transport_kind(&error), None);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn explicit_sharing_preserves_recategorized_causes_and_reuses_the_new_group() {
+    for in_place in [false, true] {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let original = with_context(
+            io::Error::new(K::TimedOut, Opaque(drops.clone())),
+            "vread",
+            "/shared",
+        );
+        let original = from_shared(&shared_source(original));
+        let original = recategorized(original);
+        let mut owner = Some(original);
+        let source = if in_place {
+            let original = owner.as_mut().unwrap();
+            let source = share_in_place(original);
+            assert_eq!(original.kind(), K::PermissionDenied);
+            let payload = original.get_ref().unwrap() as *const _ as *const ();
+            let second = share_in_place(original);
+            assert!(Arc::ptr_eq(&source, &second));
+            assert_eq!(
+                original.get_ref().unwrap() as *const _ as *const (),
+                payload
+            );
+            source
+        } else {
+            shared_source(owner.take().unwrap())
+        };
+        assert_eq!(source.kind(), K::PermissionDenied);
+        for _ in 0..2 {
+            let sibling = from_shared(&source);
+            assert_eq!(sibling.kind(), K::PermissionDenied);
+            assert_eq!(operation(&sibling), Some("vread"));
+            assert_eq!(path(&sibling), Some(Path::new("/shared")));
+            assert_eq!(message(&sibling), None);
+            assert_eq!(native_status(&sibling), None);
+            let reused = shared_source(sibling);
+            assert!(Arc::ptr_eq(&source, &reused));
+        }
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(source);
+        // In-place sharing still leaves the original slot owning its source.
+        // In the consuming branch that slot has already moved into the group.
+        drop(owner);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn recategorized_transport_keeps_provenance_across_sharing_and_fanout() {
+    for in_place in [false, true] {
+        let cause = transport(TransportKind::Timeout, "deadline");
+        let shared = from_shared(&shared_source(cause));
+        let mut cause = recategorized(shared);
+        let source = if in_place {
+            share_in_place(&mut cause)
+        } else {
+            shared_source(cause)
+        };
+        let mut siblings = fanout(from_shared(&source), 3);
+        assert_eq!(siblings.len(), 3);
+        for sibling in &mut siblings {
+            assert_eq!(sibling.kind(), K::PermissionDenied);
+            assert_eq!(transport_kind(&sibling), Some(TransportKind::Timeout));
+            assert_eq!(native_status(&sibling), None);
+            assert_eq!(message(&sibling), Some("deadline"));
+        }
+    }
+}
+
 #[test]
 fn repeated_group_sharing_reuses_the_original_source() {
     let initial = with_context(from_status(StatusCode::Nfs(69)), "vwrite", "/file");
