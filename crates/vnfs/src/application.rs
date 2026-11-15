@@ -1,6 +1,6 @@
 //! Concrete client implementations of the portable VFSI contracts.
 use crate::{
-    Attrs, DirectoryListing, FileHandle, OpenOp, ResourceLimits, Result, Vfsi, WriteResult,
+    Attrs, DirectoryListing, FileHandle, OpenOp, ResourceLimits, Result, Vfsi, WriteOutput,
 };
 use std::path::Path;
 macro_rules! client_methods {

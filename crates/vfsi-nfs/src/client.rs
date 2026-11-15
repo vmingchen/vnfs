@@ -3534,7 +3534,7 @@ impl NfsClient {
                     state = FailureState::Failed;
                 }
                 let progress = (!data.is_empty()).then(|| {
-                    IoProgress::Read(vfsi_core::api::ReadResult::owned(
+                    IoProgress::Read(vfsi_core::api::ReadOutput::owned(
                         ops[start + index].offset,
                         data,
                         eof,

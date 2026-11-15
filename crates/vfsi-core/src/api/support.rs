@@ -121,7 +121,7 @@ pub struct ReadIntoResult {
 /// For completed append writes, `offset + bytes_written` is the last reported end;
 /// concurrent writers can interleave between short-write waves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WriteResult {
+pub struct WriteOutput {
     pub offset: u64,
     pub bytes_written: usize,
     pub stable: bool,

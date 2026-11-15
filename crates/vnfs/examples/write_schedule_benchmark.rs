@@ -5,8 +5,8 @@ use std::{hint::black_box, path::Path, time::Instant};
 use vfsi_sync::VfsiExt;
 use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::{
-    FileOperand, FsClient, OpenFlags, OpenOp, ReadOp, ReadResult, SetAttrsOp, Target, VfAttrs,
-    VfOffset, VfPathBase, VfResult, WriteOp, WriteResult,
+    FileOperand, FsClient, OpenFlags, OpenOp, ReadOp, ReadOutput, SetAttrsOp, Target, VfAttrs,
+    VfOffset, VfPathBase, VfResult, WriteOp, WriteOutput,
 };
 
 struct Sink {
@@ -70,10 +70,10 @@ impl HandleBackend for Sink {
     fn sync_data(&mut self, _: &FileOperand) -> VfResult<()> {
         Ok(())
     }
-    fn read_impl(&mut self, _: &ReadOp) -> VfResult<ReadResult> {
+    fn read_impl(&mut self, _: &ReadOp) -> VfResult<ReadOutput> {
         Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
-    fn write_impl(&mut self, request: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult> {
+    fn write_impl(&mut self, request: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteOutput> {
         Ok(self
             .vwrite_impl(&[request])
             .map_err(vfsi_core::IndexedError::unattributed)
@@ -125,15 +125,15 @@ impl VectorBackend for Sink {
             .collect())
     }
 
-    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
-        let result: VfResult<Vec<ReadResult>> =
+    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadOutput> {
+        let result: VfResult<Vec<ReadOutput>> =
             { Err(std::io::Error::from(std::io::ErrorKind::Unsupported)) };
         result.map(|results| results.into_iter().map(Ok).collect())
     }
     fn vwrite_impl(
         &mut self,
         writes: &[WriteOp<&FileOperand, &[u8]>],
-    ) -> vfsi_sync::VecResult<WriteResult> {
+    ) -> vfsi_sync::VecResult<WriteOutput> {
         self.dispatches += 1;
         Ok(writes
             .iter()
@@ -146,7 +146,7 @@ impl VectorBackend for Sink {
                 };
                 let written = black_box(request.data()).len().min(self.max_write);
                 *end = (*end).max(offset + written as u64);
-                WriteResult {
+                WriteOutput {
                     file: request.file().clone(),
                     offset,
                     bytes_written: written,

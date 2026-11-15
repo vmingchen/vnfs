@@ -59,8 +59,8 @@ pub mod posix {
 #[cfg_attr(feature = "nfs", doc = concat!("\n```no_run\n", include_str!("../examples/stream_file.rs"), "\n```\n"))]
 pub mod files {
     pub use vfsi_core::api::{
-        OpenOptions, ReadOp, ReadOptions, ReadResult, ResourceLimits, StreamCompletion,
-        StreamOptions, SyncMode, WriteOp, WriteOptions, WriteResult,
+        OpenOptions, ReadOp, ReadOptions, ReadOutput, ResourceLimits, StreamCompletion,
+        StreamOptions, SyncMode, WriteOp, WriteOptions, WriteOutput,
     };
     pub use vfsi_core::{
         AsTarget, Capabilities, CopyOptions, FileHandle, FilesystemStats, OpenFlags, OpenOp,
@@ -126,7 +126,7 @@ pub(crate) use read::ReadRequest;
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use vfsi_core::api::internal::OwnedReadResult;
 pub(crate) use vfsi_core::api::{
-    AttrsOptions, ListDirOptions, ReadOp, ReadOptions, ReadResult, RenameMode, SyncMode, WriteOp,
+    AttrsOptions, ListDirOptions, ReadOp, ReadOptions, ReadOutput, RenameMode, SyncMode, WriteOp,
     WriteOptions,
 };
 
@@ -266,7 +266,7 @@ pub(crate) use vfsi_core::DirEntry;
 pub(crate) use vfsi_core::VfType as FileType;
 pub(crate) use vfsi_core::api::{
     DepthLimit, DirectoryListing, MkDirOp, RemoveMode, RemoveOptions, ResourceLimits, SetAttrsOp,
-    StreamCompletion, StreamOptions, TraversalCompletion, WriteResult,
+    StreamCompletion, StreamOptions, TraversalCompletion, WriteOutput,
 };
 pub(crate) use vfsi_core::{
     Attrs, Capabilities, CopyOptions, FilesystemStats, OpenFlags, OpenOp, TransportKind,

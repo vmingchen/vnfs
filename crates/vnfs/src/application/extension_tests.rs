@@ -449,7 +449,7 @@ impl Probe {
         &self,
         ops: impl IntoIterator<Item = crate::ReadOp<'a, crate::PosixFile>>,
         options: crate::ReadOptions,
-    ) -> vfsi_core::VecResult<crate::ReadResult> {
+    ) -> vfsi_core::VecResult<crate::ReadOutput> {
         self.calls.set(self.calls.get() + 1);
         let ops: Vec<_> = ops.into_iter().collect();
         if !ops.iter().all(|op| op.whole_file_path().is_some()) {
@@ -471,18 +471,18 @@ impl Probe {
             }
             2 => {
                 let read = results[0].as_mut().unwrap();
-                *read = crate::ReadResult::buffered(0, read.bytes_read(), true);
+                *read = crate::ReadOutput::buffered(0, read.bytes_read(), true);
             }
             4 => {
                 let read = results[0].as_mut().unwrap();
-                *read = crate::ReadResult::owned(0, read.clone().into_data().unwrap(), false);
+                *read = crate::ReadOutput::owned(0, read.clone().into_data().unwrap(), false);
             }
             5 => {
                 let read = results[0].as_mut().unwrap();
-                *read = crate::ReadResult::owned(1, read.clone().into_data().unwrap(), true);
+                *read = crate::ReadOutput::owned(1, read.clone().into_data().unwrap(), true);
             }
             7 => {
-                results.push(Ok(crate::ReadResult::owned(0, Vec::new(), true)));
+                results.push(Ok(crate::ReadOutput::owned(0, Vec::new(), true)));
             }
             _ => {}
         }
@@ -586,7 +586,7 @@ impl WritePolicyProbe {
     fn partial(
         &self,
         ops: &[crate::WriteOp<'_, crate::PosixFile>],
-    ) -> vfsi_core::VecResult<WriteResult> {
+    ) -> vfsi_core::VecResult<WriteOutput> {
         self.partial_calls.set(self.partial_calls.get() + 1);
         let short: Vec<_> = ops
             .iter()
@@ -599,7 +599,7 @@ impl WritePolicyProbe {
     fn complete(
         &self,
         ops: &[crate::WriteOp<'_, crate::PosixFile>],
-    ) -> vfsi_core::VecResult<WriteResult> {
+    ) -> vfsi_core::VecResult<WriteOutput> {
         self.complete_calls.set(self.complete_calls.get() + 1);
         if self.lose_reply.get() {
             self.partial(ops)?; // The server mutated data before the reply was lost.

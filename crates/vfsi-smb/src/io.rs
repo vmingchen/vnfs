@@ -49,7 +49,7 @@ impl SmbVecFs {
                         OpError::failed(
                             cause,
                             Some(vfsi_core::IoProgress::Read(
-                                vfsi_core::api::ReadResult::owned(offset, data, false),
+                                vfsi_core::api::ReadOutput::owned(offset, data, false),
                             )),
                         )
                     });
@@ -344,7 +344,7 @@ impl SmbVecFs {
             let uncertain = vfsi_core::transport_kind(&(cause)).is_some()
                 || original_state == FailureState::Unknown;
             let progress = (!prefix.is_empty()).then(|| {
-                IoProgress::Read(vfsi_core::api::ReadResult::owned(offset, prefix, false))
+                IoProgress::Read(vfsi_core::api::ReadOutput::owned(offset, prefix, false))
             });
             return Err(if uncertain {
                 OpError::unknown(cause, progress)
@@ -383,7 +383,7 @@ impl SmbVecFs {
                     }
                 }
                 let progress = (!prefix.is_empty() || had_progress).then(|| {
-                    IoProgress::Read(vfsi_core::api::ReadResult::owned(offset, prefix, eof))
+                    IoProgress::Read(vfsi_core::api::ReadOutput::owned(offset, prefix, eof))
                 });
                 Err(
                     if state == FailureState::Unknown || original_state == FailureState::Unknown {
@@ -396,7 +396,7 @@ impl SmbVecFs {
         }
     }
 
-    pub(super) fn read_one(&mut self, op: &ReadOp) -> OpResult<ReadResult> {
+    pub(super) fn read_one(&mut self, op: &ReadOp) -> OpResult<ReadOutput> {
         if op.length > isize::MAX as usize {
             return Err(OpError::not_attempted(std::io::Error::from_raw_os_error(
                 libc::EFBIG,
@@ -438,7 +438,7 @@ impl SmbVecFs {
                     error
                 }
             })?;
-            return Ok(ReadResult {
+            return Ok(ReadOutput {
                 file: op.file.clone(),
                 offset,
                 eof: op.length > 0 && data.len() < op.length,
@@ -480,7 +480,7 @@ impl SmbVecFs {
         }
         let data = result?;
         let eof = !data.is_empty() && end >= size || op.length > 0 && data.len() < op.length;
-        Ok(ReadResult {
+        Ok(ReadOutput {
             file: op.file.clone(),
             offset,
             data,
@@ -488,7 +488,7 @@ impl SmbVecFs {
         })
     }
 
-    pub(super) fn write_one(&mut self, op: WriteOp<&FileOperand, &[u8]>) -> OpResult<WriteResult> {
+    pub(super) fn write_one(&mut self, op: WriteOp<&FileOperand, &[u8]>) -> OpResult<WriteOutput> {
         let Some(fd) = op.file().fd() else {
             if matches!(op.file(), FileOperand::Saved) {
                 return Err(OpError::not_attempted(std::io::Error::from(
@@ -519,7 +519,7 @@ impl SmbVecFs {
             };
             let written =
                 self.compound_write_path(&path, offset, op.data(), op.creates(), op.truncates())?;
-            return Ok(WriteResult {
+            return Ok(WriteOutput {
                 file: op.file().clone(),
                 offset,
                 bytes_written: written,
@@ -560,7 +560,7 @@ impl SmbVecFs {
         let written = write_result?;
         self.raw_flush(file_id)
             .map_err(|cause| write_wire_error(cause, written))?;
-        Ok(WriteResult {
+        Ok(WriteOutput {
             file: op.file().clone(),
             offset,
             bytes_written: written,

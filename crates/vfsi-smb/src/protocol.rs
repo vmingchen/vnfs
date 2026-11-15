@@ -510,7 +510,7 @@ pub(super) fn read_wire_error(
 ) -> OpError {
     wire_failure(
         cause,
-        data.map(|data| IoProgress::Read(vfsi_core::api::ReadResult::owned(offset, data, false))),
+        data.map(|data| IoProgress::Read(vfsi_core::api::ReadOutput::owned(offset, data, false))),
     )
 }
 
@@ -527,7 +527,7 @@ pub(super) fn finish_read_result(
         (Ok(data), Ok(())) => Ok(data),
         (Ok(data), Err(cause)) => {
             let eof = requested > 0 && data.len() < requested;
-            let progress = Some(IoProgress::Read(vfsi_core::api::ReadResult::owned(
+            let progress = Some(IoProgress::Read(vfsi_core::api::ReadOutput::owned(
                 offset, data, eof,
             )));
             Err(if vfsi_core::transport_kind(&(cause)).is_some() {

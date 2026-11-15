@@ -210,21 +210,21 @@ fn external_clients_can_inspect_sources_without_private_fields() {
 
 #[test]
 fn result_constructors_preserve_storage_invariants_without_retaining_borrows() {
-    let owned = vnfs::files::ReadResult::owned(17, vec![1, 2, 3], true);
+    let owned = vnfs::files::ReadOutput::owned(17, vec![1, 2, 3], true);
     assert_eq!(owned.offset(), 17);
     assert_eq!(owned.bytes_read(), 3);
     assert!(owned.eof());
     assert!(!owned.is_buffered());
     assert_eq!(owned.data(), Some([1, 2, 3].as_slice()));
     assert_eq!(owned.into_data(), Some(vec![1, 2, 3]));
-    let borrowed = vnfs::files::ReadResult::buffered(5, 2, false);
+    let borrowed = vnfs::files::ReadOutput::buffered(5, 2, false);
     assert!(borrowed.is_buffered());
     assert_eq!(borrowed.bytes_read(), 2);
     assert!(!borrowed.eof());
     assert_eq!(borrowed.data(), None);
     assert_eq!(borrowed.into_data(), None);
     assert_eq!(
-        vnfs::files::ReadResult::owned(0, Vec::new(), true).bytes_read(),
+        vnfs::files::ReadOutput::owned(0, Vec::new(), true).bytes_read(),
         0
     );
 }

@@ -1089,8 +1089,8 @@ vstatfs(...)   -> VecResult<FilesystemStats>
 vreadlink(...) -> VecResult<PathBuf>
 vsymlink(...)  -> VecResult<()>
 vhardlink(...) -> VecResult<()>
-vread(...)     -> VecResult<ReadResult>
-vwrite(...)    -> VecResult<WriteResult>
+vread(...)     -> VecResult<ReadOutput>
+vwrite(...)    -> VecResult<WriteOutput>
 vopen(...)     -> VecResult<Self::File>
 vopen_dirs(...) -> VecResult<Self::Dir>
 vremove_dir_contents(...) -> VecResult<()>
@@ -1106,8 +1106,8 @@ vrename(...)   -> VecResult<()>
 vcopy(...)     -> VecResult<()>
 ~~~
 
-ReadResult and WriteResult remain successful payloads. Do not put an error field
-inside ReadResult or add a second independent success/failure flag to it.
+ReadOutput and WriteOutput remain successful payloads. Do not put an error field
+inside ReadOutput or add a second independent success/failure flag to it.
 
 The outer and inner errors have different contracts:
 
@@ -1150,9 +1150,9 @@ Reads and writes spanning multiple submissions must also retain confirmed
 operation-specific progress. Examples include a valid caller-buffer prefix,
 owned bytes already read, and write bytes acknowledged before a later failure.
 Unknown effects beyond confirmed progress remain unknown. A whole-file read
-that produced only a prefix must not become a successful whole-file ReadResult.
+that produced only a prefix must not become a successful whole-file ReadOutput.
 
-IoProgress::Read retains a ReadResult prefix, including whether it describes
+IoProgress::Read retains a ReadOutput prefix, including whether it describes
 owned data or a valid caller-buffer prefix. IoProgress::Write records the
 contiguous acknowledged prefix of this input's payload. The optional progress
 is boxed on error, keeping the status-only error path free of progress allocation.

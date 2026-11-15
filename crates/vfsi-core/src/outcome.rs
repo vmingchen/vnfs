@@ -21,7 +21,7 @@ pub enum FailureState {
 /// whether the logical operation completed. Counts never describe sibling inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IoProgress {
-    Read(crate::api::ReadResult),
+    Read(crate::api::ReadOutput),
     /// Contiguous acknowledged prefix of this input's write payload.
     /// Unknown completion can still mean additional bytes were written.
     Write {

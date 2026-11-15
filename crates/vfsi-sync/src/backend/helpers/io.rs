@@ -53,7 +53,7 @@ pub fn vread_into_impl_default<F: VectorBackend + ?Sized>(
                         && !matches!(request.offset, VfOffset::At(offset) if prefix.offset() != offset) => {
                             let data = prefix.data().expect("validated owned prefix");
                             buffer[..data.len()].copy_from_slice(data);
-                            Some(IoProgress::Read(vfsi_core::api::ReadResult::buffered(
+                            Some(IoProgress::Read(vfsi_core::api::ReadOutput::buffered(
                                 prefix.offset(), data.len(), prefix.eof(),
                             )))
                         }
@@ -135,7 +135,7 @@ pub fn vopen_typed_default<F: VectorBackend + ?Sized>(
 pub fn native_read_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     request: &ReadOp,
-) -> VfResult<ReadResult> {
+) -> VfResult<ReadOutput> {
     let mut results = backend
         .vread_impl(std::slice::from_ref(request))
         .and_then(|outcomes| {
@@ -166,7 +166,7 @@ pub fn native_read_into_impl_default<F: VectorBackend + ?Sized>(
 pub fn native_write_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     request: WriteOp<&FileOperand, &[u8]>,
-) -> VfResult<WriteResult> {
+) -> VfResult<WriteOutput> {
     let mut results = backend
         .vwrite_impl(std::slice::from_ref(&request))
         .and_then(|outcomes| {

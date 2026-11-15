@@ -83,7 +83,7 @@ pub(crate) fn take_single_result<T>(operation: &str, mut results: Vec<T>) -> VfR
 pub(crate) fn validate_read_results(
     operation: &str,
     requests: &[ReadOp],
-    results: &[ReadResult],
+    results: &[ReadOutput],
 ) -> Result<(), IndexedError> {
     if results.len() != requests.len() {
         return Err(contract_error(
@@ -192,7 +192,7 @@ pub(crate) fn validate_read_into_results(
 pub(crate) fn validate_write_results(
     operation: &str,
     requests: &[WriteOp<&FileOperand, &[u8]>],
-    results: &[WriteResult],
+    results: &[WriteOutput],
 ) -> Result<(), IndexedError> {
     if results.len() != requests.len() {
         return Err(contract_error(
@@ -257,8 +257,8 @@ mod contract_tests {
         ReadOp::at(FileOperand::from_path("/file"), 0, 1)
     }
 
-    fn result() -> ReadResult {
-        ReadResult {
+    fn result() -> ReadOutput {
+        ReadOutput {
             file: FileOperand::from_path("/file"),
             offset: 0,
             data: vec![1],
@@ -291,7 +291,7 @@ mod contract_tests {
         validate_read_results(
             "test",
             &[larger],
-            &[ReadResult {
+            &[ReadOutput {
                 eof: false,
                 ..result()
             }],
@@ -300,7 +300,7 @@ mod contract_tests {
         validate_read_results(
             "test",
             std::slice::from_ref(&request),
-            &[ReadResult {
+            &[ReadOutput {
                 data: Vec::new(),
                 eof: true,
                 ..result()
@@ -308,19 +308,19 @@ mod contract_tests {
         )
         .unwrap();
         for malformed in [
-            ReadResult {
+            ReadOutput {
                 file: FileOperand::from_path("/other"),
                 ..result()
             },
-            ReadResult {
+            ReadOutput {
                 offset: 1,
                 ..result()
             },
-            ReadResult {
+            ReadOutput {
                 data: vec![1, 2],
                 ..result()
             },
-            ReadResult {
+            ReadOutput {
                 data: Vec::new(),
                 eof: false,
                 ..result()
@@ -345,7 +345,7 @@ mod contract_tests {
     fn write_result_identity_offset_size_and_cardinality_are_checked() {
         let file = FileOperand::from_path("/file");
         let request: WriteOp<&FileOperand, &[u8]> = WriteOp::new(&file, VfOffset::At(0), b"x");
-        let valid = WriteResult {
+        let valid = WriteOutput {
             file: file.clone(),
             offset: 0,
             bytes_written: 1,
@@ -357,7 +357,7 @@ mod contract_tests {
         validate_write_results(
             "test",
             &[request],
-            &[WriteResult {
+            &[WriteOutput {
                 bytes_written: 0,
                 ..valid.clone()
             }],
@@ -376,15 +376,15 @@ mod contract_tests {
             "returned 2 results",
         );
         for malformed in [
-            WriteResult {
+            WriteOutput {
                 file: FileOperand::from_path("/other"),
                 ..valid.clone()
             },
-            WriteResult {
+            WriteOutput {
                 offset: 1,
                 ..valid.clone()
             },
-            WriteResult {
+            WriteOutput {
                 bytes_written: 2,
                 ..valid.clone()
             },

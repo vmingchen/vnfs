@@ -129,7 +129,7 @@ impl VectorBackend for NfsVecFs {
         Ok(())
     }
 
-    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_core::VecResult<ReadResult> {
+    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_core::VecResult<ReadOutput> {
         self.read_results(reads)
     }
 
@@ -144,7 +144,7 @@ impl VectorBackend for NfsVecFs {
     fn vwrite_impl(
         &mut self,
         writes: &[WriteOp<&FileOperand, &[u8]>],
-    ) -> vfsi_core::VecResult<WriteResult> {
+    ) -> vfsi_core::VecResult<WriteOutput> {
         self.write_results(writes)
     }
 

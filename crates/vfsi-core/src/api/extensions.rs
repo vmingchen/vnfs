@@ -278,7 +278,7 @@ pub trait VfsiExt: Vfsi {
         &self,
         ops: impl IntoIterator<Item = crate::api::ReadOp<'a, Self::File>>,
         options: crate::api::ReadOptions,
-    ) -> std::result::Result<Vec<crate::api::ReadResult>, crate::IndexedError> {
+    ) -> std::result::Result<Vec<crate::api::ReadOutput>, crate::IndexedError> {
         let mut count = 0usize;
         let result = {
             let mut ops = ops.into_iter().inspect(|_| count += 1);
@@ -502,7 +502,7 @@ pub trait VfsiExt: Vfsi {
         &self,
         requests: &[crate::api::WriteOp<'a, Self::File>],
         options: crate::api::WriteOptions,
-    ) -> std::result::Result<Vec<crate::api::WriteResult>, crate::IndexedError> {
+    ) -> std::result::Result<Vec<crate::api::WriteOutput>, crate::IndexedError> {
         crate::internal::collect_vec_result(self.vwrite(requests, options), requests.len())
     }
 

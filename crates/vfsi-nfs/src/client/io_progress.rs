@@ -317,7 +317,7 @@ mod tests {
                 Err(OpError::failed(
                     std::io::Error::from_raw_os_error(libc::EIO),
                     Some(if read_progress {
-                        IoProgress::Read(vfsi_core::api::ReadResult::buffered(0, 1, false))
+                        IoProgress::Read(vfsi_core::api::ReadOutput::buffered(0, 1, false))
                     } else {
                         IoProgress::Write { bytes_written: 4 }
                     }),

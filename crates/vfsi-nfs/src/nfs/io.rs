@@ -161,7 +161,7 @@ fn merge_descriptor_failure(failure: &mut Option<OpError>, next: OpError) {
 impl NfsVecFs {
     /// Selective read recovery keeps successful siblings and resumes only an
     /// unsuccessful input's remaining range. Prefix storage moves on errors.
-    pub(super) fn read_results(&mut self, reads: &[ReadOp]) -> VecResult<ReadResult> {
+    pub(super) fn read_results(&mut self, reads: &[ReadOp]) -> VecResult<ReadOutput> {
         if let Some(_index) = reads
             .iter()
             .position(|read| read.length > isize::MAX as usize)
@@ -188,7 +188,7 @@ impl NfsVecFs {
             }
             return Ok(output);
         }
-        type SavedPrefix = (FailureState, Option<vfsi_core::api::ReadResult>);
+        type SavedPrefix = (FailureState, Option<vfsi_core::api::ReadOutput>);
         let retryable = |index: usize, error: &OpError| match error.progress() {
             Some(IoProgress::Read(read)) => !read.eof() && read.bytes_read() < reads[index].length,
             Some(_) => false,
@@ -298,7 +298,7 @@ impl NfsVecFs {
                                     next.data().expect("owned native retry prefix"),
                                 );
                             }
-                            Some(IoProgress::Read(vfsi_core::api::ReadResult::owned(
+                            Some(IoProgress::Read(vfsi_core::api::ReadOutput::owned(
                                 offset, data, eof,
                             )))
                         }
@@ -334,7 +334,7 @@ impl NfsVecFs {
         Ok(outcomes)
     }
 
-    pub(super) fn read_unrecovered(&mut self, reads: &[ReadOp]) -> VecResult<ReadResult> {
+    pub(super) fn read_unrecovered(&mut self, reads: &[ReadOp]) -> VecResult<ReadOutput> {
         if let Some(_index) = reads
             .iter()
             .position(|read| read.length > isize::MAX as usize)
@@ -350,7 +350,7 @@ impl NfsVecFs {
         if self.merged_mode == MergedIoMode::Off {
             return self.phased_read_results(reads);
         }
-        let mut output: Vec<Option<OpResult<ReadResult>>> =
+        let mut output: Vec<Option<OpResult<ReadOutput>>> =
             (0..reads.len()).map(|_| None).collect();
         let mut indices = Vec::new();
         let mut ops = Vec::new();
@@ -496,7 +496,7 @@ impl NfsVecFs {
                                                 ),
                                             ),
                                             Some(IoProgress::Read(
-                                                vfsi_core::api::ReadResult::owned(
+                                                vfsi_core::api::ReadOutput::owned(
                                                     ops[index].offset,
                                                     data,
                                                     eof,
@@ -834,7 +834,7 @@ impl NfsVecFs {
                     state = FailureState::Failed;
                 }
                 let progress = (length > 0).then(|| {
-                    IoProgress::Read(vfsi_core::api::ReadResult::buffered(offset, length, eof))
+                    IoProgress::Read(vfsi_core::api::ReadOutput::buffered(offset, length, eof))
                 });
                 output.push(Err(match state {
                     FailureState::NotAttempted => OpError::not_attempted(cause),
@@ -853,7 +853,7 @@ impl NfsVecFs {
         Ok(output)
     }
 
-    pub(super) fn descriptor_read_results(&mut self, reads: &[ReadOp]) -> VecResult<ReadResult> {
+    pub(super) fn descriptor_read_results(&mut self, reads: &[ReadOp]) -> VecResult<ReadOutput> {
         if let Some(_index) = reads.iter().position(|op| op.length > isize::MAX as usize) {
             return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
         }
@@ -866,7 +866,7 @@ impl NfsVecFs {
             .map(|(result, mut data)| match result {
                 Ok(result) => {
                     data.truncate(result.bytes_read);
-                    Ok(ReadResult {
+                    Ok(ReadOutput {
                         file: result.file,
                         offset: result.offset,
                         data,
@@ -1011,14 +1011,14 @@ impl NfsVecFs {
                                 let (cause, state, next) = error.into_parts();
                                 let progress = match next {
                                     Some(IoProgress::Read(next)) => Some(IoProgress::Read(
-                                        vfsi_core::api::ReadResult::buffered(
+                                        vfsi_core::api::ReadOutput::buffered(
                                             if count > 0 { offset } else { next.offset() },
                                             count + next.bytes_read(),
                                             next.eof(),
                                         ),
                                     )),
                                     _ if count > 0 => Some(IoProgress::Read(
-                                        vfsi_core::api::ReadResult::buffered(offset, count, eof),
+                                        vfsi_core::api::ReadOutput::buffered(offset, count, eof),
                                     )),
                                     next => next,
                                 };
@@ -1055,7 +1055,7 @@ impl NfsVecFs {
                         return error;
                     }
                     let (cause, state, _) = error.into_parts();
-                    let progress = Some(IoProgress::Read(vfsi_core::api::ReadResult::buffered(
+                    let progress = Some(IoProgress::Read(vfsi_core::api::ReadOutput::buffered(
                         offset, count, eof,
                     )));
                     if state == FailureState::Unknown || first_state == FailureState::Unknown {
@@ -1150,7 +1150,7 @@ impl NfsVecFs {
     pub(super) fn vwrite_batch_nfs(
         &mut self,
         writes: &[WriteOp<&FileOperand, &[u8]>],
-    ) -> VecResult<WriteResult> {
+    ) -> VecResult<WriteOutput> {
         let per = self.nfs.per_op_bytes();
         let mut ops = Vec::new();
         let mut offsets = vec![0; writes.len()];
@@ -1450,7 +1450,7 @@ impl NfsVecFs {
                         FailureState::NotAttempted => OpError::not_attempted(cause),
                     });
                 }
-                Ok(WriteResult {
+                Ok(WriteOutput {
                     file: request.file().clone(),
                     offset: offsets[index],
                     bytes_written: request.data().len(),
@@ -1462,14 +1462,14 @@ impl NfsVecFs {
 
     /// The legacy phased path-based readv (resolve + probe + open + read +
     /// close compounds).
-    pub(super) fn phased_read_results(&mut self, reads: &[ReadOp]) -> VecResult<ReadResult> {
+    pub(super) fn phased_read_results(&mut self, reads: &[ReadOp]) -> VecResult<ReadOutput> {
         if let Some(_index) = reads
             .iter()
             .position(|read| read.length > isize::MAX as usize)
         {
             return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
         }
-        let mut output: Vec<Option<OpResult<ReadResult>>> =
+        let mut output: Vec<Option<OpResult<ReadOutput>>> =
             (0..reads.len()).map(|_| None).collect();
         let mut files: Vec<Option<FileOperand>> =
             (0..reads.len()).map(|_| None).collect::<Vec<_>>();
@@ -1580,13 +1580,13 @@ impl NfsVecFs {
         reads: &[ReadOp],
         offsets: impl IntoIterator<Item = u64>,
         payloads: impl IntoIterator<Item = OpResult<(Vec<u8>, bool)>>,
-    ) -> Vec<OpResult<ReadResult>> {
+    ) -> Vec<OpResult<ReadOutput>> {
         payloads
             .into_iter()
             .zip(reads)
             .zip(offsets)
             .map(|((result, read), offset)| {
-                result.map(|(data, eof)| ReadResult {
+                result.map(|(data, eof)| ReadOutput {
                     file: read.file.clone(),
                     offset,
                     data,
@@ -1600,7 +1600,7 @@ impl NfsVecFs {
     pub(super) fn write_results(
         &mut self,
         writes: &[WriteOp<&FileOperand, &[u8]>],
-    ) -> VecResult<WriteResult> {
+    ) -> VecResult<WriteOutput> {
         self.ensure_writable(writes.len())?;
         if writes.is_empty() {
             return Ok(Vec::new());
@@ -1697,7 +1697,7 @@ impl NfsVecFs {
         if errors.is_empty() {
             return self.vwrite_path_nfs(writes, &path_ops, &offsets, full);
         }
-        let mut output: Vec<Option<OpResult<WriteResult>>> =
+        let mut output: Vec<Option<OpResult<WriteOutput>>> =
             (0..writes.len()).map(|_| None).collect();
         for (index, error) in errors {
             output[index] = Some(Err(error));
@@ -1731,8 +1731,8 @@ impl NfsVecFs {
     pub(super) fn vwrite_path_fallback_nfs(
         &mut self,
         writes: &[WriteOp<&FileOperand, &[u8]>],
-    ) -> VecResult<WriteResult> {
-        let mut output: Vec<Option<OpResult<WriteResult>>> =
+    ) -> VecResult<WriteOutput> {
+        let mut output: Vec<Option<OpResult<WriteOutput>>> =
             (0..writes.len()).map(|_| None).collect();
         let mut files = (0..writes.len()).map(|_| None).collect::<Vec<_>>();
         let mut paths = Vec::new();
@@ -1865,7 +1865,7 @@ impl NfsVecFs {
         path_ops: &[crate::client::PathWriteOp<'_>],
         offsets: &[u64],
         full: bool,
-    ) -> VecResult<WriteResult> {
+    ) -> VecResult<WriteOutput> {
         let mut results = Vec::new();
         let mut first = 0;
         while first < writes.len() {
@@ -1928,7 +1928,7 @@ impl NfsVecFs {
             results.extend(outcome.results.into_iter().take(take).enumerate().map(
                 |(index, result)| {
                     let index = first + index;
-                    result.map(|(bytes_written, committed)| WriteResult {
+                    result.map(|(bytes_written, committed)| WriteOutput {
                         file: (*writes[index].file()).clone(),
                         offset: offsets[index],
                         bytes_written,

@@ -190,10 +190,10 @@ impl HandleBackend for FaultBackend {
             self.inner.close_impl(file)
         }
     }
-    fn read_impl(&mut self, op: &ReadOp) -> vfsi_core::VfResult<ReadResult> {
+    fn read_impl(&mut self, op: &ReadOp) -> vfsi_core::VfResult<ReadOutput> {
         self.inner.read_impl(op)
     }
-    fn write_impl(&mut self, op: WriteOp<&FileOperand, &[u8]>) -> vfsi_core::VfResult<WriteResult> {
+    fn write_impl(&mut self, op: WriteOp<&FileOperand, &[u8]>) -> vfsi_core::VfResult<WriteOutput> {
         self.inner.write_impl(op)
     }
     fn seek_impl(
@@ -227,7 +227,7 @@ impl VectorBackend for FaultBackend {
         self.inner.vopen_raw_impl(paths, flags, modes)
     }
 
-    fn vread_impl(&mut self, ops: &[ReadOp]) -> vfsi_sync::VecResult<ReadResult> {
+    fn vread_impl(&mut self, ops: &[ReadOp]) -> vfsi_sync::VecResult<ReadOutput> {
         self.read_calls
             .lock()
             .unwrap()
@@ -306,7 +306,7 @@ impl VectorBackend for FaultBackend {
     fn vwrite_impl(
         &mut self,
         ops: &[WriteOp<&FileOperand, &[u8]>],
-    ) -> vfsi_core::VecResult<WriteResult> {
+    ) -> vfsi_core::VecResult<WriteOutput> {
         self.write_calls
             .lock()
             .unwrap()

@@ -28,7 +28,7 @@ pub use vfsi_core::api::{
     DEFAULT_READV_MAX_TOTAL_BYTES, DEFAULT_WALK_MAX_DEPTH, DepthLimit, DirectoryListing,
     ListDirOptions, OpenOptions, ReadIntoResult as FsReadIntoResult, ReadOptions, ResourceLimits,
     StreamCompletion, StreamOptions, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind,
-    WriteResult as FsWriteResult, walk_events,
+    WriteOutput as FsWriteResult, walk_events,
 };
 
 #[doc(hidden)]

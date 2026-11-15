@@ -639,13 +639,13 @@ impl Engine {
                     None
                 } else {
                     Some(match &mut job.buffer {
-                        Buffer::Read(_) => IoProgress::Read(vfsi_core::api::ReadResult::buffered(
+                        Buffer::Read(_) => IoProgress::Read(vfsi_core::api::ReadOutput::buffered(
                             job.offset, count, false,
                         )),
                         Buffer::OwnedRead(buffer) => {
                             let mut data = std::mem::take(buffer);
                             data.truncate(count);
-                            IoProgress::Read(vfsi_core::api::ReadResult::owned(
+                            IoProgress::Read(vfsi_core::api::ReadOutput::owned(
                                 job.offset, data, false,
                             ))
                         }
@@ -800,7 +800,7 @@ impl DescriptorIo for Engine {
                 };
                 let Some(offset) = op.offset.checked_add(prefix as u64) else {
                     let progress = (prefix > 0).then(|| {
-                        IoProgress::Read(vfsi_core::api::ReadResult::buffered(
+                        IoProgress::Read(vfsi_core::api::ReadOutput::buffered(
                             op.offset, prefix, false,
                         ))
                     });
@@ -859,7 +859,7 @@ impl DescriptorIo for Engine {
                                 _ => 0,
                             });
                             let progress =
-                                Some(IoProgress::Read(vfsi_core::api::ReadResult::buffered(
+                                Some(IoProgress::Read(vfsi_core::api::ReadOutput::buffered(
                                     job.offset - prefix as u64,
                                     prefix + count,
                                     false,

@@ -30,8 +30,8 @@ fn error_facts(error: &std::io::Error) -> ErrorFacts {
 use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::{
     Capabilities, DirEntry, DirPageCursor, FileOperand, FsClient, ListDirOptions, OpenFlags,
-    OpenOp, ReadIntoResult, ReadOp, ReadResult, SetAttrsOp, Target, VfAttrs, VfOffset, VfResult,
-    Vfsi, VfsiExt, WriteOp, WriteResult,
+    OpenOp, ReadIntoResult, ReadOp, ReadOutput, SetAttrsOp, Target, VfAttrs, VfOffset, VfResult,
+    Vfsi, VfsiExt, WriteOp, WriteOutput,
 };
 
 #[test]
@@ -350,8 +350,8 @@ impl VectorBackend for ScalarOnly {
         Ok((entries, (end < count).then(|| DirPageCursor::new(end))))
     }
 
-    fn vread_impl(&mut self, requests: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
-        let result: VfResult<Vec<ReadResult>> = {
+    fn vread_impl(&mut self, requests: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadOutput> {
+        let result: VfResult<Vec<ReadOutput>> = {
             let limit = self
                 .vector_result_limit
                 .lock()
@@ -411,7 +411,7 @@ impl VectorBackend for ScalarOnly {
     fn vwrite_impl(
         &mut self,
         requests: &[WriteOp<&FileOperand, &[u8]>],
-    ) -> vfsi_sync::VecResult<WriteResult> {
+    ) -> vfsi_sync::VecResult<WriteOutput> {
         let limit = self
             .vector_result_limit
             .lock()
@@ -546,13 +546,13 @@ macro_rules! handle_contract {
             fn sync_data(&mut self, file: &FileOperand) -> VfResult<()> {
                 self.scalar.sync_data(file)
             }
-            fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
+            fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadOutput> {
                 self.scalar.read_impl(request)
             }
             fn write_impl(
                 &mut self,
                 request: WriteOp<&FileOperand, &[u8]>,
-            ) -> VfResult<WriteResult> {
+            ) -> VfResult<WriteOutput> {
                 self.scalar.write_impl(request)
             }
             fn seek_impl(&mut self, file: &FileOperand, position: SeekFrom) -> VfResult<u64> {
@@ -595,7 +595,7 @@ impl VectorBackend for LegacyDirectoryBackend {
         self.scalar.vopen_raw_impl(paths, flags, modes)
     }
 
-    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
+    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadOutput> {
         panic!("unexpected read")
     }
     fn listdir_impl(
@@ -697,15 +697,15 @@ impl VectorBackend for WriteBoundaryProbe {
         self.scalar.vopen_raw_impl(paths, flags, modes)
     }
 
-    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
-        let result: VfResult<Vec<ReadResult>> =
+    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadOutput> {
+        let result: VfResult<Vec<ReadOutput>> =
             { Err(std::io::Error::from(std::io::ErrorKind::Unsupported)) };
         result.map(|results| results.into_iter().map(Ok).collect())
     }
     fn vwrite_impl(
         &mut self,
         writes: &[WriteOp<&FileOperand, &[u8]>],
-    ) -> vfsi_sync::VecResult<WriteResult> {
+    ) -> vfsi_sync::VecResult<WriteOutput> {
         self.calls.lock().unwrap().push(
             writes
                 .iter()
@@ -728,7 +728,7 @@ impl VectorBackend for WriteBoundaryProbe {
                 .enumerate()
                 .map(|(index, result)| {
                     let write = writes.get(index).unwrap_or(&writes[0]);
-                    result.map(|bytes_written| WriteResult {
+                    result.map(|bytes_written| WriteOutput {
                         file: (*write.file()).clone(),
                         offset: match write.offset() {
                             VfOffset::At(offset) => offset,
@@ -747,7 +747,7 @@ impl VectorBackend for WriteBoundaryProbe {
         }
         Ok(writes
             .iter()
-            .map(|op| WriteResult {
+            .map(|op| WriteOutput {
                 file: op.file().clone(),
                 offset: match op.offset() {
                     VfOffset::End => {
@@ -921,8 +921,8 @@ impl VectorBackend for AttrsBackend {
         self.scalar.vopen_raw_impl(paths, flags, modes)
     }
 
-    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
-        let result: VfResult<Vec<ReadResult>> =
+    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadOutput> {
+        let result: VfResult<Vec<ReadOutput>> =
             { Err(std::io::Error::from(std::io::ErrorKind::Unsupported)) };
         result.map(|results| results.into_iter().map(Ok).collect())
     }
@@ -1202,7 +1202,7 @@ impl VectorBackend for PagedBackend {
         self.scalar.vopen_raw_impl(paths, flags, modes)
     }
 
-    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
+    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadOutput> {
         panic!("directory paging must not issue reads")
     }
 
@@ -1358,7 +1358,7 @@ impl VectorBackend for WorkflowOverride {
         self.scalar.vopen_raw_impl(paths, flags, modes)
     }
 
-    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
+    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadOutput> {
         panic!("specialized workflows must not fall back to generic vector reads")
     }
 
@@ -1501,8 +1501,8 @@ impl VectorBackend for DefaultBackend {
         self.scalar.vopen_raw_impl(paths, flags, modes)
     }
 
-    fn vread_impl(&mut self, requests: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
-        let result: VfResult<Vec<ReadResult>> = {
+    fn vread_impl(&mut self, requests: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadOutput> {
+        let result: VfResult<Vec<ReadOutput>> = {
             self.vector_reads += 1;
             requests
                 .iter()
@@ -1839,7 +1839,7 @@ impl HandleBackend for ScalarOnly {
         Ok(())
     }
 
-    fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
+    fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadOutput> {
         if let Some((entered, release)) = self.blocked_read.take() {
             entered.wait();
             release.wait();
@@ -1853,7 +1853,7 @@ impl HandleBackend for ScalarOnly {
             return Err(std::io::Error::from_raw_os_error(libc::EACCES));
         }
         if self.oversized_read {
-            return Ok(ReadResult {
+            return Ok(ReadOutput {
                 file: request.file.clone(),
                 offset: 0,
                 eof: false,
@@ -1870,7 +1870,7 @@ impl HandleBackend for ScalarOnly {
         let end = start.saturating_add(request.length).min(self.data.len());
         let data = self.data.get(start..end).unwrap_or_default().to_vec();
         self.cursor = offset + data.len() as u64;
-        Ok(ReadResult {
+        Ok(ReadOutput {
             file: request.file.clone(),
             offset,
             eof: end == self.data.len(),
@@ -1917,13 +1917,13 @@ impl HandleBackend for ScalarOnly {
         })
     }
 
-    fn write_impl(&mut self, request: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult> {
+    fn write_impl(&mut self, request: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteOutput> {
         let call = self.write_calls.fetch_add(1, Ordering::SeqCst);
         if self.interrupt_write_call == Some(call) {
             return Err(std::io::Error::from_raw_os_error(libc::EINTR));
         }
         if self.oversized_write_count {
-            return Ok(WriteResult {
+            return Ok(WriteOutput {
                 file: request.file().clone(),
                 offset: 0,
                 bytes_written: request.data().len() + 1,
@@ -1944,7 +1944,7 @@ impl HandleBackend for ScalarOnly {
         self.data.resize(self.data.len().max(start + length), 0);
         self.data[start..start + length].copy_from_slice(&request.data()[..length]);
         self.cursor = offset + length as u64;
-        Ok(WriteResult {
+        Ok(WriteOutput {
             file: request.file().clone(),
             offset,
             bytes_written: length,
@@ -3158,7 +3158,7 @@ impl VectorBackend for StreamBackend {
         }
         self.scalar.vopen_impl(requests)
     }
-    fn vread_impl(&mut self, requests: &[ReadOp]) -> vfsi_sync::VecResult<ReadResult> {
+    fn vread_impl(&mut self, requests: &[ReadOp]) -> vfsi_sync::VecResult<ReadOutput> {
         self.batches.push(("read", requests.len()));
         let error = self.read_error.take();
         if error.as_ref().is_some_and(|error| error.index().is_none()) {
@@ -3187,7 +3187,7 @@ impl VectorBackend for StreamBackend {
                 let mut read = previous.unwrap();
                 read.data.truncate(1);
                 Some(vfsi_core::IoProgress::Read(
-                    vfsi_core::api::ReadResult::owned(read.offset, read.data, false),
+                    vfsi_core::api::ReadOutput::owned(read.offset, read.data, false),
                 ))
             } else {
                 None
@@ -4207,7 +4207,7 @@ impl VectorBackend for DirectoryProbe {
         self.scalar.vopen_raw_impl(paths, flags, modes)
     }
 
-    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
+    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadOutput> {
         unreachable!("directory test must not issue file reads")
     }
     fn vopen_dirs_impl(
@@ -5094,7 +5094,7 @@ impl VectorBackend for ReadOutcomes {
         self.scalar.vopen_raw_impl(paths, flags, modes)
     }
 
-    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_sync::VecResult<ReadResult> {
+    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_sync::VecResult<ReadOutput> {
         self.calls += 1;
         self.lengths.push(reads.len());
         if let Some(error) = self.rejection.take() {
@@ -5108,7 +5108,7 @@ impl VectorBackend for ReadOutcomes {
                     let VfOffset::At(offset) = read.offset else {
                         unreachable!()
                     };
-                    return Ok(ReadResult {
+                    return Ok(ReadOutput {
                         file: read.file.clone(),
                         offset,
                         data: Vec::new(),
@@ -5117,7 +5117,7 @@ impl VectorBackend for ReadOutcomes {
                 }
                 if index == 1 || self.fail_first {
                     if self.malformed {
-                        return Ok(ReadResult {
+                        return Ok(ReadOutput {
                             file: read.file.clone(),
                             offset: 999,
                             data: b"bad".to_vec(),
@@ -5134,7 +5134,7 @@ impl VectorBackend for ReadOutcomes {
                         std::io::Error::from_raw_os_error,
                     );
                     let prefix = Some(vfsi_sync::IoProgress::Read(
-                        vfsi_core::api::ReadResult::owned(0, b"p".to_vec(), self.prefix_eof),
+                        vfsi_core::api::ReadOutput::owned(0, b"p".to_vec(), self.prefix_eof),
                     ));
                     return Err(if self.prefix_failed {
                         vfsi_sync::OpError::failed(cause, prefix)
@@ -5142,7 +5142,7 @@ impl VectorBackend for ReadOutcomes {
                         vfsi_sync::OpError::unknown(cause, prefix)
                     });
                 }
-                Ok(ReadResult {
+                Ok(ReadOutput {
                     file: read.file.clone(),
                     offset: 0,
                     data: b"x".to_vec(),
@@ -5416,7 +5416,7 @@ impl VectorBackend for WholeReadProbe {
         self.scalar.vopen_raw_impl(paths, flags, modes)
     }
 
-    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_sync::VecResult<ReadResult> {
+    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_sync::VecResult<ReadOutput> {
         self.waves.push(
             reads
                 .iter()
@@ -5437,12 +5437,12 @@ impl VectorBackend for WholeReadProbe {
                             "lost READ suffix",
                         ),
                         Some(vfsi_sync::IoProgress::Read(
-                            vfsi_core::api::ReadResult::owned(offset, b"c".to_vec(), false),
+                            vfsi_core::api::ReadOutput::owned(offset, b"c".to_vec(), false),
                         )),
                     ));
                 }
                 if bad && self.stall && offset == 2 {
-                    return Ok(ReadResult {
+                    return Ok(ReadOutput {
                         file: read.file.clone(),
                         offset,
                         data: Vec::new(),
@@ -5458,7 +5458,7 @@ impl VectorBackend for WholeReadProbe {
                 };
                 let start = (offset as usize).min(bytes.len());
                 let end = start.saturating_add(read.length).min(bytes.len());
-                Ok(ReadResult {
+                Ok(ReadOutput {
                     file: read.file.clone(),
                     offset,
                     data: bytes[start..end].to_vec(),
@@ -5824,7 +5824,7 @@ impl VectorBackend for CloseProbe {
         self.scalar.vopen_raw_impl(paths, flags, modes)
     }
 
-    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_core::VecResult<ReadResult> {
+    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_core::VecResult<ReadOutput> {
         self.scalar.vread_impl(reads)
     }
 }
@@ -6014,7 +6014,7 @@ impl VectorBackend for OwnedOpenProbe {
             .take()
             .unwrap_or_else(|| self.scalar.vopen_impl(requests))
     }
-    fn vread_impl(&mut self, requests: &[ReadOp]) -> vfsi_core::VecResult<ReadResult> {
+    fn vread_impl(&mut self, requests: &[ReadOp]) -> vfsi_core::VecResult<ReadOutput> {
         self.scalar.vread_impl(requests)
     }
 }
@@ -6302,7 +6302,7 @@ fn native_write_outcomes_quarantine_only_invalid_progress_or_missing_slots() {
     use vfsi_sync::{FailureState, IoProgress, OpError};
     for malformed in [
         IoProgress::Write { bytes_written: 5 },
-        IoProgress::Read(vfsi_core::api::ReadResult::owned(10, b"x".to_vec(), false)),
+        IoProgress::Read(vfsi_core::api::ReadOutput::owned(10, b"x".to_vec(), false)),
     ] {
         let fs = FsClient::new(WriteBoundaryProbe {
             write_outcomes: Some(vec![
@@ -6751,7 +6751,7 @@ impl VectorBackend for NamespaceProbe {
     ) -> vfsi_sync::VecResult<FileOperand> {
         self.scalar.vopen_raw_impl(paths, flags, modes)
     }
-    fn vread_impl(&mut self, requests: &[ReadOp]) -> vfsi_sync::VecResult<ReadResult> {
+    fn vread_impl(&mut self, requests: &[ReadOp]) -> vfsi_sync::VecResult<ReadOutput> {
         self.scalar.vread_impl(requests)
     }
     fn vreadlink_impl(&mut self, paths: &[&std::path::Path]) -> vfsi_sync::VecResult<Vec<u8>> {

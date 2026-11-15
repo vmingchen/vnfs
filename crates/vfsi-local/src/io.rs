@@ -240,7 +240,7 @@ mod tests {
                     op.buffer[..3].copy_from_slice(b"abc");
                     Err(OpError::unknown(
                         std::io::Error::from_raw_os_error(libc::EIO),
-                        Some(IoProgress::Read(vfsi_core::api::ReadResult::buffered(
+                        Some(IoProgress::Read(vfsi_core::api::ReadOutput::buffered(
                             op.offset, 3, false,
                         ))),
                     ))

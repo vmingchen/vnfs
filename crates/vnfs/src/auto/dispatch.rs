@@ -1082,7 +1082,7 @@ impl Auto {
         &self,
         ops: impl IntoIterator<Item = crate::ReadOp<'a, AutoFile>>,
         options: crate::ReadOptions,
-    ) -> vfsi_core::VecResult<crate::ReadResult> {
+    ) -> vfsi_core::VecResult<crate::ReadOutput> {
         crate::read::consume_ops(
             ops,
             options.max_total_bytes_or(self.limits.max_read_bytes()),
@@ -1104,7 +1104,7 @@ impl Auto {
         &self,
         requests: &[crate::ReadRequest<'_, AutoRead<'_>>],
         budget: usize,
-    ) -> vfsi_core::VecResult<ReadResult> {
+    ) -> vfsi_core::VecResult<ReadOutput> {
         if requests.iter().all(|request| request.range_ref().is_some()) {
             return self.vread_with_limit_projected_native(requests, budget, |request| {
                 request.range_ref().expect("checked range requests")
@@ -1130,7 +1130,7 @@ impl Auto {
         requests: &[T],
         max_bytes: usize,
         project: impl for<'r> Fn(&'r T) -> &'r AutoRead<'a>,
-    ) -> vfsi_core::VecResult<ReadResult> {
+    ) -> vfsi_core::VecResult<ReadOutput> {
         use vfsi_core::OpError;
         let mut requested = 0usize;
         let mut output: Vec<_> = (0..requests.len()).map(|_| None).collect();
@@ -1307,14 +1307,14 @@ impl Auto {
     pub(crate) fn write_partial_native(
         &self,
         requests: &[crate::WriteOp<'_, AutoFile>],
-    ) -> vfsi_core::VecResult<WriteResult> {
+    ) -> vfsi_core::VecResult<WriteOutput> {
         self.write_vector(requests, false)
     }
 
     pub(crate) fn write_complete(
         &self,
         requests: &[crate::WriteOp<'_, AutoFile>],
-    ) -> vfsi_core::VecResult<WriteResult> {
+    ) -> vfsi_core::VecResult<WriteOutput> {
         self.write_vector(requests, true)
     }
 
@@ -1322,7 +1322,7 @@ impl Auto {
         &self,
         requests: &[crate::WriteOp<'a, AutoFile>],
         complete: bool,
-    ) -> vfsi_core::VecResult<WriteResult> {
+    ) -> vfsi_core::VecResult<WriteOutput> {
         use vfsi_core::OpError;
         let mut output: Vec<_> = requests
             .iter()

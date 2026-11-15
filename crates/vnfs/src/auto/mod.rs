@@ -12,8 +12,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    DirEntry, Nfs, OpenFlags, OpenOp, OwnedReadResult as ReadResult, Posix, ReadIntoResult,
-    ResourceLimits, Result as VfResult, WriteResult,
+    DirEntry, Nfs, OpenFlags, OpenOp, OwnedReadResult as ReadOutput, Posix, ReadIntoResult,
+    ResourceLimits, Result as VfResult, WriteOutput,
 };
 use vfsi_local::LocalBackend;
 use vfsi_sync::{FsClient, OpenFile};

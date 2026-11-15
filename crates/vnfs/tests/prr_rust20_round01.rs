@@ -56,7 +56,7 @@ impl Vfsi for Counted {
         &self,
         p: impl IntoIterator<Item = ReadOp<'a, Self::File>>,
         o: ReadOptions,
-    ) -> vnfs::VecResult<ReadResult> {
+    ) -> vnfs::VecResult<ReadOutput> {
         let p: Vec<_> = p.into_iter().collect();
         self.calls.borrow_mut().reads.push(p.len());
         self.fs.vread(p, o)
@@ -65,7 +65,7 @@ impl Vfsi for Counted {
         &self,
         p: &[WriteOp<'a, Self::File>],
         o: WriteOptions,
-    ) -> vnfs::VecResult<WriteResult> {
+    ) -> vnfs::VecResult<WriteOutput> {
         self.calls.borrow_mut().writes.push(p.len());
         self.fs.vwrite(p, o)
     }

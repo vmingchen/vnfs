@@ -8,8 +8,8 @@ use std::sync::{
 use vfsi_sync::api::{ReadOp as AppReadOp, ReadOptions};
 use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::{
-    FileOperand, FsClient, OpenOp, ReadOp, ReadResult, SetAttrsOp, Target, VfAttrs, VfOffset,
-    VfResult, Vfsi, VfsiExt, WriteOp, WriteResult,
+    FileOperand, FsClient, OpenOp, ReadOp, ReadOutput, SetAttrsOp, Target, VfAttrs, VfOffset,
+    VfResult, Vfsi, VfsiExt, WriteOp, WriteOutput,
 };
 
 #[derive(Default)]
@@ -54,21 +54,21 @@ impl HandleBackend for ReadBackend {
     fn sync_data(&mut self, _: &FileOperand) -> VfResult<()> {
         Ok(())
     }
-    fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
+    fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadOutput> {
         let VfOffset::At(offset) = request.offset else {
             panic!("positional read expected")
         };
         let data = b"abcdef";
         let start = usize::try_from(offset).unwrap().min(data.len());
         let end = start.saturating_add(request.length).min(data.len());
-        Ok(ReadResult {
+        Ok(ReadOutput {
             file: request.file.clone(),
             offset,
             data: data[start..end].to_vec(),
             eof: end == data.len(),
         })
     }
-    fn write_impl(&mut self, _: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult> {
+    fn write_impl(&mut self, _: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteOutput> {
         Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
     fn seek_impl(&mut self, _: &FileOperand, _: SeekFrom) -> VfResult<u64> {
@@ -111,8 +111,8 @@ impl VectorBackend for ReadBackend {
             .collect())
     }
 
-    fn vread_impl(&mut self, requests: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
-        let result: VfResult<Vec<ReadResult>> = {
+    fn vread_impl(&mut self, requests: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadOutput> {
+        let result: VfResult<Vec<ReadOutput>> = {
             self.dispatches.fetch_add(1, Ordering::SeqCst);
             requests
                 .iter()

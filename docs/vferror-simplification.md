@@ -44,8 +44,8 @@ or transport provenance use the small inspection functions described below;
 callers needing execution certainty or confirmed progress inspect OpError before
 extracting its standard error. Do not infer safe retries from ErrorKind alone.
 
-For example, `Vfsi::vread` returns `VecResult<ReadResult>`, expanding to
-`Result<Vec<Result<ReadResult, OpError>>, std::io::Error>`. The outer standard
+For example, `Vfsi::vread` returns `VecResult<ReadOutput>`, expanding to
+`Result<Vec<Result<ReadOutput, OpError>>, std::io::Error>`. The outer standard
 error describes whole-call rejection; each accepted input has its own success or
 `OpError` in the vector. This change does not impose sequential execution or stop
 healthy siblings when another input fails.

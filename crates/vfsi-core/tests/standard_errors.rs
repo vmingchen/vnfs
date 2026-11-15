@@ -370,7 +370,7 @@ fn sharing_an_operation_cause_keeps_progress_owned_and_does_not_nest_groups() {
     let mut error = vfsi_core::OpError::unknown(
         io::Error::new(K::TimedOut, Opaque(drops.clone())),
         Some(vfsi_core::IoProgress::Read(
-            vfsi_core::api::ReadResult::owned(7, data, false),
+            vfsi_core::api::ReadOutput::owned(7, data, false),
         )),
     );
     let first = share_op_cause(&mut error);

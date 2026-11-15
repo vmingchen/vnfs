@@ -212,7 +212,7 @@ fn operation_exceptions_preserve_each_failure_state_and_owned_read_prefix() {
                 vfsi_core::OpError::unknown(
                     vfsi_core::internal::errors::transport(vfsi_core::TransportKind::Other, "lost"),
                     Some(vfsi_core::IoProgress::Read(
-                        vfsi_core::api::ReadResult::owned(9, b"prefix".to_vec(), false),
+                        vfsi_core::api::ReadOutput::owned(9, b"prefix".to_vec(), false),
                     )),
                 ),
             ),
@@ -323,9 +323,9 @@ fn whole_file_validation_charges_only_valid_returned_prefixes() {
     std::fs::write(root.0.join("healthy"), b"ab").unwrap();
     let paths = vec!["/first".into(), "/healthy".into()];
     for prefix in [
-        vfsi_core::api::ReadResult::owned(1, b"xx".to_vec(), false),
-        vfsi_core::api::ReadResult::owned(0, b"xxx".to_vec(), false),
-        vfsi_core::api::ReadResult::buffered(0, 2, false),
+        vfsi_core::api::ReadOutput::owned(1, b"xx".to_vec(), false),
+        vfsi_core::api::ReadOutput::owned(0, b"xxx".to_vec(), false),
+        vfsi_core::api::ReadOutput::buffered(0, 2, false),
     ] {
         let mut backend = FaultBackend::new(&root.0, None);
         backend.read_all_item_errors = vec![(
@@ -353,7 +353,7 @@ fn whole_file_validation_charges_only_valid_returned_prefixes() {
         0,
         OpError::failed(
             std::io::Error::from_raw_os_error(libc::EIO),
-            Some(IoProgress::Read(vfsi_core::api::ReadResult::owned(
+            Some(IoProgress::Read(vfsi_core::api::ReadOutput::owned(
                 0,
                 b"xx".to_vec(),
                 false,

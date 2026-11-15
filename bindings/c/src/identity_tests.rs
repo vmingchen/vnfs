@@ -101,13 +101,13 @@ impl HandleBackend for IdentityBackend {
     fn close_impl(&mut self, _: &FileOperand) -> Result<(), std::io::Error> {
         Ok(())
     }
-    fn read_impl(&mut self, _: &ReadOp) -> Result<vfsi_sync::ReadResult, std::io::Error> {
+    fn read_impl(&mut self, _: &ReadOp) -> Result<vfsi_sync::ReadOutput, std::io::Error> {
         unreachable!()
     }
     fn write_impl(
         &mut self,
         _: WriteOp<&FileOperand, &[u8]>,
-    ) -> Result<vfsi_sync::WriteResult, std::io::Error> {
+    ) -> Result<vfsi_sync::WriteOutput, std::io::Error> {
         unreachable!()
     }
     fn seek_impl(&mut self, _: &FileOperand, _: std::io::SeekFrom) -> Result<u64, std::io::Error> {
@@ -153,7 +153,7 @@ impl VectorBackend for IdentityBackend {
             .collect())
     }
 
-    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
+    fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadOutput> {
         unreachable!()
     }
     fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_sync::VecResult<()> {

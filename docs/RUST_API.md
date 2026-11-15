@@ -567,7 +567,7 @@ timeouts; this is not a cancellation mechanism.
 Lifecycle observers are delivered after the backend lock is released. They may
 reenter the client. Keep callbacks short and avoid strong observer/client cycles.
 
-`Vfsi::vread` returns `VecResult<ReadResult>`: an outer rejection before
+`Vfsi::vread` returns `VecResult<ReadOutput>`: an outer rejection before
 input dispatch, or one independent outcome per input. Successful siblings remain
 available when another read fails. The result slot identifies the input;
 `OpError` preserves completion state and any confirmed owned or buffered
@@ -578,10 +578,10 @@ vector once, then selects the first failed input in input order and discards
 other outcomes and error progress. Short reads remain short; the helper does
 not provide stop-on-error, rollback or retry safety.
 
-`ReadResult` has private fields. Use `offset()`, `bytes_read()`, `eof()`, `data()`,
+`ReadOutput` has private fields. Use `offset()`, `bytes_read()`, `eof()`, `data()`,
 `is_buffered()`, and `into_data()`. Backend implementers construct owned results
-with `ReadResult::owned`, which derives the byte count, or use
-`ReadResult::buffered` for caller-owned storage. Results never retain buffer borrows.
+with `ReadOutput::owned`, which derives the byte count, or use
+`ReadOutput::buffered` for caller-owned storage. Results never retain buffer borrows.
 
 ## Migrating requests and policies
 

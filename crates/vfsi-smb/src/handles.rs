@@ -257,13 +257,13 @@ impl HandleBackend for SmbVecFs {
     fn open_impl(&mut self, request: &OpenOp) -> VfResult<FileOperand> {
         vfsi_sync::backend::helpers::native_open_impl_default(self, request)
     }
-    fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
+    fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadOutput> {
         vfsi_sync::backend::helpers::native_read_impl_default(self, request)
     }
     fn read_into_impl(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
         vfsi_sync::backend::helpers::native_read_into_impl_default(self, request, buffer)
     }
-    fn write_impl(&mut self, request: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult> {
+    fn write_impl(&mut self, request: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteOutput> {
         vfsi_sync::backend::helpers::native_write_impl_default(self, request)
     }
     fn seek_impl(&mut self, file: &FileOperand, position: std::io::SeekFrom) -> VfResult<u64> {

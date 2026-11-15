@@ -255,10 +255,10 @@ mod tests {
         fn close_impl(&mut self, _: &FileOperand) -> VfResult<()> {
             Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
-        fn read_impl(&mut self, _: &ReadOp) -> VfResult<ReadResult> {
+        fn read_impl(&mut self, _: &ReadOp) -> VfResult<ReadOutput> {
             Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
-        fn write_impl(&mut self, _: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult> {
+        fn write_impl(&mut self, _: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteOutput> {
             Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
         fn seek_impl(&mut self, _: &FileOperand, _: std::io::SeekFrom) -> VfResult<u64> {
@@ -317,8 +317,8 @@ mod tests {
                 .collect())
         }
 
-        fn vread_impl(&mut self, reads: &[ReadOp]) -> crate::VecResult<ReadResult> {
-            let result: VfResult<Vec<ReadResult>> = {
+        fn vread_impl(&mut self, reads: &[ReadOp]) -> crate::VecResult<ReadOutput> {
+            let result: VfResult<Vec<ReadOutput>> = {
                 assert!(reads.iter().map(|r| r.length).sum::<usize>() <= BYTES);
                 self.read_widths.push(reads.len());
                 Ok(reads
@@ -330,7 +330,7 @@ mod tests {
                         let source = &self.sources[r.file.fd().unwrap() as usize];
                         let start = (offset as usize).min(source.len());
                         let end = source.len().min(start + r.length.min(self.read_limit));
-                        ReadResult {
+                        ReadOutput {
                             file: if self.malformed_read {
                                 FileOperand::from_fd(999)
                             } else {
@@ -348,7 +348,7 @@ mod tests {
         fn vwrite_impl(
             &mut self,
             writes: &[WriteOp<&FileOperand, &[u8]>],
-        ) -> crate::VecResult<WriteResult> {
+        ) -> crate::VecResult<WriteOutput> {
             self.write_calls += 1;
             if self.write_failure {
                 // Simulate an acknowledged-unknown mutation before a lost reply.
@@ -362,7 +362,7 @@ mod tests {
                             let VfOffset::At(offset) = write.offset() else {
                                 panic!("positional write")
                             };
-                            Ok(WriteResult {
+                            Ok(WriteOutput {
                                 file: (*write.file()).clone(),
                                 offset,
                                 bytes_written: 1,
@@ -392,7 +392,7 @@ mod tests {
                     destination.resize(destination.len().max(offset as usize + n), 0);
                     destination[offset as usize..offset as usize + n]
                         .copy_from_slice(&w.data()[..n]);
-                    WriteResult {
+                    WriteOutput {
                         file: (*w.file()).clone(),
                         offset,
                         bytes_written: n,

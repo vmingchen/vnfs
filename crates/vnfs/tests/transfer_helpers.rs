@@ -166,7 +166,7 @@ impl Vfsi for Harness {
         &self,
         r: impl IntoIterator<Item = ReadOp<'a, Self::File>>,
         o: ReadOptions,
-    ) -> vnfs::VecResult<ReadResult> {
+    ) -> vnfs::VecResult<ReadOutput> {
         let r: Vec<_> = r.into_iter().collect();
         let ranges: Vec<_> = r
             .iter()
@@ -221,43 +221,43 @@ impl Vfsi for Harness {
         c.max_bytes = c.max_bytes.max(
             out.iter()
                 .filter_map(|result| result.as_ref().ok())
-                .map(ReadResult::bytes_read)
+                .map(ReadOutput::bytes_read)
                 .sum(),
         );
         if self.fault.get() == Fault::ShortRead {
             for result in out.iter_mut().filter_map(|result| result.as_mut().ok()) {
                 if result.bytes_read() > 3 {
-                    *result = ReadResult::buffered(result.offset(), 3, false);
+                    *result = ReadOutput::buffered(result.offset(), 3, false);
                 }
             }
         }
         if self.fault.get() == Fault::OwnedShortRead {
             for result in out.iter_mut().filter_map(|result| result.as_mut().ok()) {
                 if let Some(data) = result.data().filter(|data| data.len() > 3) {
-                    *result = ReadResult::owned(result.offset(), data[..3].to_vec(), false);
+                    *result = ReadOutput::owned(result.offset(), data[..3].to_vec(), false);
                 }
             }
         }
         if self.fault.get() == Fault::NoReadProgress
             && let Some(Ok(read)) = out.first_mut()
         {
-            *read = ReadResult::owned(read.offset(), Vec::new(), false);
+            *read = ReadOutput::owned(read.offset(), Vec::new(), false);
         }
         if self.fault.get() == Fault::OversizedOwnedRead
             && let Some(Ok(read)) = out.first_mut()
         {
-            *read = ReadResult::owned(read.offset(), vec![0; ranges[0].1 + 1], true);
+            *read = ReadOutput::owned(read.offset(), vec![0; ranges[0].1 + 1], true);
         }
         if self.fault.get() == Fault::BadRead {
             out.pop();
         }
         if self.fault.get() == Fault::ExtraReadOutcome {
-            out.push(Ok(ReadResult::owned(0, Vec::new(), true)));
+            out.push(Ok(ReadOutput::owned(0, Vec::new(), true)));
         }
         if self.fault.get() == Fault::WrongOffset
             && let Some(Ok(read)) = out.first_mut()
         {
-            *read = ReadResult::buffered(1, read.bytes_read(), read.eof());
+            *read = ReadOutput::buffered(1, read.bytes_read(), read.eof());
         }
         Ok(out)
     }
@@ -265,7 +265,7 @@ impl Vfsi for Harness {
         &self,
         r: &[WriteOp<'a, Self::File>],
         o: WriteOptions,
-    ) -> vnfs::VecResult<WriteResult> {
+    ) -> vnfs::VecResult<WriteOutput> {
         self.calls.borrow_mut().writes += 1;
         let mut out = self.fs.vwrite(r, o)?;
         if self.fault.get() == Fault::LostWrite {

@@ -1239,11 +1239,11 @@ impl LocalBackend {
         Ok(())
     }
 
-    fn readv_one(&mut self, op: &ReadOp) -> VfResult<ReadResult> {
+    fn readv_one(&mut self, op: &ReadOp) -> VfResult<ReadOutput> {
         let mut data = vec![0u8; op.length];
         let result = self.readv_one_into(op, &mut data)?;
         data.truncate(result.bytes_read);
-        Ok(ReadResult {
+        Ok(ReadOutput {
             file: result.file,
             offset: result.offset,
             data,
@@ -1268,7 +1268,7 @@ impl LocalBackend {
 
     /// Lossless local read engine. The native trait retains an explicit strict
     /// bridge until the coordinated operation-family signature migration.
-    fn read_results(&mut self, reads: &[ReadOp]) -> vfsi_core::VecResult<ReadResult> {
+    fn read_results(&mut self, reads: &[ReadOp]) -> vfsi_core::VecResult<ReadOutput> {
         use vfsi_core::{OpError, OpResult};
         if reads.is_empty() {
             return Ok(Vec::new());
@@ -1284,7 +1284,7 @@ impl LocalBackend {
         });
         if owned && Self::independent_reads(reads) {
             // Dense valid cohorts need neither placeholder outcomes nor an index map.
-            let mut out: Vec<Option<OpResult<ReadResult>>> = Vec::new();
+            let mut out: Vec<Option<OpResult<ReadOutput>>> = Vec::new();
             let mut operations = Vec::with_capacity(reads.len());
             let mut indices = Vec::new();
             let mut offsets = if reads.iter().all(|op| matches!(op.offset, VfOffset::At(_))) {
@@ -1381,7 +1381,7 @@ impl LocalBackend {
                 .map(|(result, mut data)| match result {
                     Ok(result) => {
                         data.truncate(result.bytes_read);
-                        Ok(ReadResult {
+                        Ok(ReadOutput {
                             file: result.file,
                             offset: result.offset,
                             data,
@@ -1416,7 +1416,7 @@ impl LocalBackend {
         op: &ReadOp,
         offset: u64,
         result: vfsi_core::OpResult<Vec<u8>>,
-    ) -> vfsi_core::OpResult<ReadResult> {
+    ) -> vfsi_core::OpResult<ReadOutput> {
         let result = result
             .map_err(|error| Self::check_read_error(error, offset, op.length, true))
             .and_then(|data| {
@@ -1428,7 +1428,7 @@ impl LocalBackend {
                         None,
                     ));
                 }
-                Ok(ReadResult {
+                Ok(ReadOutput {
                     file: op.file.clone(),
                     offset,
                     eof: data.is_empty() && op.length != 0,
@@ -1674,7 +1674,7 @@ impl LocalBackend {
         })
     }
 
-    fn writev_one(&mut self, op: WriteOp<&FileOperand, &[u8]>) -> vfsi_core::OpResult<WriteResult> {
+    fn writev_one(&mut self, op: WriteOp<&FileOperand, &[u8]>) -> vfsi_core::OpResult<WriteOutput> {
         use vfsi_core::{FailureState, IoProgress, OpError};
         let (off, descriptor, result) = match op.file() {
             FileOperand::Fd(fd) => {
@@ -1773,7 +1773,7 @@ impl LocalBackend {
         {
             self.advance_offset(op.file(), off + confirmed as u64);
         }
-        result.map(|bytes_written| WriteResult {
+        result.map(|bytes_written| WriteOutput {
             file: op.file().clone(),
             offset: off,
             bytes_written,
@@ -1784,7 +1784,7 @@ impl LocalBackend {
     fn write_results(
         &mut self,
         writes: &[WriteOp<&FileOperand, &[u8]>],
-    ) -> vfsi_core::VecResult<WriteResult> {
+    ) -> vfsi_core::VecResult<WriteOutput> {
         use vfsi_core::{IoProgress, OpError, OpResult};
         if writes.is_empty() {
             return Ok(Vec::new());
@@ -1796,7 +1796,7 @@ impl LocalBackend {
             let ordered = self.io.ordered();
             let mut operations = Vec::with_capacity(writes.len());
             let mut ranges = Vec::with_capacity(if ordered { 0 } else { writes.len() });
-            let mut output: Vec<Option<OpResult<WriteResult>>> =
+            let mut output: Vec<Option<OpResult<WriteOutput>>> =
                 (0..writes.len()).map(|_| None).collect();
             let mut independent = true;
             for (index, op) in writes.iter().enumerate() {
@@ -1873,7 +1873,7 @@ impl LocalBackend {
                     let VfOffset::At(offset) = request.offset() else {
                         unreachable!()
                     };
-                    *slot = Some(result.map(|bytes_written| WriteResult {
+                    *slot = Some(result.map(|bytes_written| WriteOutput {
                         file: request.file().clone(),
                         offset,
                         bytes_written,
@@ -2265,13 +2265,13 @@ impl HandleBackend for LocalBackend {
     fn open_impl(&mut self, request: &OpenOp) -> VfResult<FileOperand> {
         vfsi_sync::backend::helpers::native_open_impl_default(self, request)
     }
-    fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
+    fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadOutput> {
         vfsi_sync::backend::helpers::native_read_impl_default(self, request)
     }
     fn read_into_impl(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
         vfsi_sync::backend::helpers::native_read_into_impl_default(self, request, buffer)
     }
-    fn write_impl(&mut self, request: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult> {
+    fn write_impl(&mut self, request: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteOutput> {
         vfsi_sync::backend::helpers::native_write_impl_default(self, request)
     }
     fn seek_impl(&mut self, file: &FileOperand, position: std::io::SeekFrom) -> VfResult<u64> {
@@ -2437,7 +2437,7 @@ impl VectorBackend for LocalBackend {
                 let result = match (result, self.close_impl(file)) {
                     (Ok(data), Err(error)) => Err(OpError::failed(
                         error,
-                        Some(IoProgress::Read(vfsi_core::api::ReadResult::owned(
+                        Some(IoProgress::Read(vfsi_core::api::ReadOutput::owned(
                             0, data, true,
                         ))),
                     )),
@@ -2462,7 +2462,7 @@ impl VectorBackend for LocalBackend {
         Ok(output)
     }
 
-    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_core::VecResult<ReadResult> {
+    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_core::VecResult<ReadOutput> {
         self.read_results(reads)
     }
 
@@ -2477,7 +2477,7 @@ impl VectorBackend for LocalBackend {
     fn vwrite_impl(
         &mut self,
         writes: &[WriteOp<&FileOperand, &[u8]>],
-    ) -> vfsi_core::VecResult<WriteResult> {
+    ) -> vfsi_core::VecResult<WriteOutput> {
         self.write_results(writes)
     }
 

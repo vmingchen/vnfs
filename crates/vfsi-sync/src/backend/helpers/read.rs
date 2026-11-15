@@ -183,7 +183,7 @@ pub fn read_all_vectors<F: VectorBackend + ?Sized>(
             });
             if let Some((cause, state)) = failure {
                 let progress = (!bytes.is_empty()).then(|| {
-                    IoProgress::Read(vfsi_core::api::ReadResult::owned(
+                    IoProgress::Read(vfsi_core::api::ReadOutput::owned(
                         0,
                         std::mem::take(bytes),
                         eof && !exceeded,
@@ -233,8 +233,8 @@ pub fn stream_read_chunks(
     files: &[FileOperand],
     chunk_size: impl Fn(usize) -> usize,
     memory_limit: usize,
-    mut read: impl FnMut(&[ReadOp]) -> Result<Vec<ReadResult>, IndexedError>,
-    mut cb: impl FnMut(usize, ReadResult) -> bool,
+    mut read: impl FnMut(&[ReadOp]) -> Result<Vec<ReadOutput>, IndexedError>,
+    mut cb: impl FnMut(usize, ReadOutput) -> bool,
 ) -> Result<(), IndexedError> {
     use std::collections::VecDeque;
 
@@ -380,7 +380,7 @@ mod stream_error_tests {
                             )),
                         });
                     }
-                    Ok(vec![ReadResult {
+                    Ok(vec![ReadOutput {
                         file: reads[0].file.clone(),
                         offset: 0,
                         data: vec![1],
@@ -413,7 +413,7 @@ mod stream_error_tests {
                     calls += 1;
                     let mut results: Vec<_> = requests
                         .iter()
-                        .map(|request| ReadResult {
+                        .map(|request| ReadOutput {
                             file: request.file.clone(),
                             offset: 0,
                             data: vec![1],

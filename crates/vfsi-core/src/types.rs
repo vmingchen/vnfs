@@ -402,7 +402,7 @@ impl ReadOp {
 /// `file` echoes the request's file reference so results can be paired back
 /// to mixed fd/path inputs without reordering assumptions.
 #[derive(Debug, Clone)]
-pub struct ReadResult {
+pub struct ReadOutput {
     pub file: FileOperand,
     /// The resolved offset the read actually started at (never `Cur`/`End`
     /// sentinels).
@@ -427,7 +427,7 @@ pub struct ReadIntoResult {
 
 /// The result of one [`crate::WriteOp`]. `file` echoes the request's file reference.
 #[derive(Debug, Clone)]
-pub struct WriteResult {
+pub struct WriteOutput {
     pub file: FileOperand,
     /// The resolved offset the write actually started at (never `Cur`/`End`
     /// sentinels).

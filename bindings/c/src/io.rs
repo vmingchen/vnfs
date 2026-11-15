@@ -3,7 +3,7 @@ use super::*;
 
 pub(super) fn validate_c_read_results(
     reads: &[ReadOp],
-    results: &[vfsi_sync::ReadResult],
+    results: &[vfsi_sync::ReadOutput],
 ) -> Result<(), std::io::Error> {
     if results.len() != reads.len() {
         return Err(invalid_backend_result_count(
@@ -44,7 +44,7 @@ pub(super) fn validate_c_read_results(
 
 pub(super) fn validate_c_write_results(
     writes: &[WriteOp<&FileOperand, &[u8]>],
-    results: &[vfsi_sync::WriteResult],
+    results: &[vfsi_sync::WriteOutput],
 ) -> Result<(), std::io::Error> {
     if results.len() != writes.len() {
         return Err(invalid_backend_result_count(

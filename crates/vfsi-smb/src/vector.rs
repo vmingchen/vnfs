@@ -176,14 +176,14 @@ impl VectorBackend for SmbVecFs {
         Ok(())
     }
 
-    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_core::VecResult<ReadResult> {
+    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_core::VecResult<ReadOutput> {
         self.read_results(reads)
     }
 
     fn vwrite_impl(
         &mut self,
         writes: &[WriteOp<&FileOperand, &[u8]>],
-    ) -> vfsi_core::VecResult<WriteResult> {
+    ) -> vfsi_core::VecResult<WriteOutput> {
         self.write_results(writes)
     }
 
@@ -982,7 +982,7 @@ impl VectorBackend for SmbVecFs {
 }
 
 impl SmbVecFs {
-    pub(super) fn read_results(&mut self, reads: &[ReadOp]) -> vfsi_core::VecResult<ReadResult> {
+    pub(super) fn read_results(&mut self, reads: &[ReadOp]) -> vfsi_core::VecResult<ReadOutput> {
         use vfsi_core::{OpError, OpResult};
         if reads.is_empty() {
             return Ok(Vec::new());
@@ -1012,7 +1012,7 @@ impl SmbVecFs {
         }
         let connection = self.client.connection_mut().clone();
         let tree = self.tree.clone();
-        let mut output: Vec<Option<OpResult<ReadResult>>> =
+        let mut output: Vec<Option<OpResult<ReadOutput>>> =
             (0..reads.len()).map(|_| None).collect();
         let mut jobs = Vec::with_capacity(reads.len());
         let mut indices = Vec::with_capacity(reads.len());
@@ -1059,7 +1059,7 @@ impl SmbVecFs {
                     let VfOffset::At(offset) = read.offset else {
                         unreachable!()
                     };
-                    ReadResult {
+                    ReadOutput {
                         file: read.file.clone(),
                         offset,
                         eof: data.len() < read.length,
@@ -1080,7 +1080,7 @@ impl SmbVecFs {
     pub(super) fn write_results(
         &mut self,
         writes: &[WriteOp<&FileOperand, &[u8]>],
-    ) -> vfsi_core::VecResult<WriteResult> {
+    ) -> vfsi_core::VecResult<WriteOutput> {
         use vfsi_core::{OpError, OpResult};
         #[cfg(feature = "test-faults")]
         {
@@ -1115,7 +1115,7 @@ impl SmbVecFs {
                     && write.data().len() <= u32::MAX as usize
             });
         if concurrent {
-            let mut output: Vec<Option<OpResult<WriteResult>>> =
+            let mut output: Vec<Option<OpResult<WriteOutput>>> =
                 (0..writes.len()).map(|_| None).collect::<Vec<_>>();
             let mut prepared = Vec::with_capacity(writes.len());
             let mut indices = Vec::with_capacity(writes.len());
@@ -1180,7 +1180,7 @@ impl SmbVecFs {
                     let VfOffset::At(offset) = write.offset() else {
                         unreachable!()
                     };
-                    output[index] = Some(outcome.result.map(|bytes_written| WriteResult {
+                    output[index] = Some(outcome.result.map(|bytes_written| WriteOutput {
                         file: write.file().clone(),
                         offset,
                         bytes_written,
@@ -1217,7 +1217,7 @@ impl SmbVecFs {
         &mut self,
         write: WriteOp<&FileOperand, &[u8]>,
         stopped: &mut Option<Arc<std::io::Error>>,
-    ) -> vfsi_core::OpResult<WriteResult> {
+    ) -> vfsi_core::OpResult<WriteOutput> {
         use vfsi_core::OpError;
         if stopped.is_none() && self.client.is_disconnected() {
             *stopped = Some(vfsi_core::internal::errors::shared_source(

@@ -201,7 +201,7 @@ macro_rules! owned_client {
                 &self,
                 ops: impl IntoIterator<Item = ReadOp<'a, $file>>,
                 options: ReadOptions,
-            ) -> vfsi_core::VecResult<ReadResult> {
+            ) -> vfsi_core::VecResult<ReadOutput> {
                 crate::read::consume_ops(
                     ops,
                     options.max_total_bytes_or(self.limits().max_read_bytes()),
@@ -217,7 +217,7 @@ macro_rules! owned_client {
             pub(crate) fn write_partial_native(
                 &self,
                 requests: &[WriteOp<'_, $file>],
-            ) -> vfsi_core::VecResult<WriteResult> {
+            ) -> vfsi_core::VecResult<WriteOutput> {
                 self.inner.vwrite_mapped_native(requests, |op| {
                     op.file().inner.write_request_at(op.offset(), op.data())
                 })
@@ -229,7 +229,7 @@ macro_rules! owned_client {
             pub(crate) fn write_complete(
                 &self,
                 requests: &[WriteOp<'_, $file>],
-            ) -> vfsi_core::VecResult<WriteResult> {
+            ) -> vfsi_core::VecResult<WriteOutput> {
                 self.inner.vwrite_all_mapped_native(requests, |op| {
                     op.file().inner.write_request_at(op.offset(), op.data())
                 })

@@ -93,9 +93,9 @@ fn application_requests_results_and_errors_are_root_types() {
         vnfs::files::ReadOp::range(file, 0, 1)
     }
     let _ = request;
-    let result = vnfs::files::ReadResult::owned(0, vec![1], false);
+    let result = vnfs::files::ReadOutput::owned(0, vec![1], false);
     assert_eq!(result.data(), Some([1].as_slice()));
-    let into = vnfs::files::ReadResult::buffered(7, 1, true);
+    let into = vnfs::files::ReadOutput::buffered(7, 1, true);
     assert!(into.eof());
     let error = vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(28));
     assert_eq!(error.kind(), vnfs::error::ErrorKind::StorageFull);

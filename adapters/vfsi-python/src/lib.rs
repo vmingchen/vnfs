@@ -21,9 +21,9 @@ use pyo3::types::{PyBytes, PyDict, PyString};
 use vfsi_core::{ERR_ACCES, ERR_NOENT};
 
 use vfsi_core::{
-    AttrMask, Capabilities, ExtentPair, FileOperand, IndexedError, ReadOp, ReadResult, SeekFrom,
+    AttrMask, Capabilities, ExtentPair, FileOperand, IndexedError, ReadOp, ReadOutput, SeekFrom,
     VF_CAP_HARDLINKS, VF_CAP_LSTAT, VF_CAP_NON_UTF8_PATHS, VF_CAP_POSIX_METADATA,
-    VF_CAP_SERVER_COPY, VF_CAP_SYMLINKS, VfAttrs, VfOffset, VfType, WriteOp, WriteResult,
+    VF_CAP_SERVER_COPY, VF_CAP_SYMLINKS, VfAttrs, VfOffset, VfType, WriteOp, WriteOutput,
 };
 #[cfg(feature = "dummy")]
 use vfsi_local::LocalBackend;
@@ -458,7 +458,7 @@ fn contract_error(operation: &str, detail: impl std::fmt::Display) -> PyErr {
     PyOSError::new_err(format!("{operation}: backend contract violation: {detail}"))
 }
 
-fn one_read_result(operation: &str, op: &ReadOp, results: Vec<ReadResult>) -> PyResult<ReadResult> {
+fn one_read_result(operation: &str, op: &ReadOp, results: Vec<ReadOutput>) -> PyResult<ReadOutput> {
     let mut results = validate_read_results(operation, std::slice::from_ref(op), results)?;
     results
         .pop()
@@ -469,7 +469,7 @@ fn validate_read_completion(
     operation: &str,
     index: usize,
     op: &ReadOp,
-    result: &ReadResult,
+    result: &ReadOutput,
 ) -> PyResult<()> {
     if result.file != op.file {
         return Err(contract_error(
@@ -504,8 +504,8 @@ fn validate_read_completion(
 fn validate_read_results(
     operation: &str,
     ops: &[ReadOp],
-    results: Vec<ReadResult>,
-) -> PyResult<Vec<ReadResult>> {
+    results: Vec<ReadOutput>,
+) -> PyResult<Vec<ReadOutput>> {
     if results.len() != ops.len() {
         return Err(contract_error(
             operation,
@@ -521,9 +521,9 @@ fn validate_read_results(
 fn one_write_result(
     operation: &str,
     op: &WriteOp,
-    results: Vec<WriteResult>,
+    results: Vec<WriteOutput>,
     append: bool,
-) -> PyResult<WriteResult> {
+) -> PyResult<WriteOutput> {
     let mut results =
         validate_write_results(operation, std::slice::from_ref(op), results, |_| append)?;
     results
@@ -535,7 +535,7 @@ fn validate_write_result(
     operation: &str,
     index: usize,
     op: &WriteOp,
-    result: &WriteResult,
+    result: &WriteOutput,
     append: bool,
 ) -> PyResult<()> {
     if &result.file != op.file() {
@@ -572,9 +572,9 @@ fn validate_write_result(
 fn validate_write_results(
     operation: &str,
     ops: &[WriteOp],
-    results: Vec<WriteResult>,
+    results: Vec<WriteOutput>,
     append: impl Fn(&WriteOp) -> bool,
-) -> PyResult<Vec<WriteResult>> {
+) -> PyResult<Vec<WriteOutput>> {
     if results.len() != ops.len() {
         return Err(contract_error(
             operation,
@@ -1055,7 +1055,7 @@ impl NfsClient {
         fds: Vec<i64>,
         offsets: Option<Vec<u64>>,
         datas: Vec<Vec<u8>>,
-    ) -> PyResult<Vec<vfsi_core::OpResult<WriteResult>>> {
+    ) -> PyResult<Vec<vfsi_core::OpResult<WriteOutput>>> {
         if fds.len() != datas.len()
             || offsets
                 .as_ref()
@@ -1160,7 +1160,7 @@ impl NfsClient {
         fds: Vec<i64>,
         offsets: Vec<u64>,
         lengths: Vec<usize>,
-    ) -> PyResult<Vec<vfsi_core::OpResult<ReadResult>>> {
+    ) -> PyResult<Vec<vfsi_core::OpResult<ReadOutput>>> {
         if fds.len() != offsets.len() || fds.len() != lengths.len() {
             return Err(PyValueError::new_err(
                 "fds, offsets, and lengths must have equal lengths",
@@ -3182,7 +3182,7 @@ mod tests {
             one_read_result(
                 "pread",
                 &op,
-                vec![ReadResult {
+                vec![ReadOutput {
                     file: FileOperand::from_fd(8),
                     offset: 11,
                     data: vec![1],
@@ -3194,13 +3194,13 @@ mod tests {
 
         let second = ReadOp::at(FileOperand::from_fd(8), 0, 1);
         let swapped = vec![
-            ReadResult {
+            ReadOutput {
                 file: second.file.clone(),
                 offset: 0,
                 data: vec![2],
                 eof: false,
             },
-            ReadResult {
+            ReadOutput {
                 file: op.file.clone(),
                 offset: 11,
                 data: vec![1],
@@ -3212,7 +3212,7 @@ mod tests {
             one_read_result(
                 "pread",
                 &op,
-                vec![ReadResult {
+                vec![ReadOutput {
                     file: FileOperand::from_fd(7),
                     offset: 12,
                     data: vec![1],
@@ -3225,7 +3225,7 @@ mod tests {
             one_read_result(
                 "pread",
                 &op,
-                vec![ReadResult {
+                vec![ReadOutput {
                     file: FileOperand::from_fd(7),
                     offset: 11,
                     data: vec![1; 4],
@@ -3244,7 +3244,7 @@ mod tests {
             one_write_result(
                 "pwrite",
                 &op,
-                vec![WriteResult {
+                vec![WriteOutput {
                     file: FileOperand::from_fd(7),
                     offset: 11,
                     bytes_written: 4,
@@ -3339,13 +3339,13 @@ mod aggregate_listdir_error_tests {
         fn close_impl(&mut self, _: &FileOperand) -> vfsi_core::VfResult<()> {
             unreachable!()
         }
-        fn read_impl(&mut self, _: &ReadOp) -> vfsi_core::VfResult<ReadResult> {
+        fn read_impl(&mut self, _: &ReadOp) -> vfsi_core::VfResult<ReadOutput> {
             unreachable!()
         }
         fn write_impl(
             &mut self,
             _: WriteOp<&FileOperand, &[u8]>,
-        ) -> vfsi_core::VfResult<WriteResult> {
+        ) -> vfsi_core::VfResult<WriteOutput> {
             unreachable!()
         }
         fn seek_impl(&mut self, _: &FileOperand, _: std::io::SeekFrom) -> vfsi_core::VfResult<u64> {
@@ -3392,7 +3392,7 @@ mod aggregate_listdir_error_tests {
                 .collect())
         }
 
-        fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
+        fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadOutput> {
             unreachable!()
         }
         fn vlistdirs_impl(

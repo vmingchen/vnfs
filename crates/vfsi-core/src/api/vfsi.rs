@@ -1,6 +1,6 @@
 use crate::api::{
     Attrs, CopyOptions, DirectoryListing, MkDirOp, OpenOp, ResourceLimits, Result, SetAttrsOp,
-    WriteResult,
+    WriteOutput,
 };
 use std::path::Path;
 
@@ -313,7 +313,7 @@ pub trait Vfsi {
         &self,
         ops: impl IntoIterator<Item = crate::api::ReadOp<'a, Self::File>>,
         options: crate::api::ReadOptions,
-    ) -> crate::VecResult<crate::api::ReadResult>;
+    ) -> crate::VecResult<crate::api::ReadOutput>;
     /// Write positional ranges with explicit short-write policy.
     /// With default options, report accepted byte counts without completing short writes.
     /// With `write_all(true)`, complete each eligible input through short-write waves.
@@ -352,7 +352,7 @@ pub trait Vfsi {
         &self,
         requests: &[crate::api::WriteOp<'a, Self::File>],
         options: crate::api::WriteOptions,
-    ) -> crate::VecResult<WriteResult>;
+    ) -> crate::VecResult<WriteOutput>;
     /// Close independent handles and return one outcome per input. Confirmed
     /// successes are disarmed, including when a sibling fails. Already closed
     /// handles succeed without dispatch. A lost reply leaves remote state

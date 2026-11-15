@@ -107,7 +107,7 @@ impl Vfsi for PortableFs {
         &self,
         ops: impl IntoIterator<Item = ReadOp<'a, TestFile>>,
         _: ReadOptions,
-    ) -> vfsi_core::VecResult<ReadResult> {
+    ) -> vfsi_core::VecResult<ReadOutput> {
         self.reads.set(self.reads.get() + 1);
         if self.shape.get() == 6 {
             return Err(vfsi_core::internal::errors::transport(
@@ -122,10 +122,10 @@ impl Vfsi for PortableFs {
             .map(|(index, mut op)| {
                 if let Some((_, offset, buffer)) = op.buffer_parts_mut() {
                     buffer.fill(index as u8);
-                    ReadResult::buffered(offset, buffer.len(), false)
+                    ReadOutput::buffered(offset, buffer.len(), false)
                 } else {
                     assert!(op.whole_file_path().is_some());
-                    ReadResult::owned(0, vec![index as u8], true)
+                    ReadOutput::owned(0, vec![index as u8], true)
                 }
             })
             .collect();
@@ -133,10 +133,10 @@ impl Vfsi for PortableFs {
             1 => {
                 results.pop();
             }
-            2 => results.push(ReadResult::owned(0, vec![], true)),
-            3 => results[0] = ReadResult::buffered(0, 1, true),
-            4 => results[0] = ReadResult::owned(1, vec![0], true),
-            5 => results[0] = ReadResult::owned(0, vec![0], false),
+            2 => results.push(ReadOutput::owned(0, vec![], true)),
+            3 => results[0] = ReadOutput::buffered(0, 1, true),
+            4 => results[0] = ReadOutput::owned(1, vec![0], true),
+            5 => results[0] = ReadOutput::owned(0, vec![0], false),
             _ => {}
         }
         Ok(results.into_iter().map(Ok).collect())
@@ -145,7 +145,7 @@ impl Vfsi for PortableFs {
         &self,
         _: &[WriteOp<'a, TestFile>],
         _: WriteOptions,
-    ) -> vfsi_core::VecResult<WriteResult> {
+    ) -> vfsi_core::VecResult<WriteOutput> {
         panic!("unexpected write")
     }
     fn vclose(&self, files: &mut [TestFile]) -> vfsi_core::VecResult<()> {
@@ -726,7 +726,7 @@ fn consuming_reads_release_caller_buffers_and_owned_counts_are_derived() {
     assert_eq!((result[0].offset(), result[0].bytes_read()), (7, 3));
     assert!(result[0].is_buffered());
     buffer.fill(42); // Results retain no borrow of caller storage.
-    let owned = ReadResult::owned(2, vec![1, 2, 3], true);
+    let owned = ReadOutput::owned(2, vec![1, 2, 3], true);
     assert_eq!(owned.bytes_read(), owned.data().unwrap().len());
 }
 

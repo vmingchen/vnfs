@@ -174,13 +174,13 @@ pub trait HandleBackend {
 
     fn close_impl(&mut self, file: &FileOperand) -> VfResult<()>;
 
-    fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult>;
+    fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadOutput>;
 
     fn read_into_impl(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
         crate::backend::helpers::read_into_impl_default(self, request, buffer)
     }
 
-    fn write_impl(&mut self, request: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult>;
+    fn write_impl(&mut self, request: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteOutput>;
 
     fn seek_impl(&mut self, file: &FileOperand, position: std::io::SeekFrom) -> VfResult<u64>;
 
@@ -221,7 +221,7 @@ pub trait HandleBackend {
 /// synthesizes a complete backend from scalar methods.
 pub trait VectorBackend: HandleBackend {
     // Vector I/O and strict opens.
-    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_core::VecResult<ReadResult>;
+    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_core::VecResult<ReadOutput>;
 
     fn vread_into_impl(
         &mut self,
@@ -239,7 +239,7 @@ pub trait VectorBackend: HandleBackend {
     fn vwrite_impl(
         &mut self,
         writes: &[WriteOp<&FileOperand, &[u8]>],
-    ) -> vfsi_core::VecResult<WriteResult> {
+    ) -> vfsi_core::VecResult<WriteOutput> {
         let _ = writes;
         Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }

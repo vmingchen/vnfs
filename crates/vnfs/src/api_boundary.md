@@ -134,7 +134,7 @@ fn conversion(attrs: vfsi_sync::VfAttrs) -> vnfs::directory::Attrs { attrs.into(
 ```
 
 ```compile_fail,E0277
-fn conversion(result: vfsi_core::ReadResult) -> vnfs::files::ReadResult { result.into() }
+fn conversion(result: vfsi_core::ReadOutput) -> vnfs::files::ReadOutput { result.into() }
 ```
 
 ```compile_fail,E0308
@@ -148,7 +148,7 @@ fn coercion(client: &vnfs::nfs::NfsClient) -> &vfsi_sync::FsClient<vfsi_nfs::Nfs
 ```
 
 ```compile_fail,E0277
-fn conversion(result: vfsi_sync::WriteResult) -> vnfs::files::WriteResult { result.into() }
+fn conversion(result: vfsi_sync::WriteOutput) -> vnfs::files::WriteOutput { result.into() }
 ```
 
 ```compile_fail,E0599
@@ -378,7 +378,7 @@ Vector-only generic code needs no extension trait:
 
 ```no_run
 use vnfs::files::{Vfsi, ReadOp, ReadOptions};
-fn vector_only(fs: &impl Vfsi) -> vnfs::VecResult<vnfs::files::ReadResult> {
+fn vector_only(fs: &impl Vfsi) -> vnfs::VecResult<vnfs::files::ReadOutput> {
     fs.vread([ReadOp::whole("/file-1"), ReadOp::whole("/file-2")], ReadOptions::new())
 }
 ```
@@ -393,7 +393,7 @@ use vnfs::backend::rpc::RpcClient;
 Read-result fields cannot be independently mutated:
 
 ```compile_fail
-let mut result = vnfs::files::ReadResult::owned(0, vec![1], true);
+let mut result = vnfs::files::ReadOutput::owned(0, vec![1], true);
 result.bytes_read = 100;
 ```
 

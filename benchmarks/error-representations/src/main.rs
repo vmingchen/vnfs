@@ -18,7 +18,7 @@ use std::{
     },
     time::Instant,
 };
-use vfsi_core::{Attrs, FailureState, IoProgress, StatusCode, TransportKind, api::ReadResult};
+use vfsi_core::{Attrs, FailureState, IoProgress, StatusCode, TransportKind, api::ReadOutput};
 
 static TRACK: AtomicBool = AtomicBool::new(false);
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
@@ -413,9 +413,9 @@ fn layouts<C>() -> serde_json::Value {
         "indexed_error":size_of::<Indexed<C>>(),
         "op_result_unit":size_of::<Result<(),Outcome<C>>>(),
         "op_result_usize":size_of::<Result<usize,Outcome<C>>>(),
-        "op_result_read":size_of::<Result<ReadResult,Outcome<C>>>(),
+        "op_result_read":size_of::<Result<ReadOutput,Outcome<C>>>(),
         "op_result_attrs":size_of::<Result<Attrs,Outcome<C>>>(),
-        "outer_read":size_of::<Result<Vec<Result<ReadResult,Outcome<C>>>,C>>()
+        "outer_read":size_of::<Result<Vec<Result<ReadOutput,Outcome<C>>>,C>>()
     })
 }
 
@@ -575,7 +575,7 @@ fn run<P: Policy>(scenario: &str, iterations: usize, fixture: &Path) -> serde_js
                     drop(black_box(outcomes));
                 } else {
                     // Real reads and synthetic completions use exactly the same
-                    // final ReadResult/error envelope assembly for both policies.
+                    // final ReadOutput/error envelope assembly for both policies.
                     let completions: Vec<i32> = if let Some(ring) = ring {
                         ring.wave().expect("ring wave")
                     } else if let Some(files) = &files {
@@ -596,11 +596,11 @@ fn run<P: Policy>(scenario: &str, iterations: usize, fixture: &Path) -> serde_js
                             })
                             .collect()
                     };
-                    let outcomes: Vec<Result<ReadResult, Outcome<P::Cause>>> = completions
+                    let outcomes: Vec<Result<ReadOutput, Outcome<P::Cause>>> = completions
                         .into_iter()
                         .map(|n| {
                             if n >= 0 {
-                                Ok(ReadResult::buffered(0, n as usize, false))
+                                Ok(ReadOutput::buffered(0, n as usize, false))
                             } else {
                                 let cause =
                                     if scenario.starts_with("vec") && scenario.ends_with("nfs") {
@@ -674,12 +674,12 @@ fn main() {
             "{}",
             serde_json::json!({"minimal":layouts::<Mini>(),
             "io":layouts::<io::Error>(),"arc_io":layouts::<Arc<io::Error>>(),
-            "read_result":size_of::<ReadResult>(),"attrs":size_of::<Attrs>(),
+            "read_result":size_of::<ReadOutput>(),"attrs":size_of::<Attrs>(),
             "native_payload":size_of::<NativePayload>(),"context":size_of::<Context>(),
             "current_io_error":size_of::<io::Error>(),
             "current_op_error":size_of::<vfsi_core::OpError>(),
             "current_op_result_unit":size_of::<vfsi_core::OpResult<()>>(),
-            "current_op_result_read":size_of::<vfsi_core::OpResult<ReadResult>>(),
+            "current_op_result_read":size_of::<vfsi_core::OpResult<ReadOutput>>(),
             "compiled_rustc":env!("VFERROR_COMPILED_RUSTC")})
         );
         return;
@@ -792,7 +792,7 @@ mod tests {
                 cause: make_io(Spec::Transport, &source),
                 state,
                 progress: (state != FailureState::NotAttempted).then(|| {
-                    Box::new(IoProgress::Read(ReadResult::owned(8, vec![1, 2, 3], false)))
+                    Box::new(IoProgress::Read(ReadOutput::owned(8, vec![1, 2, 3], false)))
                 }),
             };
             assert_eq!(error.state, state);

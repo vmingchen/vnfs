@@ -51,7 +51,7 @@ pub use metadata::{AttrsOptions, SetAttrsOp};
 mod mkdir;
 pub use mkdir::MkDirOp;
 mod read;
-pub use read::{ReadOp, ReadOptions, ReadResult};
+pub use read::{ReadOp, ReadOptions, ReadOutput};
 mod write;
 pub use write::{WriteOp, WriteOptions};
 mod visit;
@@ -63,7 +63,7 @@ pub use support::{
     DEFAULT_READV_MAX_TOTAL_BYTES, DEFAULT_WALK_MAX_DEPTH, DepthLimit, DirectoryListing,
     ResourceLimits, StreamCompletion, StreamOptions, TraversalCompletion,
 };
-pub use support::{ReadIntoResult, WriteResult};
+pub use support::{ReadIntoResult, WriteOutput};
 mod paging;
 pub use paging::{DirectoryCursor, DirectoryPage};
 mod listdir;
@@ -97,7 +97,7 @@ pub mod prelude {
     pub use super::{
         AsTarget, Attributes, AttrsOptions, ControlFlow, CopyOptions, DirHandle, FileHandle,
         ListDirControl, ListDirOptions, MkDirOp, OpenFlags, OpenOp, ReadOp, ReadOptions,
-        ReadResult, RemoveMode, RemoveOptions, RenameMode, ResourceLimits, SetAttrsOp,
+        ReadOutput, RemoveMode, RemoveOptions, RenameMode, ResourceLimits, SetAttrsOp,
         StreamOptions, SyncMode, Target, Vfsi, VfsiExt, WalkOptions, WriteOp, WriteOptions,
     };
 }

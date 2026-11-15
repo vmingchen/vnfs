@@ -83,7 +83,7 @@ impl<'a, H: crate::api::FileHandle + 'a> ReadOp<'a, H> {
 
 /// Progress for one operation, with no borrowed references to caller storage.
 #[derive(Clone, PartialEq, Eq)]
-pub struct ReadResult {
+pub struct ReadOutput {
     offset: u64,
     eof: bool,
     payload: ReadPayload,
@@ -93,9 +93,9 @@ enum ReadPayload {
     Owned(Vec<u8>),
     Buffered(usize),
 }
-impl std::fmt::Debug for ReadResult {
+impl std::fmt::Debug for ReadOutput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReadResult")
+        f.debug_struct("ReadOutput")
             .field("offset", &self.offset())
             .field("bytes_read", &self.bytes_read())
             .field("eof", &self.eof())
@@ -103,7 +103,7 @@ impl std::fmt::Debug for ReadResult {
             .finish()
     }
 }
-impl ReadResult {
+impl ReadOutput {
     /// Owned contents. The byte count is derived, never independently supplied.
     pub fn owned(offset: u64, data: Vec<u8>, eof: bool) -> Self {
         Self {
@@ -223,7 +223,7 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
     into: impl Fn(&'a H, u64, &'a mut [u8]) -> B,
     owned: impl FnOnce(&[ReadRequest<'a, R>], usize) -> VecResult<OwnedReadResult>,
     buffers: impl FnOnce(&mut [B], usize) -> VecResult<crate::api::ReadIntoResult>,
-) -> VecResult<ReadResult> {
+) -> VecResult<ReadOutput> {
     let mut ops = ops.into_iter();
     let Some(first) = ops.next() else {
         return Ok(Vec::new());
@@ -251,7 +251,7 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
                         .map(|result| {
                             checked_read(
                                 result.map(|read| {
-                                    ReadResult::buffered(read.offset, read.bytes_read, read.eof)
+                                    ReadOutput::buffered(read.offset, read.bytes_read, read.eof)
                                 }),
                                 true,
                                 Some((offset, length)),
@@ -267,7 +267,7 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
             .into_iter()
             .map(|result| {
                 checked_read(
-                    result.map(|read| ReadResult::owned(read.offset, read.data, read.eof)),
+                    result.map(|read| ReadOutput::owned(read.offset, read.data, read.eof)),
                     false,
                     (!whole).then_some((offset, length)),
                     whole,
@@ -290,9 +290,9 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
     let mut buffer_indices = Vec::new();
     // Backend projections are opaque. Owned-only reads retain compact bounds.
     // Buffered-first batches reuse bounds storage as their final output: smaller
-    // native slots cannot expand to ReadResult in an in-place Vec collection.
+    // native slots cannot expand to ReadOutput in an in-place Vec collection.
     let mut compact_bounds = Vec::new();
-    let mut expected: Vec<OpResult<ReadResult>> = Vec::new();
+    let mut expected: Vec<OpResult<ReadOutput>> = Vec::new();
     let mut mixed = false;
     let mut requested = 0usize;
     for (index, op) in ops.enumerate() {
@@ -306,11 +306,11 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
             if let Some(bounds) = bounds {
                 if expected.is_empty() {
                     expected.reserve(capacity);
-                    expected.resize_with(index, || Ok(ReadResult::buffered(0, 0, false)));
+                    expected.resize_with(index, || Ok(ReadOutput::buffered(0, 0, false)));
                 }
-                expected.push(Ok(ReadResult::buffered(bounds.0, bounds.1, false)));
+                expected.push(Ok(ReadOutput::buffered(bounds.0, bounds.1, false)));
             } else if !expected.is_empty() {
-                expected.push(Ok(ReadResult::buffered(0, 0, false)));
+                expected.push(Ok(ReadOutput::buffered(0, 0, false)));
             }
         } else if let Some(bounds) = bounds {
             if compact_bounds.is_empty() {
@@ -364,7 +364,7 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
         // compact bounds before I/O, then fill their final slots directly.
         expected = std::mem::take(&mut compact_bounds)
             .into_iter()
-            .map(|(offset, length)| Ok(ReadResult::buffered(offset, length, false)))
+            .map(|(offset, length)| Ok(ReadOutput::buffered(offset, length, false)))
             .collect();
     }
     let mut remaining = budget;
@@ -377,7 +377,7 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
             let bounds = expected[index].as_ref().expect("saved read bounds");
             let bounds = (bounds.offset(), bounds.bytes_read());
             expected[index] = checked_read(
-                result.map(|read| ReadResult::buffered(read.offset, read.bytes_read, read.eof)),
+                result.map(|read| ReadOutput::buffered(read.offset, read.bytes_read, read.eof)),
                 true,
                 Some(bounds),
                 false,
@@ -404,7 +404,7 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
                     Some(compact_bounds[index])
                 };
                 let result = checked_read(
-                    result.map(|read| ReadResult::owned(read.offset, read.data, read.eof)),
+                    result.map(|read| ReadOutput::owned(read.offset, read.data, read.eof)),
                     false,
                     bounds,
                     whole,
@@ -429,7 +429,7 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
             Some((bounds.offset(), bounds.bytes_read()))
         };
         expected[index] = checked_read(
-            result.map(|read| ReadResult::owned(read.offset, read.data, read.eof)),
+            result.map(|read| ReadOutput::owned(read.offset, read.data, read.eof)),
             false,
             bounds,
             whole,
@@ -467,12 +467,12 @@ fn read_phase<T>(result: VecResult<T>, expected: usize) -> Vec<OpResult<T>> {
 }
 
 fn checked_read(
-    result: OpResult<ReadResult>,
+    result: OpResult<ReadOutput>,
     buffered: bool,
     expected: Option<(u64, usize)>,
     whole: bool,
     remaining: &mut usize,
-) -> OpResult<ReadResult> {
+) -> OpResult<ReadOutput> {
     let progress = match &result {
         Ok(read) => Some(read),
         Err(error) => match error.progress() {
@@ -520,7 +520,7 @@ fn checked_owned(
     remaining: &mut usize,
 ) -> OpResult<OwnedReadResult> {
     checked_read(
-        result.map(|read| ReadResult::owned(read.offset, read.data, read.eof)),
+        result.map(|read| ReadOutput::owned(read.offset, read.data, read.eof)),
         false,
         None,
         whole,
@@ -685,10 +685,10 @@ mod compact_read_tests {
     #[test]
     fn compact_read_results_preserve_owned_and_buffered_empty_progress() {
         if cfg!(target_pointer_width = "64") {
-            assert_eq!(std::mem::size_of::<ReadResult>(), 40);
+            assert_eq!(std::mem::size_of::<ReadOutput>(), 40);
         }
-        let owned = ReadResult::owned(7, Vec::new(), true);
-        const BUFFERED: ReadResult = ReadResult::buffered(7, 0, true);
+        let owned = ReadOutput::owned(7, Vec::new(), true);
+        const BUFFERED: ReadOutput = ReadOutput::buffered(7, 0, true);
         assert_eq!(owned.bytes_read(), 0);
         assert_eq!(owned.offset(), BUFFERED.offset());
         assert_eq!(owned.eof(), BUFFERED.eof());
@@ -701,12 +701,12 @@ mod compact_read_tests {
         assert_eq!(BUFFERED.clone().into_data(), None);
         let data = vec![1, 2, 3];
         let pointer = data.as_ptr();
-        let result = ReadResult::owned(9, data, false);
+        let result = ReadOutput::owned(9, data, false);
         assert_eq!(result.bytes_read(), 3);
         let extracted = result.into_data().unwrap();
         assert_eq!(extracted.as_ptr(), pointer);
         assert_eq!(
-            ReadResult::buffered(0, usize::MAX, false).bytes_read(),
+            ReadOutput::buffered(0, usize::MAX, false).bytes_read(),
             usize::MAX
         );
     }

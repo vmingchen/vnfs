@@ -194,14 +194,14 @@ fn auto_range_only_reads_keep_the_legacy_routing_allocation_cost() {
     // beyond Posix. Measure the required outcome type rather than its smaller
     // success payload; scattering needs no partition or extra index vector.
     let routing_bytes = paths.len()
-        * (std::mem::size_of::<vnfs::error::OpResult<vnfs::files::ReadResult>>()
+        * (std::mem::size_of::<vnfs::error::OpResult<vnfs::files::ReadOutput>>()
             + std::mem::size_of::<vfsi_sync::FsRead<'_, vfsi_local::LocalBackend>>());
     assert_eq!(cost.0, baseline.0 + 2);
     assert!(
         cost.1 <= baseline.1 + routing_bytes,
         "cost={cost:?} baseline={baseline:?} routing_bytes={routing_bytes} outcome={} slot={}",
-        std::mem::size_of::<vnfs::error::OpResult<vnfs::files::ReadResult>>(),
-        std::mem::size_of::<Option<vnfs::error::OpResult<vnfs::files::ReadResult>>>()
+        std::mem::size_of::<vnfs::error::OpResult<vnfs::files::ReadOutput>>(),
+        std::mem::size_of::<Option<vnfs::error::OpResult<vnfs::files::ReadOutput>>>()
     );
 }
 

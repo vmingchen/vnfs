@@ -153,14 +153,14 @@ macro_rules! __vfsi_client_methods {
             &self,
             ops: impl IntoIterator<Item = vfsi_core::api::ReadOp<'a, Self::File>>,
             options: vfsi_core::api::ReadOptions,
-        ) -> vfsi_core::VecResult<vfsi_core::api::ReadResult> {
+        ) -> vfsi_core::VecResult<vfsi_core::api::ReadOutput> {
             ($vread_native)($read_receiver(self), ops, options)
         }
         fn vwrite<'a>(
             &self,
             requests: &[vfsi_core::api::WriteOp<'a, Self::File>],
             options: vfsi_core::api::WriteOptions,
-        ) -> vfsi_core::VecResult<WriteResult> {
+        ) -> vfsi_core::VecResult<WriteOutput> {
             let result = if options.write_all() {
                 ($vwrite_all_native)($write_receiver(self), requests)
             } else {

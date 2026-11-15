@@ -5,10 +5,10 @@ use vfsi_core::internal::TraversalBudget;
 
 /// Translate one READ outcome without copying an owned error prefix.
 fn stream_read(
-    result: vfsi_core::OpResult<ReadResult>,
+    result: vfsi_core::OpResult<ReadOutput>,
     offset: u64,
     chunk: usize,
-) -> (Option<ReadResult>, Option<vfsi_core::OpError>) {
+) -> (Option<ReadOutput>, Option<vfsi_core::OpError>) {
     use vfsi_core::{FailureState, IoProgress, OpError};
     let invalid = || {
         OpError::unknown(
@@ -638,7 +638,7 @@ pub(crate) fn read_backend<'a, F: crate::backend::VectorBackend + 'static>(
     client: &crate::FsClient<F>,
     ops: impl IntoIterator<Item = ReadOp<'a, crate::OpenFile<F>>>,
     options: ReadOptions,
-) -> vfsi_core::VecResult<ReadResult> {
+) -> vfsi_core::VecResult<ReadOutput> {
     consume_ops(
         ops,
         options.max_total_bytes_or(client.limits().max_read_bytes()),
@@ -689,7 +689,7 @@ pub fn public_write_results<T>(result: vfsi_core::VecResult<T>) -> vfsi_core::Ve
 pub(crate) fn write_backend<'a, F>(
     client: &crate::FsClient<F>,
     ops: &[WriteOp<'a, crate::OpenFile<F>>],
-) -> vfsi_core::VecResult<vfsi_core::api::WriteResult>
+) -> vfsi_core::VecResult<vfsi_core::api::WriteOutput>
 where
     F: crate::backend::VectorBackend + 'static,
 {
@@ -699,7 +699,7 @@ where
 pub(crate) fn write_backend_all<'a, F>(
     client: &crate::FsClient<F>,
     ops: &[WriteOp<'a, crate::OpenFile<F>>],
-) -> vfsi_core::VecResult<vfsi_core::api::WriteResult>
+) -> vfsi_core::VecResult<vfsi_core::api::WriteOutput>
 where
     F: crate::backend::VectorBackend + 'static,
 {

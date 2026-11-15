@@ -2,7 +2,7 @@ use std::{
     error::Error,
     io::{self, ErrorKind as K},
 };
-use vfsi_core::{IndexedError, IoProgress, OpError, api::ReadResult};
+use vfsi_core::{IndexedError, IoProgress, OpError, api::ReadOutput};
 
 #[test]
 fn unknown_attribution_stays_unknown_without_calling_the_mapper() {
@@ -63,7 +63,7 @@ fn lossy_selection_discards_progress_but_keeps_the_selected_input_cause() {
             Ok(1),
             Err(OpError::unknown(
                 io::Error::from_raw_os_error(libc::EIO),
-                Some(IoProgress::Read(ReadResult::owned(0, vec![1, 2], false))),
+                Some(IoProgress::Read(ReadOutput::owned(0, vec![1, 2], false))),
             )),
             Err(OpError::failed(
                 io::Error::from_raw_os_error(libc::EACCES),

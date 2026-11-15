@@ -207,13 +207,13 @@ impl vfsi_sync::backend::HandleBackend for ListingBackend {
             Ok(())
         }
     }
-    fn read_impl(&mut self, _: &ReadOp) -> vfsi_sync::VfResult<vfsi_sync::ReadResult> {
+    fn read_impl(&mut self, _: &ReadOp) -> vfsi_sync::VfResult<vfsi_sync::ReadOutput> {
         Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
     fn write_impl(
         &mut self,
         _: vfsi_sync::WriteOp<&FileOperand, &[u8]>,
-    ) -> vfsi_sync::VfResult<vfsi_sync::WriteResult> {
+    ) -> vfsi_sync::VfResult<vfsi_sync::WriteOutput> {
         Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
     fn seek_impl(&mut self, _: &FileOperand, _: std::io::SeekFrom) -> vfsi_sync::VfResult<u64> {
@@ -348,12 +348,12 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
         }
     }
 
-    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadResult> {
+    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadOutput> {
         if self.malformed_reply == Some(MalformedReply::ReadPanic) {
             panic!("injected backend panic");
         }
 
-        let result: vfsi_sync::VfResult<Vec<vfsi_sync::ReadResult>> = {
+        let result: vfsi_sync::VfResult<Vec<vfsi_sync::ReadOutput>> = {
             let Some(size) = self.read_size else {
                 return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
             };
@@ -362,7 +362,7 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
                 .iter()
                 .cycle()
                 .take(result_count)
-                .map(|read| vfsi_sync::ReadResult {
+                .map(|read| vfsi_sync::ReadOutput {
                     file: if self.malformed_reply == Some(MalformedReply::ReadWrongFile) {
                         FileOperand::from_fd(999)
                     } else {
@@ -399,7 +399,7 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
                                 "lost read",
                             ),
                             Some(vfsi_sync::IoProgress::Read(
-                                vfsi_sync::api::ReadResult::owned(
+                                vfsi_sync::api::ReadOutput::owned(
                                     read.offset,
                                     b"p".to_vec(),
                                     false,
@@ -417,7 +417,7 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
     fn vwrite_impl(
         &mut self,
         writes: &[WriteOp<&FileOperand, &[u8]>],
-    ) -> vfsi_sync::VecResult<vfsi_sync::WriteResult> {
+    ) -> vfsi_sync::VecResult<vfsi_sync::WriteOutput> {
         let calls = self
             .write_calls
             .as_ref()
@@ -433,7 +433,7 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
             .iter()
             .cycle()
             .take(result_count)
-            .map(|op| vfsi_sync::WriteResult {
+            .map(|op| vfsi_sync::WriteOutput {
                 file: if self.malformed_reply == Some(MalformedReply::WriteWrongFile) {
                     FileOperand::from_fd(999)
                 } else {

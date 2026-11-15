@@ -4008,7 +4008,7 @@ mod tests {
                 let count = op.file.read_at(&mut op.buffer[..2], op.offset).unwrap();
                 return vec![Err(OpError::unknown(
                     std::io::Error::from_raw_os_error(libc::EIO),
-                    Some(IoProgress::Read(vfsi_core::api::ReadResult::buffered(
+                    Some(IoProgress::Read(vfsi_core::api::ReadOutput::buffered(
                         if self.malformed_progress {
                             999
                         } else {
@@ -4334,7 +4334,7 @@ mod tests {
                         Ok(3),
                         Err(OpError::failed(
                             std::io::Error::from_raw_os_error(libc::EIO),
-                            Some(IoProgress::Read(vfsi_core::api::ReadResult::buffered(
+                            Some(IoProgress::Read(vfsi_core::api::ReadOutput::buffered(
                                 0, 1, false,
                             ))),
                         )),

@@ -504,7 +504,7 @@ fn multi_reads_validate_each_request_and_keep_valid_siblings() {
                                         if prefix {
                                             return Err(OpError::failed(
                                                 std::io::Error::from_raw_os_error(libc::EIO),
-                                                Some(IoProgress::Read(ReadResult::owned(
+                                                Some(IoProgress::Read(ReadOutput::owned(
                                                     bad_offset, data, eof,
                                                 ))),
                                             ));
@@ -532,7 +532,7 @@ fn multi_reads_validate_each_request_and_keep_valid_siblings() {
                                         if prefix {
                                             return Err(OpError::failed(
                                                 std::io::Error::from_raw_os_error(libc::EIO),
-                                                Some(IoProgress::Read(ReadResult::buffered(
+                                                Some(IoProgress::Read(ReadOutput::buffered(
                                                     bad_offset, bad_count, eof,
                                                 ))),
                                             ));
@@ -596,7 +596,7 @@ fn multi_whole_reads_validate_start_and_completion_without_losing_error_prefixes
                 let first = if failure {
                     Err(OpError::failed(
                         std::io::Error::from_raw_os_error(libc::EIO),
-                        Some(IoProgress::Read(ReadResult::owned(offset, vec![1], eof))),
+                        Some(IoProgress::Read(ReadOutput::owned(offset, vec![1], eof))),
                     ))
                 } else {
                     Ok(OwnedReadResult {
@@ -655,7 +655,7 @@ fn simple_native_causes_and_moving_read_progress_do_not_allocate() {
     let pointer = bytes.as_ptr();
     let error = OpError::failed(
         std::io::Error::from_raw_os_error(libc::EIO),
-        Some(IoProgress::Read(ReadResult::owned(4, bytes, false))),
+        Some(IoProgress::Read(ReadOutput::owned(4, bytes, false))),
     );
     let ((_, _, progress), allocations) = measured(|| error.into_parts());
     assert_eq!(allocations, 0);

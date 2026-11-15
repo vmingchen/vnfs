@@ -485,7 +485,7 @@ pub fn own_read_error(error: crate::OpError, offset: u64, mut buffer: Vec<u8>) -
                 && prefix.bytes_read() <= buffer.len() =>
         {
             buffer.truncate(prefix.bytes_read());
-            Some(IoProgress::Read(crate::api::ReadResult::owned(
+            Some(IoProgress::Read(crate::api::ReadOutput::owned(
                 offset,
                 buffer,
                 prefix.eof(),

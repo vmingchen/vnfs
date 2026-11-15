@@ -1,4 +1,4 @@
-use vfsi_core::api::ReadResult;
+use vfsi_core::api::ReadOutput;
 use vfsi_core::{FailureState, IoProgress, OpError, OpResult, VecResult};
 
 #[test]
@@ -43,8 +43,8 @@ fn unsubmitted_and_unknown_are_distinct_even_with_the_same_cause() {
 #[test]
 fn owned_and_borrowed_read_prefixes_survive_errors() {
     for read in [
-        ReadResult::owned(8, vec![1, 2, 3], false),
-        ReadResult::buffered(8, 3, false),
+        ReadOutput::owned(8, vec![1, 2, 3], false),
+        ReadOutput::buffered(8, 3, false),
     ] {
         let error = OpError::failed(
             std::io::Error::from_raw_os_error(libc::EIO),
@@ -160,7 +160,7 @@ fn consuming_error_parts_moves_owned_progress_without_copying() {
     let pointer = data.as_ptr();
     let error = OpError::unknown(
         vfsi_core::internal::errors::transport(vfsi_core::TransportKind::Other, "lost suffix"),
-        Some(IoProgress::Read(ReadResult::owned(4, data, false))),
+        Some(IoProgress::Read(ReadOutput::owned(4, data, false))),
     );
     let (cause, state, progress) = error.into_parts();
     assert!(vfsi_core::transport_kind(&(cause)).is_some());
@@ -204,7 +204,7 @@ fn write_prefix_merging_retains_knowledge_and_rejects_invalid_progress() {
     for progress in [
         IoProgress::Write { bytes_written: 4 },
         IoProgress::Stream { next_offset: 4 },
-        IoProgress::Read(vfsi_core::api::ReadResult::owned(
+        IoProgress::Read(vfsi_core::api::ReadOutput::owned(
             0,
             b"wrong".to_vec(),
             false,

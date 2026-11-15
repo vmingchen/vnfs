@@ -713,7 +713,7 @@ fn cleanup_errors_preserve_read_data_and_completion_certainty() {
     assert!(prefix.eof());
     let read_error = OpError::failed(
         vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Smb(0xc000_0022)),
-        Some(IoProgress::Read(vfsi_core::api::ReadResult::owned(
+        Some(IoProgress::Read(vfsi_core::api::ReadOutput::owned(
             0,
             vec![7],
             false,

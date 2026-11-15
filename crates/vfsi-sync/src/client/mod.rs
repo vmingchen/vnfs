@@ -8,17 +8,17 @@ use std::sync::Arc;
 use vfsi_core::api::internal::OwnedReadResult as FsReadResult;
 use vfsi_core::api::{
     DirectoryListing, ReadIntoResult as FsReadIntoResult, ResourceLimits,
-    WriteResult as FsWriteResult,
+    WriteOutput as FsWriteResult,
 };
 
 use crate::backend::{HandleBackend, VectorBackend};
 use crate::contracts::{validate_read_into_results, validate_read_results, validate_write_results};
 use crate::{
     AttrMask, Attrs, Capabilities, DirEntry, FileOperand, OpenFlags, OpenOp, ReadAllOptions,
-    ReadOp, ReadResult, RemoveOptions, VfDir, VfOffset, VfResult, WriteOp, WriteResult,
+    ReadOp, ReadOutput, RemoveOptions, VfDir, VfOffset, VfResult, WriteOp, WriteOutput,
 };
 
-fn read_result(result: ReadResult) -> FsReadResult {
+fn read_result(result: ReadOutput) -> FsReadResult {
     FsReadResult {
         offset: result.offset,
         data: result.data,
@@ -26,7 +26,7 @@ fn read_result(result: ReadResult) -> FsReadResult {
     }
 }
 
-fn write_result(result: WriteResult) -> FsWriteResult {
+fn write_result(result: WriteOutput) -> FsWriteResult {
     FsWriteResult {
         offset: result.offset,
         bytes_written: result.bytes_written,
