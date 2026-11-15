@@ -3,6 +3,27 @@
 This project follows [Semantic Versioning](https://semver.org/) for the
 `nfs4fs` package. Rust crate and C ABI versions are tracked independently.
 
+## 2026-11-15 — standard I/O error causes
+
+Rust releases: vnfs 0.0.36; vfsi-core/vfsi-sync and local/POSIX/io_uring/NFS/SMB
+backends 0.3.0; vfsi-c 0.3.20. Python: nfs4fs 0.3.16 and vsmb 0.1.10.
+The unchanged nfsv41-sys and pure-Python helper packages retain their versions.
+C ABI remains v3 with existing optional-symbol fallback.
+
+- Breaking Rust API: replace VfError with owned std::io::Error. Keep independent
+  per-input outcomes, certainty and confirmed progress in OpError; use IndexedError
+  only for lossy multi-input helpers.
+- Preserve arbitrary source ownership, native status and transport provenance
+  without blanket error cloning. Preserve caller-selected ErrorKind when sharing
+  recategorized native or shared payloads.
+- Keep parallel descriptor batching and standard-I/O nonreplay behavior.
+- Avoid dense local read staging and move single-chunk SMB response buffers.
+  Integrated allocation/wire evidence and remaining timing costs are documented
+  under docs/benchmarks/error-integration.
+- During coordinated publication, the port compatibility gate explicitly applies
+  the reviewed migration patches to its pinned Rust-port snapshots. Remove that
+  transition after the ports adopt the published release.
+
 ## 2026-11-14 — coordinated maintenance patches
 
 Coordinated patches: vnfs 0.0.35; vfsi-nfs 0.2.4; vfsi-core/vfsi-sync,

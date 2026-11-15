@@ -861,10 +861,13 @@ class EcosystemBaselineTests(unittest.TestCase):
         os.chdir(self.root)
         self.addCleanup(os.chdir, previous)
 
+        commands = []
+
         def run(command, *args, **kwargs):
             # The gate's local wrapper passes commands as positional arguments;
             # its final parity checks pass a list directly.
             command = [command, *args] if isinstance(command, str) else list(command)
+            commands.append(command)
             cwd = Path(kwargs.get('cwd', self.root))
             if command[:2] == ['git', 'checkout']:
                 (cwd / 'Cargo.toml').write_text('vnfs = { version = "0.0.29", features = ["posix"] }\n')
@@ -874,18 +877,27 @@ class EcosystemBaselineTests(unittest.TestCase):
                 }).encode())
             if command[:2] == ['cargo', 'build']:
                 binary = cwd / kwargs['env']['CARGO_TARGET_DIR'] / 'debug/find'
-                binary.parent.mkdir(parents=True)
+                binary.parent.mkdir(parents=True, exist_ok=True)
                 binary.write_text('fake binary')
             if len(command) > 1 and str(command[0]).endswith('/debug/find'):
                 if not Path(command[0]).is_file():
                     raise FileNotFoundError(command[0])
             return subprocess.CompletedProcess(command, 0, stdout=b'parity\n')
 
-        with patch.dict(os.environ, CARGO_TARGET_DIR='cache'), patch.object(
-            sys, 'argv', ['check-rust.py', 'unused', 'a' * 40, 'findutils']
-        ), patch.object(subprocess, 'run', side_effect=run):
-            main()
-        self.assertTrue((self.root / 'cache/debug/find').is_file())
+        migration = self.root / 'coordinated.patch'
+        for configured in [False, True]:
+            commands.clear()
+            with patch.dict(os.environ, CARGO_TARGET_DIR='cache',
+                            VFSI_PORT_MIGRATION_PATCH=str(migration) if configured else ''), patch.object(
+                sys, 'argv', ['check-rust.py', 'unused', 'a' * 40, 'findutils']
+            ), patch.object(subprocess, 'run', side_effect=run):
+                main()
+            self.assertTrue((self.root / 'cache/debug/find').is_file())
+            applied = [command for command in commands if command[:2] == ['git', 'apply']]
+            self.assertEqual(applied, [
+                ['git', 'apply', '--check', '--unidiff-zero', str(migration)],
+                ['git', 'apply', '--unidiff-zero', str(migration)],
+            ] if configured else [])
 
 
 class PortWorkflowTriggerTests(unittest.TestCase):
@@ -903,6 +915,8 @@ class PortWorkflowTriggerTests(unittest.TestCase):
         for path in ("Cargo.toml", "Cargo.lock", "crates/vfsi-sync/src/client/mod.rs",
                      "bindings/c/include/vfsi_dynamic.h", "ecosystem/ports.toml",
                      "ci/ports/check-c-abi.sh", "ci/check-promotion.py",
+                     "docs/migrations/std-error-coreutils.patch",
+                     "docs/migrations/std-error-findutils.patch",
                      "scripts/test-ci-scripts.py", ".github/workflows/ports.yml",
                      ".github/workflows/ci.yml", ".github/workflows/promote-vfsi.yml"):
             with self.subTest(path=path):
