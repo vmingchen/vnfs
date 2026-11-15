@@ -169,12 +169,89 @@ pass 2,042 nfs4fs tests; 544 fixture-dependent skips are not coverage.
 No new syscall, allocation or execution-order change is introduced by this
 cleanup. Non-Linux execution remains unverified.
 
+## Stage 6: integrated evidence and a healthy NFS allocation fix
+
+Binding cleanup is local commit `f68f5ec`. The integrated
+[actual-client report](benchmarks/error-integration/README.md) compares immutable
+content snapshots with identical independent VecResult semantics. It archives
+all 27 scenarios × nine randomized pairs, separate Rust allocation/peak-live
+controls, exact source/compiler/binary provenance, syscall/ring counters and
+NFSv4.1/v4.2 request-byte and SMB wire controls.
+
+A measured extra healthy NFS allocation led to lazy DescriptorReadPlan failure
+slots. Required live regression coverage verifies zero healthy failure-slot
+capacity, sparse EBADF/overflow NotAttempted inputs, both healthy siblings,
+wire owners and cleanup. Both minor-version descriptor targets pass seven tests.
+Read-only network review found no issues.
+
+An exact-capacity conversion experiment was rejected: requested bytes decreased
+but zero-byte SMB peak-live memory increased by 1,296 bytes. That code and its
+uncommitted experimental test were removed together; original tests remain.
+The report preserves its source diff and controls. Refreshing owned archive
+input timestamps exposed and corrected stale shared-Cargo-cache reuse in a
+negative control; final source snapshots were explicitly rebuilt without
+clearing or reconfiguring build caches/profiles/toolchains.
+
+The benchmark review found a lossy-error parity omission; selected index/kind/
+native status/transport are now asserted and compared, with a reproducing
+negative control. Four additional wire-parser tests cover compound/coalesced
+messages and interim STATUS_PENDING replies; all seven runner/parser tests pass.
+Catches for incomplete/dropped packet captures prevent false wire parity.
+Primary requests and terminal responses match, while scheduler-dependent pending
+responses are recorded separately.
+
+Final review independently verified source/binary hashes, all 243 paired rows,
+intervals, allocation parity and control cardinalities. A packaging finding was
+fixed by explicitly staging both required lockfiles; every frozen manifest entry
+is staged with matching hashes. No review findings remain. The generated patch
+alone has an exact-path whitespace attribute because its context spaces are data.
+
+## Stage 7: guide and disposable adoption
+
+The public guide describes standard causes, native/provenance inspection,
+explicit IndexedError extraction and non-Clone ownership. Historical published
+VecResult instructions are clearly superseded where they describe VfError.
+Stale deleted-accessor instructions found in review were corrected.
+
+The [adoption record](migrations/std-error-adoption.md) records exact source
+revisions and source-only patches for disposable coreutils/findutils snapshots.
+Both patches apply to matching originals and reproduce the tested source.
+Coreutils passes 440 library tests (one existing ignored control), rm/rmdir
+compilation, the multicall build and two round-robin CLI regressions. Findutils
+passes all 286 library tests and actual activation/metadata/pruning/side-effect/
+permission-error parity controls. Git and rsync actual builds and C consumer
+suites pass against the rebuilt SDK; rsync runs all 11 fixture/fallback tests.
+Active checkouts/pins under ~/gh are unchanged. Re-review found no issues.
+
+## Final current-source verification
+
+After refreshing only owned current-source input timestamps, strict workspace
+all-feature/all-target Clippy, the complete standard Rust runner and smoke gate
+pass. The initial final descriptor run had one STALE_CLIENTID setup failure
+before read planning. The exact failed case passed separately under both minor
+versions, then the unchanged parallel seven-test selection passed under both.
+The initial failure is retained in the work logs rather than reported as green;
+no session setup, retry or service behavior was changed.
+
+All three required real-ring controls pass. Isolated Python extensions were
+rebuilt again from current vnfs02: fsspec passes 91 tests; nfs4fs 2,042 with
+544 fixture-dependent skips; vsmb client three with one skip; vsmbfs four with
+161 fixture-dependent skips. Skips and thin zero-test entry packages remain
+excluded from coverage. Benchmark/profile Clippy and all seven observer/runner
+regressions pass. Staged source/hash/lockfile inventory and whitespace checks
+pass. Existing and new historical source manifests remain byte-identical.
+
 ## Remaining full-scope gates
 
-- Run stage-6 full local integrations and paired actual-Vfsi performance controls,
-  including peak-live memory, live NFS/SMB, real ring work counts and fan-out costs.
-- Finish stage-7 documentation and four disposable port checks. Do not repin
-  active ports, push, publish, open PRs or promote mirrors.
+- Commit the two reviewed stages locally with normal hooks. No push/publication
+  is authorized.
+- Resolve the performance-cost decision. The final rebuilt run measures healthy
+  POSIX at paired ratio 1.061 [1.031, 1.109] and one extra SMB allocation per
+  64-file batch; healthy ring/NFS are near parity. Native/opaque boxing costs are
+  quantified. These are not silently counted as zero-regression success.
 
-Existing server fixtures/build caches remain unchanged. The deferred NFS bitmap
-decoder finding remains excluded.
+Optional SMB restart/DFS and non-Linux runtime coverage remain omitted, as
+reported. Future publication/promotion requires separately authorized same-main
+CI and all four public-package port/ABI gates; local checks are not public CI.
+Existing server fixtures, host mounts/services, shared environments and build
+caches/profiles remain unchanged. The deferred NFS bitmap decoder stays excluded.

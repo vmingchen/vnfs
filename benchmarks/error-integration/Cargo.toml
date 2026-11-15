@@ -1,0 +1,22 @@
+[package]
+name = "vfsi-error-integration"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+standard-error = []
+allocation-stats = []
+allocation-profile = ["allocation-stats"]
+
+[dependencies]
+serde_json = "1"
+vfsi-core = { path = "../../crates/vfsi-core" }
+vfsi-sync = { path = "../../crates/vfsi-sync" }
+vfsi-posix = { path = "../../crates/vfsi-posix" }
+vfsi-uring = { path = "../../crates/vfsi-uring" }
+vfsi-nfs = { path = "../../crates/vfsi-nfs" }
+vfsi-smb = { path = "../../crates/vfsi-smb" }
+vnfs = { path = "../../crates/vnfs", features = ["posix", "uring"] }

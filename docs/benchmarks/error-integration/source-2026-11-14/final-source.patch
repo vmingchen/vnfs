@@ -1,0 +1,166 @@
+diff --git a/crates/vfsi-nfs/src/nfs/io.rs b/crates/vfsi-nfs/src/nfs/io.rs
+index 22b8496..acf31a0 100644
+--- a/crates/vfsi-nfs/src/nfs/io.rs
++++ b/crates/vfsi-nfs/src/nfs/io.rs
+@@ -104,6 +104,15 @@ struct DescriptorReadPlan {
+     metadata_started: bool,
+ }
+ 
++impl DescriptorReadPlan {
++    fn reject(&mut self, index: usize, error: OpError) {
++        if self.errors.is_empty() {
++            self.errors.resize_with(self.offsets.len(), || None);
++        }
++        self.errors[index] = Some(error);
++    }
++}
++
+ pub(super) use crate::client::WriteWaveAccess;
+ 
+ #[cfg(test)]
+@@ -623,7 +632,7 @@ impl NfsVecFs {
+             ops: Vec::with_capacity(reads.len()),
+             owners: Vec::with_capacity(reads.len()),
+             offsets: vec![0; reads.len()],
+-            errors: (0..reads.len()).map(|_| None).collect::<Vec<_>>(),
++            errors: Vec::new(),
+             metadata_started: false,
+         };
+         for (index, op) in reads.iter().enumerate() {
+@@ -633,9 +642,10 @@ impl NfsVecFs {
+                 .and_then(|fd| self.open_files.get(&fd))
+                 .cloned()
+             else {
+-                plan.errors[index] = Some(OpError::not_attempted(
+-                    std::io::Error::from_raw_os_error((ERR_EBADF) as i32),
+-                ));
++                plan.reject(
++                    index,
++                    OpError::not_attempted(std::io::Error::from_raw_os_error((ERR_EBADF) as i32)),
++                );
+                 continue;
+             };
+             let offset = match op.offset {
+@@ -646,30 +656,38 @@ impl NfsVecFs {
+                     match self.file_size(&open.fh) {
+                         Ok(size) => size,
+                         Err(cause) => {
+-                            plan.errors[index] =
+-                                Some(if vfsi_core::transport_kind(&(cause)).is_some() {
++                            plan.reject(
++                                index,
++                                if vfsi_core::transport_kind(&(cause)).is_some() {
+                                     OpError::unknown(cause, None)
+                                 } else {
+                                     OpError::failed(cause, None)
+-                                });
++                                },
++                            );
+                             continue;
+                         }
+                     }
+                 }
+                 _ => {
+-                    plan.errors[index] = Some(OpError::not_attempted(std::io::Error::from(
+-                        std::io::ErrorKind::InvalidInput,
+-                    )));
++                    plan.reject(
++                        index,
++                        OpError::not_attempted(std::io::Error::from(
++                            std::io::ErrorKind::InvalidInput,
++                        )),
++                    );
+                     continue;
+                 }
+             };
+             let Some(_end) = offset.checked_add(op.length as u64) else {
+                 let cause = std::io::Error::from_raw_os_error(libc::EOVERFLOW);
+-                plan.errors[index] = Some(if op.offset == VfOffset::End {
+-                    OpError::failed(cause, None)
+-                } else {
+-                    OpError::not_attempted(cause)
+-                });
++                plan.reject(
++                    index,
++                    if op.offset == VfOffset::End {
++                        OpError::failed(cause, None)
++                    } else {
++                        OpError::not_attempted(cause)
++                    },
++                );
+                 continue;
+             };
+             plan.offsets[index] = offset;
+@@ -763,7 +781,7 @@ impl NfsVecFs {
+         let mut wire_index = 0;
+         let mut output = Vec::with_capacity(reads.len());
+         for (index, read) in reads.iter().enumerate() {
+-            if let Some(error) = errors[index].take() {
++            if let Some(error) = errors.get_mut(index).and_then(Option::take) {
+                 output.push(Err(error));
+                 continue;
+             }
+@@ -2024,6 +2042,63 @@ mod path_write_tests {
+ #[cfg(test)]
+ mod descriptor_outcome_tests {
+     use super::*;
++    #[test]
++    fn live_descriptor_plans_allocate_failure_slots_only_after_rejection() {
++        let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
++            assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
++            return;
++        };
++        let minor = std::env::var("VFSI_NFS_MINOR")
++            .unwrap_or_else(|_| "1".into())
++            .parse()
++            .unwrap();
++        let mut fs = NfsVecFs::connect_minor(&server, minor).unwrap();
++        let path = PathBuf::from(format!("/descriptor-plan-storage-{}", std::process::id()));
++        let file = fs
++            .open_raw_impl(&path, libc::O_CREAT | libc::O_TRUNC | libc::O_RDWR, 0o600)
++            .unwrap();
++        fs.write_raw_impl(&file, 0, b"ab").unwrap();
++        let good = ReadOp::new(file.clone(), VfOffset::At(0), 1);
++        let healthy = fs.descriptor_read_plan(std::slice::from_ref(&good));
++        assert_eq!(
++            healthy.errors.capacity(),
++            0,
++            "healthy plans must not reserve failure slots"
++        );
++        assert_eq!(healthy.owners, [0]);
++        let invalid = ReadOp::from_fd(i32::MAX, VfOffset::At(0), 1);
++        let overflow = ReadOp::new(file.clone(), VfOffset::At(u64::MAX), 1);
++        let reads = [
++            good.clone(),
++            invalid,
++            overflow,
++            ReadOp::new(file.clone(), VfOffset::At(1), 1),
++        ];
++        let plan = fs.descriptor_read_plan(&reads);
++        assert_eq!(plan.errors.len(), reads.len());
++        assert!(plan.errors[0].is_none() && plan.errors[3].is_none());
++        for (index, code) in [(1, libc::EBADF), (2, libc::EOVERFLOW)] {
++            let error = plan.errors[index].as_ref().unwrap();
++            assert_eq!(error.state(), FailureState::NotAttempted);
++            assert_eq!(
++                vfsi_core::native_status(error.cause()),
++                Some(vfsi_core::StatusCode::Errno(code as u32))
++            );
++        }
++        assert_eq!(plan.owners, [0, 3]);
++        let outcomes = fs.descriptor_read_results(&reads).unwrap();
++        assert_eq!(outcomes[0].as_ref().unwrap().data, b"a");
++        assert_eq!(outcomes[3].as_ref().unwrap().data, b"b");
++        for index in [1, 2] {
++            assert_eq!(
++                outcomes[index].as_ref().unwrap_err().state(),
++                FailureState::NotAttempted
++            );
++        }
++        fs.close_impl(&file).unwrap();
++        fs.remove_impl(&path, false).unwrap();
++        fs.shutdown().unwrap();
++    }
+ 
+     #[test]
+     fn independent_cursor_reads_share_a_wave_until_a_descriptor_repeats() {
