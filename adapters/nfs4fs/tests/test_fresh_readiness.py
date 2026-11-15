@@ -772,3 +772,43 @@ def test_closed_transaction_file_rejects_public_io_but_can_finalize(
     else:
         assert not dummy_fs.exists("/closed")
     assert not dummy_fs._client._fds
+
+
+@pytest.mark.parametrize("action", ["commit", "discard"])
+@pytest.mark.parametrize("mode", ["wb", "ab", "xb"])
+def test_transaction_skips_manually_finalized_files(
+    dummy_fs, monkeypatch, action, mode
+):
+    if mode != "xb":
+        dummy_fs.pipe_file("/manual", b"old")
+    original_open = dummy_fs._client.open
+    stage_opens = []
+
+    def open_file(path, native_mode, **kwargs):
+        if ".nfs4fs-txn-" in path:
+            stage_opens.append(path)
+        return original_open(path, native_mode, **kwargs)
+
+    monkeypatch.setattr(dummy_fs._client, "open", open_file)
+    with dummy_fs.transaction:
+        with dummy_fs.open("/manual", mode) as file:
+            file.write(b"new")
+        getattr(file, action)()
+        getattr(file, action)()  # Public finalization is idempotent.
+        assert file.closed
+        with dummy_fs.open("/healthy", "wb") as sibling:
+            sibling.write(b"healthy")
+
+    assert dummy_fs.cat_file("/healthy") == b"healthy"
+    if action == "commit":
+        assert dummy_fs.cat_file("/manual") == (b"oldnew" if mode == "ab" else b"new")
+    elif mode == "xb":
+        assert not dummy_fs.exists("/manual")
+    else:
+        assert dummy_fs.cat_file("/manual") == b"old"
+    assert len(stage_opens) == (2 if action == "commit" else 1)
+    assert len(set(stage_opens)) == len(stage_opens)
+    assert not any(".nfs4fs-txn-" in path for path in dummy_fs.ls("/", detail=False))
+    assert not dummy_fs._client._fds
+    assert not dummy_fs._intrans
+    assert dummy_fs._transaction is None

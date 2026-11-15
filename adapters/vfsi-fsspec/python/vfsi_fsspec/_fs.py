@@ -2763,7 +2763,7 @@ class _DeferredWriteFile:
 
     def prepare(self):
         """Upload to a same-directory temporary file without exposing target."""
-        if self._prepared:
+        if self._prepared or self._committed:
             return
         if "x" in self.mode and self.fs.exists(self.path):
             raise FileExistsError(errno.EEXIST, "File exists", self.path)
