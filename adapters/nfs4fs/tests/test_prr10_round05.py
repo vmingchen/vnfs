@@ -18,11 +18,8 @@ def test_cache_rejects_same_fileid_from_another_filesystem(
         stat_many = fs._client.stat_many
         filesystem_id = [0]
 
-        def remote_metadata(paths):
-            stats, errors = stat_many(paths)
-            for attrs in stats:
-                if attrs is None:
-                    continue
+        def remote_attrs(attrs):
+            if attrs is not None:
                 attrs.update(
                     fs_id=filesystem_id[0],
                     fileid=123,
@@ -35,9 +32,23 @@ def test_cache_rejects_same_fileid_from_another_filesystem(
                     attrs["change"] = 42
                 else:
                     attrs.pop("change", None)
-            return stats, errors
+            return attrs
 
+        def remote_metadata(paths):
+            stats, errors = stat_many(paths)
+            return [remote_attrs(attrs) for attrs in stats], errors
+
+        fstat = fs._client.fstat
+        fstat_many = fs._client.fstat_many
+        # The simulated server must report the same scoped identity by path
+        # and descriptor; cache fills now verify both sides of the OPEN race.
         monkeypatch.setattr(fs._client, "stat_many", remote_metadata)
+        monkeypatch.setattr(fs._client, "fstat", lambda fd: remote_attrs(fstat(fd)))
+        monkeypatch.setattr(
+            fs._client,
+            "fstat_many",
+            lambda fds: [remote_attrs(attrs) for attrs in fstat_many(fds)],
+        )
         cached = fsspec.filesystem(
             "blockcache",
             fs=fs,
