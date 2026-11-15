@@ -736,13 +736,19 @@ use vnfs::nfs::mount::PathMapper;
 use vnfs::nfs::mount::ResolvePath;
 ```
 
-Error representation is opaque; inspect typed status and context through methods:
+Causes are standard I/O errors without input indices. Attribution belongs to
+the separate opaque indexed wrapper:
 
 ```compile_fail,E0616
-let mut error = vnfs::Error::errno(0, 2);
+let mut error = vnfs::error::IndexedError::at(0, vnfs::Error::from_raw_os_error(2));
+error.index = Some(9);
+```
+
+```compile_fail,E0609
+let mut error = vnfs::Error::from_raw_os_error(2);
 error.index = Some(9);
 ```
 
 ```compile_fail,E0599
-let _ = vnfs::Error::errno(0, 2).err_no();
+let _ = vnfs::Error::from_raw_os_error(2).err_no();
 ```
