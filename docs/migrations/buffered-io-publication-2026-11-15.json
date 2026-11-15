@@ -1,0 +1,397 @@
+{
+  "rust_source_commit": "bdc0313c01d958493453edd2bf54e916c3517248",
+  "python_source_commit": "5b96dde6ccdf58b8109e02f72734cdaf054d05de",
+  "rust_release_gates": {
+    "ci.yml": {
+      "conclusion": "success",
+      "createdAt": "2026-11-15T23:28:23Z",
+      "databaseId": 43774993198,
+      "event": "push",
+      "headBranch": "main",
+      "headSha": "bdc0313c01d958493453edd2bf54e916c3517248",
+      "status": "completed",
+      "url": "https://github.com/vmingchen/vnfs/actions/runs/43774993198"
+    },
+    "ports.yml": {
+      "conclusion": "success",
+      "createdAt": "2026-11-15T23:28:23Z",
+      "databaseId": 43774993169,
+      "event": "push",
+      "headBranch": "main",
+      "headSha": "bdc0313c01d958493453edd2bf54e916c3517248",
+      "status": "completed",
+      "url": "https://github.com/vmingchen/vnfs/actions/runs/43774993169"
+    }
+  },
+  "python_release_gates": {
+    "ci.yml": {
+      "conclusion": "success",
+      "createdAt": "2026-11-15T23:01:26Z",
+      "databaseId": 43772498823,
+      "event": "push",
+      "headBranch": "main",
+      "headSha": "5b96dde6ccdf58b8109e02f72734cdaf054d05de",
+      "status": "completed",
+      "url": "https://github.com/vmingchen/vnfs/actions/runs/43772498823"
+    },
+    "ports.yml": {
+      "conclusion": "success",
+      "createdAt": "2026-11-15T23:01:26Z",
+      "databaseId": 43772498737,
+      "event": "workflow_dispatch",
+      "headBranch": "main",
+      "headSha": "5b96dde6ccdf58b8109e02f72734cdaf054d05de",
+      "status": "completed",
+      "url": "https://github.com/vmingchen/vnfs/actions/runs/43772498737"
+    }
+  },
+  "c_abi": 3,
+  "rust": [
+    {
+      "name": "vfsi-core",
+      "version": "0.4.0",
+      "elapsed_seconds": 3.615,
+      "checksum": "7393000b63379c0c5fcd89b739b653eb45c8ccfa97e52c17b99701726dcab626",
+      "created_at": "2026-11-15T23:36:39.286327Z",
+      "source_commit": "bdc0313c01d958493453edd2bf54e916c3517248"
+    },
+    {
+      "name": "vfsi-sync",
+      "version": "0.4.0",
+      "elapsed_seconds": 4.51,
+      "checksum": "802c4cb043eacaa8489e22bd0a6277a1ed023e362b873420554b60c252c92130",
+      "created_at": "2026-11-15T23:36:44.713034Z",
+      "source_commit": "bdc0313c01d958493453edd2bf54e916c3517248"
+    },
+    {
+      "name": "vfsi-local",
+      "version": "0.4.0",
+      "elapsed_seconds": 4.809,
+      "checksum": "6d4e8061cbee163f1993d8e45dc67ad231a154b9f902f43a5f5562f6631cc7df",
+      "created_at": "2026-11-15T23:36:49.191982Z",
+      "source_commit": "bdc0313c01d958493453edd2bf54e916c3517248"
+    },
+    {
+      "name": "vfsi-posix",
+      "version": "0.4.0",
+      "elapsed_seconds": 3.813,
+      "checksum": "af02c7719e76623e050b8fbde2c93c65e1e983c744c2a3b2e8c6f83256348495",
+      "created_at": "2026-11-15T23:36:53.861046Z",
+      "source_commit": "bdc0313c01d958493453edd2bf54e916c3517248"
+    },
+    {
+      "name": "vfsi-uring",
+      "version": "0.4.0",
+      "elapsed_seconds": 2.184,
+      "checksum": "23279f17b06412645cafc7436723ba69ae4cbabfac8a95df89497d9bcc5702ac",
+      "created_at": "2026-11-15T23:36:57.464871Z",
+      "source_commit": "bdc0313c01d958493453edd2bf54e916c3517248"
+    },
+    {
+      "name": "vfsi-nfs",
+      "version": "0.4.0",
+      "elapsed_seconds": 11.083,
+      "checksum": "926bfad9da6a2f3b0952fcad0d3bb1b06b92eba099a21c570f1e470ab4e0581a",
+      "created_at": "2026-11-15T23:37:07.630924Z",
+      "source_commit": "bdc0313c01d958493453edd2bf54e916c3517248"
+    },
+    {
+      "name": "vfsi-smb",
+      "version": "0.4.0",
+      "elapsed_seconds": 9.881,
+      "checksum": "12bf3e8454cd545b3d38cd5ffd6ea9d51239302d8614b9e58ce41521c18a0f26",
+      "created_at": "2026-11-15T23:37:18.400920Z",
+      "source_commit": "bdc0313c01d958493453edd2bf54e916c3517248"
+    },
+    {
+      "name": "vnfs",
+      "version": "0.0.38",
+      "elapsed_seconds": 11.378,
+      "checksum": "e42a9e058f5131c76d01b32cd1565a9d928b49e55f36e4928bf93734e7ebae8f",
+      "created_at": "2026-11-15T23:37:30.429648Z",
+      "source_commit": "bdc0313c01d958493453edd2bf54e916c3517248"
+    },
+    {
+      "name": "vfsi-c",
+      "version": "0.3.22",
+      "elapsed_seconds": 16.016,
+      "checksum": "7644aaf00623f00dd98001e6ee98e81e993c338fce0692c78ddcee8eca032c5c",
+      "created_at": "2026-11-15T23:37:47.238751Z",
+      "source_commit": "bdc0313c01d958493453edd2bf54e916c3517248"
+    }
+  ],
+  "python": {
+    "vfsi-fsspec": {
+      "version": "0.1.16",
+      "source_commit": "5b96dde6ccdf58b8109e02f72734cdaf054d05de",
+      "workflow": "https://github.com/vmingchen/vnfs/actions/runs/43773528597",
+      "conclusion": "success",
+      "elapsed_seconds": 76.0,
+      "jobs": [
+        {
+          "name": "build",
+          "seconds": 44.0,
+          "steps": []
+        },
+        {
+          "name": "Verify CI passed",
+          "seconds": 6.0,
+          "steps": []
+        },
+        {
+          "name": "publish",
+          "seconds": 27.0,
+          "steps": []
+        }
+      ],
+      "files": [
+        {
+          "filename": "vfsi_fsspec-0.1.16-py3-none-any.whl",
+          "sha256": "005b80337d86800cea01bdbaf2a992428f826d1bf9ed2378f8a54db08463403c",
+          "url": "https://files.pythonhosted.org/packages/cb/ac/ab136125734668eaf28c159cbdd0dc7451ff5e54dad6b0de25508f0df93c/vfsi_fsspec-0.1.16-py3-none-any.whl",
+          "upload_time": "2026-11-15T23:13:31.849749Z"
+        },
+        {
+          "filename": "vfsi_fsspec-0.1.16.tar.gz",
+          "sha256": "ebfe75b97aa834796c45e50cf9fa837079a988b24a0e10b36da884f41e75b8a5",
+          "url": "https://files.pythonhosted.org/packages/1b/96/2a467877c05d4d0c0fa30dce20b9b9d020c853ad6852c42b80a5bc809d76/vfsi_fsspec-0.1.16.tar.gz",
+          "upload_time": "2026-11-15T23:13:33.242820Z"
+        }
+      ]
+    },
+    "vsmb": {
+      "version": "0.1.11",
+      "source_commit": "5b96dde6ccdf58b8109e02f72734cdaf054d05de",
+      "workflow": "https://github.com/vmingchen/vnfs/actions/runs/43773528768",
+      "conclusion": "success",
+      "elapsed_seconds": 230.0,
+      "jobs": [
+        {
+          "name": "wheel (aarch64-unknown-linux-gnu, abi3)",
+          "seconds": 164.0,
+          "steps": []
+        },
+        {
+          "name": "wheel (x86_64-unknown-linux-gnu, abi3)",
+          "seconds": 91.0,
+          "steps": []
+        },
+        {
+          "name": "Verify CI passed",
+          "seconds": 8.0,
+          "steps": []
+        },
+        {
+          "name": "wheel (x86_64-unknown-linux-gnu, cp314t)",
+          "seconds": 78.0,
+          "steps": []
+        },
+        {
+          "name": "sdist",
+          "seconds": 31.0,
+          "steps": []
+        },
+        {
+          "name": "sbom",
+          "seconds": 53.0,
+          "steps": []
+        },
+        {
+          "name": "publish",
+          "seconds": 26.0,
+          "steps": []
+        }
+      ],
+      "files": [
+        {
+          "filename": "vsmb-0.1.11-cp314-cp314t-manylinux_2_28_x86_64.whl",
+          "sha256": "23deed3721b6394a51e329573e5a4ff173ac2da1466380466db516a651ae1c29",
+          "url": "https://files.pythonhosted.org/packages/17/ee/d1c23efade22b924078474d7ac390889e372538081ca88ab71a26c9e5007/vsmb-0.1.11-cp314-cp314t-manylinux_2_28_x86_64.whl",
+          "upload_time": "2026-11-15T23:16:04.362847Z"
+        },
+        {
+          "filename": "vsmb-0.1.11-cp39-abi3-manylinux_2_28_aarch64.whl",
+          "sha256": "a18abbebde8867a31641f6ae37dd90b3e4947b6e7232e7cc2b52bd56c130e888",
+          "url": "https://files.pythonhosted.org/packages/aa/33/24acb6b2fe3e70fb07a902eb5660c8d4bcace1b9188936cd12e2469a3acf/vsmb-0.1.11-cp39-abi3-manylinux_2_28_aarch64.whl",
+          "upload_time": "2026-11-15T23:16:06.165842Z"
+        },
+        {
+          "filename": "vsmb-0.1.11-cp39-abi3-manylinux_2_28_x86_64.whl",
+          "sha256": "72279ea8acae9289443691c17df69f105d5057267a7ac5dc0572ea3d2d99b14a",
+          "url": "https://files.pythonhosted.org/packages/5e/ca/ff86d6b2333348696c73923bc759fd8876e07995b6d5d98819d3914decb9/vsmb-0.1.11-cp39-abi3-manylinux_2_28_x86_64.whl",
+          "upload_time": "2026-11-15T23:16:07.944085Z"
+        },
+        {
+          "filename": "vsmb-0.1.11.tar.gz",
+          "sha256": "d80f25ffc59d822628610e31064b99b991eee10e301cb1c2b1655364b2192126",
+          "url": "https://files.pythonhosted.org/packages/57/6d/dacbdf540a4df7e163bed868df7cd51f6d444d3cefb5c5290e046b983564/vsmb-0.1.11.tar.gz",
+          "upload_time": "2026-11-15T23:16:09.470512Z"
+        }
+      ]
+    },
+    "vsmbfs": {
+      "version": "0.1.10",
+      "source_commit": "5b96dde6ccdf58b8109e02f72734cdaf054d05de",
+      "workflow": "https://github.com/vmingchen/vnfs/actions/runs/43774029108",
+      "conclusion": "success",
+      "elapsed_seconds": 226.0,
+      "jobs": [
+        {
+          "name": "build",
+          "seconds": 31.0,
+          "steps": []
+        },
+        {
+          "name": "Verify CI passed",
+          "seconds": 6.0,
+          "steps": []
+        },
+        {
+          "name": "publish",
+          "seconds": 26.0,
+          "steps": []
+        }
+      ],
+      "files": [
+        {
+          "filename": "vsmbfs-0.1.10-py3-none-any.whl",
+          "sha256": "a444be81535d6b31697c22ac674b835125e087af8fc4d489a38e91c9ff608f17",
+          "url": "https://files.pythonhosted.org/packages/9d/a0/131a4e861aa990a589f4b0ad8b4db1ee3af77f8cdd23cfdfce851f352337/vsmbfs-0.1.10-py3-none-any.whl",
+          "upload_time": "2026-11-15T23:21:22.236947Z"
+        },
+        {
+          "filename": "vsmbfs-0.1.10.tar.gz",
+          "sha256": "82244e6ef54f4341974b02565e644826bdaa0e302bef13811bc17c65d922885f",
+          "url": "https://files.pythonhosted.org/packages/95/12/659cf225895784ed1f3f99c67bd7fc8ad9595df437071002b5ec641b8173/vsmbfs-0.1.10.tar.gz",
+          "upload_time": "2026-11-15T23:21:23.389445Z"
+        }
+      ]
+    },
+    "nfs4fs": {
+      "version": "0.3.17",
+      "source_commit": "5b96dde6ccdf58b8109e02f72734cdaf054d05de",
+      "workflow": "https://github.com/vmingchen/vnfs/actions/runs/43773745616",
+      "conclusion": "success",
+      "elapsed_seconds": 1593.0,
+      "jobs": [
+        {
+          "name": "Verify CI passed",
+          "seconds": 9.0,
+          "steps": []
+        },
+        {
+          "name": "wheel (aarch64-unknown-linux-gnu, abi3)",
+          "seconds": 1095.0,
+          "steps": []
+        },
+        {
+          "name": "sbom",
+          "seconds": 92.0,
+          "steps": []
+        },
+        {
+          "name": "sdist",
+          "seconds": 20.0,
+          "steps": []
+        },
+        {
+          "name": "wheel (x86_64-unknown-linux-gnu, cp314t)",
+          "seconds": 140.0,
+          "steps": []
+        },
+        {
+          "name": "wheel (x86_64-unknown-linux-gnu, abi3)",
+          "seconds": 158.0,
+          "steps": []
+        },
+        {
+          "name": "Installed wheel against live NFS RPCSEC_GSS",
+          "seconds": 32.0,
+          "steps": []
+        },
+        {
+          "name": "publish",
+          "seconds": 36.0,
+          "steps": []
+        }
+      ],
+      "files": [
+        {
+          "filename": "nfs4fs-0.3.17-cp314-cp314t-manylinux_2_28_x86_64.whl",
+          "sha256": "17ab768d5ab40d8d9bac70752ea02f78fd731c68957762e7f79df73da218e30a",
+          "url": "https://files.pythonhosted.org/packages/88/f3/ce6fa9b9c3473257cbc0526f54af70cdfe737b1589bbf3b2180cbbc899d6/nfs4fs-0.3.17-cp314-cp314t-manylinux_2_28_x86_64.whl",
+          "upload_time": "2026-11-15T23:41:02.863382Z"
+        },
+        {
+          "filename": "nfs4fs-0.3.17-cp39-abi3-manylinux_2_28_aarch64.whl",
+          "sha256": "b365da95030f5487e1e5a46d39f32e63ba35e131da2715ed05e3a6d98fe70fbf",
+          "url": "https://files.pythonhosted.org/packages/34/37/97d78785ca10d4010f3874073e28fa1fdbb05c87eb16c82b18602cd5c76e/nfs4fs-0.3.17-cp39-abi3-manylinux_2_28_aarch64.whl",
+          "upload_time": "2026-11-15T23:41:06.096021Z"
+        },
+        {
+          "filename": "nfs4fs-0.3.17-cp39-abi3-manylinux_2_28_x86_64.whl",
+          "sha256": "f77a31fd63054d932690dfd3512e75710b83f6a236e7fcdeae9e431cc7599e42",
+          "url": "https://files.pythonhosted.org/packages/dc/6b/d6bcec30162c56d0b50fab03742f7c7ddb6b036412dac3b3eb924783da7d/nfs4fs-0.3.17-cp39-abi3-manylinux_2_28_x86_64.whl",
+          "upload_time": "2026-11-15T23:41:08.143639Z"
+        },
+        {
+          "filename": "nfs4fs-0.3.17.tar.gz",
+          "sha256": "84900d5af31d46fcb5babf9b2d8daaa264f71bbe24912cd57133a2f0223f86b9",
+          "url": "https://files.pythonhosted.org/packages/51/f2/2189520cd01823d59105e5ff65994eaeb7859016ef5432cf141f96d2a706/nfs4fs-0.3.17.tar.gz",
+          "upload_time": "2026-11-15T23:41:09.643136Z"
+        }
+      ]
+    }
+  },
+  "superseded_initial_cohort": {
+    "source_commit": "5b96dde6ccdf58b8109e02f72734cdaf054d05de",
+    "reason": "Payload type renames require a new pre-1.0 minor cohort rather than an in-range 0.3.x patch.",
+    "packages": [
+      {
+        "name": "vfsi-core",
+        "version": "0.3.1",
+        "checksum": "7ca11fb13525790a962ed580df5b2f46d7f7f9c381cc515b267295d4b5f71601"
+      },
+      {
+        "name": "vfsi-sync",
+        "version": "0.3.1",
+        "checksum": "ba622677363128bc3f75372dde0de3df9e12d8de669f38621cb03e5d3598b904"
+      },
+      {
+        "name": "vfsi-local",
+        "version": "0.3.1",
+        "checksum": "6509b1cc8000f5ce54c82b385c69079ff48da7285a1ce171fc2dad6fac2fce4b"
+      },
+      {
+        "name": "vfsi-posix",
+        "version": "0.3.1",
+        "checksum": "cc83036ce60396d331b2246d70e101e7e983131b1afd34d291ccdf31cd674ba5"
+      },
+      {
+        "name": "vfsi-uring",
+        "version": "0.3.1",
+        "checksum": "38acbac1e8211791d33191f659e9d073c0a5e94cab31f9e082be6e77d15b7f88"
+      },
+      {
+        "name": "vfsi-nfs",
+        "version": "0.3.1",
+        "checksum": "38a74dff5d6254acecaea1a3990cedf8cdb1baf11f98ef9ae3ab777b3c530a33"
+      },
+      {
+        "name": "vfsi-smb",
+        "version": "0.3.1",
+        "checksum": "ae7b3a89043c2bdf512a1919681f72d8db9a22ab7960d5898919d9c6ff7cbdd0"
+      },
+      {
+        "name": "vnfs",
+        "version": "0.0.37",
+        "checksum": "be9c4e1ffdbf6645796dc3d18d50d9b5cec3585bc19f458b86072463160663e3"
+      },
+      {
+        "name": "vfsi-c",
+        "version": "0.3.21",
+        "checksum": "ec34efadd29666e06abbca1bd842620ae6dc313b9cd996ed4eba913a9e1ab0ba"
+      }
+    ]
+  }
+}
