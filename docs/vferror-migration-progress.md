@@ -1,6 +1,7 @@
 # Standard I/O error migration progress
 
-Baseline: 70bea6a. All changes remain local. The complete design and seven-stage
+Baseline: 70bea6a. The implementation stages below record local verification.
+Coordinated publication is recorded at the end. The complete design and seven-stage
 scope in vferror-simplification.md remain authoritative.
 
 ## Reviewed local commits
@@ -286,3 +287,23 @@ reported. Future publication/promotion requires separately authorized same-main
 CI and all four public-package port/ABI gates; local checks are not public CI.
 Existing server fixtures, host mounts/services, shared environments and build
 caches/profiles remain unchanged. The deferred NFS bitmap decoder stays excluded.
+
+
+## Coordinated publication — 2026-11-15
+
+The source commits were merged into main. The P2 category-preservation fix is
+2d271b1; release metadata and CI-specific documentation corrections culminate in
+c6c8fd6. Exact-commit canonical CI and all four-port/ABI checks passed before
+publication. [Publication evidence](migrations/std-error-publication-2026-11-15.json)
+records the registry versions/checksums, release workflows and actual port SHAs.
+
+Published Rust: vnfs 0.0.36; vfsi-core/sync/local/POSIX/io_uring/NFS/SMB 0.3.0;
+vfsi-c 0.3.20, preserving C ABI v3. Python: nfs4fs 0.3.16 and vsmb 0.1.10.
+Unchanged native system bindings and pure-Python helpers retain their versions.
+
+All four ports now pin the published artifacts, with explicit standard-error
+migration in the Rust applications. Their local tests, required copy fallback
+controls, published SDK parity tests and read-only reviews pass. Port CI is
+tracked on the exact pushed commits. The compatibility registry now points at
+those commits and applies no transitional source patches. The previously
+recorded performance costs and omitted-platform limits remain applicable.

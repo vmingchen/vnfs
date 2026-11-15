@@ -9,8 +9,6 @@ on:
       - "crates/**"
       - "bindings/c/**"
       - "ecosystem/**"
-      - "docs/migrations/std-error-coreutils.patch"
-      - "docs/migrations/std-error-findutils.patch"
       - "ci/ports/**"
       - "ci/check-ecosystem.py"
       - "ci/check-promotion.py"
@@ -115,8 +113,6 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/target/debug
           VFSI_INCLUDE: ${{ github.workspace }}/bindings/c/include
-          # Temporary standard-error release transition; C consumers ignore it.
-          VFSI_PORT_MIGRATION_PATCH: ${{ github.workspace }}/docs/migrations/std-error-${{ matrix.id }}.patch
         run: |
           "${{ steps.component.outputs.test }}" \
             "${{ steps.component.outputs.repository }}" \

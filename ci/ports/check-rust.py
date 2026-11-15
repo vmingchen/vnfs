@@ -35,14 +35,6 @@ def main():
         run('git', 'remote', 'add', 'origin', repository)
         run('git', 'fetch', '--quiet', '--depth=1', 'origin', revision)
         run('git', 'checkout', '--quiet', '--detach', 'FETCH_HEAD')
-        # Coordinated breaking releases can test their reviewed source migration
-        # before the new registry package and port pins exist. Never edit a caller
-        # checkout, and reject a patch that does not apply to the pinned snapshot.
-        if migration := os.environ.get('VFSI_PORT_MIGRATION_PATCH'):
-            patch = Path(migration).resolve()
-            run('git', 'apply', '--check', '--unidiff-zero', str(patch))
-            run('git', 'apply', '--unidiff-zero', str(patch))
-            print(f'{port}: applied coordinated source migration {patch}', flush=True)
         use_development_vnfs(checkout / 'Cargo.toml', root)
         # Updating the disposable lockfile is necessary: pre-1.0 patch pins do
         # not admit the next platform version. Verify resolution, not just flags.

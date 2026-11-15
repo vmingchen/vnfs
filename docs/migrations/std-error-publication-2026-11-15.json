@@ -1,0 +1,329 @@
+{
+  "release_commit": "c6c8fd6d0d2cdb108d34af1fdfd8ebf094341ec4",
+  "release_gates": {
+    "CI": {
+      "run": 43675592490,
+      "url": "https://github.com/vmingchen/vnfs/actions/runs/43675592490",
+      "conclusion": "success"
+    },
+    "Port compatibility": {
+      "run": 43675592467,
+      "url": "https://github.com/vmingchen/vnfs/actions/runs/43675592467",
+      "conclusion": "success"
+    }
+  },
+  "rust": [
+    {
+      "name": "vfsi-core",
+      "version": "0.3.0",
+      "checksum": "8dc7b2d255f3174bbd941a73f56de9e0899d14a03bf97a0fb470918f71d41304",
+      "created_at": "2026-11-15T04:31:51.803150Z",
+      "source_commit": "c6c8fd6d0d2cdb108d34af1fdfd8ebf094341ec4"
+    },
+    {
+      "name": "vfsi-sync",
+      "version": "0.3.0",
+      "checksum": "77ed15d71c70d53e3040bafe358b588aff64a31ba1fb9e48d75203961e3c7e30",
+      "created_at": "2026-11-15T04:31:56.516411Z",
+      "source_commit": "c6c8fd6d0d2cdb108d34af1fdfd8ebf094341ec4"
+    },
+    {
+      "name": "vfsi-local",
+      "version": "0.3.0",
+      "checksum": "206575d14b541293b6bb6d99c4018e2b455397d21b265a1162c6a7288393e9d4",
+      "created_at": "2026-11-15T04:32:01.162182Z",
+      "source_commit": "c6c8fd6d0d2cdb108d34af1fdfd8ebf094341ec4"
+    },
+    {
+      "name": "vfsi-posix",
+      "version": "0.3.0",
+      "checksum": "55c4600a1f7d6ec134c2c470ed2fdfd94180406a2f184ecbe8ef8d15924fe66a",
+      "created_at": "2026-11-15T04:32:03.729606Z",
+      "source_commit": "c6c8fd6d0d2cdb108d34af1fdfd8ebf094341ec4"
+    },
+    {
+      "name": "vfsi-uring",
+      "version": "0.3.0",
+      "checksum": "b389ae9621b5bc5a7be98c4599aea2abaa0c5aaa92788a1211647311bd6ec1e9",
+      "created_at": "2026-11-15T04:32:07.113404Z",
+      "source_commit": "c6c8fd6d0d2cdb108d34af1fdfd8ebf094341ec4"
+    },
+    {
+      "name": "vfsi-nfs",
+      "version": "0.3.0",
+      "checksum": "6969c94ce04e18a14ca5a18755527893d09b0de64860eba0e62ec80cb58467ea",
+      "created_at": "2026-11-15T04:32:22.986935Z",
+      "source_commit": "c6c8fd6d0d2cdb108d34af1fdfd8ebf094341ec4"
+    },
+    {
+      "name": "vfsi-smb",
+      "version": "0.3.0",
+      "checksum": "01aadfe4125ceae46c2c415e07f722a3968b6bc4d4ba8c88cb0b5505633cd4e6",
+      "created_at": "2026-11-15T04:32:32.426839Z",
+      "source_commit": "c6c8fd6d0d2cdb108d34af1fdfd8ebf094341ec4"
+    },
+    {
+      "name": "vnfs",
+      "version": "0.0.36",
+      "checksum": "e79f16b7673f2d499cdf69502a4d6b93fb680a532104ca6b67008d8f5514770c",
+      "created_at": "2026-11-15T04:32:39.442498Z",
+      "source_commit": "c6c8fd6d0d2cdb108d34af1fdfd8ebf094341ec4"
+    },
+    {
+      "name": "vfsi-c",
+      "version": "0.3.20",
+      "checksum": "f99a2b50a41ca2cfd40d500a58c8cf2c6f6a7c44e25690f99a8910b0be3af252",
+      "created_at": "2026-11-15T04:32:58.473162Z",
+      "source_commit": "c6c8fd6d0d2cdb108d34af1fdfd8ebf094341ec4"
+    }
+  ],
+  "python": {
+    "vsmb": {
+      "version": "0.1.10",
+      "artifacts": [
+        {
+          "filename": "vsmb-0.1.10-cp314-cp314t-manylinux_2_28_x86_64.whl",
+          "url": "https://files.pythonhosted.org/packages/03/5c/f3a5eed9e9edbe20e72d4505f91b2998f60dc0846d118e4fa7db4668974c/vsmb-0.1.10-cp314-cp314t-manylinux_2_28_x86_64.whl",
+          "digests": {
+            "blake2b_256": "035cf3a5eed9e9edbe20e72d4505f91b2998f60dc0846d118e4fa7db4668974c",
+            "md5": "3bd0175ebefed3b71e95906f3733e2c6",
+            "sha256": "cba89a2eaa52e1f9f85da5d456111f3bcc9c6e9e66253e48406f4628a1eab5b0"
+          },
+          "upload_time_iso_8601": "2026-11-15T04:37:12.098524Z"
+        },
+        {
+          "filename": "vsmb-0.1.10-cp39-abi3-manylinux_2_28_aarch64.whl",
+          "url": "https://files.pythonhosted.org/packages/aa/a5/847be9c5654e26aa9d254b099c54da1ebaade8a705a62dc5a51c8b4e0d64/vsmb-0.1.10-cp39-abi3-manylinux_2_28_aarch64.whl",
+          "digests": {
+            "blake2b_256": "aaa5847be9c5654e26aa9d254b099c54da1ebaade8a705a62dc5a51c8b4e0d64",
+            "md5": "bb26e234403366a0b10aa03532732df4",
+            "sha256": "94a2229f07b5edbfd04df2c5b657e33f958fc32a565bf0f227f1448f25e0d13f"
+          },
+          "upload_time_iso_8601": "2026-11-15T04:37:13.685166Z"
+        },
+        {
+          "filename": "vsmb-0.1.10-cp39-abi3-manylinux_2_28_x86_64.whl",
+          "url": "https://files.pythonhosted.org/packages/f8/0f/1ec19cc8c485abb63f321bccec92a6da3603e9b278523ea1edd66ae6060a/vsmb-0.1.10-cp39-abi3-manylinux_2_28_x86_64.whl",
+          "digests": {
+            "blake2b_256": "f80f1ec19cc8c485abb63f321bccec92a6da3603e9b278523ea1edd66ae6060a",
+            "md5": "d59fe9191b7182359ad44bdb2cd6e437",
+            "sha256": "2c6e526b0b2c97872e95d99cc3ede95972444ef4370f2ae10082cfa11cf950eb"
+          },
+          "upload_time_iso_8601": "2026-11-15T04:37:15.339202Z"
+        },
+        {
+          "filename": "vsmb-0.1.10.tar.gz",
+          "url": "https://files.pythonhosted.org/packages/8f/56/9a95c5b571a3c9f00e51fb7d38b1a184030bd2581e20c368bceae3339727/vsmb-0.1.10.tar.gz",
+          "digests": {
+            "blake2b_256": "8f569a95c5b571a3c9f00e51fb7d38b1a184030bd2581e20c368bceae3339727",
+            "md5": "bfd18798698da086e9acab9dc176352d",
+            "sha256": "b3456b8d44fab9a0a9ecd3dcc34620352600025448ebfd64abc495f4bbc4e28f"
+          },
+          "upload_time_iso_8601": "2026-11-15T04:37:16.973361Z"
+        }
+      ],
+      "source_commit": "c6c8fd6d0d2cdb108d34af1fdfd8ebf094341ec4"
+    },
+    "nfs4fs": {
+      "version": "0.3.16",
+      "artifacts": [
+        {
+          "filename": "nfs4fs-0.3.16-cp314-cp314t-manylinux_2_28_x86_64.whl",
+          "url": "https://files.pythonhosted.org/packages/be/b0/a3c022d68fc02aa743c0a4205e42b96f8831b1516a11620ff7b6cb03c808/nfs4fs-0.3.16-cp314-cp314t-manylinux_2_28_x86_64.whl",
+          "digests": {
+            "blake2b_256": "beb0a3c022d68fc02aa743c0a4205e42b96f8831b1516a11620ff7b6cb03c808",
+            "md5": "4e2effe665ff43be31506589925f1a0e",
+            "sha256": "58eff580f2a12bcb44c25367b1cb5fd94f5a1387203681dc500d05f484658220"
+          },
+          "upload_time_iso_8601": "2026-11-15T04:58:42.085400Z"
+        },
+        {
+          "filename": "nfs4fs-0.3.16-cp39-abi3-manylinux_2_28_aarch64.whl",
+          "url": "https://files.pythonhosted.org/packages/4c/61/a06f8c30240d882b90086077343846a1926671a0639c85c677435005fdaa/nfs4fs-0.3.16-cp39-abi3-manylinux_2_28_aarch64.whl",
+          "digests": {
+            "blake2b_256": "4c61a06f8c30240d882b90086077343846a1926671a0639c85c677435005fdaa",
+            "md5": "824d86d256c6f3801bb31b1dc9651b2c",
+            "sha256": "c8d8f196a27d0a46d463d220e611994e5cd335c5ef14c7c1d7266a5165e62c45"
+          },
+          "upload_time_iso_8601": "2026-11-15T04:58:44.370216Z"
+        },
+        {
+          "filename": "nfs4fs-0.3.16-cp39-abi3-manylinux_2_28_x86_64.whl",
+          "url": "https://files.pythonhosted.org/packages/5f/1f/0cbb7e9c4902d13c590433d58dd412df6235f697642183eb501f03fb0d8c/nfs4fs-0.3.16-cp39-abi3-manylinux_2_28_x86_64.whl",
+          "digests": {
+            "blake2b_256": "5f1f0cbb7e9c4902d13c590433d58dd412df6235f697642183eb501f03fb0d8c",
+            "md5": "c9919d7d06e4659b9528021ed2d99b84",
+            "sha256": "439d7cced0fb785649a542e48d55ca3d6340f6aee700cd0c564d654e2f73310e"
+          },
+          "upload_time_iso_8601": "2026-11-15T04:58:46.349801Z"
+        },
+        {
+          "filename": "nfs4fs-0.3.16.tar.gz",
+          "url": "https://files.pythonhosted.org/packages/dd/45/b9b84e98abccd0e2a411b0f7b08061db9e11f938cafbc9b9805fde826877/nfs4fs-0.3.16.tar.gz",
+          "digests": {
+            "blake2b_256": "dd45b9b84e98abccd0e2a411b0f7b08061db9e11f938cafbc9b9805fde826877",
+            "md5": "92fa44c492511c0f651e006a66eca10b",
+            "sha256": "0c4ac279de34d3445fc86a9039c3694a5779733676089b6ace0eb4425bb068cc"
+          },
+          "upload_time_iso_8601": "2026-11-15T04:58:47.880688Z"
+        }
+      ],
+      "source_commit": "c6c8fd6d0d2cdb108d34af1fdfd8ebf094341ec4"
+    }
+  },
+  "python_release_workflows": {
+    "nfs4fs": {
+      "run": 43677320266,
+      "url": "https://github.com/vmingchen/vnfs/actions/runs/43677320266",
+      "conclusion": "success"
+    },
+    "vsmb": {
+      "run": 43677321753,
+      "url": "https://github.com/vmingchen/vnfs/actions/runs/43677321753",
+      "conclusion": "success"
+    }
+  },
+  "ports": {
+    "coreutils": {
+      "revision": "a515477acb596afd49c161697b92030160e66171",
+      "repository": "vfsi/vfsi-port-coreutils",
+      "vnfs": "0.0.36",
+      "vfsi_c": null
+    },
+    "findutils": {
+      "revision": "bb7e6f95a35864c973387e31345d1fedc7b72b6d",
+      "repository": "vfsi/vfsi-port-findutils",
+      "vnfs": "0.0.36",
+      "vfsi_c": null
+    },
+    "git": {
+      "revision": "0e2dcc066d24a1e47a6686f821fa028d778dbc82",
+      "repository": "vfsi/vfsi-port-git",
+      "vnfs": null,
+      "vfsi_c": "0.3.20"
+    },
+    "rsync": {
+      "revision": "98d68b3fd207932fb8e3f893accd959207385720",
+      "repository": "vfsi/vfsi-port-rsync",
+      "vnfs": null,
+      "vfsi_c": "0.3.20"
+    }
+  },
+  "port_ci_runs": {
+    "coreutils": [
+      {
+        "databaseId": 43678689067,
+        "name": "L10n (Localization)",
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43678689067"
+      },
+      {
+        "databaseId": 43678689092,
+        "name": "CICD",
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43678689092"
+      },
+      {
+        "databaseId": 43678689076,
+        "name": "Check TOML files",
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43678689076"
+      },
+      {
+        "databaseId": 43678689058,
+        "name": "GnuTests",
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43678689058"
+      },
+      {
+        "databaseId": 43678689240,
+        "name": "Devcontainer",
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43678689240"
+      },
+      {
+        "databaseId": 43678689065,
+        "name": "Code Quality",
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43678689065"
+      },
+      {
+        "databaseId": 43678689220,
+        "name": "make",
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43678689220"
+      },
+      {
+        "databaseId": 43678689139,
+        "name": "OpenBSD",
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43678689139"
+      },
+      {
+        "databaseId": 43678689061,
+        "name": "Fuzzing",
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43678689061"
+      },
+      {
+        "databaseId": 43678689179,
+        "name": "Android",
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43678689179"
+      },
+      {
+        "databaseId": 43678689051,
+        "name": "VFSI public package integration",
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43678689051"
+      },
+      {
+        "databaseId": 43678689063,
+        "name": "FreeBSD",
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43678689063"
+      },
+      {
+        "databaseId": 43678689157,
+        "name": "WSL2",
+        "url": "https://github.com/vfsi/vfsi-port-coreutils/actions/runs/43678689157"
+      }
+    ],
+    "findutils": [
+      {
+        "databaseId": 43678690825,
+        "name": "VFSI public package integration",
+        "url": "https://github.com/vfsi/vfsi-port-findutils/actions/runs/43678690825"
+      },
+      {
+        "databaseId": 43678690820,
+        "name": "External-testsuites",
+        "url": "https://github.com/vfsi/vfsi-port-findutils/actions/runs/43678690820"
+      },
+      {
+        "databaseId": 43678690800,
+        "name": "Basic CI",
+        "url": "https://github.com/vfsi/vfsi-port-findutils/actions/runs/43678690800"
+      }
+    ],
+    "git": [
+      {
+        "databaseId": 43678692562,
+        "name": "Test VFSI public package integration",
+        "url": "https://github.com/vfsi/vfsi-port-git/actions/runs/43678692562"
+      },
+      {
+        "databaseId": 43678692631,
+        "name": "git-l10n",
+        "url": "https://github.com/vfsi/vfsi-port-git/actions/runs/43678692631"
+      },
+      {
+        "databaseId": 43678692557,
+        "name": "Coverity",
+        "url": "https://github.com/vfsi/vfsi-port-git/actions/runs/43678692557"
+      },
+      {
+        "databaseId": 43678692608,
+        "name": "CI",
+        "url": "https://github.com/vfsi/vfsi-port-git/actions/runs/43678692608"
+      }
+    ],
+    "rsync": [
+      {
+        "databaseId": 43678694610,
+        "name": "Test VFSI public package integration",
+        "url": "https://github.com/vfsi/vfsi-port-rsync/actions/runs/43678694610"
+      }
+    ]
+  },
+  "port_ci_note": "Run links identify the exact port commits; final live conclusions are checked at handoff, independently of this publication snapshot.",
+  "abi": 3
+}

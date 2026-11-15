@@ -1,3 +1,6 @@
+> Historical local-adoption record. The coordinated release and actual port
+> commits are now recorded in [publication evidence](std-error-publication-2026-11-15.json).
+
 # Standard I/O error adoption (local verification)
 
 This is a source-breaking Rust API change after the VecResult migration.

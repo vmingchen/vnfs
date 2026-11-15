@@ -894,10 +894,9 @@ class EcosystemBaselineTests(unittest.TestCase):
                 main()
             self.assertTrue((self.root / 'cache/debug/find').is_file())
             applied = [command for command in commands if command[:2] == ['git', 'apply']]
-            self.assertEqual(applied, [
-                ['git', 'apply', '--check', '--unidiff-zero', str(migration)],
-                ['git', 'apply', '--unidiff-zero', str(migration)],
-            ] if configured else [])
+            # Published adoption is complete: even a stale transition variable
+            # must not modify the committed source selected by the registry.
+            self.assertEqual(applied, [])
 
 
 class PortWorkflowTriggerTests(unittest.TestCase):
@@ -915,8 +914,6 @@ class PortWorkflowTriggerTests(unittest.TestCase):
         for path in ("Cargo.toml", "Cargo.lock", "crates/vfsi-sync/src/client/mod.rs",
                      "bindings/c/include/vfsi_dynamic.h", "ecosystem/ports.toml",
                      "ci/ports/check-c-abi.sh", "ci/check-promotion.py",
-                     "docs/migrations/std-error-coreutils.patch",
-                     "docs/migrations/std-error-findutils.patch",
                      "scripts/test-ci-scripts.py", ".github/workflows/ports.yml",
                      ".github/workflows/ci.yml", ".github/workflows/promote-vfsi.yml"):
             with self.subTest(path=path):

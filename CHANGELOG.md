@@ -20,9 +20,9 @@ C ABI remains v3 with existing optional-symbol fallback.
 - Avoid dense local read staging and move single-chunk SMB response buffers.
   Integrated allocation/wire evidence and remaining timing costs are documented
   under docs/benchmarks/error-integration.
-- During coordinated publication, the port compatibility gate explicitly applies
-  the reviewed migration patches to its pinned Rust-port snapshots. Remove that
-  transition after the ports adopt the published release.
+- Ports adopt the published standard-error API with explicit indexed-error
+  extraction. The compatibility gate tests their updated committed source
+  directly, without transitional source patches.
 
 ## 2026-11-14 — coordinated maintenance patches
 
