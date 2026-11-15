@@ -3977,3 +3977,175 @@ fn test_native_code(error: &std::io::Error) -> u32 {
         _ => panic!("expected a native error, got {error:?}"),
     }
 }
+
+#[test]
+fn configured_namespace_root_is_not_a_mutation_entry() {
+    let Some(fs) = connect() else { return };
+    struct Cleanup {
+        fs: NfsVecFs,
+        root: PathBuf,
+    }
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = self.fs.remove_paths_impl(&[self.root.as_path()], true);
+        }
+    }
+    let base = PathBuf::from(format!("/vfsi-root-entry-{}", std::process::id()));
+    let mut cleanup = Cleanup {
+        fs,
+        root: base.clone(),
+    };
+    let server = std::env::var("VFSI_NFS_SERVER").unwrap();
+    let minor = std::env::var("VFSI_NFS_MINOR")
+        .unwrap_or_else(|_| "2".into())
+        .parse()
+        .unwrap();
+    for root in [base.clone(), base.join("nested")] {
+        cleanup.fs.ensure_dir_impl(&root, 0o755).unwrap();
+        let mut fs = vfsi_nfs::NfsClientBuilder::new(&server)
+            .root(&root)
+            .minor_version(Some(minor))
+            .connect()
+            .unwrap();
+        let source = fs
+            .open_raw_impl(Path::new("/source"), libc::O_CREAT | libc::O_WRONLY, 0o600)
+            .unwrap();
+        fs.write_raw_impl(&source, 0, b"retained").unwrap();
+        fs.close_impl(&source).unwrap();
+        for (index, alias) in ["/", "/child/..", "../../", ""].into_iter().enumerate() {
+            let good = format!("/mkdir-{index}");
+            let outcomes = fs
+                .vmkdir_impl(&[alias, &good].map(|path| VfAttrs {
+                    file: FileOperand::from_path(path),
+                    masks: AttrMask::MODE,
+                    mode: 0o700,
+                    ..Default::default()
+                }))
+                .unwrap();
+            assert_root_rejected(&outcomes, "mkdir");
+            assert_eq!(
+                fs.stat_impl(Path::new(&good)).unwrap().ftype,
+                VfType::Directory
+            );
+            let good = format!("/symlink-{index}");
+            let outcomes = fs
+                .vsymlink_impl(
+                    &[Path::new("source"), Path::new("source")],
+                    &[Path::new(alias), Path::new(&good)],
+                )
+                .unwrap();
+            assert_root_rejected(&outcomes, "symlink");
+            assert_eq!(
+                fs.lstat_impl(Path::new(&good)).unwrap().ftype,
+                VfType::Symlink
+            );
+            let good = format!("/hardlink-{index}");
+            let outcomes = fs
+                .vhardlink_impl(
+                    &[Path::new("/source"), Path::new("/source")],
+                    &[Path::new(alias), Path::new(&good)],
+                )
+                .unwrap();
+            assert_root_rejected(&outcomes, "hardlink");
+            assert_eq!(
+                fs.read_raw_impl(&FileOperand::from_path(&good), 0, 8)
+                    .unwrap(),
+                b"retained"
+            );
+
+            let renamed = format!("/renamed-{index}");
+            let outcomes = fs
+                .vrename_impl(&[
+                    (
+                        FileOperand::from_path(alias),
+                        FileOperand::from_path("/forbidden"),
+                    ),
+                    (
+                        FileOperand::from_path(&good),
+                        FileOperand::from_path(&renamed),
+                    ),
+                ])
+                .unwrap();
+            assert_root_rejected(&outcomes, "rename source");
+            let outcomes = fs
+                .vrename_impl(&[
+                    (
+                        FileOperand::from_path(&renamed),
+                        FileOperand::from_path(alias),
+                    ),
+                    (
+                        FileOperand::from_path(&renamed),
+                        FileOperand::from_path(&good),
+                    ),
+                ])
+                .unwrap();
+            assert_root_rejected(&outcomes, "rename destination");
+            let outcomes = fs
+                .vremove_impl(&[FileOperand::from_path(alias), FileOperand::from_path(&good)])
+                .unwrap();
+            assert_root_rejected(&outcomes, "remove");
+            assert!(fs.stat_impl(Path::new(&good)).is_err());
+            for mode in [
+                vfsi_core::api::RemoveMode::Tree,
+                vfsi_core::api::RemoveMode::Entry,
+            ] {
+                let good = format!("/policy-remove-{index}-{mode:?}");
+                let file = fs
+                    .open_raw_impl(Path::new(&good), libc::O_CREAT | libc::O_WRONLY, 0o600)
+                    .unwrap();
+                fs.close_impl(&file).unwrap();
+                let outcomes = fs
+                    .remove_paths_with_options_impl(
+                        &[Path::new(alias), Path::new(&good)],
+                        mode,
+                        RemoveOptions::new().with_retries(0),
+                    )
+                    .unwrap();
+                assert_root_rejected(&outcomes, "policy remove");
+                assert_eq!(
+                    fs.read_raw_impl(&FileOperand::from_path("/source"), 0, 8)
+                        .unwrap(),
+                    b"retained"
+                );
+            }
+        }
+        assert_eq!(
+            fs.stat_impl(Path::new("/")).unwrap().ftype,
+            VfType::Directory
+        );
+        assert_eq!(
+            fs.read_raw_impl(&FileOperand::from_path("/source"), 0, 8)
+                .unwrap(),
+            b"retained"
+        );
+        let contents = fs
+            .remove_paths_with_options_impl(
+                &[Path::new("/")],
+                vfsi_core::api::RemoveMode::Contents,
+                RemoveOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(contents.len(), 1);
+        assert!(contents[0].is_ok());
+        assert_eq!(
+            fs.stat_impl(Path::new("/")).unwrap().ftype,
+            VfType::Directory
+        );
+    }
+    fn assert_root_rejected(outcomes: &[vfsi_core::OpResult<()>], operation: &str) {
+        assert_eq!(outcomes.len(), 2, "{operation}");
+        let error = outcomes[0].as_ref().expect_err(operation);
+        assert_eq!(
+            error.state(),
+            vfsi_core::FailureState::NotAttempted,
+            "{operation}: {error}"
+        );
+        assert_eq!(
+            vfsi_core::native_status(error.cause()),
+            Some(vfsi_core::StatusCode::Errno(libc::EBUSY as u32)),
+            "{operation}: {error}"
+        );
+        assert!(error.progress().is_none(), "{operation}");
+        assert!(outcomes[1].is_ok(), "{operation}: {:?}", outcomes[1]);
+    }
+}

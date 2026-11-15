@@ -67,6 +67,21 @@ impl NfsVecFs {
         }
     }
 
+    // A namespace root has no mutable parent/name entry inside that namespace.
+    // Reject it before a server-prefix split can address the export itself or
+    // mistake its basename for a child. Keep root lookup and metadata valid.
+    fn server_entry_path(&self, path: PathBuf) -> VfResult<PathBuf> {
+        if path == self.connection.root {
+            Err(std::io::Error::from_raw_os_error(libc::EBUSY))
+        } else {
+            Ok(path)
+        }
+    }
+
+    pub(super) fn server_vf_entry_path(&self, file: &FileOperand) -> VfResult<PathBuf> {
+        self.server_entry_path(self.server_vf_path(file)?)
+    }
+
     /// Resolve `files` to file handles in as few compounds as possible: each
     /// unique parent directory is resolved once, then all children are
     /// LOOKUPed in tolerant batches (`[PUTFH, LOOKUP, GETFH, GETATTR type]`
@@ -194,7 +209,13 @@ impl NfsVecFs {
         let mut names = Vec::with_capacity(paths.len());
         let mut indices = Vec::with_capacity(paths.len());
         for (index, path) in paths.iter().enumerate() {
-            let full = self.server_path(path);
+            let full = match self.server_entry_path(self.server_path(path)) {
+                Ok(full) => full,
+                Err(cause) => {
+                    slots[index] = Some(Err(OpError::not_attempted(cause)));
+                    continue;
+                }
+            };
             match split_path_bytes(path_bytes(&full)) {
                 Ok((parent, name)) => {
                     files.push(FileOperand::from_os_path(
@@ -462,8 +483,8 @@ impl NfsVecFs {
         let mut prepared = Vec::with_capacity(pairs.len());
         let mut indices = Vec::with_capacity(pairs.len());
         for (index, (src, dst)) in pairs.iter().enumerate() {
-            match self.server_vf_path(src).and_then(|src| {
-                self.server_vf_path(dst)
+            match self.server_vf_entry_path(src).and_then(|src| {
+                self.server_vf_entry_path(dst)
                     .map(|dst| crate::client::PathRenamePair {
                         src: path_bytes(&src).to_vec(),
                         dst: path_bytes(&dst).to_vec(),
@@ -601,8 +622,8 @@ impl NfsVecFs {
         let mut indices = Vec::with_capacity(pairs.len());
         for (index, (src, dst)) in pairs.iter().enumerate() {
             let prepared = (|| {
-                let source = self.server_vf_path(src)?;
-                let destination = self.server_vf_path(dst)?;
+                let source = self.server_vf_entry_path(src)?;
+                let destination = self.server_vf_entry_path(dst)?;
                 let (sdir, oldname) = split_path_bytes(path_bytes(&source))
                     .map_err(|_| std::io::Error::from_raw_os_error((ERR_NOENT) as i32))?;
                 let (ddir, newname) = split_path_bytes(path_bytes(&destination))
@@ -651,7 +672,7 @@ impl NfsVecFs {
         let mut paths = Vec::new();
         let mut indices = Vec::new();
         for (index, file) in files.iter().enumerate() {
-            match self.server_vf_path(file) {
+            match self.server_vf_entry_path(file) {
                 Ok(path) => {
                     paths.push(path_bytes(&path).to_vec());
                     indices.push(index);
@@ -746,7 +767,7 @@ impl NfsVecFs {
         let mut groups = std::collections::BTreeMap::<Box<[u8]>, Vec<(usize, Vec<u8>)>>::new();
         let mut slots = (0..files.len()).map(|_| None).collect::<Vec<_>>();
         for (index, file) in files.iter().enumerate() {
-            let request = self.server_vf_path(file).and_then(|path| {
+            let request = self.server_vf_entry_path(file).and_then(|path| {
                 let (parent, name) = split_path_bytes(path_bytes(&path))
                     .map_err(|_| std::io::Error::from_raw_os_error((ERR_NOENT) as i32))?;
                 Ok((Box::<[u8]>::from(parent), name.to_vec()))

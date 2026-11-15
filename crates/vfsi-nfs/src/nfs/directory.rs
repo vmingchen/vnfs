@@ -389,7 +389,7 @@ impl NfsVecFs {
 
     /// Resolve a path operand to its parent handle and final component name.
     pub(super) fn remove_parent_handle(&mut self, path: &Path) -> VfResult<(NfsFh, Vec<u8>)> {
-        let full = self.server_vf_path(&FileOperand::from_os_path(path))?;
+        let full = self.server_vf_entry_path(&FileOperand::from_os_path(path))?;
         let (dir, name) = split_path_bytes(path_bytes(&full))
             .map_err(|_| std::io::Error::from_raw_os_error((ERR_NOENT) as i32))?;
         let (parent, kind) = self.resolve_path_and_type(&path_from_bytes(dir), true)?;
