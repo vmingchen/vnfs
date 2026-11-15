@@ -167,48 +167,22 @@ impl<F: HandleBackend> FsClient<F> {
             }
         }
         if !files.is_empty() {
-            let results = self.lock()?.vstatfs_impl(&files);
-            match results {
-                Ok(results) if results.len() <= files.len() => {
-                    let mut results = results.into_iter();
-                    for (local, &index) in indices.iter().enumerate() {
-                        output[index] = Some(
-                            results
-                                .next()
-                                .unwrap_or_else(|| {
-                                    Err(OpError::unknown(
-                                        vfsi_core::internal::errors::invalid_reply(
-                                            "missing statfs outcome",
-                                        ),
-                                        None,
-                                    ))
-                                })
-                                .map_err(|error| error.with_context("vstatfs", paths[local])),
-                        );
-                    }
-                }
-                Ok(_) => {
-                    for (local, &index) in indices.iter().enumerate() {
-                        output[index] = Some(Err(OpError::unknown(
-                            vfsi_core::internal::errors::invalid_reply(
-                                "statfs backend returned too many outcomes",
-                            ),
-                            None,
-                        )
-                        .with_context("vstatfs", paths[local])));
-                    }
-                }
-                Err(error) => {
-                    for ((local, &index), error) in indices
-                        .iter()
-                        .enumerate()
-                        .zip(vfsi_core::internal::errors::fanout(error, indices.len()))
-                    {
-                        output[index] = Some(Err(
-                            OpError::not_attempted(error).with_context("vstatfs", paths[local])
-                        ));
-                    }
-                }
+            let result = super::namespace::namespace_results(
+                self.lock()?.vstatfs_impl(&files),
+                &paths,
+                "vstatfs",
+            );
+            let results = match result {
+                Ok(results) => results,
+                Err(cause) => vfsi_core::internal::errors::fanout(cause, files.len())
+                    .zip(&paths)
+                    .map(|(cause, path)| {
+                        Err(OpError::not_attempted(cause).with_context("vstatfs", *path))
+                    })
+                    .collect(),
+            };
+            for (index, result) in indices.into_iter().zip(results) {
+                output[index] = Some(result);
             }
         }
         Ok(output
@@ -390,47 +364,18 @@ impl<F: VectorBackend> FsClient<F> {
                 } else {
                     backend.vgetattrs_nofollow_impl(&mut attrs[start..end])
                 };
-                match result {
-                    Ok(results) if results.len() <= end - start => {
-                        let mut results = results.into_iter();
-                        for path in &paths[start..end] {
-                            statuses.push(
-                                results
-                                    .next()
-                                    .unwrap_or_else(|| {
-                                        Err(OpError::unknown(
-                                            vfsi_core::internal::errors::invalid_reply(
-                                                "missing metadata outcome",
-                                            ),
-                                            None,
-                                        ))
-                                    })
-                                    .map_err(|error| error.with_context("vgetattrs", *path)),
-                            );
-                        }
-                    }
-                    Ok(_) => {
-                        for path in &paths[start..end] {
-                            statuses.push(Err(OpError::unknown(
-                                vfsi_core::internal::errors::invalid_reply(
-                                    "too many metadata outcomes",
-                                ),
-                                None,
-                            )
-                            .with_context("vgetattrs", *path)));
-                        }
-                    }
-                    Err(error) => {
-                        for (path, error) in paths[start..end]
-                            .iter()
-                            .zip(vfsi_core::internal::errors::fanout(error, end - start))
-                        {
-                            statuses.push(Err(
-                                OpError::not_attempted(error).with_context("vgetattrs", *path)
-                            ));
-                        }
-                    }
-                }
+                let result =
+                    super::namespace::namespace_results(result, &paths[start..end], "vgetattrs");
+                let results = match result {
+                    Ok(results) => results,
+                    Err(cause) => vfsi_core::internal::errors::fanout(cause, end - start)
+                        .zip(&paths[start..end])
+                        .map(|(cause, path)| {
+                            Err(OpError::not_attempted(cause).with_context("vgetattrs", *path))
+                        })
+                        .collect(),
+                };
+                statuses.extend(results);
                 start = end;
             }
         }

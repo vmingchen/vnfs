@@ -208,6 +208,7 @@ struct ScalarOnly {
     stats_calls: Arc<AtomicUsize>,
     stats_result_count: Option<usize>,
     stats_error_index: Option<usize>,
+    stats_error_progress: Option<vfsi_core::IoProgress>,
     notifications: Notifications,
     blocked_read: Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
     blocked_close: Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
@@ -900,6 +901,7 @@ struct AttrsBackend {
     removals: usize,
     metadata_calls: MetadataCalls,
     metadata_failure: Option<usize>,
+    metadata_error_progress: Option<vfsi_core::IoProgress>,
     scalar: ScalarOnly,
     calls: Vec<(bool, Vec<VfAttrs>)>,
     failure: Option<(usize, IndexedError)>,
@@ -939,7 +941,7 @@ impl VectorBackend for AttrsBackend {
                 if self.metadata_failure == Some(index) {
                     Err(vfsi_core::OpError::failed(
                         std::io::Error::from_raw_os_error(libc::EACCES),
-                        None,
+                        self.metadata_error_progress.clone(),
                     ))
                 } else {
                     Ok(())
@@ -960,7 +962,7 @@ impl VectorBackend for AttrsBackend {
                 if self.metadata_failure == Some(index) {
                     Err(vfsi_core::OpError::failed(
                         std::io::Error::from_raw_os_error(libc::EACCES),
-                        None,
+                        self.metadata_error_progress.clone(),
                     ))
                 } else {
                     Ok(())
@@ -1780,7 +1782,7 @@ impl HandleBackend for ScalarOnly {
             if let Some(slot) = results.get_mut(index) {
                 *slot = Err(vfsi_core::OpError::failed(
                     std::io::Error::from_raw_os_error(libc::ENOENT),
-                    None,
+                    self.stats_error_progress.clone(),
                 ));
             } else {
                 results.push(Err(vfsi_core::OpError::failed(
@@ -8056,5 +8058,113 @@ fn scalar_metadata_defaults_preserve_targets_fields_following_and_failures() {
             libc::EACCES as u32
         );
         assert_eq!(vfsi_core::internal::errors::operation(&(error)), None);
+    }
+}
+
+fn query_progress_cases() -> [Option<vfsi_core::IoProgress>; 4] {
+    [
+        None,
+        Some(vfsi_core::IoProgress::Read(
+            vfsi_core::api::ReadOutput::owned(0, b"prefix".to_vec(), false),
+        )),
+        Some(vfsi_core::IoProgress::Write { bytes_written: 1 }),
+        Some(vfsi_core::IoProgress::Stream { next_offset: 1 }),
+    ]
+}
+
+fn assert_query_failure(
+    error: &vfsi_core::OpError,
+    invalid_progress: bool,
+    operation: &'static str,
+    path: &str,
+    errno: i32,
+) {
+    assert!(error.progress().is_none());
+    assert_eq!(
+        error.state(),
+        if invalid_progress {
+            vfsi_core::FailureState::Unknown
+        } else {
+            vfsi_core::FailureState::Failed
+        }
+    );
+    assert_eq!(
+        vfsi_core::transport_kind(error.cause()),
+        invalid_progress.then_some(vfsi_core::TransportKind::InvalidReply)
+    );
+    if !invalid_progress {
+        assert_eq!(
+            vfsi_core::native_status(error.cause()),
+            Some(vfsi_core::StatusCode::Errno(errno as u32))
+        );
+    }
+    assert_eq!(
+        vfsi_core::internal::errors::operation(error.cause()),
+        Some(operation)
+    );
+    assert_eq!(
+        vfsi_core::internal::errors::path(error.cause()),
+        Some(std::path::Path::new(path))
+    );
+}
+
+#[test]
+fn filesystem_statistics_reject_byte_progress_without_losing_siblings_or_batching() {
+    for progress in query_progress_cases() {
+        let invalid_progress = progress.is_some();
+        let backend = ScalarOnly {
+            stats_error_index: Some(1),
+            stats_error_progress: progress,
+            ..Default::default()
+        };
+        let calls = backend.stats_calls.clone();
+        let client = FsClient::new(backend);
+        let outcomes = client.vstatfs(&["/before", "/bad", "/after"]).unwrap();
+        assert_eq!(outcomes.len(), 3);
+        assert!(outcomes[0].is_ok() && outcomes[2].is_ok());
+        assert_query_failure(
+            outcomes[1].as_ref().unwrap_err(),
+            invalid_progress,
+            "vstatfs",
+            "/bad",
+            libc::ENOENT,
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "one native vector");
+    }
+}
+
+#[test]
+fn metadata_queries_reject_byte_progress_without_losing_siblings_or_batching() {
+    for follow in [false, true] {
+        for progress in query_progress_cases() {
+            let invalid_progress = progress.is_some();
+            let backend = AttrsBackend {
+                metadata_failure: Some(1),
+                metadata_error_progress: progress,
+                ..Default::default()
+            };
+            let calls = backend.metadata_calls.clone();
+            let client = FsClient::new(backend);
+            let outcomes = client
+                .vgetattrs_native(
+                    &["/before", "/bad", "/after"],
+                    vfsi_core::AttrMask::MODE,
+                    follow,
+                )
+                .unwrap();
+            assert_eq!(outcomes.len(), 3);
+            assert!(outcomes[0].is_ok() && outcomes[2].is_ok());
+            assert_query_failure(
+                outcomes[1].as_ref().unwrap_err(),
+                invalid_progress,
+                "vgetattrs",
+                "/bad",
+                libc::EACCES,
+            );
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.len(), 1, "one native policy run");
+            assert_eq!(calls[0].0, follow);
+            assert_eq!(calls[0].1.len(), 3);
+        }
     }
 }
