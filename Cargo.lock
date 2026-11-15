@@ -151,18 +151,18 @@ dependencies = [
 
 [[package]]
 name = "bitfields"
-version = "3.2.1"
+version = "3.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "807d221c91e4249c6beacda2a1c27083786aa457a254f0caecf0008976f7388f"
+checksum = "dc060e0c6ccf1573af560ead0cf52a802771658ee29a1f28336103070e450eb1"
 dependencies = [
  "bitfields-impl",
 ]
 
 [[package]]
 name = "bitfields-impl"
-version = "3.2.1"
+version = "3.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e21ae6cea457e4a4181b9d3923fc5e880df098b2e7acb07387c5ad975e09547"
+checksum = "647e44daa78d36c85ef0e949be07bec8d3371b2ad992ba333ccdfc967f951c42"
 dependencies = [
  "derive_more",
  "getset",
@@ -241,9 +241,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.11.0"
+version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "375989decec1a0fa424442bed520fa12ede43a48475ce8c7417d2c69b32b5f6b"
+checksum = "4ff2a8126fff0f8c839080d619675a585e61720bb12d2baceae45769fd66f155"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -633,9 +633,9 @@ dependencies = [
 
 [[package]]
 name = "io-uring"
-version = "0.7.15"
+version = "0.7.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed3bd0ecfbb87805f538bb7b32e5239ca0763890c623e349860ecba69469f2bb"
+checksum = "878c26bc5e45fe089ce2ca25689260c152a87ce1d7de2ca86101efeea6973932"
 dependencies = [
  "bitflags",
  "cfg-if",
@@ -1092,9 +1092,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "smb2"
-version = "0.42.1"
+version = "0.43.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a6bbadc4fa75cf99077feb23cdd4c98d262fb77fb5e83378ad85a9bb05bbe01"
+checksum = "80f2cf9dad3855f65b5e1541eca795c2446296cec2ced18148fa8cf14397aecd"
 dependencies = [
  "aes",
  "aes-gcm",
