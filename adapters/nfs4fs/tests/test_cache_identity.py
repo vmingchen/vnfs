@@ -2,8 +2,8 @@
 
 import errno
 import hashlib
-import pickle
 import os
+import pickle
 
 import fsspec
 import pytest

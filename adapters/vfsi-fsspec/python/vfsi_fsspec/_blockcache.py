@@ -17,8 +17,8 @@ from functools import partial
 
 from fsspec.caching import MMapCache
 from fsspec.exceptions import BlocksizeMismatchError
-from fsspec.implementations.cached import CachingFileSystem
 from fsspec.implementations.cache_mapper import HashCacheMapper
+from fsspec.implementations.cached import CachingFileSystem
 
 from ._caching import _Nfs4MMapCache
 from ._fs import (
@@ -27,8 +27,8 @@ from ._fs import (
     _handle_identity,
     _normalize_mode,
     _open_with_wrappers,
-    _OwnedStream,
     _oserror,
+    _OwnedStream,
     _rebase_error,
     _stale_handle_error,
 )
