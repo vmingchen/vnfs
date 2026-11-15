@@ -1592,6 +1592,40 @@ class VfsiFile(AbstractBufferedFile):
             result.extend(chunk)
         return bytes(result)
 
+    def _fetch_ranges(self, ranges):
+        """Fill sparse cache ranges through this file's pinned descriptor."""
+        lengths = [end - start for start, end in ranges]
+        self.fs._check_read_allocation(sum(lengths), self.path)
+        for batch in _bounded_batches(
+            lengths, self.fs.batch_size, self.fs.max_batch_bytes
+        ):
+            fd = self._raw._ensure_open()
+            try:
+                data, errors = self.fs._client.pread_many(
+                    [fd] * len(batch),
+                    [ranges[index][0] for index in batch],
+                    [lengths[index] for index in batch],
+                )
+            except OSError as error:
+                if not self.fs.auto_reconnect or not _can_reconnect(error):
+                    raise
+                # Read-only recovery reuses the scalar identity/retry engine.
+                for index in batch:
+                    yield self._fetch_range(*ranges[index])
+                continue
+            for position, index in enumerate(batch):
+                start, end = ranges[index]
+                if position in errors:
+                    error = _oserror(errors[position], self.path)
+                    if not self.fs.auto_reconnect or not _can_reconnect(error):
+                        raise error
+                    yield self._fetch_range(start, end)
+                    continue
+                value = data[position] or b""
+                if value and len(value) < lengths[index]:
+                    value += self._fetch_range(start + len(value), end)
+                yield value
+
     def _initiate_upload(self):
         # Creation/truncation and append positioning happen when the raw
         # descriptor is opened, preserving POSIX open-time errors.
@@ -5811,7 +5845,15 @@ class VfsiFileSystem(AbstractFileSystem):
             native_pairs = [
                 (self._native_path(a), self._native_path(b)) for a, b in pairs
             ]
-            copied, errors = self._client.copy_many(native_pairs)
+            try:
+                copied, errors = self._client.copy_many(native_pairs)
+            except Exception as error:
+                _rebase_error(
+                    error,
+                    range(len(pairs)) if positions is None else positions,
+                    [source for source, _ in pairs],
+                )
+                raise
             missing = sorted(
                 index for index, code in errors.items() if _errno(code) == errno.ENOENT
             )
@@ -5852,9 +5894,21 @@ class VfsiFileSystem(AbstractFileSystem):
                     else:
                         ready.append(index)
                 if ready:
-                    retried, retry_errors = self._client.copy_many(
-                        [native_pairs[index] for index in ready]
-                    )
+                    try:
+                        retried, retry_errors = self._client.copy_many(
+                            [native_pairs[index] for index in ready]
+                        )
+                    except Exception as error:
+                        _rebase_error(
+                            error,
+                            (
+                                ready
+                                if positions is None
+                                else [positions[index] for index in ready]
+                            ),
+                            [pairs[index][0] for index in ready],
+                        )
+                        raise
                     for position, index in enumerate(ready):
                         copied[index] = retried[position]
                         errors.pop(index, None)

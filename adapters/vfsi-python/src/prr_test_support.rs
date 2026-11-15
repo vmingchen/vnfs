@@ -49,6 +49,7 @@ pub(crate) struct FaultBackend {
     pub(crate) read_item_errors: Vec<(usize, std::io::Error)>,
     pub(crate) attrs_errors: std::collections::VecDeque<Option<IndexedError>>,
     pub(crate) attrs_item_errors: Vec<(usize, std::io::Error)>,
+    pub(crate) attrs_omit_size: Option<usize>,
     pub(crate) attrs_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
     pub(crate) extent_errors: std::collections::VecDeque<IndexedError>,
     pub(crate) extent_item_errors: Vec<(usize, vfsi_core::OpError)>,
@@ -81,6 +82,7 @@ impl FaultBackend {
             attrs_errors: Default::default(),
             attrs_calls: Default::default(),
             attrs_item_errors: Default::default(),
+            attrs_omit_size: None,
             extent_errors: Default::default(),
             extent_item_errors: Default::default(),
             extent_calls: Default::default(),
@@ -126,6 +128,11 @@ impl FaultBackend {
         } else {
             self.inner.vgetattrs_nofollow_impl(attrs)?
         };
+        if let Some(index) = self.attrs_omit_size.take() {
+            assert!(results[index].is_ok());
+            attrs[index].returned.remove(AttrMask::SIZE);
+            attrs[index].size = 0;
+        }
         for (index, error) in injected {
             // Read-only fault injection: actual sibling results come from the
             // single native batch, never inferred from a legacy prefix index.

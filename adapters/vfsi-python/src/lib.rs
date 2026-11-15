@@ -2718,6 +2718,15 @@ impl NfsClient {
             let mut source_ids = HashMap::new();
             for (&index, attrs) in oversized.iter().zip(attrs) {
                 if let Some(attrs) = attrs {
+                    if !attrs.returned.contains(AttrMask::SIZE) {
+                        errors.insert(
+                            index,
+                            vfsi_core::internal::errors::invalid_reply(
+                                "copy source metadata omitted its size",
+                            ),
+                        );
+                        continue;
+                    }
                     sizes[index] = Some(attrs.size);
                     if attrs.returned.contains(AttrMask::identity()) {
                         identity_candidates.push(index);

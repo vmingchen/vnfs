@@ -26,7 +26,9 @@ from ._fs import (
     _normalize_mode,
     _open_with_wrappers,
     _OwnedStream,
+    _oserror,
     _rebase_error,
+    _stale_handle_error,
 )
 
 _CACHE_FORMAT_KEY = "nfs4fs_blockcache_format"
@@ -215,6 +217,13 @@ def _reset_stale_generation(cache_fs, path):
     )
 
 
+def _check_cache_identity(detail, file, path, *, index=None):
+    raw = getattr(file, "_raw", None)
+    expected = detail.get("identity")
+    if raw is not None and expected is not None and tuple(expected) != raw._identity:
+        raise _oserror(_stale_handle_error(path), path, index=index)
+
+
 def _mark_compatible_cache(cache_fs, path, file):
     cache = getattr(file, "cache", None)
     if isinstance(cache, MMapCache):
@@ -225,12 +234,16 @@ def _mark_compatible_cache(cache_fs, path, file):
         raw = getattr(file, "_raw", None)
         if raw is not None:
             raw._ensure_open()
+            # fsspec's path-based multi_fetcher can switch objects after OPEN.
+            cache.multi_fetcher = file._fetch_ranges
+    detail = cache_fs._metadata.cached_files[-1].get(path)
+    if detail is not None:
+        _check_cache_identity(detail, file, path)
     if isinstance(cache, MMapCache) and not isinstance(cache, _Nfs4MMapCache):
         cache.__class__ = _Nfs4MMapCache
         block_count = (cache.size + cache.blocksize - 1) // cache.blocksize
         cache.blocks.intersection_update(range(block_count))
 
-    detail = cache_fs._metadata.cached_files[-1].get(path)
     if detail is not None:
         changed = False
         identity = getattr(getattr(file, "_raw", None), "_identity", None)
@@ -648,6 +661,7 @@ def _open_many_with_cache(cache_fs, open_files):
             for index in remote_indices:
                 file = indexed_files[index]
                 detail = records[index]["detail"]
+                _check_cache_identity(detail, file, paths[index], index=index)
                 old_blocksize = detail.get("blocksize")
                 if old_blocksize is not None and old_blocksize != file.blocksize:
                     raise BlocksizeMismatchError(

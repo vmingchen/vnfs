@@ -243,3 +243,39 @@ def test_range_metadata_transport_error_rebases_subset(dummy_fs, monkeypatch):
     assert raised.value is failure
     assert failure.index == 1
     assert failure.transport_kind == "timeout"
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("native_index", [0, None])
+def test_raised_copy_errors_keep_filtered_public_positions(
+    dummy_fs, monkeypatch, retry, native_index
+):
+    dummy_fs.auto_mkdir = True
+    dummy_fs.mkdir("/directory")
+    dummy_fs.pipe({"/first": b"data", "/later": b"data"})
+    failure = TimeoutError("lost copy reply")
+    failure.transport_kind = "timeout"
+    failure.index = native_index
+    calls = []
+
+    def copy_many(pairs):
+        calls.append(list(pairs))
+        if retry and len(calls) == 1:
+            return [4, None], {1: FileNotFoundError(errno.ENOENT, "missing parent")}
+        raise failure
+
+    monkeypatch.setattr(dummy_fs._client, "copy_many", copy_many)
+    with pytest.raises(TimeoutError) as raised:
+        dummy_fs.copy(
+            ["/directory", "/first", "/later"],
+            ["/directory-copy", "/first-copy", "/parent/later"],
+            symlinks=True,
+        )
+    assert raised.value is failure
+    assert failure.transport_kind == "timeout"
+    assert failure.index == ((2 if retry else 1) if native_index == 0 else None)
+    assert calls[0] == [("/first", "/first-copy"), ("/later", "/parent/later")]
+    if retry:
+        assert calls[1:] == [[("/later", "/parent/later")]]
+    else:
+        assert len(calls) == 1

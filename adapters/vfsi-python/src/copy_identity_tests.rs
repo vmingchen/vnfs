@@ -185,3 +185,44 @@ fn small_copy_keeps_nonprefix_successes_without_replaying_truncating_writes() {
         );
     }
 }
+
+#[test]
+fn oversized_copy_rejects_missing_size_without_truncating_destination() {
+    Python::initialize();
+    let root = TestRoot::new();
+    for name in ["large", "healthy"] {
+        std::fs::write(root.0.join(name), vec![name.as_bytes()[0]; 2048]).unwrap();
+    }
+    std::fs::write(root.0.join("destination"), b"retained destination").unwrap();
+    let mut backend = FaultBackend::new(&root.0, None);
+    backend.attrs_omit_size = Some(0);
+    let calls = backend.extent_calls.clone();
+    Python::attach(|py| {
+        let (copied, errors) = client(backend)
+            .copy_many(
+                py,
+                vec![
+                    ("/missing".into(), "/unused".into()),
+                    ("/large".into(), "/destination".into()),
+                    ("/healthy".into(), "/new".into()),
+                ],
+            )
+            .unwrap();
+        assert_eq!(copied, vec![None, None, Some(2048)]);
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[&0].raw_os_error(), Some(libc::ENOENT));
+        assert_eq!(
+            vfsi_core::transport_kind(&errors[&1]),
+            Some(vfsi_core::TransportKind::InvalidReply)
+        );
+    });
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![vec![PathBuf::from("/healthy")]]
+    );
+    assert_eq!(
+        std::fs::read(root.0.join("destination")).unwrap(),
+        b"retained destination"
+    );
+    assert_eq!(std::fs::read(root.0.join("new")).unwrap(), vec![b'h'; 2048]);
+}
