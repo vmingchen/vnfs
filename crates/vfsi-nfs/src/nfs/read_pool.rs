@@ -599,10 +599,12 @@ impl NfsReadPool {
         if let Some(payload) = callback_panic {
             std::panic::resume_unwind(payload);
         }
-        if let Some(error) = primary_error {
+        // A callback failure starts cancellation. Later prefetch/drain or
+        // cleanup errors must not replace its original cause.
+        if let Some(error) = callback_error {
             return Err(error);
         }
-        if let Some(error) = callback_error {
+        if let Some(error) = primary_error {
             return Err(error);
         }
         close_error.map(|()| {
@@ -902,6 +904,96 @@ fn read_range(
 mod tests {
     use super::{NfsReadPoolOptions, WorkerEvent, spawn_worker_thread};
     use std::sync::mpsc;
+
+    #[test]
+    fn callback_error_survives_later_prefetch_and_close_failures() {
+        use super::{NfsReadPool, WorkerCommand};
+        for failed_prefetch in [false, true] {
+            let (commands, requests) = mpsc::sync_channel(8);
+            let (send, events) = mpsc::channel();
+            send.send(WorkerEvent::Started {
+                stream_id: 1,
+                worker: 0,
+                result: Ok(Some(2)),
+            })
+            .unwrap();
+            for index in 0..2 {
+                send.send(WorkerEvent::Chunk {
+                    stream_id: 1,
+                    worker: 0,
+                    index,
+                    offset: index,
+                    result: if index == 1 && failed_prefetch {
+                        Err(std::io::Error::from_raw_os_error(libc::EIO))
+                    } else {
+                        Ok(vec![b'x'])
+                    },
+                })
+                .unwrap();
+            }
+            send.send(WorkerEvent::Finished {
+                stream_id: 1,
+                worker: 0,
+                result: Err(std::io::Error::from_raw_os_error(libc::EBADF)),
+            })
+            .unwrap();
+            let mut pool = NfsReadPool {
+                commands: vec![commands],
+                events,
+                threads: Vec::new(),
+                options: NfsReadPoolOptions::new()
+                    .with_worker_count(std::num::NonZeroUsize::new(1).unwrap())
+                    .with_chunk_size(std::num::NonZeroUsize::new(1).unwrap())
+                    .with_max_in_flight(std::num::NonZeroUsize::new(2).unwrap())
+                    .with_max_buffered_bytes(2),
+                effective_workers: 1,
+                effective_in_flight: 2,
+                worker_alive: vec![true],
+                next_stream_id: 1,
+            };
+            let mut calls = 0;
+            let cause = std::sync::Arc::new(std::io::Error::from_raw_os_error(libc::EACCES));
+            let original = std::sync::Arc::clone(&cause);
+            let error = pool
+                .read_stream("/file", |offset, bytes| {
+                    calls += 1;
+                    assert_eq!((offset, bytes), (0, b"x".as_slice()));
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        original.clone(),
+                    ))
+                })
+                .unwrap_err();
+            assert_eq!(calls, 1, "no callback for the drained prefetch");
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            let retained = error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<std::sync::Arc<std::io::Error>>()
+                .unwrap();
+            assert!(
+                std::sync::Arc::ptr_eq(retained, &cause),
+                "original cause retained"
+            );
+            let requests: Vec<_> = requests.try_iter().collect();
+            assert!(
+                matches!(
+                    requests.as_slice(),
+                    [
+                        WorkerCommand::Start { .. },
+                        WorkerCommand::Read { index: 0, .. },
+                        WorkerCommand::Read { index: 1, .. },
+                        WorkerCommand::Finish { .. },
+                    ]
+                ),
+                "drain and close finish before returning"
+            );
+            assert!(
+                pool.events.try_recv().is_err(),
+                "all submitted work drained"
+            );
+        }
+    }
 
     #[test]
     fn options_enforce_minimums_and_cap_concurrency_by_memory_budget() {

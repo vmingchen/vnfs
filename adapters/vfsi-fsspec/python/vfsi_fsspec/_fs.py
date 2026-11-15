@@ -2367,17 +2367,19 @@ class _BufferGroup:
             datas = []
             total = 0
             for file in pending:
+                # Full waves cannot admit later files. Avoid reading payloads
+                # only to discard and reread them in every subsequent wave.
+                if len(wave) >= self.fs.batch_size or total == self.fs.max_batch_bytes:
+                    break
+                if wave and (file._base_mode == "a") != (wave[0]._base_mode == "a"):
+                    continue
                 file._write_spool.seek(file._spool_read_offset)
                 data = file._write_spool.read(
                     min(file.blocksize, self.fs.max_batch_bytes)
                 )
                 if not data:
                     continue
-                if wave and (
-                    (file._base_mode == "a") != (wave[0]._base_mode == "a")
-                    or len(wave) >= self.fs.batch_size
-                    or total + len(data) > self.fs.max_batch_bytes
-                ):
+                if wave and total + len(data) > self.fs.max_batch_bytes:
                     continue
                 wave.append(file)
                 datas.append(data)

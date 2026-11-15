@@ -1713,3 +1713,42 @@ def test_deferred_cleanup_preserves_legacy_native_close_signature(
     assert calls == [[fd]]
     assert not pool.descriptor_valid(token)
     assert not pool._deferred_close
+
+
+@pytest.mark.parametrize("batch_size,max_batch_bytes", [(1, 256), (128, 4)])
+def test_grouped_writes_only_read_payloads_for_admitted_wave(
+    tmp_path, monkeypatch, batch_size, max_batch_bytes
+):
+    with fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "admitted-writes"),
+        write_buffering=True,
+        block_size=1,
+        batch_size=batch_size,
+        max_batch_bytes=max_batch_bytes,
+        skip_instance_cache=True,
+    ) as fs:
+        paths = [f"/file-{index}" for index in range(128)]
+        payload_reads = []
+        calls = _record_calls(monkeypatch, fs._client, "pwritev")
+        with _open_files(fs, paths, "wb") as files:
+            for index, file in enumerate(files):
+                file.write(bytes([index]))
+                # Preserve real spooled-file seek/rollover behavior; count only
+                # payload reads, including reads discarded before native dispatch.
+                original = file._write_spool.read
+
+                def read(size=-1, original=original):
+                    payload_reads.append(size)
+                    return original(size)
+
+                monkeypatch.setattr(file._write_spool, "read", read)
+        assert [fs.cat_file(path) for path in paths] == [
+            bytes([index]) for index in range(128)
+        ]
+        width = min(batch_size, max_batch_bytes)
+        assert len(calls) == (len(paths) + width - 1) // width
+        assert all(len(args[0]) <= batch_size for args, _ in calls)
+        assert all(sum(map(len, args[2])) <= max_batch_bytes for args, _ in calls)
+        assert len(payload_reads) == len(paths)
