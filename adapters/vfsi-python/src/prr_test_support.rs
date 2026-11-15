@@ -62,6 +62,8 @@ pub(crate) struct FaultBackend {
     pub(crate) grow_before_read: Option<(PathBuf, Vec<u8>)>,
     pub(crate) read_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
     pub(crate) write_counts: Option<Vec<usize>>,
+    pub(crate) write_overreports: bool,
+    pub(crate) write_result_offset: Option<u64>,
     pub(crate) write_error: Option<IndexedError>,
     pub(crate) replace_after_write_error: Option<(PathBuf, Vec<u8>)>,
     pub(crate) read_all_errors_after_write: std::collections::VecDeque<IndexedError>,
@@ -94,6 +96,8 @@ impl FaultBackend {
             grow_before_read: None,
             read_calls: Arc::default(),
             write_counts: None,
+            write_overreports: false,
+            write_result_offset: None,
             write_error: None,
             replace_after_write_error: None,
             read_all_errors_after_write: std::collections::VecDeque::new(),
@@ -331,7 +335,7 @@ impl VectorBackend for FaultBackend {
             }
             rejected.push((index, vfsi_core::OpError::unknown(cause, None)));
         }
-        let result = if !rejected.is_empty() {
+        let mut result = if !rejected.is_empty() {
             let indices: Vec<_> = (0..ops.len())
                 .filter(|index| !rejected.iter().any(|(failed, _)| failed == index))
                 .collect();
@@ -367,6 +371,17 @@ impl VectorBackend for FaultBackend {
         } else {
             self.inner.vwrite_impl(ops)
         };
+        if self.write_overreports {
+            self.write_overreports = false;
+            if let Ok(items) = &mut result {
+                items[0].as_mut().unwrap().bytes_written += 1;
+            }
+        }
+        if let Some(offset) = self.write_result_offset.take()
+            && let Ok(items) = &mut result
+        {
+            items[0].as_mut().unwrap().offset = offset;
+        }
         if (result.is_err()
             || result
                 .as_ref()

@@ -387,3 +387,53 @@ fn same_file_sentinel_is_adapter_local_without_fake_native_status() {
         assert!(!value.hasattr("status_domain").unwrap());
     });
 }
+
+#[test]
+fn malformed_scalar_write_completions_are_nonretryable_invalid_replies() {
+    Python::initialize();
+    for (method, overflow) in [
+        ("write", false),
+        ("pwrite", false),
+        ("write_positioned", false),
+        ("write_positioned", true),
+    ] {
+        let root = prr_test_support::TestRoot::new();
+        let mut backend = prr_test_support::FaultBackend::new(&root.0, None);
+        backend.write_overreports = !overflow;
+        backend.write_result_offset = overflow.then_some(u64::MAX);
+        let file = vfsi_sync::backend::HandleBackend::open_raw_impl(
+            &mut backend.inner,
+            Path::new("/data"),
+            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+            0o600,
+        )
+        .unwrap();
+        let fd = i64::from(file.fd().unwrap());
+        let calls = backend.write_calls.clone();
+        let client = prr_test_support::client(backend);
+        Python::attach(|py| {
+            let error = match method {
+                "write" => client.write(py, fd, b"abc".to_vec()).unwrap_err(),
+                "pwrite" => client.pwrite(py, fd, b"abc".to_vec(), 0).unwrap_err(),
+                _ => client
+                    .write_positioned(py, fd, b"abc".to_vec())
+                    .unwrap_err(),
+            };
+            assert!(error.is_instance_of::<PyOSError>(py));
+            assert_eq!(
+                error
+                    .value(py)
+                    .getattr("transport_kind")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "invalid_reply"
+            );
+            assert!(!error.value(py).hasattr("index").unwrap());
+            assert!(error.to_string().contains("backend contract violation"));
+            client.close_many(py, vec![fd], false).unwrap();
+        });
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        assert_eq!(std::fs::read(root.0.join("data")).unwrap(), b"abc");
+    }
+}

@@ -455,7 +455,13 @@ fn operation_exception(
 }
 
 fn contract_error(operation: &str, detail: impl std::fmt::Display) -> PyErr {
-    PyOSError::new_err(format!("{operation}: backend contract violation: {detail}"))
+    to_py_err(
+        vfsi_core::internal::errors::invalid_reply(format!(
+            "{operation}: backend contract violation: {detail}"
+        )),
+        None,
+        None,
+    )
 }
 
 fn one_read_result(operation: &str, op: &ReadOp, results: Vec<ReadOutput>) -> PyResult<ReadOutput> {
@@ -1568,7 +1574,7 @@ impl NfsClient {
             let position = w
                 .offset
                 .checked_add(w.bytes_written as u64)
-                .ok_or_else(|| PyOSError::new_err("file position overflow"))?;
+                .ok_or_else(|| contract_error("write_positioned", "file position overflow"))?;
             Ok((w.bytes_written, position))
         })
     }
@@ -3185,6 +3191,7 @@ mod tests {
 
     #[test]
     fn scalar_read_result_contract_is_validated() {
+        Python::initialize();
         let op = ReadOp::at(FileOperand::from_fd(7), 11, 3);
         assert!(one_read_result("pread", &op, Vec::new()).is_err());
         assert!(
@@ -3247,6 +3254,7 @@ mod tests {
 
     #[test]
     fn scalar_write_result_contract_is_validated() {
+        Python::initialize();
         let op = WriteOp::at(FileOperand::from_fd(7), 11, vec![1, 2, 3]);
         assert!(one_write_result("pwrite", &op, Vec::new(), false).is_err());
         assert!(
@@ -3267,6 +3275,7 @@ mod tests {
 
     #[test]
     fn path_result_cannot_cross_the_descriptor_boundary() {
+        Python::initialize();
         assert!(descriptor("open", &FileOperand::from_path("/not-a-descriptor")).is_err());
     }
 }

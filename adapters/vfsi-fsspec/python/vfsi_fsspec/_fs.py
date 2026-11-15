@@ -3209,7 +3209,7 @@ class VfsiFileSystem(AbstractFileSystem):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.close()
+        _close_reader_on_exit(self, exc_type, exc_value, traceback)
 
     def open(
         self,

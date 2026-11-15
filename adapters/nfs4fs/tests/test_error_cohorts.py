@@ -279,3 +279,66 @@ def test_raised_copy_errors_keep_filtered_public_positions(
         assert calls[1:] == [[("/later", "/parent/later")]]
     else:
         assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "body_error",
+    [
+        None,
+        ValueError("application failure"),
+        KeyboardInterrupt("application interrupted"),
+    ],
+)
+@pytest.mark.parametrize(
+    "cleanup_error", [OSError("shutdown failed"), RuntimeError("shutdown poisoned")]
+)
+def test_filesystem_context_preserves_body_error(
+    dummy_fs, monkeypatch, body_error, cleanup_error
+):
+    shutdown = dummy_fs._client.shutdown
+    calls = []
+
+    def fail_shutdown():
+        calls.append(True)
+        shutdown()
+        raise cleanup_error
+
+    monkeypatch.setattr(dummy_fs._client, "shutdown", fail_shutdown)
+    expected = body_error if body_error is not None else cleanup_error
+    with pytest.raises(type(expected)) as raised:
+        with dummy_fs:
+            if body_error is not None:
+                raise body_error
+    assert raised.value is expected
+    if body_error is not None:
+        assert raised.value.__cause__ is cleanup_error
+    assert calls == [True]
+    assert dummy_fs.closed
+
+
+def test_invalid_scalar_write_reply_poisons_handle_without_replay(
+    dummy_fs, monkeypatch
+):
+    file = dummy_fs.open("/uncertain", "wb", cache_type="none")
+    original = dummy_fs._client.pwrite
+    failure = OSError(errno.EIO, "pwrite: backend contract violation")
+    failure.transport_kind = "invalid_reply"
+    attempts = []
+
+    def invalid_reply(*args, **kwargs):
+        attempts.append(args)
+        original(*args, **kwargs)
+        raise failure
+
+    monkeypatch.setattr(dummy_fs._client, "pwrite", invalid_reply)
+    try:
+        with pytest.raises(OSError) as raised:
+            file.write(b"abc")
+        assert raised.value is failure
+        with pytest.raises(ConnectionError):
+            file.write(b"replay")
+        assert len(attempts) == 1
+    finally:
+        file.close()
+    assert dummy_fs.cat_file("/uncertain") == b"abc"
+    assert not dummy_fs._client._fds
