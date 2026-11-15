@@ -5,12 +5,15 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## 2026-11-15 — buffered I/O and failure-boundary fixes
 
-Rust releases: vnfs 0.0.37; vfsi-core/vfsi-sync and local/POSIX/io_uring/NFS/SMB
-backends 0.3.1; vfsi-c 0.3.21. Python: nfs4fs 0.3.17, vfsi-fsspec 0.1.16,
+Rust releases: vnfs 0.0.38; vfsi-core/vfsi-sync and local/POSIX/io_uring/NFS/SMB
+backends 0.4.0; vfsi-c 0.3.22. Python: nfs4fs 0.3.17, vfsi-fsspec 0.1.16,
 vsmb 0.1.11 and vsmbfs 0.1.10. C ABI remains v3; nfsv41-sys and
 libntirpc-sys retain their existing versions.
 
-- Rename Rust ReadResult/WriteResult payloads to ReadOutput/WriteOutput.
+- Breaking Rust API: rename ReadResult/WriteResult payloads to
+  ReadOutput/WriteOutput. Use the 0.4.x core/backend cohort together; the
+  preliminary 0.3.1, vnfs 0.0.37 and vfsi-c 0.3.21 releases are superseded
+  because their dependency ranges can break older Rust clients.
 - Reject byte progress in metadata/statistics failures and preserve primary
   callback and transaction failures during cleanup.
 - Protect configured NFS namespace roots from directory-entry mutations.
