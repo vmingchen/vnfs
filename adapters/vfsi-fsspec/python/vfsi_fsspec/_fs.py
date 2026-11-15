@@ -5061,7 +5061,9 @@ class VfsiFileSystem(AbstractFileSystem):
                 flatten=not source_is_str,
             )
 
-        kwargs.pop("assume_literal", None)
+        # Expansion has consumed these traversal controls; none configure OPEN.
+        for option in ("assume_literal", "on_error", "refresh", "topdown"):
+            kwargs.pop(option, None)
         callback.set_size(len(lpaths))
         local = LocalFileSystem(auto_mkdir=True)
         if pre_stats is not None:
@@ -5280,7 +5282,9 @@ class VfsiFileSystem(AbstractFileSystem):
                 flatten=not source_is_str,
             )
 
-        kwargs.pop("assume_literal", None)
+        # Expansion has consumed these traversal controls; none configure OPEN.
+        for option in ("assume_literal", "on_error", "refresh", "topdown"):
+            kwargs.pop(option, None)
         callback.set_size(len(rpaths))
         pairs = []
         remote_dirs = []

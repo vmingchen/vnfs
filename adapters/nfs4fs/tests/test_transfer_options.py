@@ -230,3 +230,97 @@ def test_bulk_cache_constructor_error_keeps_application_provenance(
     assert paths[1].read_bytes() == b"old"
     assert not fs._client._fds
     assert not fs._client._deferred_close
+
+
+@pytest.mark.parametrize("direction", ["get", "put"])
+@pytest.mark.parametrize("selection", ["paired", "recursive"])
+@pytest.mark.parametrize(
+    "control",
+    ["on_error_omit", "on_error_raise", "on_error_callback", "refresh", "topdown"],
+)
+def test_traversal_controls_keep_vector_transfer_path(
+    dummy_fs, tmp_path, monkeypatch, direction, selection, control
+):
+    from fsspec.implementations.local import LocalFileSystem
+
+    fs = dummy_fs
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    payloads = [b"aaa", b"bbb"]
+    names = ["a", "b"]
+    for name, data in zip(names, payloads):
+        (source / name).write_bytes(data)
+    fs.mkdir("/source")
+    if direction == "put" and selection == "paired":
+        fs.mkdir("/target")
+    fs.pipe({f"/source/{name}": data for name, data in zip(names, payloads)})
+    if control.startswith("on_error_"):
+        value = control.removeprefix("on_error_")
+        if value == "callback":
+
+            def value(error):
+                pytest.fail(f"unexpected traversal failure: {error}")
+
+        options = {"on_error": value}
+    else:
+        options = {control: control == "refresh"}
+    walks = []
+    original_walk = fs.walk if direction == "get" else LocalFileSystem.walk
+
+    if direction == "get":
+
+        def walk(*args, **kwargs):
+            walks.append(kwargs.copy())
+            return original_walk(*args, **kwargs)
+
+        monkeypatch.setattr(fs, "walk", walk)
+    else:
+
+        def walk(local_fs, *args, **kwargs):
+            walks.append(kwargs.copy())
+            return original_walk(local_fs, *args, **kwargs)
+
+        monkeypatch.setattr(LocalFileSystem, "walk", walk)
+    method = "read_all_many" if direction == "get" else "write_many"
+    original = getattr(fs._client, method)
+    vectors = []
+
+    def record(*args, **kwargs):
+        vectors.append(args[0])
+        return original(*args, **kwargs)
+
+    def no_scalar_open(*args, **kwargs):
+        pytest.fail("traversal control disabled vector transfer")
+
+    monkeypatch.setattr(fs._client, method, record)
+    monkeypatch.setattr(fs._client, "open", no_scalar_open)
+    if direction == "get":
+        remote = (
+            "/source" if selection == "recursive" else [f"/source/{n}" for n in names]
+        )
+        local = (
+            str(target)
+            if selection == "recursive"
+            else [str(target / n) for n in names]
+        )
+        fs.get(remote, local, recursive=selection == "recursive", **options)
+        assert [(target / n).read_bytes() for n in names] == payloads
+    else:
+        local = (
+            str(source)
+            if selection == "recursive"
+            else [str(source / n) for n in names]
+        )
+        remote = (
+            "/target" if selection == "recursive" else [f"/target/{n}" for n in names]
+        )
+        fs.put(local, remote, recursive=selection == "recursive", **options)
+        assert [fs.cat_file(f"/target/{n}") for n in names] == payloads
+    if selection == "recursive":
+        assert walks
+        assert any(all(call.get(k) == v for k, v in options.items()) for call in walks)
+    else:
+        assert not walks
+    assert len(vectors) == 1
+    assert len(vectors[0]) == 2
