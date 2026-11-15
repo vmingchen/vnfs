@@ -259,3 +259,33 @@ def test_paired_special_filter_preserves_directory_errors_and_copy_cohort(
     assert (remote / "out-alpha").read_bytes() == b"payload"
     assert callback.size == callback.value == 3
     assert not dummy_fs._client._fds
+
+
+@pytest.mark.parametrize("source_state", ["missing", "denied", "readable"])
+def test_same_path_copy_preserves_source_error_precedence(dummy_fs, source_state):
+    import errno
+    import shutil
+
+    if source_state != "missing":
+        dummy_fs.pipe_file("/source", b"keep")
+    if source_state == "denied":
+        dummy_fs._client.chmod(dummy_fs._native_path("/source"), 0)
+    try:
+        error_type = {
+            "missing": FileNotFoundError,
+            "denied": PermissionError,
+            "readable": shutil.SameFileError,
+        }[source_state]
+        with pytest.raises(error_type) as caught:
+            dummy_fs.copy(["/source"], ["/source"])
+        assert caught.value.index == 0
+        if source_state == "missing":
+            assert caught.value.errno == errno.ENOENT
+            assert not dummy_fs.exists("/source")
+        elif source_state == "denied":
+            assert caught.value.errno == errno.EACCES
+    finally:
+        if source_state == "denied":
+            dummy_fs._client.chmod(dummy_fs._native_path("/source"), 0o600)
+    if source_state != "missing":
+        assert dummy_fs.cat_file("/source") == b"keep"

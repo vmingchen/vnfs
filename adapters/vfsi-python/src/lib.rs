@@ -2550,7 +2550,7 @@ impl NfsClient {
             // Remove exact path aliases before either the small write or the
             // extent-copy path can truncate their shared inode.
             for index in 0..n {
-                if sources[index] == dests[index] {
+                if sources[index] == dests[index] && !errors.contains_key(&index) {
                     data[index] = None;
                     oversized.retain(|&candidate| candidate != index);
                     errors.insert(index, same_file_error());

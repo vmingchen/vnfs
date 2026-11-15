@@ -178,7 +178,9 @@ def test_nonrecursive_remove_requires_successful_metadata(
                 dummy_fs.rm(paths)
             else:
                 getattr(dummy_fs, operation)(paths[0])
-        assert removed == []
+        assert removed == (
+            [[dummy_fs._native_path("/safe")]] if operation == "rm_many" else []
+        )
         if cause is not None:
             assert caught.value is cause
             assert cause.index == index
@@ -188,4 +190,128 @@ def test_nonrecursive_remove_requires_successful_metadata(
             assert caught.value.errno == errno.EIO
             assert caught.value.index == index
     assert dummy_fs.isdir("/blocked")
-    assert dummy_fs.cat_file("/safe") == b"keep"
+    if operation == "rm_many":
+        assert not dummy_fs.exists("/safe")
+    else:
+        assert dummy_fs.cat_file("/safe") == b"keep"
+
+
+@pytest.mark.parametrize("directory_first", [False, True])
+@pytest.mark.parametrize("batch_size", [1, 16])
+def test_get_error_index_survives_filtering_and_batching(
+    dummy_fs, tmp_path, directory_first, batch_size
+):
+    dummy_fs.batch_size = batch_size
+    dummy_fs.pipe_file("/ok", b"keep")
+    sources = ["/ok", "/missing"]
+    if directory_first:
+        dummy_fs.mkdir("/directory")
+        sources.insert(0, "/directory")
+    targets = [str(tmp_path / f"download-{i}") for i in range(len(sources))]
+    with pytest.raises(FileNotFoundError) as caught:
+        dummy_fs.get(sources, targets)
+    assert caught.value.index == len(sources) - 1
+    assert caught.value.filename == "/missing"
+    assert (tmp_path / f"download-{int(directory_first)}").read_bytes() == b"keep"
+    assert not os.path.exists(targets[-1])
+
+
+@pytest.mark.parametrize("operation", ["pipe", "put", "put_with_directory"])
+def test_write_transfer_error_index_survives_filtering_and_batching(
+    dummy_fs, tmp_path, operation
+):
+    dummy_fs.batch_size = 1
+    with pytest.raises(FileNotFoundError) as caught:
+        if operation == "pipe":
+            expected = 1
+            dummy_fs.pipe({"/ok": b"keep", "/missing/file": b"no"})
+        else:
+            first = tmp_path / "first"
+            second = tmp_path / "second"
+            first.write_bytes(b"keep")
+            second.write_bytes(b"no")
+            sources = [str(first), str(second)]
+            targets = ["/ok", "/missing/file"]
+            if operation == "put_with_directory":
+                directory = tmp_path / "directory"
+                directory.mkdir()
+                sources.insert(0, str(directory))
+                targets.insert(0, "/directory")
+            expected = len(sources) - 1
+            dummy_fs.put(sources, targets)
+    assert caught.value.index == expected
+    assert caught.value.filename == "/missing/file"
+    assert dummy_fs.cat_file("/ok") == b"keep"
+    assert not dummy_fs.exists("/missing/file")
+
+
+def test_get_rebases_raised_transport_error_without_replaying_downloads(
+    dummy_fs, tmp_path, monkeypatch
+):
+    dummy_fs.batch_size = 1
+    dummy_fs.mkdir("/directory")
+    dummy_fs.pipe({"/ok": b"keep", "/later": b"not downloaded"})
+    targets = [str(tmp_path / f"target-{i}") for i in range(3)]
+    (tmp_path / "target-2").write_bytes(b"old local data")
+    cause = TimeoutError(errno.ETIMEDOUT, "deadline")
+    cause.index = 0
+    cause.transport_kind = "timeout"
+    original = dummy_fs._client.read_all_many
+    calls = []
+
+    def read_many(paths, budget):
+        calls.append(list(paths))
+        if paths == [dummy_fs._native_path("/later")]:
+            raise cause
+        return original(paths, budget)
+
+    monkeypatch.setattr(dummy_fs._client, "read_all_many", read_many)
+    with pytest.raises(TimeoutError) as caught:
+        dummy_fs.get(["/directory", "/ok", "/later"], targets)
+    assert caught.value is cause
+    assert cause.index == 2
+    assert cause.filename == "/later"
+    assert cause.transport_kind == "timeout"
+    assert len(calls) == 2
+    assert (tmp_path / "target-1").read_bytes() == b"keep"
+    assert (tmp_path / "target-2").read_bytes() == b"old local data"
+
+
+@pytest.mark.parametrize("metadata_first", [False, True])
+def test_remove_combines_sparse_metadata_and_native_errors_in_public_input_order(
+    dummy_fs, monkeypatch, metadata_first
+):
+    paths = (
+        ["/unclassified", "/remove-denied"]
+        if metadata_first
+        else ["/remove-denied", "/unclassified"]
+    )
+    dummy_fs.pipe(dict.fromkeys(paths, b"keep"))
+    metadata_error = PermissionError(errno.EACCES, "metadata denied")
+    mutation_error = PermissionError(errno.EPERM, "remove denied")
+    mutation_error.index = 0
+    original = dummy_fs._client.lstat_many
+
+    def metadata(native):
+        stats, errors = original(native)
+        index = native.index(dummy_fs._native_path("/unclassified"))
+        stats[index] = None
+        errors[index] = metadata_error
+        return stats, errors
+
+    calls = []
+
+    def remove(native):
+        calls.append(list(native))
+        raise mutation_error
+
+    with monkeypatch.context() as patch:
+        patch.setattr(dummy_fs._client, "lstat_many", metadata)
+        patch.setattr(dummy_fs._client, "remove_many", remove)
+        with pytest.raises(PermissionError) as caught:
+            dummy_fs.rm(paths)
+    expected = metadata_error if metadata_first else mutation_error
+    assert caught.value is expected
+    assert caught.value.index == 0
+    assert calls == [[dummy_fs._native_path("/remove-denied")]]
+    assert all(dummy_fs.cat_file(path) == b"keep" for path in paths)

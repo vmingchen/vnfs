@@ -1772,6 +1772,8 @@ class VfsiFile(AbstractBufferedFile):
         return written
 
     def seek(self, offset, whence=0):
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
         if not self._has_read_cache() and not self._buffered_write:
             return self._raw.seek(offset, whence)
         requested = operator.index(offset)
@@ -1789,6 +1791,8 @@ class VfsiFile(AbstractBufferedFile):
         return super().seek(requested, whence)
 
     def tell(self):
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
         if not self._has_read_cache() and not self._buffered_write:
             return self._raw.tell()
         return super().tell()
@@ -1804,6 +1808,8 @@ class VfsiFile(AbstractBufferedFile):
         raise io.UnsupportedOperation("not writable")
 
     def flush(self, force=False):
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
         if not self._using_buffer:
             return self._raw.flush()
         if self._buffered_read:
@@ -4394,6 +4400,7 @@ class VfsiFileSystem(AbstractFileSystem):
         mode="overwrite",
         callback=None,
         callback_pairs=None,
+        input_indices=None,
     ):
         _validate_write_mode(mode)
         with self._cache_mutation(paths, namespace=True):
@@ -4466,16 +4473,35 @@ class VfsiFileSystem(AbstractFileSystem):
                     self._ensure_dirs(list(parents))
                 # A failed vector can have completed mutations. Prepare parents
                 # first and never replay writes, even for an indexed ENOENT.
-                written = self._client.write_many(
-                    batch_native, batch_datas, truncate=True
-                )
+                try:
+                    written = self._client.write_many(
+                        batch_native, batch_datas, truncate=True
+                    )
+                except Exception as error:
+                    position = getattr(error, "index", None)
+                    if isinstance(position, int) and 0 <= position < len(batch):
+                        index = batch[position]
+                        _oserror(
+                            error,
+                            paths[index],
+                            index=(
+                                index if input_indices is None else input_indices[index]
+                            ),
+                        )
+                    raise
                 for position, index in enumerate(batch):
                     expected = len(datas[index])
                     if written[position] != expected:
-                        raise OSError(
-                            errno.EIO,
-                            f"short write: wrote {written[position]} of {expected} bytes",
+                        raise _oserror(
+                            OSError(
+                                errno.EIO,
+                                f"short write: wrote {written[position]} of {expected} bytes",
+                                paths[index],
+                            ),
                             paths[index],
+                            index=(
+                                index if input_indices is None else input_indices[index]
+                            ),
                         )
                 for index in batch:
                     report(index)
@@ -4730,16 +4756,17 @@ class VfsiFileSystem(AbstractFileSystem):
                         remote_path,
                         local_path,
                         stats[i].get("size") if stats[i] else 0,
+                        i,
                     )
                 )
         if not pairs:
             return
         read_batch_bytes = min(self.max_batch_bytes, self.read_all_max_total_bytes)
         for batch in _bounded_batches(
-            [size for _, _, size in pairs], self.batch_size, read_batch_bytes
+            [size for _, _, size, _ in pairs], self.batch_size, read_batch_bytes
         ):
             if len(batch) == 1 and pairs[batch[0]][2] > read_batch_bytes:
-                remote_path, local_path, size = pairs[batch[0]]
+                remote_path, local_path, size, _ = pairs[batch[0]]
                 with callback.branched(remote_path, local_path) as child:
                     child.set_size(size)
                     local.makedirs(local._parent(local_path), exist_ok=True)
@@ -4757,15 +4784,22 @@ class VfsiFileSystem(AbstractFileSystem):
             selected = [pairs[i] for i in batch]
             native = [
                 self._native_path(self._checked_strip_protocol(remote_path))
-                for remote_path, _, _ in selected
+                for remote_path, _, _, _ in selected
             ]
-            data, errors = self._client.read_all_many(native, read_batch_bytes)
-            for i, ((remote_path, local_path, _), buf) in enumerate(
+            try:
+                data, errors = self._client.read_all_many(native, read_batch_bytes)
+            except Exception as error:
+                position = getattr(error, "index", None)
+                if isinstance(position, int) and 0 <= position < len(selected):
+                    remote_path, _, _, public_index = selected[position]
+                    _oserror(error, remote_path, index=public_index)
+                raise
+            for i, ((remote_path, local_path, _, public_index), buf) in enumerate(
                 zip(selected, data)
             ):
                 with callback.branched(remote_path, local_path) as child:
                     if buf is None:
-                        raise _oserror(errors[i], remote_path)
+                        raise _oserror(errors[i], remote_path, index=public_index)
                     local.makedirs(local._parent(local_path), exist_ok=True)
                     with open(local_path, "wb") as out:
                         child.set_size(len(buf))
@@ -4883,12 +4917,12 @@ class VfsiFileSystem(AbstractFileSystem):
         callback.set_size(len(rpaths))
         pairs = []
         remote_dirs = []
-        for local_path, remote_path in zip(lpaths, rpaths):
+        for public_index, (local_path, remote_path) in enumerate(zip(lpaths, rpaths)):
             if os.path.isdir(local_path):
                 remote_dirs.append(remote_path)
                 callback.relative_update()
             else:
-                pairs.append((local_path, remote_path))
+                pairs.append((local_path, remote_path, public_index))
         if remote_dirs:
             if self._intrans:
                 raise NotImplementedError(
@@ -4897,7 +4931,7 @@ class VfsiFileSystem(AbstractFileSystem):
             self._makedirs_batched(remote_dirs, exist_ok=True)
         if not pairs:
             return
-        sizes = [os.path.getsize(local_path) for local_path, _ in pairs]
+        sizes = [os.path.getsize(local_path) for local_path, _, _ in pairs]
 
         def upload_streamed(local_path, remote_path, size):
             with callback.branched(local_path, remote_path) as child:
@@ -4912,12 +4946,13 @@ class VfsiFileSystem(AbstractFileSystem):
             self._write_batch(
                 [
                     self._checked_strip_protocol(remote_path)
-                    for _, remote_path, _ in items
+                    for _, remote_path, _, _ in items
                 ],
-                [data for _, _, data in items],
+                [data for _, _, data, _ in items],
                 mode=mode,
+                input_indices=[index for _, _, _, index in items],
             )
-            for local_path, remote_path, data in items:
+            for local_path, remote_path, data, _ in items:
                 with callback.branched(local_path, remote_path) as child:
                     child.set_size(len(data))
                     child.relative_update(len(data))
@@ -4926,13 +4961,13 @@ class VfsiFileSystem(AbstractFileSystem):
         for batch in _bounded_batches(sizes, self.batch_size, self.max_batch_bytes):
             if len(batch) == 1 and sizes[batch[0]] > self.max_batch_bytes:
                 i = batch[0]
-                local_path, remote_path = pairs[i]
+                local_path, remote_path, public_index = pairs[i]
                 upload_streamed(local_path, remote_path, sizes[i])
                 continue
             staged = []
             staged_bytes = 0
             for i in batch:
-                local_path, remote_path = pairs[i]
+                local_path, remote_path, public_index = pairs[i]
                 remaining = self.max_batch_bytes - staged_bytes
                 with open(local_path, "rb") as fh:
                     data = fh.read(remaining + 1)
@@ -4946,7 +4981,7 @@ class VfsiFileSystem(AbstractFileSystem):
                     if len(data) > self.max_batch_bytes:
                         upload_streamed(local_path, remote_path, sizes[i])
                         continue
-                staged.append((local_path, remote_path, data))
+                staged.append((local_path, remote_path, data, public_index))
                 staged_bytes += len(data)
             upload_batched(staged)
 
@@ -5219,12 +5254,36 @@ class VfsiFileSystem(AbstractFileSystem):
                 stats, errors = self._client.lstat_many(
                     [self._native_path(p) for p in paths]
                 )
+                first_error = None
                 for i, s in enumerate(stats):
                     if i in errors or s is None:
-                        raise _oserror(errors.get(i, errno.EIO), paths[i], index=i)
-                    if s["type"] == "directory":
+                        if first_error is None:
+                            first_error = (i, errors.get(i, errno.EIO))
+                    elif s["type"] == "directory":
                         raise ValueError("Cannot delete directory, set recursive=True")
-                self._client.remove_many([self._native_path(p) for p in paths])
+                if first_error is None:
+                    self._client.remove_many([self._native_path(p) for p in paths])
+                    return
+                # A failed classification cannot authorize removal of that
+                # input, but validated siblings retain independent execution.
+                active = [
+                    i for i, s in enumerate(stats) if s is not None and i not in errors
+                ]
+                try:
+                    if active:
+                        self._client.remove_many(
+                            [self._native_path(paths[i]) for i in active]
+                        )
+                except Exception as error:
+                    position = getattr(error, "index", None)
+                    if not isinstance(position, int) or not 0 <= position < len(active):
+                        raise
+                    index = active[position]
+                    if index < first_error[0]:
+                        _oserror(error, paths[index], index=index)
+                        raise
+                index, error = first_error
+                raise _oserror(error, paths[index], index=index)
 
     def _rm_recursive(self, paths, maxdepth=None):
         """Recursively remove ``paths`` with a batched walk + removev."""

@@ -1752,3 +1752,35 @@ def test_grouped_writes_only_read_payloads_for_admitted_wave(
         assert all(len(args[0]) <= batch_size for args, _ in calls)
         assert all(sum(map(len, args[2])) <= max_batch_bytes for args, _ in calls)
         assert len(payload_reads) == len(paths)
+
+
+@pytest.mark.parametrize(
+    "cache_type,mode,write_buffering",
+    [
+        ("none", "rb", False),
+        ("readahead", "rb", False),
+        ("blockcache", "rb", False),
+        ("none", "wb", False),
+        ("none", "wb", True),
+    ],
+)
+@pytest.mark.parametrize("operation", ["seek", "tell", "flush"])
+def test_closed_ordinary_file_rejects_position_and_flush(
+    dummy_fs, cache_type, mode, write_buffering, operation
+):
+    dummy_fs.pipe_file("/closed", b"keep")
+    dummy_fs.write_buffering = write_buffering
+    file = dummy_fs.open("/closed", mode, cache_type=cache_type)
+    if "w" in mode:
+        file.write(b"retained")
+    file.close()
+    assert file.closed
+    with pytest.raises(ValueError, match="closed"):
+        (
+            getattr(file, operation)(0)
+            if operation == "seek"
+            else getattr(file, operation)()
+        )
+    if "w" in mode:
+        assert dummy_fs.cat_file("/closed") == b"retained"
+    assert not dummy_fs._client._fds
