@@ -6,6 +6,7 @@ floor contains equivalent generation and mmap-boundary fixes.
 """
 
 import fcntl
+import hashlib
 import os
 import threading
 import time
@@ -17,6 +18,7 @@ from functools import partial
 from fsspec.caching import MMapCache
 from fsspec.exceptions import BlocksizeMismatchError
 from fsspec.implementations.cached import CachingFileSystem
+from fsspec.implementations.cache_mapper import HashCacheMapper
 
 from ._caching import _Nfs4MMapCache
 from ._fs import (
@@ -41,6 +43,19 @@ _LOCKS_GUARD = threading.RLock()
 _STORAGE_LOCKS = weakref.WeakValueDictionary()
 _ACTIVE_LOCK_FDS = set()
 _HELD_STORAGE = threading.local()
+
+
+class _VfsiHashCacheMapper(HashCacheMapper):
+    """Hash Unix filenames losslessly, preserving the default mapper identity."""
+
+    def __call__(self, path):
+        return hashlib.sha256(path.encode("utf-8", "surrogateescape")).hexdigest()
+
+    def __eq__(self, other):
+        return type(other) in (HashCacheMapper, type(self))
+
+    def __hash__(self):
+        return hash(HashCacheMapper)
 
 
 def _before_fork():
@@ -158,6 +173,7 @@ def _publish_generations(cache_fs, records, previous):
         raise
     # Retiring published generations only unlinks their names. Existing mmap
     # readers retain their own inode, which must never be truncated in place.
+    retirement_error = None
     for record in records:
         filename = record.get("old_filename")
         if filename is not None and filename != record["filename"]:
@@ -165,6 +181,11 @@ def _publish_generations(cache_fs, records, previous):
                 os.remove(filename)
             except FileNotFoundError:
                 pass
+            except BaseException as error:
+                if retirement_error is None:
+                    retirement_error = error
+    if retirement_error is not None:
+        raise retirement_error
 
 
 def _reset_stale_generation(cache_fs, path):
@@ -451,6 +472,9 @@ def _pop_writable_cache_file(cache_fs, path):
 
 
 def _register_cache(cache_fs):
+    if type(cache_fs._mapper) is HashCacheMapper:
+        # Custom/same-name mappers retain their own path and naming policy.
+        cache_fs._mapper = _VfsiHashCacheMapper()
     cache_fs.fs._register_persistent_cache(cache_fs, _invalidate_registered_paths)
 
 

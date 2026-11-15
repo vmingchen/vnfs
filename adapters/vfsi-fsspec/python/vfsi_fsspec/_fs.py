@@ -4087,7 +4087,9 @@ class VfsiFileSystem(AbstractFileSystem):
         # the key changes when the file is renamed as well as when its
         # contents change.
         return hashlib.sha256(
-            f"{info.get('name')}:{cls._version_token(info)}".encode()
+            f"{info.get('name')}:{cls._version_token(info)}".encode(
+                "utf-8", "surrogateescape"
+            )
         ).hexdigest()
 
     @staticmethod
