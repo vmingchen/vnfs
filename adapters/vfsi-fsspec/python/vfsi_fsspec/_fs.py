@@ -1643,6 +1643,24 @@ class VfsiFile(AbstractBufferedFile):
         self.loc += position - (previous + written)
         self._raw._pos = position
 
+    def _mark_write_failure(self, error):
+        self._write_failed = True
+        if isinstance(error, OSError) and not _is_transport_error(error):
+            self._write_failure_errno = error.errno
+        self._raw._broken = True
+
+    def _fail_staging(self, error):
+        self._mark_write_failure(error)
+        # These bytes are unusable after a partial local write. Release them,
+        # retaining any spool whose close fails for group cleanup to retry.
+        self.buffer = io.BytesIO()
+        if self._write_spool is not None:
+            try:
+                self._write_spool.close()
+            except BaseException as cleanup:
+                raise error from cleanup
+            self._write_spool = None
+
     def _upload_chunk(self, final=False):
         data = self.buffer.getvalue()
         offset = 0
@@ -1656,10 +1674,7 @@ class VfsiFile(AbstractBufferedFile):
                     self._reconcile_append_position(previous, written, self._raw.tell())
                 offset += written
         except BaseException as error:
-            self._write_failed = True
-            if isinstance(error, OSError) and not _is_transport_error(error):
-                self._write_failure_errno = error.errno
-            self._raw._broken = True
+            self._mark_write_failure(error)
             raise
         return True
 
@@ -1668,11 +1683,15 @@ class VfsiFile(AbstractBufferedFile):
             return
         if self._write_spool is None:
             raise RuntimeError("grouped writer has no staging spool")
-        self._write_spool.seek(0, io.SEEK_END)
-        self._write_spool.write(self.buffer.getvalue())
-        self.buffer = io.BytesIO()
-        if self._buffer_group is not None:
-            self._buffer_group.enforce_memory_limit()
+        try:
+            self._write_spool.seek(0, io.SEEK_END)
+            _write_fully(self._write_spool, self.buffer.getvalue())
+            self.buffer = io.BytesIO()
+            if self._buffer_group is not None:
+                self._buffer_group.enforce_memory_limit()
+        except BaseException as error:
+            self._fail_staging(error)
+            raise
 
     def read(self, size=-1):
         if not self._has_read_cache():
@@ -2091,7 +2110,7 @@ class _BufferGroup:
                 if buffer is not None:
                     total += buffer.tell()
                 spool = file._write_spool
-                if spool is not None and not spool._rolled:
+                if spool is not None and not spool.closed and not spool._rolled:
                     position = spool.tell()
                     total += spool.seek(0, io.SEEK_END)
                     spool.seek(position)
@@ -2103,12 +2122,16 @@ class _BufferGroup:
                 return
             for file in self.files:
                 spool = file._write_spool
-                if spool is not None and not spool._rolled:
+                if spool is not None and not spool.closed and not spool._rolled:
                     position = spool.tell()
                     size = spool.seek(0, io.SEEK_END)
                     spool.seek(position)
                     if size:
-                        spool.rollover()
+                        try:
+                            spool.rollover()
+                        except BaseException as error:
+                            file._fail_staging(error)
+                            raise
 
     def _rebase_file_error(self, error, files):
         position = getattr(error, "index", None)
@@ -2918,6 +2941,14 @@ class _DeferredWriteFile:
 
 class _VfsiTransaction(Transaction):
     """Stage writes, then publish ordered rename batches and exclusive links."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        except BaseException as cleanup:
+            if exc_value is not None:
+                raise exc_value from cleanup
+            raise
 
     def complete(self, commit=True):
         files = list(self.files)
