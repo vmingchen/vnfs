@@ -739,3 +739,36 @@ def test_created_modified_use_subsecond_metadata(dummy_fs, monkeypatch):
     assert dummy_fs.modified("/timestamp") == datetime.datetime(
         2023, 11, 14, 22, 13, 21, 987654, tzinfo=datetime.timezone.utc
     )
+
+
+@pytest.mark.parametrize(
+    "operation", ["write", "truncate", "seek", "tell", "flush", "enter"]
+)
+@pytest.mark.parametrize("commit", [False, True])
+def test_closed_transaction_file_rejects_public_io_but_can_finalize(
+    dummy_fs, operation, commit
+):
+    transaction = dummy_fs.transaction
+    transaction.__enter__()
+    try:
+        file = dummy_fs.open("/closed", "wb")
+        file.write(b"retained payload")
+        file.close()
+        assert file.closed
+        call = {
+            "write": lambda: file.write(b"unexpected"),
+            "truncate": lambda: file.truncate(0),
+            "seek": lambda: file.seek(0),
+            "tell": file.tell,
+            "flush": file.flush,
+            "enter": file.__enter__,
+        }[operation]
+        with pytest.raises(ValueError, match="closed"):
+            call()
+    finally:
+        transaction.complete(commit=commit)
+    if commit:
+        assert dummy_fs.cat_file("/closed") == b"retained payload"
+    else:
+        assert not dummy_fs.exists("/closed")
+    assert not dummy_fs._client._fds

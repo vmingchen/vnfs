@@ -2656,9 +2656,13 @@ class _DeferredWriteFile:
         return self._spool.write(data)
 
     def seek(self, offset, whence=0):
+        if self._closed:
+            raise ValueError("I/O operation on closed file")
         return self._spool.seek(offset, whence)
 
     def tell(self):
+        if self._closed:
+            raise ValueError("I/O operation on closed file")
         return self._spool.tell()
 
     def truncate(self, size=None):
@@ -2667,9 +2671,13 @@ class _DeferredWriteFile:
         return self._spool.truncate(size)
 
     def flush(self):
+        if self._closed:
+            raise ValueError("I/O operation on closed file")
         self._spool.flush()
 
     def __enter__(self):
+        if self._closed:
+            raise ValueError("I/O operation on closed file")
         return self
 
     def __exit__(self, *args):
@@ -5212,7 +5220,9 @@ class VfsiFileSystem(AbstractFileSystem):
                     [self._native_path(p) for p in paths]
                 )
                 for i, s in enumerate(stats):
-                    if s is not None and s["type"] == "directory":
+                    if i in errors or s is None:
+                        raise _oserror(errors.get(i, errno.EIO), paths[i], index=i)
+                    if s["type"] == "directory":
                         raise ValueError("Cannot delete directory, set recursive=True")
                 self._client.remove_many([self._native_path(p) for p in paths])
 

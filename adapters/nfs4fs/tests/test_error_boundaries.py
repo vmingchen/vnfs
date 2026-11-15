@@ -132,3 +132,60 @@ def test_group_read_error_uses_openfiles_position(dummy_fs, monkeypatch, duplica
         assert caught.value is error
         assert error.index == 1
     assert not dummy_fs._client._fds
+
+
+@pytest.mark.parametrize("operation", ["rm_file", "rm", "rm_many"])
+@pytest.mark.parametrize("failure", ["denied", "missing", "unreported"])
+def test_nonrecursive_remove_requires_successful_metadata(
+    dummy_fs, monkeypatch, operation, failure
+):
+    dummy_fs.mkdir("/blocked")
+    dummy_fs.pipe_file("/safe", b"keep")
+    paths = ["/safe", "/blocked"] if operation == "rm_many" else ["/blocked"]
+    index = len(paths) - 1
+    cause = None
+    if failure != "unreported":
+        cause = OSError(
+            errno.EACCES if failure == "denied" else errno.ENOENT, "metadata failure"
+        )
+        cause.index = 99
+        cause.status_domain = "nfs"
+        cause.status_code = 13 if failure == "denied" else 2
+    original = dummy_fs._client.lstat_many
+    removed = []
+
+    def metadata(native_paths):
+        stats, errors = original(native_paths)
+        blocked = dummy_fs._native_path("/blocked")
+        if blocked in native_paths:
+            position = native_paths.index(blocked)
+            stats[position] = None
+            if cause is not None:
+                errors[position] = cause
+        return stats, errors
+
+    with monkeypatch.context() as patch:
+        patch.setattr(dummy_fs._client, "lstat_many", metadata)
+        remove = dummy_fs._client.remove_many
+
+        def remove_many(native_paths):
+            removed.append(native_paths)
+            return remove(native_paths)
+
+        patch.setattr(dummy_fs._client, "remove_many", remove_many)
+        with pytest.raises(OSError) as caught:
+            if operation == "rm_many":
+                dummy_fs.rm(paths)
+            else:
+                getattr(dummy_fs, operation)(paths[0])
+        assert removed == []
+        if cause is not None:
+            assert caught.value is cause
+            assert cause.index == index
+            assert cause.filename == "/blocked"
+            assert cause.status_domain == "nfs"
+        else:
+            assert caught.value.errno == errno.EIO
+            assert caught.value.index == index
+    assert dummy_fs.isdir("/blocked")
+    assert dummy_fs.cat_file("/safe") == b"keep"
