@@ -289,3 +289,63 @@ def test_deferred_scalar_probe_does_not_claim_first_grouped_input(
     assert not fs._client._fds
     assert not fs._intrans
     assert fs._transaction is None
+
+
+def test_deferred_parent_creation_does_not_claim_first_transaction_file(
+    dummy_fs, tmp_path
+):
+    import os
+
+    fs = dummy_fs
+    fs.mkdir("/readonly")
+    fs.auto_mkdir = True
+    os.chmod(tmp_path / "root" / "readonly", 0o555)
+    try:
+        with pytest.raises(PermissionError) as raised:
+            with fs.transaction:
+                for path in ["/healthy", "/readonly/new/file"]:
+                    with fs.open(path, "wb") as file:
+                        file.write(b"data")
+        assert raised.value.errno == errno.EACCES
+        assert getattr(raised.value, "index", None) is None
+        assert raised.value.filename.endswith("/readonly/new")
+    finally:
+        os.chmod(tmp_path / "root" / "readonly", 0o755)
+    assert not fs.exists("/healthy")
+    assert not fs.exists("/readonly/new")
+    assert not any(".nfs4fs-txn-" in path for path in fs.ls("/", detail=False))
+    assert not fs._client._fds
+    assert not fs._intrans
+    assert fs._transaction is None
+
+
+@pytest.mark.parametrize("action", ["commit", "discard"])
+def test_deferred_manual_finalization_keeps_scalar_error_context(
+    dummy_fs, tmp_path, action
+):
+    import os
+
+    fs = dummy_fs
+    fs.mkdir("/readonly")
+    fs.pipe_file("/readonly/file", b"retained")
+    with fs.transaction:
+        with fs.open("/healthy", "wb") as healthy:
+            healthy.write(b"healthy")
+        with fs.open("/readonly/file", "wb") as file:
+            file.write(b"replacement")
+        file.prepare()
+        os.chmod(tmp_path / "root" / "readonly", 0o555)
+        try:
+            with pytest.raises(PermissionError) as raised:
+                getattr(file, action)()
+            assert raised.value.errno == errno.EACCES
+            assert getattr(raised.value, "index", None) is None
+        finally:
+            os.chmod(tmp_path / "root" / "readonly", 0o755)
+            file.discard()
+    assert fs.cat_file("/healthy") == b"healthy"
+    assert fs.cat_file("/readonly/file") == b"retained"
+    assert not any(".nfs4fs-txn-" in path for path in fs.ls("/readonly", detail=False))
+    assert not fs._client._fds
+    assert not fs._intrans
+    assert fs._transaction is None

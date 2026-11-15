@@ -2725,16 +2725,16 @@ class _DeferredWriteFile:
             # Keep the staging component independent of the destination length;
             # a valid NAME_MAX-sized basename must still be writable atomically.
             self.temp_path = posixpath.join(parent, f".nfs4fs-txn-{uuid.uuid4().hex}")
-            if "a" in mode and self._exists():
+            if "a" in mode and self._run_scalar(fs.exists, path):
                 fs._copy_remote_to_fileobj(path, self._spool)
                 self._spool.seek(0, io.SEEK_END)
             stack.pop_all()
 
-    def _exists(self):
+    def _run_scalar(self, operation, *args):
         try:
-            return self.fs.exists(self.path)
+            return operation(*args)
         except Exception as error:
-            # A scalar handle must not expose its singleton probe's vector index.
+            # A scalar handle must not expose its private operation's vector index.
             position = getattr(error, "index", None)
             if (
                 isinstance(position, int)
@@ -2809,7 +2809,7 @@ class _DeferredWriteFile:
         """Upload to a same-directory temporary file without exposing target."""
         if self._prepared or self._committed:
             return
-        if "x" in self.mode and self._exists():
+        if "x" in self.mode and self._run_scalar(self.fs.exists, self.path):
             raise FileExistsError(errno.EEXIST, "File exists", self.path)
         try:
             permissions = (
@@ -2818,7 +2818,9 @@ class _DeferredWriteFile:
         except FileNotFoundError:
             permissions = None  # New transactional files stay private.
         if self.fs.auto_mkdir:
-            self.fs._ensure_dirs([posixpath.dirname(self.temp_path) or "/"])
+            self._run_scalar(
+                self.fs._ensure_dirs, [posixpath.dirname(self.temp_path) or "/"]
+            )
         self._spool.seek(0)
         # Cleanup is permitted only after exclusive OPEN acknowledges creation.
         # A collision or lost OPEN reply does not establish ownership of the name.
@@ -2839,7 +2841,7 @@ class _DeferredWriteFile:
                 self.fs._client.chmod(self.fs._native_path(self.temp_path), permissions)
         except BaseException:
             try:
-                self.fs.rm(self.temp_path)
+                self._run_scalar(self.fs.rm, self.temp_path)
             except FileNotFoundError:
                 self._stage_owned = False
             except OSError:
@@ -2851,7 +2853,7 @@ class _DeferredWriteFile:
         self._prepared = True
 
     def finalize(self):
-        self.finalize_many([self])
+        self._run_scalar(self.finalize_many, [self])
 
     @staticmethod
     def finalize_many(files):
@@ -2899,7 +2901,7 @@ class _DeferredWriteFile:
         try:
             if self._stage_owned:
                 try:
-                    self.fs.rm(self.temp_path)
+                    self._run_scalar(self.fs.rm, self.temp_path)
                 except FileNotFoundError:
                     pass
                 self._stage_owned = False
