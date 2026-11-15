@@ -738,6 +738,61 @@ fn cleanup_errors_preserve_read_data_and_completion_certainty() {
     assert!(error.progress().is_some());
 }
 
+#[test]
+fn live_raw_reads_preserve_chunk_boundaries_short_reads_and_empty_results() {
+    use vfsi_sync::test_support::borrow_writes;
+    let (Ok(server), Ok(share)) = (
+        std::env::var("VFSI_SMB_SERVER"),
+        std::env::var("VFSI_SMB_SHARE"),
+    ) else {
+        assert_ne!(std::env::var("VFSI_SMB_REQUIRED").as_deref(), Ok("1"));
+        return;
+    };
+    let mut fs = SmbVecFs::connect(
+        &server,
+        &share,
+        &std::env::var("VFSI_SMB_USERNAME").unwrap_or_default(),
+        &std::env::var("VFSI_SMB_PASSWORD").unwrap_or_default(),
+        &std::env::var("VFSI_SMB_DOMAIN").unwrap_or_default(),
+    )
+    .unwrap();
+    let chunk = fs.client.params().unwrap().max_read_size as usize;
+    assert!(chunk > 0 && chunk <= 16 * 1024 * 1024);
+    let data: Vec<_> = (0..chunk + 17).map(|index| (index % 251) as u8).collect();
+    let path = format!("/vfsi-read-chunk-boundaries-{}", std::process::id());
+    let outcomes = fs
+        .vwrite_impl(&borrow_writes(&[WriteOp::from_path(
+            &path,
+            VfOffset::At(0),
+            data.clone(),
+        )
+        .with_creation()
+        .with_truncate()]))
+        .unwrap();
+    assert!(outcomes.into_iter().all(|outcome| outcome.is_ok()));
+    let (id, _) = fs.raw_open(&path, libc::O_RDONLY).unwrap();
+    for length in [0, 1, chunk - 1, chunk, chunk + 1, chunk + 17] {
+        assert_eq!(fs.raw_read(id, 0, length).unwrap(), data[..length]);
+    }
+    // Short and empty replies must stay owned successes, including a request
+    // spanning several chunks whose first response already reaches EOF.
+    for length in [1, chunk, chunk + 1] {
+        let offset = data.len() - 1;
+        assert_eq!(
+            fs.raw_read(id, offset as u64, length).unwrap(),
+            data[offset..]
+        );
+        assert!(
+            fs.raw_read(id, data.len() as u64, length)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    fs.close_temporary_handle(id).unwrap();
+    assert!(fs.deferred_closes.is_empty());
+    fs.unlink_impl(Path::new(&path)).unwrap();
+}
+
 #[cfg(feature = "test-faults")]
 #[test]
 fn live_raw_and_compound_reads_retain_prefix_after_later_chunk_failure() {

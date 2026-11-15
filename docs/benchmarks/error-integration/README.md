@@ -1,8 +1,9 @@
 # Integrated standard-error measurements
 
-Status: local measurements and work-parity controls completed. Acceptance of
-the measured healthy POSIX/SMB costs remains open; these are not publication
-approval or a claim of universal performance parity.
+Status: historical pre-optimization measurements. The
+[read optimization follow-up](read-optimization-2026-11-14.md) removes the extra
+healthy allocation and records the remaining timing cost. These are not
+publication approval or a claim of universal performance parity.
 
 This compares actual Vfsi clients with the same independent VecResult semantics:
 baseline `70bea6a` versus `f68f5ec` plus the archived

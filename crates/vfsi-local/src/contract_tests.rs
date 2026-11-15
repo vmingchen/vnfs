@@ -4101,6 +4101,116 @@ mod tests {
         }
     }
 
+    struct CardinalityReadExecutor {
+        calls: std::sync::Arc<AtomicUsize>,
+        adjustment: i8,
+    }
+    impl crate::io::DescriptorIo for CardinalityReadExecutor {
+        fn owned_read_window(&self) -> Option<usize> {
+            Some(1024)
+        }
+        fn read(&mut self, operations: &mut [crate::io::Read<'_>]) -> Vec<OpResult<usize>> {
+            crate::io::read_ordered(operations)
+        }
+        fn read_owned(&mut self, operations: Vec<crate::io::OwnedRead>) -> Vec<OpResult<Vec<u8>>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let mut results = crate::io::read_owned_via_borrowed(self, operations);
+            match self.adjustment {
+                -1 => {
+                    results.pop();
+                }
+                1 => results.push(Ok(Vec::new())),
+                _ => {}
+            }
+            results
+        }
+        fn write(&mut self, _: &[crate::io::Write<'_>]) -> Vec<OpResult<usize>> {
+            unreachable!()
+        }
+        fn sync(&mut self, _: &[&std::sync::Arc<std::fs::File>], _: bool) -> Vec<OpResult<()>> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn owned_read_batches_preserve_dense_sparse_and_malformed_outcomes() {
+        for mask in [0, 1, 2, 4, 7] {
+            for adjustment in [-1, 0, 1] {
+                for current in [false, true] {
+                    for length in [0, 2] {
+                        let root = TempRoot::new("owned-read-indexing");
+                        std::fs::create_dir(&root.0).unwrap();
+                        std::fs::write(root.0.join("file"), b"abcdef").unwrap();
+                        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+                        let mut fs = LocalBackend::new(
+                            root.0.clone(),
+                            CardinalityReadExecutor {
+                                calls: calls.clone(),
+                                adjustment,
+                            },
+                        )
+                        .unwrap();
+                        let files: Vec<_> = (0..3)
+                            .map(|index| {
+                                let file = fs
+                                    .open_raw_impl(Path::new("/file"), libc::O_RDONLY, 0)
+                                    .unwrap();
+                                fs.seek_raw_impl(&file, index * 2, SeekFrom::Set).unwrap();
+                                file
+                            })
+                            .collect();
+                        let reads: Vec<_> = files
+                            .iter()
+                            .enumerate()
+                            .map(|(index, file)| {
+                                ReadOp::new(
+                                    if mask & (1 << index) == 0 {
+                                        file.clone()
+                                    } else {
+                                        FileOperand::from_fd(i32::MAX)
+                                    },
+                                    if current {
+                                        VfOffset::Cur
+                                    } else {
+                                        VfOffset::At(index as u64 * 2)
+                                    },
+                                    length,
+                                )
+                            })
+                            .collect();
+                        let results = fs.vread_impl(&reads).unwrap();
+                        assert_eq!(results.len(), 3);
+                        assert_eq!(calls.load(Ordering::Relaxed), usize::from(mask != 7));
+                        for (index, result) in results.into_iter().enumerate() {
+                            let valid = mask & (1 << index) == 0;
+                            if !valid {
+                                let error = result.unwrap_err();
+                                assert_eq!(error.state(), FailureState::NotAttempted);
+                                assert_eq!(error.cause().raw_os_error(), Some(libc::EBADF));
+                            } else if adjustment != 0 {
+                                let error = result.unwrap_err();
+                                assert_eq!(error.state(), FailureState::Unknown);
+                                assert!(error.progress().is_none());
+                                assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidData);
+                            } else {
+                                let read = result.unwrap();
+                                assert_eq!(read.offset, index as u64 * 2);
+                                assert_eq!(read.data, &b"abcdef"[index * 2..index * 2 + length]);
+                                assert!(!read.eof);
+                            }
+                            let advanced = current && valid && adjustment == 0;
+                            assert_eq!(
+                                fs.seek_raw_impl(&files[index], 0, SeekFrom::Cur).unwrap(),
+                                (index * 2 + if advanced { length } else { 0 }) as i64
+                            );
+                        }
+                        assert!(fs.vclose_impl(&files).unwrap().iter().all(Result::is_ok));
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn native_read_error_prefix_updates_cursor_only_after_progress_validation() {
         for owned in [false, true] {

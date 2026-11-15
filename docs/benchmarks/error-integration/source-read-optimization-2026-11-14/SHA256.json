@@ -1,0 +1,12 @@
+{
+  "Cargo.lock": "fad37d8765b9d5d4a9aeaf22540da1c5deb6b5979b92d812b7b631dfd375d699",
+  "Cargo.toml": "9db518e0942da3cb6f83df0aa0ee8faa64777c7aac79c34c5380105811e9719f",
+  "baseline-perf-flat.txt": "1f24592d8997dd0744a66e784ce0db517bb377e3f2e01b0183bf4aee8d8b0e6c",
+  "final-source.patch": "4bd9061384bf31d97503afa1438c363c64d2fe7b549247b1b1cd77ac7daec06f",
+  "run.py": "a4a5c983e408681c62791ea28f08e126bea6d11d19a179c977414846d6722616",
+  "src/main.rs": "a7af1a9204a4d07649a872259520379698f37ee7af2b86e649773df4494868c8",
+  "standard-before-optimization-perf-flat.txt": "ca1dfb5a1f0e59d9cfdef7f57414adf9aede563a00468f9f3a1ecd234b8f7f2f",
+  "test_runner.py": "e5fa956a33ced558dbbf3e0262807ce7771a17f9c6309e9ddd57721cab73d808",
+  "test_trace.py": "b736265c2af111af399f2d6b84fb236a6e90c5ab8225fad81b082d8d715ea1a8",
+  "trace.py": "a6a8c261b23dd5cbed18565cd0057ef3fd28a6c45ee85e885be48b7efa948cc6"
+}

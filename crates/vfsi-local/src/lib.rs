@@ -1283,10 +1283,10 @@ impl LocalBackend {
                 .is_some_and(|total| total <= limit)
         });
         if owned && Self::independent_reads(reads) {
-            let mut out: Vec<Option<OpResult<ReadResult>>> =
-                (0..reads.len()).map(|_| None).collect();
+            // Dense valid cohorts need neither placeholder outcomes nor an index map.
+            let mut out: Vec<Option<OpResult<ReadResult>>> = Vec::new();
             let mut operations = Vec::with_capacity(reads.len());
-            let mut indices = Vec::with_capacity(reads.len());
+            let mut indices = Vec::new();
             let mut offsets = if reads.iter().all(|op| matches!(op.offset, VfOffset::At(_))) {
                 Vec::new()
             } else {
@@ -1298,66 +1298,72 @@ impl LocalBackend {
                         if !offsets.is_empty() {
                             offsets[index] = offset;
                         }
+                        if !out.is_empty() {
+                            indices.push(index);
+                        }
                         operations.push(io::OwnedRead {
                             file: Arc::clone(file),
                             offset,
                             buffer: Vec::new(),
                         });
-                        indices.push(index);
                     }
-                    Err(error) => out[index] = Some(Err(OpError::not_attempted(error))),
+                    Err(error) => {
+                        if out.is_empty() {
+                            out.resize_with(reads.len(), || None);
+                            indices.extend(0..index);
+                        }
+                        out[index] = Some(Err(OpError::not_attempted(error)));
+                    }
                 }
             }
-            // Validate descriptors before allocating payloads. A malformed
-            // sibling does not prevent valid requests sharing one executor call.
-            for (operation, &index) in operations.iter_mut().zip(&indices) {
+            let sparse = !out.is_empty();
+            for (local, operation) in operations.iter_mut().enumerate() {
+                let index = if sparse { indices[local] } else { local };
                 operation.buffer = vec![0; reads[index].length];
             }
-            let results = if operations.is_empty() {
+            let count = operations.len();
+            let results = if count == 0 {
                 Vec::new()
             } else {
                 self.io.read_owned(operations)
             };
-            if results.len() != indices.len() {
-                for index in indices {
-                    out[index] = Some(Err(OpError::unknown(
+            if results.len() != count {
+                let invalid = || {
+                    Err(OpError::unknown(
                         vfsi_core::internal::errors::invalid_reply(
                             "owned read returned wrong result count",
                         ),
                         None,
-                    )));
+                    ))
+                };
+                if !sparse {
+                    return Ok((0..reads.len()).map(|_| invalid()).collect());
+                }
+                for index in indices {
+                    out[index] = Some(invalid());
                 }
             } else {
+                if !sparse {
+                    return Ok(results
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, result)| {
+                            let op = &reads[index];
+                            let offset = match op.offset {
+                                VfOffset::At(offset) => offset,
+                                _ => offsets[index],
+                            };
+                            self.finish_owned_read(op, offset, result)
+                        })
+                        .collect());
+                }
                 for (index, result) in indices.into_iter().zip(results) {
                     let op = &reads[index];
                     let offset = match op.offset {
                         VfOffset::At(offset) => offset,
                         _ => offsets[index],
                     };
-                    let result = result
-                        .map_err(|error| Self::check_read_error(error, offset, op.length, true))
-                        .and_then(|data| {
-                            if data.len() > op.length {
-                                return Err(OpError::unknown(
-                                    vfsi_core::internal::errors::invalid_reply(
-                                        "owned read exceeds requested length",
-                                    ),
-                                    None,
-                                ));
-                            }
-                            Ok(ReadResult {
-                                file: op.file.clone(),
-                                offset,
-                                eof: data.is_empty() && op.length != 0,
-                                data,
-                            })
-                        });
-                    self.advance_read_progress(
-                        op,
-                        offset,
-                        result.as_ref().map(|read| read.data.len()),
-                    );
-                    out[index] = Some(result);
+                    out[index] = Some(self.finish_owned_read(op, offset, result));
                 }
             }
             return Ok(out
@@ -1403,6 +1409,34 @@ impl LocalBackend {
                     .map_err(|error| OpError::failed(error, None))
             })
             .collect())
+    }
+
+    fn finish_owned_read(
+        &mut self,
+        op: &ReadOp,
+        offset: u64,
+        result: vfsi_core::OpResult<Vec<u8>>,
+    ) -> vfsi_core::OpResult<ReadResult> {
+        let result = result
+            .map_err(|error| Self::check_read_error(error, offset, op.length, true))
+            .and_then(|data| {
+                if data.len() > op.length {
+                    return Err(vfsi_core::OpError::unknown(
+                        vfsi_core::internal::errors::invalid_reply(
+                            "owned read exceeds requested length",
+                        ),
+                        None,
+                    ));
+                }
+                Ok(ReadResult {
+                    file: op.file.clone(),
+                    offset,
+                    eof: data.is_empty() && op.length != 0,
+                    data,
+                })
+            });
+        self.advance_read_progress(op, offset, result.as_ref().map(|read| read.data.len()));
+        result
     }
 
     fn check_read_error(

@@ -1,0 +1,72 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 5K of event 'cpu-clock'
+# Event count (approx.): 5954864433
+#
+# Overhead  Command          Shared Object      Symbol
+# ........  ...............  .................  ........................................................................................................................
+#
+    27.81%  baseline-timing  [kernel.kallsyms]  [k] __arch_copy_to_user
+    15.18%  baseline-timing  [kernel.kallsyms]  [k] el0_svc
+    10.02%  baseline-timing  libc.so.6          [.] __internal_syscall_cancel
+     5.22%  baseline-timing  libc.so.6          [.] __memset_zva64
+     4.33%  baseline-timing  [kernel.kallsyms]  [k] invoke_syscall.constprop.0
+     3.15%  baseline-timing  [kernel.kallsyms]  [k] fdget
+     2.54%  baseline-timing  baseline-timing    [.] <vfsi_local::LocalBackend as vfsi_sync::backend::VectorBackend>::vread_impl
+     1.65%  baseline-timing  [kernel.kallsyms]  [k] shmem_file_read_iter
+     1.47%  baseline-timing  [kernel.kallsyms]  [k] vfs_read
+     1.45%  baseline-timing  baseline-timing    [.] core::hash::BuildHasher::hash_one
+     1.25%  baseline-timing  libc.so.6          [.] _int_malloc
+     1.20%  baseline-timing  [kernel.kallsyms]  [k] shmem_get_folio_gfp
+     1.04%  baseline-timing  [kernel.kallsyms]  [k] _copy_to_iter
+     0.98%  baseline-timing  baseline-timing    [.] vfsi_core::api::read::consume_ops
+     0.96%  baseline-timing  baseline-timing    [.] vfsi_local::LocalBackend::prepare_read
+     0.91%  baseline-timing  baseline-timing    [.] vfsi_sync::client::read::<impl vfsi_sync::client::FsClient<F>>::vread_with_limit_projected_native
+     0.84%  baseline-timing  [kernel.kallsyms]  [k] atime_needs_update
+     0.84%  baseline-timing  [kernel.kallsyms]  [k] get_random_u16
+     0.84%  baseline-timing  baseline-timing    [.] vfsi_sync::contracts::validate_read_results
+     0.83%  baseline-timing  baseline-timing    [.] <alloc::vec::into_iter::IntoIter<T,A> as core::iter::traits::iterator::Iterator>::try_fold
+     0.69%  baseline-timing  baseline-timing    [.] vfsi_error_integration::run::{{closure}}
+     0.67%  baseline-timing  baseline-timing    [.] alloc::vec::in_place_collect::from_iter_in_place
+     0.67%  baseline-timing  libc.so.6          [.] __syscall_cancel
+     0.67%  baseline-timing  libc.so.6          [.] _int_free_chunk
+     0.66%  baseline-timing  baseline-timing    [.] <alloc::vec::into_iter::IntoIter<T,A> as core::iter::traits::iterator::Iterator>::try_fold
+     0.59%  baseline-timing  [kernel.kallsyms]  [k] filemap_get_entry
+     0.57%  baseline-timing  libc.so.6          [.] __libc_malloc2
+     0.56%  baseline-timing  [kernel.kallsyms]  [k] aa_file_perm
+     0.56%  baseline-timing  baseline-timing    [.] vfsi_core::api::read::checked_read
+     0.54%  baseline-timing  [kernel.kallsyms]  [k] copy_page_to_iter
+     0.52%  baseline-timing  [kernel.kallsyms]  [k] __arm64_sys_pread64
+     0.52%  baseline-timing  [kernel.kallsyms]  [k] apparmor_file_permission
+     0.45%  baseline-timing  baseline-timing    [.] <vfsi_posix::PosixIo as vfsi_local::io::DescriptorIo>::read_owned
+     0.45%  baseline-timing  libc.so.6          [.] _int_free_create_chunk
+     0.44%  baseline-timing  [kernel.kallsyms]  [k] touch_atime
+     0.44%  baseline-timing  [kernel.kallsyms]  [k] xas_start
+     0.44%  baseline-timing  libc.so.6          [.] _int_free_maybe_trim
+     0.42%  baseline-timing  baseline-timing    [.] __rustc::__rust_alloc_zeroed
+     0.39%  baseline-timing  [kernel.kallsyms]  [k] current_time
+     0.39%  baseline-timing  [kernel.kallsyms]  [k] security_file_permission
+     0.39%  baseline-timing  baseline-timing    [.] <std::hash::random::DefaultHasher as core::hash::Hasher>::write
+     0.39%  baseline-timing  libc.so.6          [.] cfree@GLIBC_2.17
+     0.37%  baseline-timing  baseline-timing    [.] <core::iter::adapters::map::Map<I,F> as core::iter::traits::iterator::Iterator>::try_fold
+     0.37%  baseline-timing  baseline-timing    [.] vfsi_sync::client::read_result
+     0.35%  baseline-timing  [kernel.kallsyms]  [k] rw_verify_area
+     0.30%  baseline-timing  [kernel.kallsyms]  [k] ktime_get_coarse_real_ts64_mg
+     0.30%  baseline-timing  [kernel.kallsyms]  [k] timestamp_truncate
+     0.30%  baseline-timing  libc.so.6          [.] unlink_chunk.isra.0
+     0.29%  baseline-timing  [kernel.kallsyms]  [k] __rcu_read_lock
+     0.29%  baseline-timing  [kernel.kallsyms]  [k] __rcu_read_unlock
+     0.27%  baseline-timing  [kernel.kallsyms]  [k] el0_svc_common.constprop.0
+     0.27%  baseline-timing  libc.so.6          [.] malloc
+     0.25%  baseline-timing  libc.so.6          [.] _int_free_merge_chunk
+     0.22%  baseline-timing  [kernel.kallsyms]  [k] folio_unlock
+     0.22%  baseline-timing  [kernel.kallsyms]  [k] xas_load
+     0.20%  baseline-timing  baseline-timing    [.] <std::fs::File as std::os::unix::fs::FileExt>::read_at
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

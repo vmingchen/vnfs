@@ -27,7 +27,13 @@ impl SmbVecFs {
             .unwrap_or(65_536)
             .max(1);
         let tree_id = self.tree.tree_id;
-        let mut data = Vec::with_capacity(length);
+        // A single response already owns its final payload; move it to the caller.
+        let single_chunk = length <= max_read;
+        let mut data = if single_chunk {
+            Vec::new()
+        } else {
+            Vec::with_capacity(length)
+        };
         let mut position = offset;
         #[cfg(feature = "test-faults")]
         let mut chunk_index = 0;
@@ -84,6 +90,9 @@ impl SmbVecFs {
                     ));
                 }
             };
+            if single_chunk {
+                return Ok(response);
+            }
             let count = response.len();
             data.extend_from_slice(&response);
             position += count as u64; // whole requested range was preflighted

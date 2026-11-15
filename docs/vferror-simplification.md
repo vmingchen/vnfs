@@ -1,8 +1,10 @@
 # Replace VfError with std::io::Error after VecResult
 
-Status: all seven source/documentation stages are implemented and reviewed
-locally. The integrated performance-cost decision remains open; this is not
-release/promotion approval. See the
+Status: all seven stages are implemented and reviewed locally. Follow-up read
+optimizations remove the measured extra healthy allocation; remaining timing
+costs are documented in the
+[follow-up report](benchmarks/error-integration/read-optimization-2026-11-14.md).
+This is not release/promotion approval. See the
 [migration progress](vferror-migration-progress.md).
 Date: 2026-11-14.
 Baseline: vnfs02 at 70bea6a.

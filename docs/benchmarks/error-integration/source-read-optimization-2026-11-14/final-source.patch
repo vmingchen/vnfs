@@ -1,0 +1,189 @@
+diff --git a/crates/vfsi-local/src/lib.rs b/crates/vfsi-local/src/lib.rs
+index 7b6433b..3310e36 100644
+--- a/crates/vfsi-local/src/lib.rs
++++ b/crates/vfsi-local/src/lib.rs
+@@ -1283,10 +1283,10 @@ impl LocalBackend {
+                 .is_some_and(|total| total <= limit)
+         });
+         if owned && Self::independent_reads(reads) {
+-            let mut out: Vec<Option<OpResult<ReadResult>>> =
+-                (0..reads.len()).map(|_| None).collect();
++            // Dense valid cohorts need neither placeholder outcomes nor an index map.
++            let mut out: Vec<Option<OpResult<ReadResult>>> = Vec::new();
+             let mut operations = Vec::with_capacity(reads.len());
+-            let mut indices = Vec::with_capacity(reads.len());
++            let mut indices = Vec::new();
+             let mut offsets = if reads.iter().all(|op| matches!(op.offset, VfOffset::At(_))) {
+                 Vec::new()
+             } else {
+@@ -1298,66 +1298,72 @@ impl LocalBackend {
+                         if !offsets.is_empty() {
+                             offsets[index] = offset;
+                         }
++                        if !out.is_empty() {
++                            indices.push(index);
++                        }
+                         operations.push(io::OwnedRead {
+                             file: Arc::clone(file),
+                             offset,
+                             buffer: Vec::new(),
+                         });
+-                        indices.push(index);
+                     }
+-                    Err(error) => out[index] = Some(Err(OpError::not_attempted(error))),
++                    Err(error) => {
++                        if out.is_empty() {
++                            out.resize_with(reads.len(), || None);
++                            indices.extend(0..index);
++                        }
++                        out[index] = Some(Err(OpError::not_attempted(error)));
++                    }
+                 }
+             }
+-            // Validate descriptors before allocating payloads. A malformed
+-            // sibling does not prevent valid requests sharing one executor call.
+-            for (operation, &index) in operations.iter_mut().zip(&indices) {
++            let sparse = !out.is_empty();
++            for (local, operation) in operations.iter_mut().enumerate() {
++                let index = if sparse { indices[local] } else { local };
+                 operation.buffer = vec![0; reads[index].length];
+             }
+-            let results = if operations.is_empty() {
++            let count = operations.len();
++            let results = if count == 0 {
+                 Vec::new()
+             } else {
+                 self.io.read_owned(operations)
+             };
+-            if results.len() != indices.len() {
+-                for index in indices {
+-                    out[index] = Some(Err(OpError::unknown(
++            if results.len() != count {
++                let invalid = || {
++                    Err(OpError::unknown(
+                         vfsi_core::internal::errors::invalid_reply(
+                             "owned read returned wrong result count",
+                         ),
+                         None,
+-                    )));
++                    ))
++                };
++                if !sparse {
++                    return Ok((0..reads.len()).map(|_| invalid()).collect());
++                }
++                for index in indices {
++                    out[index] = Some(invalid());
+                 }
+             } else {
++                if !sparse {
++                    return Ok(results
++                        .into_iter()
++                        .enumerate()
++                        .map(|(index, result)| {
++                            let op = &reads[index];
++                            let offset = match op.offset {
++                                VfOffset::At(offset) => offset,
++                                _ => offsets[index],
++                            };
++                            self.finish_owned_read(op, offset, result)
++                        })
++                        .collect());
++                }
+                 for (index, result) in indices.into_iter().zip(results) {
+                     let op = &reads[index];
+                     let offset = match op.offset {
+                         VfOffset::At(offset) => offset,
+                         _ => offsets[index],
+                     };
+-                    let result = result
+-                        .map_err(|error| Self::check_read_error(error, offset, op.length, true))
+-                        .and_then(|data| {
+-                            if data.len() > op.length {
+-                                return Err(OpError::unknown(
+-                                    vfsi_core::internal::errors::invalid_reply(
+-                                        "owned read exceeds requested length",
+-                                    ),
+-                                    None,
+-                                ));
+-                            }
+-                            Ok(ReadResult {
+-                                file: op.file.clone(),
+-                                offset,
+-                                eof: data.is_empty() && op.length != 0,
+-                                data,
+-                            })
+-                        });
+-                    self.advance_read_progress(
+-                        op,
+-                        offset,
+-                        result.as_ref().map(|read| read.data.len()),
+-                    );
+-                    out[index] = Some(result);
++                    out[index] = Some(self.finish_owned_read(op, offset, result));
+                 }
+             }
+             return Ok(out
+@@ -1405,6 +1411,34 @@ impl LocalBackend {
+             .collect())
+     }
+ 
++    fn finish_owned_read(
++        &mut self,
++        op: &ReadOp,
++        offset: u64,
++        result: vfsi_core::OpResult<Vec<u8>>,
++    ) -> vfsi_core::OpResult<ReadResult> {
++        let result = result
++            .map_err(|error| Self::check_read_error(error, offset, op.length, true))
++            .and_then(|data| {
++                if data.len() > op.length {
++                    return Err(vfsi_core::OpError::unknown(
++                        vfsi_core::internal::errors::invalid_reply(
++                            "owned read exceeds requested length",
++                        ),
++                        None,
++                    ));
++                }
++                Ok(ReadResult {
++                    file: op.file.clone(),
++                    offset,
++                    eof: data.is_empty() && op.length != 0,
++                    data,
++                })
++            });
++        self.advance_read_progress(op, offset, result.as_ref().map(|read| read.data.len()));
++        result
++    }
++
+     fn check_read_error(
+         error: vfsi_core::OpError,
+         offset: u64,
+diff --git a/crates/vfsi-smb/src/io.rs b/crates/vfsi-smb/src/io.rs
+index 91b373a..44a2571 100644
+--- a/crates/vfsi-smb/src/io.rs
++++ b/crates/vfsi-smb/src/io.rs
+@@ -27,7 +27,13 @@ impl SmbVecFs {
+             .unwrap_or(65_536)
+             .max(1);
+         let tree_id = self.tree.tree_id;
+-        let mut data = Vec::with_capacity(length);
++        // A single response already owns its final payload; move it to the caller.
++        let single_chunk = length <= max_read;
++        let mut data = if single_chunk {
++            Vec::new()
++        } else {
++            Vec::with_capacity(length)
++        };
+         let mut position = offset;
+         #[cfg(feature = "test-faults")]
+         let mut chunk_index = 0;
+@@ -84,6 +90,9 @@ impl SmbVecFs {
+                     ));
+                 }
+             };
++            if single_chunk {
++                return Ok(response);
++            }
+             let count = response.len();
+             data.extend_from_slice(&response);
+             position += count as u64; // whole requested range was preflighted

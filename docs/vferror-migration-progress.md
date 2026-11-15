@@ -243,12 +243,43 @@ excluded from coverage. Benchmark/profile Clippy and all seven observer/runner
 regressions pass. Staged source/hash/lockfile inventory and whitespace checks
 pass. Existing and new historical source manifests remain byte-identical.
 
-## Remaining performance decision and future release gates
+## Follow-up read optimization and future release gates
 
-- Resolve the performance-cost decision. The final rebuilt run measures healthy
-  POSIX at paired ratio 1.061 [1.031, 1.109] and one extra SMB allocation per
-  64-file batch; healthy ring/NFS are near parity. Native/opaque boxing costs are
-  quantified. These are not silently counted as zero-regression success.
+The seven-stage implementation is local through commit 91d9798. The earlier
+performance question concerned both healthy allocation growth and POSIX latency.
+The [follow-up report](benchmarks/error-integration/read-optimization-2026-11-14.md)
+preserves the earlier results and records a new complete 27 × nine-pair run.
+
+Profiling located extra successful-read work in PosixIo::read_owned. A forced
+fresh-result allocation showed no clear latency win and was discarded. Dense
+local reads now avoid eager placeholder/index storage until preflight rejects an
+input. Single-chunk SMB reads move the already-owned decoded payload rather than
+allocating and copying it. The measured 64 × 4 KiB healthy cohorts now save one
+allocation for POSIX/ring and 63 net allocations for SMB; NFS remains equal.
+All five have lower peak-live Rust memory and zero retained delta. Independent
+syscall, NFS request-byte, SMB wire and real ring counters retain work parity.
+
+Healthy POSIX still has a roughly 3% paired median cost in the new run, with a
+wide interval including parity and near-2× outliers in both variants. This is
+investigated and explicitly retained, not declared eliminated. The no-extra-
+healthy-allocation/work gate is met for the measured scenarios; timing and
+native/opaque failure costs remain documented limitations of the chosen API.
+
+New tests preserve dense/sparse/all-invalid mapping, malformed cardinality,
+zero/positive length, positional/current offsets and cleanup across 60 local
+combinations. The SMB live regression checks empty/short/EOF/exact-chunk and
+multi-chunk results. Neither original coverage nor failure-prefix/recovery
+controls were removed. Read-only native and network reviews found no issues.
+
+Current-source follow-up verification passes strict workspace all-feature/all-target
+Clippy, the complete standard Rust runner, required live SMB library/integration
+tests (77 and 45 passed; two and one existing ignored controls excluded), all
+three required real-ring controls, and the smoke runner. The independently
+rebuilt C SDK passes ABI-v3 and current/published-old/missing-library fallback
+checks plus NFSv4.1/v4.2 outcome conformance. All seven benchmark observer tests
+pass. The independent evidence review recomputed every timing interval/table
+and checked source/binary/trace hashes and work parity, with no findings.
+These checks are local verification, not public CI.
 
 Optional SMB restart/DFS and non-Linux runtime coverage remain omitted, as
 reported. Future publication/promotion requires separately authorized same-main
