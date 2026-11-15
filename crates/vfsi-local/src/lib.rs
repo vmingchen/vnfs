@@ -465,9 +465,7 @@ impl LocalBackend {
                 )
             };
             if next < 0 {
-                return Err(std::io::Error::from_raw_os_error(
-                    (Self::errno(&std::io::Error::last_os_error())) as i32,
-                ));
+                return Err(std::io::Error::last_os_error());
             }
             // SAFETY: the preceding open succeeded and returned a new descriptor,
             // transferred exactly once to this owning File.
@@ -526,16 +524,16 @@ impl LocalBackend {
             };
             if fd < 0 {
                 let error = std::io::Error::last_os_error();
-                let errno = if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR))
+                let error = if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR))
                     && self.no_follow_path(p).ok().is_some_and(|path| {
                         std::fs::symlink_metadata(path)
                             .is_ok_and(|metadata| metadata.file_type().is_symlink())
                     }) {
-                    ERR_ACCES
+                    std::io::Error::from_raw_os_error(libc::EACCES)
                 } else {
-                    Self::errno(&error)
+                    error
                 };
-                return Err(std::io::Error::from_raw_os_error((errno) as i32));
+                return Err(error);
             }
             fd
         };
@@ -554,15 +552,15 @@ impl LocalBackend {
             };
             if fd < 0 {
                 let error = std::io::Error::last_os_error();
-                let errno = if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR))
+                let error = if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR))
                     && std::fs::symlink_metadata(&parent_anchored)
                         .is_ok_and(|metadata| metadata.file_type().is_symlink())
                 {
-                    ERR_ACCES
+                    std::io::Error::from_raw_os_error(libc::EACCES)
                 } else {
-                    Self::errno(&error)
+                    error
                 };
-                return Err(std::io::Error::from_raw_os_error((errno) as i32));
+                return Err(error);
             }
             fd
         };
@@ -623,11 +621,11 @@ impl LocalBackend {
         };
         if fd < 0 {
             let error = std::io::Error::last_os_error();
-            let errno = match error.raw_os_error() {
-                Some(code) if code == libc::EXDEV || code == libc::ELOOP => ERR_ACCES,
-                _ => Self::errno(&error),
+            let error = match error.raw_os_error() {
+                Some(libc::EXDEV | libc::ELOOP) => std::io::Error::from_raw_os_error(libc::EACCES),
+                _ => error,
             };
-            return Err(std::io::Error::from_raw_os_error((errno) as i32));
+            return Err(error);
         }
         // SAFETY: the preceding open succeeded and returned a new descriptor,
         // transferred exactly once to this owning File.
@@ -725,11 +723,11 @@ impl LocalBackend {
                 // create the leaf add O_NOFOLLOW before opening it.
                 return Ok(no_follow);
             }
-            let errno = match error.raw_os_error() {
-                Some(code) if code == libc::EXDEV || code == libc::ELOOP => ERR_ACCES,
-                _ => Self::errno(&error),
+            let error = match error.raw_os_error() {
+                Some(libc::EXDEV | libc::ELOOP) => std::io::Error::from_raw_os_error(libc::EACCES),
+                _ => error,
             };
-            Err(std::io::Error::from_raw_os_error((errno) as i32))
+            Err(error)
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -776,9 +774,7 @@ impl LocalBackend {
             // SAFETY: the owned path and NUL-terminated name remain live for this syscall.
             let fd = unsafe { libc::open(name.as_ptr(), flags) };
             if fd < 0 {
-                return Err(std::io::Error::from_raw_os_error(
-                    (Self::errno(&std::io::Error::last_os_error())) as i32,
-                ));
+                return Err(std::io::Error::last_os_error());
             }
             // SAFETY: open succeeded and transferred a new descriptor exactly once.
             let file = unsafe { File::from_raw_fd(fd) };
@@ -819,9 +815,7 @@ impl LocalBackend {
                     )
                 };
                 if result != 0 {
-                    return Err(std::io::Error::from_raw_os_error(
-                        (Self::errno(&std::io::Error::last_os_error())) as i32,
-                    ));
+                    return Err(std::io::Error::last_os_error());
                 }
                 // Some systems accept AT_SYMLINK_NOFOLLOW but treat chmod on a
                 // symlink as a successful no-op. Verify the anchored leaf itself
@@ -840,9 +834,7 @@ impl LocalBackend {
                     )
                 };
                 if result != 0 {
-                    return Err(std::io::Error::from_raw_os_error(
-                        (Self::errno(&std::io::Error::last_os_error())) as i32,
-                    ));
+                    return Err(std::io::Error::last_os_error());
                 }
                 if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
                     return Err(std::io::Error::from_raw_os_error((ERR_ACCES) as i32));
@@ -862,10 +854,6 @@ impl LocalBackend {
             file.set_permissions(std::fs::Permissions::from_mode(mode & 0o7777))
                 .map_err(|error| (error))
         }
-    }
-
-    fn errno(e: &std::io::Error) -> u32 {
-        e.raw_os_error().map(|n| n as u32).unwrap_or(VF_ERR_RPC)
     }
 
     fn overflow(_index: usize) -> std::io::Error {
@@ -932,9 +920,7 @@ impl LocalBackend {
         if result >= 0 {
             Ok(result > 0)
         } else {
-            Err(std::io::Error::from_raw_os_error(
-                (Self::errno(&std::io::Error::last_os_error())) as i32,
-            ))
+            Err(std::io::Error::last_os_error())
         }
     }
 
@@ -1080,17 +1066,6 @@ impl LocalBackend {
         Ok((uid, gid))
     }
 
-    fn ownership_result(result: std::io::Result<()>, _index: usize) -> VfResult<()> {
-        result.map_err(|error| {
-            let code = if error.kind() == std::io::ErrorKind::InvalidInput {
-                ERR_INVAL
-            } else {
-                Self::errno(&error)
-            };
-            std::io::Error::from_raw_os_error((code) as i32)
-        })
-    }
-
     fn chown_path(a: &VfAttrs, path: &AnchoredPath, follow: bool, index: usize) -> VfResult<()> {
         if !a.masks.intersects(AttrMask::UID | AttrMask::GID) {
             return Ok(());
@@ -1102,12 +1077,11 @@ impl LocalBackend {
             return Err(std::io::Error::from_raw_os_error((ERR_NOENT) as i32));
         }
         let (uid, gid) = Self::ownership_ids(a, index)?;
-        let result = if follow {
+        if follow {
             std::os::unix::fs::chown(path.as_ref(), uid, gid)
         } else {
             std::os::unix::fs::lchown(path.as_ref(), uid, gid)
-        };
-        Self::ownership_result(result, index)
+        }
     }
 
     fn setattr_one(&mut self, a: &VfAttrs, i: usize) -> VfResult<()> {
@@ -1121,7 +1095,7 @@ impl LocalBackend {
             }
             if a.masks.intersects(AttrMask::UID | AttrMask::GID) {
                 let (uid, gid) = Self::ownership_ids(a, i)?;
-                Self::ownership_result(std::os::unix::fs::fchown(open.file.as_ref(), uid, gid), i)?;
+                std::os::unix::fs::fchown(open.file.as_ref(), uid, gid)?;
             }
             if a.masks.contains(AttrMask::MODE) {
                 open.file
@@ -1196,9 +1170,7 @@ impl LocalBackend {
         // SAFETY: the owned anchors, NUL-terminated path and two timespecs
         // stay live for the synchronous syscall.
         if unsafe { libc::utimensat(libc::AT_FDCWD, name.as_ptr(), times.as_ptr(), 0) } != 0 {
-            return Err(std::io::Error::from_raw_os_error(
-                (Self::errno(&std::io::Error::last_os_error())) as i32,
-            ));
+            return Err(std::io::Error::last_os_error());
         }
         Ok(())
     }
@@ -2950,9 +2922,7 @@ fn local_filesystem_stats(fd: std::os::fd::RawFd, _index: usize) -> VfResult<Fil
     // SAFETY: fd is borrowed from a live File and raw provides writable statvfs output
     // storage.
     if unsafe { libc::fstatvfs(fd, &mut raw) } != 0 {
-        return Err(std::io::Error::from_raw_os_error(
-            (LocalBackend::errno(&std::io::Error::last_os_error())) as i32,
-        ));
+        return Err(std::io::Error::last_os_error());
     }
     let bytes = |blocks: u64| {
         blocks
@@ -2978,7 +2948,7 @@ fn local_filesystem_stats(fd: std::os::fd::RawFd, _index: usize) -> VfResult<Fil
         if errno == 0 || errno == libc::EINVAL {
             Ok(None)
         } else {
-            Err(std::io::Error::from_raw_os_error((errno) as i32))
+            Err(std::io::Error::from_raw_os_error(errno))
         }
     };
     Ok(FilesystemStats::default()

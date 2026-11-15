@@ -23,8 +23,7 @@ use vfsi_core::{ERR_ACCES, ERR_NOENT};
 use vfsi_core::{
     AttrMask, Capabilities, ExtentPair, FileOperand, IndexedError, ReadOp, ReadResult, SeekFrom,
     VF_CAP_HARDLINKS, VF_CAP_LSTAT, VF_CAP_NON_UTF8_PATHS, VF_CAP_POSIX_METADATA,
-    VF_CAP_SERVER_COPY, VF_CAP_SYMLINKS, VF_ERR_UNSUPPORTED, VfAttrs, VfOffset, VfType, WriteOp,
-    WriteResult,
+    VF_CAP_SERVER_COPY, VF_CAP_SYMLINKS, VfAttrs, VfOffset, VfType, WriteOp, WriteResult,
 };
 #[cfg(feature = "dummy")]
 use vfsi_local::LocalBackend;
@@ -122,6 +121,8 @@ type StatManyResult = (Vec<Option<Py<PyDict>>>, ErrorMap);
 type ReadManyResult = (Vec<Option<Vec<u8>>>, ErrorMap);
 /// Per-index copied byte counts (None on failure) plus failures.
 type CopyManyResult = (Vec<Option<u64>>, ErrorMap);
+// Historical Python encoding only; never use it as an OS errno.
+const LEGACY_ERROR_UNSUPPORTED: u32 = u32::MAX - 1;
 const ERR_SAME_FILE: u32 = u32::MAX - 2;
 
 // Adapter-only wire sentinel. It is not an OS errno or protocol status.
@@ -2888,7 +2889,7 @@ pub fn register(m: &Bound<'_, PyModule>, version: &str) -> PyResult<()> {
     m.add("CAP_HARDLINKS", VF_CAP_HARDLINKS)?;
     m.add("CAP_NON_UTF8_PATHS", VF_CAP_NON_UTF8_PATHS)?;
     m.add("CAP_LSTAT", VF_CAP_LSTAT)?;
-    m.add("ERR_UNSUPPORTED", VF_ERR_UNSUPPORTED)?;
+    m.add("ERR_UNSUPPORTED", LEGACY_ERROR_UNSUPPORTED)?;
     Ok(())
 }
 

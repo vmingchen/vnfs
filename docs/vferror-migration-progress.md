@@ -150,10 +150,27 @@ This records the reviewed stage-4 source cutover, not completion of the full
 seven-stage plan. No push, publication, active port repin or mirror promotion
 has occurred.
 
+## Stage 5: binding and numeric-code cleanup
+
+The atomic cutover is local commit `cd25783`. Follow-up cleanup removes the
+portable synthetic RPC/unsupported constants; the historical unsupported value
+stays private to the Python boundary, matching the C boundary. Local syscall
+failures move their original standard errors without converting through a
+synthetic numeric fallback. Containment EACCES policy remains unchanged.
+
+Read-only review of all four source changes found no issues. Local tests pass
+107 cases; the detached native Python target passes 73 (one existing manual
+performance control ignored). Strict workspace all-feature/all-target and
+native Python Clippy, C unit tests, independently compiled ABI-v3 client and
+smoke checks pass. The rebuilt C SDK passes current/published-old/missing-library
+fallbacks and required NFSv4.1/v4.2 outcome controls. Rebuilt Python extensions
+pass 2,042 nfs4fs tests; 544 fixture-dependent skips are not coverage.
+
+No new syscall, allocation or execution-order change is introduced by this
+cleanup. Non-Linux execution remains unverified.
+
 ## Remaining full-scope gates
 
-- Finish the stage-5 numeric-code/binding conformance audit with explicit indices,
-  ABI v3/optional-symbol compatibility and confirmed-close ownership checks.
 - Run stage-6 full local integrations and paired actual-Vfsi performance controls,
   including peak-live memory, live NFS/SMB, real ring work counts and fan-out costs.
 - Finish stage-7 documentation and four disposable port checks. Do not repin

@@ -1,7 +1,7 @@
 # Replace VfError with std::io::Error after VecResult
 
-Status: stages 1–4 are implemented and reviewed locally. Binding cleanup,
-integrated performance measurements and adoption gates remain. See the
+Status: stages 1–5 are implemented and reviewed locally. Integrated performance
+measurements and adoption gates remain. See the
 [migration progress](vferror-migration-progress.md).
 Date: 2026-11-14.
 Baseline: vnfs02 at 70bea6a.

@@ -3545,9 +3545,7 @@ mod tests {
                 let path = CString::new(self.leaf.as_os_str().as_bytes())
                     .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
                 if unsafe { libc::mkfifo(path.as_ptr(), 0o600) } != 0 {
-                    return Err(std::io::Error::from_raw_os_error(
-                        (LocalBackend::errno(&std::io::Error::last_os_error())) as i32,
-                    ));
+                    return Err(std::io::Error::last_os_error());
                 }
             }
             Ok(())

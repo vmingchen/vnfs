@@ -17,11 +17,6 @@ use crate::path::path_from_bytes;
 // Constants (mirroring tc_api.h)
 // ---------------------------------------------------------------------------
 
-/// Errors that have no filesystem status (transport / client side).
-pub const VF_ERR_RPC: u32 = 0xFFFF_FFFF;
-/// Requested feature is not implemented by this backend.
-pub const VF_ERR_UNSUPPORTED: u32 = 0xFFFF_FFFE;
-
 /// Generic errno-style error codes (they coincide with the NFS4ERR codes for
 /// the same conditions, which the NFS backend reports).
 pub const ERR_NOENT: u32 = 2;
