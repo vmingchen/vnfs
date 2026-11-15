@@ -5255,8 +5255,13 @@ class VfsiFileSystem(AbstractFileSystem):
             if source_is_str:
                 lpath = make_path_posix(lpath)
             local = LocalFileSystem()
+            # Older fsspec drops kwargs when scalar expansion delegates to
+            # the list form. Enter that form directly to retain walk controls.
             lpaths = local.expand_path(
-                lpath, recursive=recursive, maxdepth=maxdepth, **kwargs
+                [lpath] if source_is_str else lpath,
+                recursive=recursive,
+                maxdepth=maxdepth,
+                **kwargs,
             )
             if source_is_str and (not recursive or maxdepth is not None):
                 lpaths = [p for p in lpaths if not (trailing_sep(p) or local.isdir(p))]
