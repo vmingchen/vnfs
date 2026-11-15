@@ -342,3 +342,128 @@ def test_invalid_scalar_write_reply_poisons_handle_without_replay(
         file.close()
     assert dummy_fs.cat_file("/uncertain") == b"abc"
     assert not dummy_fs._client._fds
+
+
+@pytest.mark.parametrize("duplicate_dest", [False, True])
+def test_directory_copy_error_keeps_public_input_position(dummy_fs, duplicate_dest):
+    dummy_fs.pipe({"/source-file": b"data", "/occupied": b"file"})
+    dirs = ["/dir-a", "/dir-b", "/dir-c"] if duplicate_dest else ["/dir-a"]
+    for path in dirs:
+        dummy_fs.mkdir(path)
+    sources = ["/source-file", *dirs]
+    destinations = (
+        ["/out", "/same", "/same", "/occupied/child"]
+        if duplicate_dest
+        else ["/out", "/occupied/child"]
+    )
+    with pytest.raises(NotADirectoryError) as raised:
+        dummy_fs.copy(sources, destinations, symlinks=True)
+    assert raised.value.index == len(sources) - 1
+    assert not dummy_fs.exists("/out")
+
+
+@pytest.mark.parametrize("shared_parent", [False, True])
+def test_directory_copy_generated_parent_errors_are_attributed_only_when_unique(
+    dummy_fs, monkeypatch, shared_parent
+):
+    dummy_fs.pipe_file("/source-file", b"data")
+    dummy_fs.mkdir("/dir-a")
+    dummy_fs.mkdir("/dir-b")
+    destinations = (
+        ["/shared/a", "/shared/b"]
+        if shared_parent
+        else ["/other/child", "/blocked/child"]
+    )
+    failure = PermissionError(errno.EACCES, "mkdir denied")
+    failure.index = 0
+    failure.status_domain = "nfs"
+    failure.status_code = 13
+    calls = []
+
+    def mkdir(paths, mode):
+        calls.append(list(paths))
+        assert paths == (["/shared"] if shared_parent else ["/blocked", "/other"])
+        raise failure
+
+    monkeypatch.setattr(dummy_fs._client, "mkdir_many", mkdir)
+    with pytest.raises(PermissionError) as raised:
+        dummy_fs.copy(
+            ["/source-file", "/dir-a", "/dir-b"],
+            ["/out", *destinations],
+            symlinks=True,
+        )
+    assert raised.value is failure
+    assert getattr(failure, "index", None) == (None if shared_parent else 2)
+    assert (failure.status_domain, failure.status_code) == ("nfs", 13)
+    assert len(calls) == 1
+
+
+def test_directory_copy_followed_metadata_error_rebases_filtered_subset(
+    dummy_fs, monkeypatch
+):
+    dummy_fs.pipe_file("/source-file", b"data")
+    for path in ["/dir-a", "/dir-b", "/exists"]:
+        dummy_fs.mkdir(path)
+    failure = TimeoutError("lost directory metadata reply")
+    failure.transport_kind = "timeout"
+    failure.index = 0
+
+    def stat(paths):
+        assert paths == ["/exists"]
+        raise failure
+
+    monkeypatch.setattr(dummy_fs._client, "stat_many", stat)
+    with pytest.raises(TimeoutError) as raised:
+        dummy_fs.copy(
+            ["/source-file", "/dir-a", "/dir-b"],
+            ["/out", "/missing", "/exists"],
+            symlinks=True,
+        )
+    assert raised.value is failure
+    assert failure.index == 2
+    assert failure.transport_kind == "timeout"
+
+
+@pytest.mark.parametrize("mode", ["wb", "ab"])
+@pytest.mark.parametrize("native_index", [0, None])
+def test_legacy_grouped_write_error_keeps_public_file_position(
+    dummy_fs, monkeypatch, mode, native_index
+):
+    dummy_fs.pipe({"/a": b"old-a", "/b": b"old-b"})
+    dummy_fs.write_buffering = True
+    dummy_fs.batch_size = 1
+    monkeypatch.setattr(dummy_fs._client, "_native_has_vector_outcomes", False)
+    method = "append_many" if mode == "ab" else "pwrite_many"
+    original = getattr(dummy_fs._client, method)
+    failure = PermissionError(errno.EACCES, "legacy write denied")
+    failure.index = native_index
+    failure.status_domain = "nfs"
+    failure.status_code = 13
+    calls = []
+
+    def write(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 2:
+            raise failure
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(dummy_fs._client, method, write)
+    with pytest.raises(PermissionError) as raised:
+        entries = OpenFiles(
+            [OpenFile(dummy_fs, path, mode=mode) for path in ["/a", "/b"]],
+            mode=mode,
+            fs=dummy_fs,
+        )
+        with entries as files:
+            files[0].write(b"new-a")
+            files[1].write(b"new-b")
+    assert raised.value is failure
+    assert failure.index == (1 if native_index == 0 else None)
+    if native_index == 0:
+        assert failure.filename == "/b"
+    assert (failure.status_domain, failure.status_code) == ("nfs", 13)
+    assert len(calls) == 2
+    assert dummy_fs.cat_file("/a") == (b"old-a" if mode == "ab" else b"") + b"new-a"
+    assert dummy_fs.cat_file("/b") == (b"old-b" if mode == "ab" else b"")
+    assert not dummy_fs._client._fds
+    assert not dummy_fs._client._deferred_close

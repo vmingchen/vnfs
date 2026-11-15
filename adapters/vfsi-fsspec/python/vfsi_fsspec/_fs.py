@@ -2519,9 +2519,14 @@ class _BufferGroup:
                             file._spool_read_offset += written
             except BaseException as error:
                 index = getattr(error, "index", None)
-                if isinstance(index, int) and 0 <= index < len(wave):
+                if (
+                    isinstance(index, int)
+                    and not isinstance(index, bool)
+                    and 0 <= index < len(wave)
+                ):
                     try:
                         error.filename = wave[index].path
+                        error.index = self.files.index(wave[index])
                     except (AttributeError, TypeError):
                         pass
                 for file in wave:
@@ -3892,6 +3897,26 @@ class VfsiFileSystem(AbstractFileSystem):
 
     # -- batched directory creation ---------------------------------------
 
+    def _rebase_directory_error(self, error, prefixes, paths):
+        """Attribute an implicit parent only when it serves one requested path."""
+        position = getattr(error, "index", None)
+        if (
+            isinstance(position, int)
+            and not isinstance(position, bool)
+            and 0 <= position < len(prefixes)
+        ):
+            prefix = prefixes[position]
+            matches = [
+                index
+                for index, path in enumerate(paths)
+                if path == prefix or path.startswith(prefix + "/")
+            ]
+            _oserror(error, self._internalize(prefix))
+            if len(matches) == 1:
+                error.index = matches[0]
+            else:
+                del error.index
+
     def _ensure_dirs(self, paths, mode=None):
         """``mkdir -p`` a set of internal paths with as few compounds as
         possible: one batched existence probe, then one mkdirv batch per
@@ -3906,7 +3931,11 @@ class VfsiFileSystem(AbstractFileSystem):
             comps = [c for c in native.split("/") if c]
             prefixes.update("/" + "/".join(comps[:i]) for i in range(1, len(comps) + 1))
         ordered = sorted(prefixes, key=lambda p: (p.count("/"), p))
-        exists = self._client.exists_many(list(ordered))
+        try:
+            exists = self._client.exists_many(list(ordered))
+        except Exception as error:
+            self._rebase_directory_error(error, ordered, native_paths)
+            raise
         missing = [p for p, ok in zip(ordered, exists) if not ok]
         by_depth = {}
         for p in missing:
@@ -3923,11 +3952,16 @@ class VfsiFileSystem(AbstractFileSystem):
                     try:
                         self._client.mkdir_many(pending, mode)
                         break
-                    except FileExistsError:
+                    except FileExistsError as collision:
+                        self._rebase_directory_error(collision, pending, native_paths)
                         # A concurrent mkdir-p may have won after exists_many.
                         # Accept only paths that now resolve to directories and
                         # retry siblings that remain absent.
-                        stats, errors = self._client.stat_many(pending)
+                        try:
+                            stats, errors = self._client.stat_many(pending)
+                        except Exception as error:
+                            self._rebase_directory_error(error, pending, native_paths)
+                            raise
                         missing = []
                         found_directory = False
                         for index, native in enumerate(pending):
@@ -3935,9 +3969,15 @@ class VfsiFileSystem(AbstractFileSystem):
                                 if _errno(errors[index]) == errno.ENOENT:
                                     missing.append(native)
                                     continue
-                                raise _oserror(
-                                    errors[index], self._internalize(native)
-                                ) from None
+                                error = _oserror(
+                                    errors[index],
+                                    self._internalize(native),
+                                    index=index,
+                                )
+                                self._rebase_directory_error(
+                                    error, pending, native_paths
+                                )
+                                raise error from None
                             attrs = stats[index]
                             if attrs is None or attrs["type"] != "directory":
                                 raise
@@ -3947,6 +3987,9 @@ class VfsiFileSystem(AbstractFileSystem):
                         if not found_directory:
                             raise
                         pending = missing
+                    except Exception as error:
+                        self._rebase_directory_error(error, pending, native_paths)
+                        raise
 
     def _makedirs_batched(self, paths, exist_ok=False):
         """fsspec ``makedirs`` semantics for many paths, batched."""
@@ -3954,7 +3997,11 @@ class VfsiFileSystem(AbstractFileSystem):
         if not paths:
             return
         native = [self._native_path(p) for p in paths]
-        lstats, lerrs = self._client.lstat_many(native)
+        try:
+            lstats, lerrs = self._client.lstat_many(native)
+        except Exception as error:
+            _rebase_error(error, range(len(paths)), paths)
+            raise
         missing = []
         existing = []
         for i, p in enumerate(paths):
@@ -3963,14 +4010,22 @@ class VfsiFileSystem(AbstractFileSystem):
             else:
                 code = lerrs.get(i)
                 if code is not None and _errno(code) != errno.ENOENT:
-                    raise _oserror(code, p)
+                    raise _oserror(code, p, index=i)
                 missing.append(p)
         if existing and not exist_ok:
             raise FileExistsError(errno.EEXIST, f"File exists: {existing[0][1]!r}")
         if existing:
-            estats, eerrs = self._client.stat_many(
-                [self._native_path(p) for _, p in existing]
-            )
+            try:
+                estats, eerrs = self._client.stat_many(
+                    [self._native_path(p) for _, p in existing]
+                )
+            except Exception as error:
+                _rebase_error(
+                    error,
+                    [index for index, _ in existing],
+                    [path for _, path in existing],
+                )
+                raise
             for j, (i, p) in enumerate(existing):
                 if estats[j] is not None and estats[j]["type"] == "directory":
                     continue
@@ -3978,7 +4033,12 @@ class VfsiFileSystem(AbstractFileSystem):
                     raise _oserror(eerrs[j], p, index=i)
                 raise FileExistsError(errno.EEXIST, f"File exists: {p!r}")
         if missing:
-            self._ensure_dirs(missing)
+            try:
+                self._ensure_dirs(missing)
+            except Exception as error:
+                positions = {path: index for index, path in enumerate(paths)}
+                _rebase_error(error, [positions[path] for path in missing], missing)
+                raise
 
     # -- metadata ----------------------------------------------------------
 
@@ -5757,6 +5817,7 @@ class VfsiFileSystem(AbstractFileSystem):
         file_pairs = []
         file_indices = []
         dir_pairs = []
+        dir_indices = []
         symlink_pairs = []
         first_error = None
         for i, ((src, dst), stat) in enumerate(zip(pairs, stats)):
@@ -5766,6 +5827,7 @@ class VfsiFileSystem(AbstractFileSystem):
                     first_error = _oserror(errors[i], src)
             elif stat is not None and stat["type"] == "directory":
                 dir_pairs.append((src, dst))
+                dir_indices.append(i)
             elif stat is not None and stat["type"] == "file":
                 file_pairs.append((src, dst))
                 file_indices.append(i)
@@ -5776,7 +5838,14 @@ class VfsiFileSystem(AbstractFileSystem):
                 if on_error == "raise" and first_error is None:
                     first_error = FileNotFoundError(src)
         if dir_pairs:
-            self._makedirs_batched([dst for _, dst in dir_pairs], exist_ok=True)
+            try:
+                self._makedirs_batched([dst for _, dst in dir_pairs], exist_ok=True)
+            except Exception as error:
+                positions = {}
+                for index, (_, destination) in zip(dir_indices, dir_pairs):
+                    positions.setdefault(destination, index)
+                _rebase_error(error, list(positions.values()), list(positions))
+                raise
             for src, dst in dir_pairs:
                 _complete_child(callback, src, dst, 0)
         self._copy_pairs(
