@@ -362,11 +362,10 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
     if buffer_count != 0 && !buffered_first {
         // Mixed owned-first cohorts need an output vector anyway. Promote
         // compact bounds before I/O, then fill their final slots directly.
-        expected = compact_bounds
+        expected = std::mem::take(&mut compact_bounds)
             .into_iter()
             .map(|(offset, length)| Ok(ReadResult::buffered(offset, length, false)))
             .collect();
-        compact_bounds = Vec::new();
     }
     let mut remaining = budget;
     if buffer_count != 0 {

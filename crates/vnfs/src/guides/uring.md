@@ -4,7 +4,7 @@ Enable the optional Linux backend without bringing in the NFS native library:
 
 ```toml
 [dependencies]
-vnfs = { version = "0.0.26", default-features = false, features = ["uring"] }
+vnfs = { version = "0.0.36", default-features = false, features = ["uring"] }
 ```
 
 The optional uring feature is available on Linux in the published vnfs crate.
@@ -18,12 +18,13 @@ let fs = Uring::new("/data")?;
 let files = fs.open_batch(&[
     OpenOp::new("/file-1", OpenFlags::READ),
     OpenOp::new("/file-2", OpenFlags::READ),
-])?;
+])
+.map_err(vnfs::error::IndexedError::into_cause)?;
 let result = fs.vread(files.iter().map(|file| ReadOp::range(file, 0, 4096)),
                      Default::default());
 let close = fs.close_files(files);
 let results = result?;
-close?;
+close.map_err(vnfs::error::IndexedError::into_cause)?;
 for outcome in results {
     match outcome {
         Ok(read) => println!("{} bytes", read.bytes_read()),
