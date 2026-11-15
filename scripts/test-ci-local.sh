@@ -9,11 +9,11 @@ usage() {
   cat <<'HELP'
 Usage: scripts/test-ci-local.sh [--managed-nfs] [--managed-smb] JOB [JOB ...]
 
-Jobs: smoke, fast, check, rust, python, nfs, smb, uring, quick (rust + python), all/full
+Jobs: fast (default; smoke/quick aliases), check, rust, python, nfs, smb, uring, all/full
 uring: Linux real-ring tests (requires io_uring permitted by kernel/seccomp).
-smoke: small server-independent Rust subset for iteration (not full CI).
-fast: server-independent Rust tests; check: formatting and Clippy.
-rust: check + fast. all/full: rust + python + nfs + smb.
+fast: quick native-free Rust unit/fault tests only (not full CI).
+check: formatting and Clippy; rust: check + the full server-independent Rust suite.
+all/full: rust + python + nfs + smb. Full checks are opt-in locally.
 
 The managed server flags are opt-in. Without them, nfs needs a server at
 VFSI_NFS_SERVER (default 127.0.0.1), and smb needs VFSI_SMB_SERVER and
@@ -41,23 +41,22 @@ while (($#)); do
     --managed-nfs) managed_nfs=1 ;;
     --managed-smb) managed_smb=1 ;;
     -h|--help) usage; exit 0 ;;
-    smoke|fast|check|rust|python|nfs|smb|uring) jobs+=("$1") ;;
-    quick) jobs+=(rust python) ;;
+    fast|smoke|quick) jobs+=(fast) ;;
+    check|rust|python|nfs|smb|uring) jobs+=("$1") ;;
     all|full) jobs+=(rust python nfs smb) ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
 done
 if ((${#jobs[@]} == 0)); then
-  usage >&2
-  exit 2
+  jobs=(fast)
 fi
 
 declare -A selected=()
 for job in "${jobs[@]}"; do selected["$job"]=1; done
 if [[ -v selected[rust] ]]; then
   selected[check]=1
-  selected[fast]=1
+  unset 'selected[fast]'
 fi
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$repo_root/target}
 if ((managed_nfs)) && [[ ! -v selected[nfs] ]]; then
@@ -258,8 +257,8 @@ run_check() {
   cargo clippy --manifest-path adapters/vsmb/Cargo.toml --locked --all-targets -- -D warnings
 }
 
-run_fast() { ./scripts/test-rust.sh; }
-run_smoke() { ./scripts/test-rust.sh --quick; }
+run_fast() { ./scripts/test-rust.sh --fast; }
+run_rust() { ./scripts/test-rust.sh --full; }
 
 run_uring() {
   [[ $(uname -s) == Linux ]] || { echo 'uring tests require Linux' >&2; return 1; }
@@ -324,11 +323,14 @@ run_smb() {
   "$python_bin" -m pytest adapters/vsmb/tests adapters/vsmbfs/tests
 }
 
-for job in check smoke fast python nfs smb uring; do
+for job in check fast rust python nfs smb uring; do
   if [[ -v selected[$job] ]]; then
     echo "==> Running local CI job: $job"
-    started=$SECONDS
+    started=${EPOCHREALTIME:-${SECONDS}.000000}
     "run_$job"
-    echo "==> $job completed in $((SECONDS - started)) seconds"
+    finished=${EPOCHREALTIME:-${SECONDS}.000000}
+    elapsed=$(( ${finished/./} - ${started/./} ))
+    printf '==> %s completed in %d.%03d seconds\n' "$job" \
+      "$((elapsed / 1000000))" "$((elapsed / 1000 % 1000))"
   fi
 done

@@ -4,18 +4,22 @@ set -euo pipefail
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
-quick=0
+mode=''
 package='' target='' filter=''
 usage() {
-  echo 'Usage: scripts/test-rust.sh [--quick | --package NAME (--lib | --test TARGET) [--filter PATTERN]]'
-  echo '--quick: core unit/fault tests and public API regressions; not a full CI substitute.'
+  echo 'Usage: scripts/test-rust.sh [--fast | --full | --package NAME (--lib | --test TARGET) [--filter PATTERN]]'
+  echo '--fast (default; --quick alias): portable/core, sync, local and POSIX unit/fault tests only.'
+  echo '--full: complete server-independent Rust suite, native dependency tests, doctests and detached adapters.'
+  echo 'Fast omits two large-tree stress cases; full and focused selections retain them.'
   echo '--package: one root-workspace package and target, using the normal test features.'
   echo 'Example: scripts/test-rust.sh --package vnfs --test readv --filter budgets'
 }
 bad_args() { echo "$*" >&2; usage >&2; exit 2; }
 while (($#)); do
   case "$1" in
-    --quick) ((quick == 0)) || bad_args 'Duplicate --quick'; quick=1; shift ;;
+    --fast|--quick|--full)
+      [[ -z "$mode" ]] || bad_args 'Select exactly one mode'
+      mode=${1#--}; [[ "$mode" != quick ]] || mode=fast; shift ;;
     --lib) [[ -z "$target" ]] || bad_args 'Select exactly one target'; target=--lib; shift ;;
     --package|--test|--filter)
       (($# >= 2)) && [[ -n "$2" && "$2" != -* ]] || bad_args "Missing value for $1"
@@ -30,8 +34,8 @@ while (($#)); do
   esac
 done
 if [[ -n "$package$target$filter" ]]; then
-  ((quick == 0)) && [[ -n "$package" && -n "$target" ]] ||
-    bad_args 'Focused mode requires a package and one target, without --quick'
+  [[ -z "$mode" ]] && [[ -n "$package" && -n "$target" ]] ||
+    bad_args 'Focused mode requires a package and one target, without --fast or --full'
   focused=(cargo test -p "$package")
   case "$package" in
     vfsi-core|vfsi-local|vfsi-posix) focused+=(--features test-faults) ;;
@@ -61,18 +65,19 @@ timings=${VFSI_TEST_TIMINGS:-$repo_root/target/test-timings.tsv}
 mkdir -p "$(dirname "$timings")"
 printf 'command\tseconds\tstatus\n' > "$timings"
 run() {
-  local start=$SECONDS status=0
+  local start=${EPOCHREALTIME:-${SECONDS}.000000} end elapsed status=0
   "$@" || status=$?
-  printf '%s\t%s\t%s\n' "$*" "$((SECONDS - start))" "$status" >> "$timings"
+  end=${EPOCHREALTIME:-${SECONDS}.000000}
+  elapsed=$(( ${end/./} - ${start/./} ))
+  printf '%s\t%d.%03d\t%s\n' "$*" "$((elapsed / 1000000))" "$((elapsed / 1000 % 1000))" "$status" >> "$timings"
   return "$status"
 }
 # Detached workspaces keep independent lockfiles, but can reuse compatible
 # dependency artifacts. Cargo still fingerprints features and build settings.
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$repo_root/target}
-run python3 scripts/test-ci-scripts.py
 
 if [[ -n "$package" ]]; then
-  focus_log=$(mktemp)
+  focus_log=$(mktemp /tmp/vnfs-focused-test.XXXXXXXX)
   trap 'rm -f -- "$focus_log"' EXIT
   run_focused() {
     local status=0 ran=0 skipped=0 line
@@ -92,20 +97,23 @@ if [[ -n "$package" ]]; then
   exit 0
 fi
 
-if ((quick)); then
-  # Keep deterministic fault coverage and public API contract tests. Skip live
-  # servers, backend-wide suites, doctests, FFI and detached Python workspaces.
+if [[ "${mode:-fast}" == fast ]]; then
+  # Native-free unit tests only: no NFS/SMB, facade integration targets,
+  # doctests, C SDK, detached adapters, formatting or Clippy. Profiled tree
+  # stress cases remain unchanged and unfiltered in full mode.
   run cargo test -p vfsi-core -p vfsi-sync -p vfsi-local -p vfsi-posix --lib \
-    --features "vfsi-core/test-faults vfsi-sync/test-faults vfsi-sync/test-support vfsi-local/test-faults"
-  run cargo test -p vnfs --features "posix test-faults" --lib \
-    --test public_api --test application_boundary --test tree_builder \
-    --test canonical_examples --test readv --test client_vectors --test port_helpers
+    --features "vfsi-core/test-faults vfsi-sync/test-faults vfsi-sync/test-support vfsi-local/test-faults" \
+    -- --skip contract_tests::tests::recursive_copy_uses_bounded_directory_pages_and_native_file_batches \
+    --skip contract_tests::tests::deep_recursive_operations_use_bounded_call_stack
   exit 0
 fi
 
+# CI selects this mode explicitly; local full runs are opt-in.
+run python3 scripts/test-ci-scripts.py
+
 # Keep this list explicit: several published packages need different feature
 # sets, and the live NFS/SMB integration suites run in their dedicated jobs.
-# Enable deterministic fault injection in the fast suites too; otherwise
+# Enable deterministic fault injection in these suites too; otherwise
 # cfg(feature = "test-faults") regressions are silently omitted.
 run cargo test -p vfsi-core -p vfsi-sync -p vfsi-local -p vfsi-posix \
   --features "vfsi-core/test-faults vfsi-sync/test-faults vfsi-sync/test-support vfsi-local/test-faults"
@@ -113,12 +121,13 @@ run cargo test -p vfsi-nfs --lib --all-features
 run cargo test -p vfsi-smb --lib
 run cargo test -p nfsv41-sys
 run ./scripts/test-libntirpc.sh
-run cargo test -p vnfs --features test-faults --lib
-run cargo test -p vnfs --features "posix test-faults" --test posix_backend
-run cargo test -p vnfs --test public_api --test application_boundary --test tree_builder \
+# Share the fault-enabled POSIX/facade build across library and public targets.
+# Previously separate feature sets caused avoidable rebuilds and links.
+run cargo test -p vnfs --features "posix test-faults" --lib --test posix_backend \
+  --test public_api --test application_boundary --test tree_builder \
   --test transfer_helpers --test canonical_examples --test readv --test client_vectors \
   --test directory_pages --test port_helpers --test posix
-run cargo test -p vnfs --doc
+run cargo test -p vnfs --features "posix test-faults" --doc
 run cargo test -p vfsi-c --lib
 
 # Python extension crates are intentionally detached Cargo workspaces so their

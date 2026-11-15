@@ -265,7 +265,7 @@ else:
 
 
 
-class RustQuickTests(unittest.TestCase):
+class RustRunnerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -277,6 +277,9 @@ class RustQuickTests(unittest.TestCase):
         (self.root / "ci").mkdir()
         shutil.copy(Path(__file__).resolve().parents[1] / "ci/test-c-nfs.sh",
                     self.root / "ci/test-c-nfs.sh")
+        native = scripts / "test-libntirpc.sh"
+        native.write_text('#!/bin/sh\nprintf "native-tests\\n" >> "$CALL_LOG"\nexit "${FAIL_STATUS:-0}"\n')
+        native.chmod(0o755)
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.log = self.root / "calls"
@@ -297,25 +300,144 @@ class RustQuickTests(unittest.TestCase):
         return subprocess.run(["bash", str(self.root / "scripts" / name), *args],
                               env=dict(self.env, **env), capture_output=True, text=True)
 
-    def test_quick_runs_fault_and_api_tests_without_adapter_or_live_jobs(self):
-        result = self.run_script("test-rust.sh", "--quick")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        calls = self.log.read_text().splitlines()
-        self.assertEqual(len(calls), 3)
-        self.assertIn("vfsi-sync/test-faults", calls[1])
-        self.assertIn("--lib", calls[1])
-        self.assertIn("--test readv", calls[2])
-        self.assertIn("--test application_boundary", calls[2])
-        self.assertIn("--test port_helpers", calls[2])
-        self.assertIn("posix test-faults", calls[2])
-        self.assertFalse(any("--manifest-path" in call or "--test nfs" in call
-                             or "--test smb" in call or "--doc" in call for call in calls))
+    def test_default_and_fast_aliases_run_only_native_free_unit_tests(self):
+        for args in [(), ("--fast",), ("--quick",)]:
+            with self.subTest(args=args):
+                self.log.unlink(missing_ok=True)
+                result = self.run_script("test-rust.sh", *args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = self.log.read_text().splitlines()
+                self.assertEqual(len(calls), 1, calls)
+                args = shlex.split(calls[0])
+                packages = [args[i + 1] for i, a in enumerate(args) if a == "-p"]
+                self.assertEqual(packages, ["vfsi-core", "vfsi-sync", "vfsi-local", "vfsi-posix"])
+                self.assertIn("--lib", args)
+                self.assertIn("vfsi-sync/test-faults", calls[0])
+                self.assertIn("vfsi-local/test-faults", calls[0])
+                self.assertFalse(any(a in args for a in ("--test", "--doc", "--manifest-path")))
+                self.assertNotIn("clippy", args)
+                self.assertNotIn("fmt", args)
+                skipped = [args[i + 1] for i, arg in enumerate(args) if arg == "--skip"]
+                self.assertEqual(skipped, [
+                    "contract_tests::tests::recursive_copy_uses_bounded_directory_pages_and_native_file_batches",
+                    "contract_tests::tests::deep_recursive_operations_use_bounded_call_stack",
+                ])
 
-    def test_smoke_dispatches_quick_and_only_quick(self):
-        result = self.run_script("test-ci-local.sh", "smoke")
+    def test_local_default_and_lightweight_aliases_only_dispatch_fast(self):
+        for args in [(), ("fast",), ("smoke",), ("quick",), ("fast", "quick")]:
+            with self.subTest(args=args):
+                self.log.unlink(missing_ok=True)
+                result = self.run_script("test-ci-local.sh", *args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Running local CI job: fast", result.stdout)
+                self.assertRegex(result.stdout, r"==> fast completed in \d+\.\d{3} seconds")
+                self.assertEqual(len(self.log.read_text().splitlines()), 1)
+
+    def assert_full_coverage(self, calls):
+        self.assertFalse(any("--skip" in call for call in calls))
+        self.assertEqual(calls.count("scripts/test-ci-scripts.py"), 1)
+        self.assertEqual(calls.count("native-tests"), 1)
+        common = next(call for call in calls if call.startswith("test -p vfsi-core "))
+        for package in ("vfsi-core", "vfsi-sync", "vfsi-local", "vfsi-posix"):
+            self.assertIn("-p " + package, common)
+        self.assertNotIn("--lib", shlex.split(common))
+        for feature in ("vfsi-core/test-faults", "vfsi-sync/test-faults",
+                        "vfsi-sync/test-support", "vfsi-local/test-faults"):
+            self.assertIn(feature, common)
+        for adapter in ("vfsi-python", "nfs4fs", "vsmb"):
+            self.assertEqual(sum("--manifest-path adapters/" + adapter + "/Cargo.toml" in call
+                                 and call.startswith("test ") for call in calls), 1)
+        for command in ("-p vfsi-nfs --lib --all-features", "-p vfsi-smb --lib",
+                        "-p nfsv41-sys", "-p vfsi-c --lib"):
+            self.assertTrue(any(command in call for call in calls), command)
+        facade = [shlex.split(call) for call in calls if call.startswith("test -p vnfs ")]
+        self.assertEqual(len(facade), 2, "One shared feature build plus doctests")
+        targets = [args[i + 1] for args in facade
+                   for i, arg in enumerate(args) if arg == "--test"]
+        self.assertEqual(set(targets), {"posix_backend", "public_api", "application_boundary",
+                         "tree_builder", "transfer_helpers", "canonical_examples", "readv",
+                         "client_vectors", "directory_pages", "port_helpers", "posix"})
+        self.assertTrue(any("--lib" in args for args in facade))
+        self.assertTrue(any("--doc" in args for args in facade))
+        self.assertTrue(all(args[args.index("--features") + 1:args.index("--features") + 3] == ["posix", "test-faults"]
+                            for args in facade))
+
+    def test_fast_stress_filters_reference_existing_unignored_tests(self):
+        root = Path(__file__).resolve().parents[1]
+        runner = (root / "scripts/test-rust.sh").read_text()
+        local = (root / "crates/vfsi-local/src/contract_tests.rs").read_text()
+        names = [line.split("--skip ", 1)[1].split()[0].removeprefix("contract_tests::tests::")
+                 for line in runner.splitlines() if "--skip " in line]
+        self.assertEqual(len(names), 2)
+        for name in names:
+            before = local[:local.index("    fn " + name + "(")].rstrip()
+            self.assertTrue(before.endswith("#[test]"), name)
+
+    def test_full_retains_backends_faults_docs_ffi_and_all_detached_adapters(self):
+        result = self.run_script("test-rust.sh", "--full")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Running local CI job: smoke", result.stdout)
-        self.assertEqual(len(self.log.read_text().splitlines()), 3)
+        self.assert_full_coverage(self.log.read_text().splitlines())
+
+    def test_explicit_local_rust_dispatches_full_without_duplicate_fast_run(self):
+        result = self.run_script("test-ci-local.sh", "fast", "rust")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Running local CI job: rust", result.stdout)
+        self.assertNotIn("Running local CI job: fast", result.stdout)
+        self.assert_full_coverage(self.log.read_text().splitlines())
+
+    def test_local_full_retains_python_and_both_live_backend_jobs(self):
+        rpcinfo = self.bin / "rpcinfo"
+        rpcinfo.write_text('#!/bin/sh\nprintf "100003 4 tcp 2049 nfs\\n"\n')
+        rpcinfo.chmod(0o755)
+        venv = self.root / "configured/bin"
+        venv.mkdir(parents=True)
+        for name in ("python", "maturin"):
+            stub = venv / name
+            stub.write_text(f'#!/bin/sh\nprintf "{name} %s\\n" "$*" >> "$CALL_LOG"\n')
+            stub.chmod(0o755)
+        result = self.run_script(
+            "test-ci-local.sh", "full", VFSI_LOCAL_CI_VENV=str(venv.parent),
+            VFSI_NFS_SERVER="test-server.invalid", VFSI_SMB_SERVER="test-server.invalid",
+            VFSI_SMB_SHARE="test-share", VFSI_SMB_LOCAL_ROOT=str(self.root),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        jobs = re.findall(r"Running local CI job: (\w+)", result.stdout)
+        self.assertEqual(jobs, ["check", "rust", "python", "nfs", "smb"])
+        calls = self.log.read_text().splitlines()
+        self.assertEqual(calls.count("native-tests"), 1)
+        self.assertTrue(any("pytest adapters/nfs4fs/tests" in call for call in calls))
+        self.assertTrue(any("pytest adapters/vsmb/tests adapters/vsmbfs/tests" in call
+                            for call in calls))
+        self.assertEqual(sum("--test nfs" in call and "-p vfsi-nfs" in call
+                             for call in calls), 2)
+        self.assertTrue(any("-p vfsi-smb --features test-faults --test smb" in call
+                            for call in calls))
+
+    def test_hosted_ci_requires_explicit_full_mode(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text()
+        calls = [line.strip().split("run: ", 1)[1] for line in workflow.splitlines()
+                 if "run: ./scripts/test-rust.sh" in line]
+        self.assertEqual(calls, ["./scripts/test-rust.sh --full"])
+
+    def test_full_stops_at_a_failed_backend_and_records_subsecond_timings(self):
+        cargo = self.bin / "cargo"
+        cargo.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALL_LOG"\n'
+            'case "$*" in "test -p vfsi-nfs "*) exit 23 ;; esac\n'
+            'printf "test result: ok. 1 passed; 0 failed\\n"\n'
+        )
+        result = self.run_script("test-rust.sh", "--full")
+        self.assertEqual(result.returncode, 23, result.stderr)
+        calls = self.log.read_text().splitlines()
+        self.assertTrue(calls[-1].startswith("test -p vfsi-nfs "))
+        self.assertFalse(any("vfsi-smb" in call or "--manifest-path" in call for call in calls))
+        rows = (self.root / "timings").read_text().splitlines()
+        self.assertEqual(len(rows), 4)
+        for row in rows[1:]:
+            command, seconds, status = row.split("\t")
+            self.assertRegex(seconds, r"^\d+\.\d{3}$")
+            self.assertGreaterEqual(float(seconds), 0)
+        self.assertEqual(rows[-1].rsplit("\t", 1)[1], "23")
 
     def test_python_jobs_select_their_virtualenv_for_native_builds(self):
         template = self.root / "venv-template"
@@ -446,15 +568,15 @@ class RustQuickTests(unittest.TestCase):
                 result = self.run_script("test-rust.sh", "--package", package, "--lib")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 calls = self.log.read_text().splitlines()
-                self.assertEqual(len(calls), 2)
-                self.assertTrue(calls[1].startswith(f"test -p {package} "))
-                self.assertIn("--lib", calls[1])
+                self.assertEqual(len(calls), 1)
+                self.assertTrue(calls[0].startswith(f"test -p {package} "))
+                self.assertIn("--lib", calls[0])
                 if features is None:
-                    self.assertIn("--all-features", calls[1])
+                    self.assertIn("--all-features", calls[0])
                 elif features:
-                    self.assertIn(f"--features {features}", calls[1])
+                    self.assertIn(f"--features {features}", calls[0])
                 else:
-                    self.assertNotIn("--features", calls[1])
+                    self.assertNotIn("--features", calls[0])
                 self.log.unlink()
 
     def test_focused_named_target_and_filter(self):
@@ -462,10 +584,10 @@ class RustQuickTests(unittest.TestCase):
                                  "--test", "readv", "--filter", "budgets")
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.log.read_text().splitlines()
-        self.assertEqual(len(calls), 2)
-        self.assertIn("--test readv budgets -- --nocapture", calls[1])
-        self.assertNotIn("--lib", calls[1])
-        self.assertNotIn("public_api", calls[1])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("--test readv budgets -- --nocapture", calls[0])
+        self.assertNotIn("--lib", calls[0])
+        self.assertNotIn("public_api", calls[0])
 
     def test_focused_zero_tests_skips_and_cargo_failures_are_not_success(self):
         for output, status in [
@@ -474,7 +596,7 @@ class RustQuickTests(unittest.TestCase):
             ("test result: FAILED. 0 passed; 1 failed", "19"),
         ]:
             with self.subTest(output=output):
-                # Fail only Cargo, not the preliminary script regression check.
+                # Verify Cargo errors and malformed/empty selections propagate unchanged.
                 cargo = self.bin / "cargo"
                 cargo.write_text(f'#!/bin/sh\nprintf "%s\\n" "{output}"\nexit {status}\n')
                 result = self.run_script("test-rust.sh", "--package", "vnfs", "--test", "readv")
@@ -494,6 +616,8 @@ class RustQuickTests(unittest.TestCase):
             ("--package", "unknown", "--lib"),
             ("--package", "vnfs", "--lib", "--test", "readv"),
             ("--quick", "--package", "vnfs", "--lib"),
+            ("--fast", "--full"), ("--full", "--fast"), ("--fast", "--quick"),
+            ("--full", "--package", "vnfs", "--lib"),
             ("--package", "vnfs", "--package", "vfsi-core", "--lib"),
             ("--package", "vnfs", "--lib", "--filter", "--help"),
         ]:
@@ -534,10 +658,10 @@ class RustQuickTests(unittest.TestCase):
                     VFSI_SMB_SHARE="test-share", **{required: "0"})
                 self.assertEqual(result.returncode, 0, result.stderr)
                 calls = self.log.read_text().splitlines()
-                self.assertEqual(len(calls), 2)
-                self.assertIn(f"--test {target}", calls[1])
+                self.assertEqual(len(calls), 1)
+                self.assertIn(f"--test {target}", calls[0])
                 if package == "vfsi-smb":
-                    self.assertIn("--features test-faults", calls[1])
+                    self.assertIn("--features test-faults", calls[0])
                 self.log.unlink()
 
 

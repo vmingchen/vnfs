@@ -128,7 +128,7 @@ jobs:
           python3 -m unittest discover -s benchmarks/du
           python3 -m unittest discover -s benchmarks/rsync
       - name: Run the repository Rust test suite
-        run: ./scripts/test-rust.sh
+        run: ./scripts/test-rust.sh --full
       - name: Report test command timings
         if: always()
         run: |

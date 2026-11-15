@@ -73,12 +73,11 @@ commit, manually dispatch the port workflow first.
 Run these commands from the repository root:
 
 ```sh
-./scripts/test-ci-local.sh smoke  # Smaller Rust subset for edit/test iteration
-./scripts/test-ci-local.sh fast   # Server-independent Rust tests, including faults
+./scripts/test-ci-local.sh        # Default: quick Rust unit/fault tests only
+./scripts/test-ci-local.sh fast   # Same as the default; smoke/quick are aliases
 ./scripts/test-ci-local.sh check  # Formatting and Clippy, including adapters
-./scripts/test-ci-local.sh rust   # check + fast
-./scripts/test-ci-local.sh quick  # rust + Python tests (existing behavior)
-./scripts/test-ci-local.sh full   # rust + Python + live NFS/SMB tests
+./scripts/test-ci-local.sh rust   # Explicit check + full server-independent Rust
+./scripts/test-ci-local.sh full   # Explicit rust + Python + live NFS/SMB tests
 ```
 
 `full` is an alias for `all`, not a replacement for GitHub's package, security,
@@ -97,7 +96,8 @@ registry source. Changes to the resolved source select a new fixture, and Cargo
 handles compiler/build-setting changes. Fixtures persist across runs; removing
 the generated `target/` directory restores a cold build.
 
-Each Rust test command records elapsed seconds and exit status in
+Each Rust test command records elapsed seconds (millisecond precision on Bash 5+)
+and exit status in
 `target/test-timings.tsv` (override with `VFSI_TEST_TIMINGS`). CI includes that
 report in its job summary. Compare both cold and warm runs: the first run after a
 cache-key change populates caches and should not be treated as a warm result.
@@ -108,12 +108,22 @@ every runner. Cache keys separate Python versions and backend job variants.
 
 ### Fast edit/test iterations
 
-Run `./scripts/test-rust.sh --quick` (or `./scripts/test-ci-local.sh smoke`)
-for core unit/fault tests and vNFS public API, read, vector and tree regressions.
-This deliberately skips live NFS/SMB, backend-wide tests, doctests, FFI and
-Python adapters. It reuses Cargo artifacts; the first build can still be slow.
-Use `./scripts/test-rust.sh` and the applicable live jobs before pushing.
-Changes to protocols, FFI, adapters or features need their targeted suites too.
+Run `./scripts/test-rust.sh` or `./scripts/test-rust.sh --fast` (equivalently,
+`./scripts/test-ci-local.sh fast`) for core, sync, local, and POSIX library
+unit tests with fault injection enabled. Two profiled large-tree stress cases
+are excluded only from fast mode; full mode and focused selections retain them.
+No facade integration targets, native RPC/SMB dependencies, doctests, FFI, or
+Python adapters are built. Reuse existing
+Cargo artifacts; the first build after source/toolchain changes can still be slow.
+`--quick` and local `smoke`/`quick` now mean this same unit-only subset.
+
+Use fast plus focused regression tests during development. Full suites run in
+CI or on explicit request, rather than automatically before every commit/push.
+CI invokes `./scripts/test-rust.sh --full`, retaining all server-independent
+backend, public-API, native dependency, C SDK, doctest, and detached adapter tests.
+Explicit local `rust` adds formatting/Clippy; local `full` also runs Python and
+live NFS/SMB. Protocol, FFI, adapter, and feature changes still need their focused
+coverage. Fast mode is not a full-CI substitute.
 
 For a narrow change, select the package, target and optional name filter through
 the focused runner, which retains the package's normal fault-test features:
@@ -126,3 +136,38 @@ the focused runner, which retains the package's normal fault-test features:
 The runner records timings in `target/test-timings.tsv` (or `VFSI_TEST_TIMINGS`)
 and rejects selections that execute no tests or report missing-fixture skips.
 Direct `cargo test` commands do not update this timing report.
+
+### Test runner profile: November 15, 2026
+
+Measured serially on the four-CPU ARM64 VM with Rust 1.93.1, reusing the existing
+target directory and default build profile. These are warm-cache wall times,
+including Cargo startup. The fast subset deliberately provides less coverage.
+
+| Runner | Median | Samples |
+|---|---:|---:|
+| Previous smoke (unit + public integration targets) | 4.40s | 3 |
+| Previous full server-independent Rust | 20.10s | 3 |
+| New fast (175 quick unit tests) | 0.15s | 5 |
+| New full server-independent Rust | 19.84s | 3 |
+
+Most first-observed elapsed time was compilation/linking, not test execution:
+the previous smoke took 44.74s and full took 138.79s before warming the relevant
+artifacts. No caches were cleared, so these are not cold-build comparisons.
+An isolated per-test profile showed that the large-tree copy and deep-recursion
+stress cases consumed over 90% of the sequential, isolated local-unit profile. Fast mode filters only
+those two cases; full mode retains them without filters. Full-mode facade targets
+share their feature configuration to avoid redundant rebuilds; the warm full
+medians remain within run-to-run variation, so no full-suite speedup is claimed.
+
+To reproduce, select the mode explicitly and reuse the same target directory:
+
+```sh
+profile=$(mktemp -d /tmp/vnfs-test-profile.XXXXXX)
+VFSI_TEST_TIMINGS="$profile/fast.tsv" /usr/bin/time -v ./scripts/test-rust.sh --fast
+# Full profiling is opt-in; CI already selects --full.
+VFSI_TEST_TIMINGS="$profile/full.tsv" /usr/bin/time -v ./scripts/test-rust.sh --full
+```
+
+Repeat warm runs serially and compare medians. Raw wall-time, memory, command
+timings, and the per-test profile are recorded in the
+[profile data](../docs/benchmarks/test-runner-2026-11-15.json).

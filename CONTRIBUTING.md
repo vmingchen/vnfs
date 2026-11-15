@@ -13,8 +13,11 @@ For code changes:
 2. Add a regression test at the lowest useful layer. Python behavior should
    include an `fsspec` contract test when applicable; protocol behavior should
    include NFS or Samba integration coverage.
-3. Run `cargo fmt --all --check`, Clippy with warnings denied, the Rust unit
-   tests, and `python -m pytest adapters/nfs4fs/tests`.
+3. Run `./scripts/test-rust.sh --fast` and focused tests for the changed behavior.
+   Python changes need the affected adapter/engine tests, and runner changes need
+   `python3 scripts/test-ci-scripts.py`. CI runs the full suites, formatting, and
+   Clippy; use `--full` locally when explicitly requested. See
+   [the runner guide](scripts/README.md#fast-edittest-iterations).
 4. Keep commits focused and explain round-trip, compatibility, and retry or
    idempotency implications in the pull request.
 

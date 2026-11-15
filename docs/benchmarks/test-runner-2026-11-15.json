@@ -1,0 +1,747 @@
+{
+  "date": "2026-11-15",
+  "source_commit": "78b609d3721de7276f99d089496713e70187622a",
+  "platform": "Linux aarch64, 4 logical CPUs",
+  "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11) (built from a source tarball)",
+  "cargo": "cargo 1.93.1 (083ac5135 2025-12-15) (built from a source tarball)",
+  "target_dir": "/home/ubuntu/vnfs/target",
+  "measurement": "GNU time wall time, serial commands, same source and retained build artifacts; no cache cleaning",
+  "groups": {
+    "old_smoke_warm": {
+      "median_seconds": 4.4,
+      "samples": [
+        {
+          "sample": "baseline-smoke-warm-1",
+          "wall_seconds": 5.19,
+          "max_rss_kib": 53256,
+          "exit_status": 0
+        },
+        {
+          "sample": "baseline-smoke-warm-2",
+          "wall_seconds": 4.4,
+          "max_rss_kib": 53764,
+          "exit_status": 0
+        },
+        {
+          "sample": "baseline-smoke-warm-3",
+          "wall_seconds": 4.32,
+          "max_rss_kib": 53772,
+          "exit_status": 0
+        }
+      ]
+    },
+    "old_full_warm": {
+      "median_seconds": 20.1,
+      "samples": [
+        {
+          "sample": "baseline-full-warm",
+          "wall_seconds": 21.61,
+          "max_rss_kib": 262180,
+          "exit_status": 0
+        },
+        {
+          "sample": "baseline-full-warm-2",
+          "wall_seconds": 20.1,
+          "max_rss_kib": 262196,
+          "exit_status": 0
+        },
+        {
+          "sample": "baseline-full-warm-3",
+          "wall_seconds": 19.54,
+          "max_rss_kib": 262004,
+          "exit_status": 0
+        }
+      ]
+    },
+    "new_fast_warm": {
+      "median_seconds": 0.15,
+      "samples": [
+        {
+          "sample": "final-fast-1",
+          "wall_seconds": 0.18,
+          "max_rss_kib": 50444,
+          "exit_status": 0
+        },
+        {
+          "sample": "final-fast-2",
+          "wall_seconds": 0.15,
+          "max_rss_kib": 50452,
+          "exit_status": 0
+        },
+        {
+          "sample": "final-fast-3",
+          "wall_seconds": 0.14,
+          "max_rss_kib": 50488,
+          "exit_status": 0
+        },
+        {
+          "sample": "final-fast-4",
+          "wall_seconds": 0.15,
+          "max_rss_kib": 50452,
+          "exit_status": 0
+        },
+        {
+          "sample": "final-fast-5",
+          "wall_seconds": 0.14,
+          "max_rss_kib": 50980,
+          "exit_status": 0
+        }
+      ]
+    },
+    "new_full_warm": {
+      "median_seconds": 19.84,
+      "samples": [
+        {
+          "sample": "candidate-full-warm-1",
+          "wall_seconds": 20.64,
+          "max_rss_kib": 262104,
+          "exit_status": 0
+        },
+        {
+          "sample": "candidate-full-warm-2",
+          "wall_seconds": 19.0,
+          "max_rss_kib": 262012,
+          "exit_status": 0
+        },
+        {
+          "sample": "candidate-full-warm-3",
+          "wall_seconds": 19.84,
+          "max_rss_kib": 262036,
+          "exit_status": 0
+        }
+      ]
+    }
+  },
+  "first_observed": [
+    {
+      "sample": "baseline-smoke",
+      "wall_seconds": 44.74,
+      "max_rss_kib": 659340,
+      "exit_status": 0
+    },
+    {
+      "sample": "baseline-full",
+      "wall_seconds": 138.79,
+      "max_rss_kib": 988420,
+      "exit_status": 0
+    },
+    {
+      "sample": "candidate-full-first",
+      "wall_seconds": 27.75,
+      "max_rss_kib": 415972,
+      "exit_status": 0
+    }
+  ],
+  "notes": [
+    "First-observed runs are not cold-build measurements; existing caches were retained.",
+    "Old smoke and new fast intentionally have different scope: new fast is 175 quick library tests, excluding two local tree stress tests.",
+    "No production Rust source or test assertion was changed. Full mode remains unfiltered.",
+    "Full after uses one POSIX/fault-enabled facade build for library, public targets and docs; original uses separate feature sets.",
+    "Old full warm samples 2 and 3 replay the saved original runner with its repository root fixed, after candidate samples; they use current runner regression tests.",
+    "Warm full medians are within sample spread; no statistically established full-suite speedup is claimed.",
+    "Installed-server NFS/SMB, io_uring, security and packaging jobs were not rerun for these script-only changes."
+  ],
+  "local_unit_profile": {
+    "method": "one isolated process per existing test; sequential; includes process startup",
+    "binary": "/home/ubuntu/vnfs/target/debug/deps/vfsi_local-e05bb1932ea876e2",
+    "tests": [
+      {
+        "test": "contract_tests::tests::recursive_copy_uses_bounded_directory_pages_and_native_file_batches",
+        "seconds": 4.1282759280875325
+      },
+      {
+        "test": "contract_tests::tests::deep_recursive_operations_use_bounded_call_stack",
+        "seconds": 1.4401532588526607
+      },
+      {
+        "test": "contract_tests::tests::setattr_mode_does_not_block_on_a_raced_fifo",
+        "seconds": 0.04625132214277983
+      },
+      {
+        "test": "contract_tests::tests::extent_copy_preserves_multi_chunk_ranges_and_final_size",
+        "seconds": 0.04440810903906822
+      },
+      {
+        "test": "contract_tests::tests::finite_overlapping_copy_between_hardlink_aliases_is_rejected_before_mutation",
+        "seconds": 0.022531596943736076
+      },
+      {
+        "test": "io_range_tests::sorted_overlap_checks_preserve_alias_empty_and_adjacent_semantics",
+        "seconds": 0.019225463271141052
+      },
+      {
+        "test": "contract_tests::tests::recursive_copy_allows_existing_ancestor_destinations",
+        "seconds": 0.013934825547039509
+      },
+      {
+        "test": "contract_tests::tests::shared_tree_copy_preserves_symlinks_and_uses_the_copy_strategy",
+        "seconds": 0.013890450820326805
+      },
+      {
+        "test": "contract_tests::tests::file_review_path_truncate_never_waits_for_a_fifo_reader",
+        "seconds": 0.011994613334536552
+      },
+      {
+        "test": "contract_tests::tests::mkdir_mode_overrides_restrictive_umask",
+        "seconds": 0.01189877837896347
+      },
+      {
+        "test": "contract_tests::tests::setattr_times_do_not_block_on_a_fifo_without_a_writer",
+        "seconds": 0.01160186156630516
+      },
+      {
+        "test": "contract_tests::tests::mkdir_initial_mode_never_exposes_unrequested_permissions",
+        "seconds": 0.011537821032106876
+      },
+      {
+        "test": "contract_tests::tests::checked_offsets_match_u64_arithmetic_at_signed_and_unsigned_boundaries",
+        "seconds": 0.008106145076453686
+      },
+      {
+        "test": "contract_tests::tests::recursive_copy_preserves_unrelated_destination_aliases",
+        "seconds": 0.00747989397495985
+      },
+      {
+        "test": "contract_tests::tests::copy_options_preserve_source_symlinks",
+        "seconds": 0.0074128927662968636
+      },
+      {
+        "test": "contract_tests::tests::copy_options_handle_mixed_dangling_links_and_original_error_indices",
+        "seconds": 0.007115059532225132
+      },
+      {
+        "test": "contract_tests::tests::dependent_descriptor_reads_work_without_spare_file_descriptors",
+        "seconds": 0.006607932969927788
+      },
+      {
+        "test": "contract_tests::tests::whole_path_reads_use_bounded_pinned_cohorts_and_always_close_temporary_handles",
+        "seconds": 0.004671970382332802
+      },
+      {
+        "test": "contract_tests::tests::owned_read_batches_preserve_dense_sparse_and_malformed_outcomes",
+        "seconds": 0.004584510810673237
+      },
+      {
+        "test": "contract_tests::tests::dummy_cwd_dotdot_stays_in_root",
+        "seconds": 0.0035270918160676956
+      },
+      {
+        "test": "contract_tests::tests::directory_listing_pins_final_directory_before_enumeration",
+        "seconds": 0.0035049673169851303
+      },
+      {
+        "test": "contract_tests::tests::directory_cursor_metadata_stays_with_renamed_directory",
+        "seconds": 0.0034233415499329567
+      },
+      {
+        "test": "contract_tests::tests::whole_collection_reuses_full_chunks_without_retaining_oversized_buffers",
+        "seconds": 0.0033840080723166466
+      },
+      {
+        "test": "contract_tests::tests::dummy_descriptor_sees_external_truncation",
+        "seconds": 0.003018965944647789
+      },
+      {
+        "test": "contract_tests::tests::short_write_errors_keep_real_kernel_prefixes_and_advance_only_confirmed_cursors",
+        "seconds": 0.002956715412437916
+      },
+      {
+        "test": "contract_tests::tests::descriptor_identity_cache_stays_with_the_open_object_not_its_path",
+        "seconds": 0.0029565077275037766
+      },
+      {
+        "test": "contract_tests::tests::open_create_honors_umask_and_does_not_chmod_existing_file",
+        "seconds": 0.002786632627248764
+      },
+      {
+        "test": "contract_tests::tests::dummy_named_attr_detection",
+        "seconds": 0.0027260491624474525
+      },
+      {
+        "test": "contract_tests::tests::to_eof_copy_between_hardlink_aliases_is_rejected_without_growth",
+        "seconds": 0.002667631022632122
+      },
+      {
+        "test": "contract_tests::tests::finite_forward_alias_copy_stops_at_original_source_eof",
+        "seconds": 0.0024425890296697617
+      },
+      {
+        "test": "contract_tests::tests::vfsi_vsetattrs_batches_permissions_and_sizes",
+        "seconds": 0.0022720880806446075
+      },
+      {
+        "test": "contract_tests::tests::renamev_honors_path_base",
+        "seconds": 0.0021727560088038445
+      },
+      {
+        "test": "contract_tests::tests::eof_is_only_true_at_end",
+        "seconds": 0.002126464620232582
+      },
+      {
+        "test": "contract_tests::tests::exclusive_copy_prototype_preserves_extents_empty_files_and_closes_handles",
+        "seconds": 0.002112588845193386
+      },
+      {
+        "test": "contract_tests::tests::write_outcomes_keep_sparse_input_mapping_and_validate_executor_completions",
+        "seconds": 0.0020903386175632477
+      },
+      {
+        "test": "contract_tests::tests::dummy_open_by_path_abs_is_root_relative",
+        "seconds": 0.0020172130316495895
+      },
+      {
+        "test": "contract_tests::tests::file_review_ensure_dir_rejects_existing_non_directories",
+        "seconds": 0.0018915459513664246
+      },
+      {
+        "test": "contract_tests::tests::dummy_root_resolves_absolute_symlink_targets_inside_root",
+        "seconds": 0.0017790040001273155
+      },
+      {
+        "test": "contract_tests::tests::native_read_error_prefix_updates_cursor_only_after_progress_validation",
+        "seconds": 0.0017740456387400627
+      },
+      {
+        "test": "contract_tests::tests::named_attr_syscalls_only_run_when_requested",
+        "seconds": 0.0017700456082820892
+      },
+      {
+        "test": "io::tests::syscall_write_failure_retains_prefix_and_retries_only_the_unwritten_tail",
+        "seconds": 0.0017615873366594315
+      },
+      {
+        "test": "contract_tests::tests::recursive_copy_rejects_aliases_into_any_source_depth_without_consuming_output",
+        "seconds": 0.0017560459673404694
+      },
+      {
+        "test": "contract_tests::tests::native_read_outcomes_isolate_invalid_handles_and_keep_one_valid_batch",
+        "seconds": 0.00174704659730196
+      },
+      {
+        "test": "contract_tests::tests::named_attr_query_errors_propagate_for_paths_and_handles",
+        "seconds": 0.0017432961612939835
+      },
+      {
+        "test": "contract_tests::tests::dummy_reports_special_file_types",
+        "seconds": 0.0017219632863998413
+      },
+      {
+        "test": "contract_tests::tests::dummy_root_clamps_dotdot",
+        "seconds": 0.0017038797959685326
+      },
+      {
+        "test": "contract_tests::tests::native_read_hook_preserves_per_input_outcomes",
+        "seconds": 0.0017018793150782585
+      },
+      {
+        "test": "contract_tests::tests::listdir_zero_max_count_is_unlimited",
+        "seconds": 0.0016922131180763245
+      },
+      {
+        "test": "contract_tests::tests::file_review_exchange_self_still_checks_existence_and_preserves_later_exchange",
+        "seconds": 0.0016895867884159088
+      },
+      {
+        "test": "contract_tests::tests::following_chown_keeps_an_existing_target_pinned_after_replacement",
+        "seconds": 0.0016850866377353668
+      },
+      {
+        "test": "contract_tests::tests::setattr_times_do_not_require_read_permission",
+        "seconds": 0.0016767540946602821
+      },
+      {
+        "test": "contract_tests::tests::raw_open_honors_directory_and_nofollow_flags",
+        "seconds": 0.0016740867868065834
+      },
+      {
+        "test": "contract_tests::tests::raw_read_only_creation_keeps_access_and_existing_contents",
+        "seconds": 0.0016681710258126259
+      },
+      {
+        "test": "contract_tests::tests::nofollow_setattrs_do_not_mutate_a_leaf_symlink_swap_target",
+        "seconds": 0.0016235867515206337
+      },
+      {
+        "test": "contract_tests::tests::handle_attributes_survive_unlink_and_scalar_helpers_share_the_engine",
+        "seconds": 0.001619379036128521
+      },
+      {
+        "test": "contract_tests::tests::setattr_unsupported_after_truncate_is_failed_in_both_follow_modes",
+        "seconds": 0.0016093794256448746
+      },
+      {
+        "test": "contract_tests::tests::raw_read_only_append_keeps_the_descriptor_read_only",
+        "seconds": 0.0015810038894414902
+      },
+      {
+        "test": "contract_tests::tests::native_scalar_adapters_preserve_application_error_context",
+        "seconds": 0.0015623783692717552
+      },
+      {
+        "test": "contract_tests::tests::native_write_hook_preserves_per_input_outcomes",
+        "seconds": 0.0015610028058290482
+      },
+      {
+        "test": "contract_tests::tests::fseek_takes_shared_ref_and_works",
+        "seconds": 0.0015500448644161224
+      },
+      {
+        "test": "contract_tests::tests::page_results_keep_valid_siblings_and_retained_directory_identity",
+        "seconds": 0.0015469621866941452
+      },
+      {
+        "test": "contract_tests::tests::exists_and_file_type_use_lstat_semantics",
+        "seconds": 0.0015150867402553558
+      },
+      {
+        "test": "contract_tests::tests::setattrsv_rejects_unsupported_bits",
+        "seconds": 0.0015142541378736496
+      },
+      {
+        "test": "contract_tests::tests::walk_works_through_dyn_vecfs",
+        "seconds": 0.0015077963471412659
+      },
+      {
+        "test": "contract_tests::tests::offset_preflight_preserves_empty_writes_and_append_positioning",
+        "seconds": 0.0015059197321534157
+      },
+      {
+        "test": "contract_tests::tests::setattr_mode_does_not_follow_a_leaf_symlink_swap",
+        "seconds": 0.0014805868268013
+      },
+      {
+        "test": "contract_tests::tests::path_write_preflight_preserves_targets_and_continues_valid_siblings",
+        "seconds": 0.0014764200896024704
+      },
+      {
+        "test": "contract_tests::tests::writev_truncate_removes_stale_tail",
+        "seconds": 0.0014697955921292305
+      },
+      {
+        "test": "contract_tests::tests::lsetattrsv_does_not_follow_final_symlink",
+        "seconds": 0.001465044915676117
+      },
+      {
+        "test": "contract_tests::tests::no_follow_operations_reject_symlinked_parent_escape",
+        "seconds": 0.0014638369902968407
+      },
+      {
+        "test": "contract_tests::tests::no_replace_preserves_invalid_self_directory_rename",
+        "seconds": 0.0014617117121815681
+      },
+      {
+        "test": "contract_tests::tests::following_chown_rejects_a_missing_leaf_replaced_by_an_escaping_symlink",
+        "seconds": 0.0014570029452443123
+      },
+      {
+        "test": "contract_tests::tests::setattr_times_stay_with_the_pinned_target_after_replacement",
+        "seconds": 0.001456545665860176
+      },
+      {
+        "test": "contract_tests::tests::metadata_outcomes_keep_siblings_after_missing_paths_and_bad_handles",
+        "seconds": 0.001452254131436348
+      },
+      {
+        "test": "contract_tests::tests::end_offset_writes_append_and_reads_at_end",
+        "seconds": 0.0014514625072479248
+      },
+      {
+        "test": "contract_tests::tests::recursive_copy_preflights_root_type_and_source_overlap",
+        "seconds": 0.001451294869184494
+      },
+      {
+        "test": "contract_tests::tests::setattrsv_updates_access_and_modify_times",
+        "seconds": 0.0014427956193685532
+      },
+      {
+        "test": "contract_tests::tests::typed_append_and_truncate_open_an_existing_file",
+        "seconds": 0.0014390870928764343
+      },
+      {
+        "test": "contract_tests::tests::unrepresentable_path_write_offsets_fail_before_create_or_truncate",
+        "seconds": 0.001428712159395218
+      },
+      {
+        "test": "contract_tests::tests::mkdir_mode_does_not_follow_a_leaf_symlink_swap",
+        "seconds": 0.0014271289110183716
+      },
+      {
+        "test": "contract_tests::tests::unsupported_rename_flags_are_distinguished_from_invalid_directory_moves",
+        "seconds": 0.0014237118884921074
+      },
+      {
+        "test": "contract_tests::tests::vf_file_cwd_and_cwd_path_resolution",
+        "seconds": 0.0014211703091859818
+      },
+      {
+        "test": "contract_tests::tests::offset_overflow_is_reported_without_io_or_cursor_wraparound",
+        "seconds": 0.0014201700687408447
+      },
+      {
+        "test": "contract_tests::tests::portable_fallback_create_keeps_parent_directory_anchored",
+        "seconds": 0.0014195451512932777
+      },
+      {
+        "test": "contract_tests::tests::metadata_outcomes_preserve_final_symlink_policy",
+        "seconds": 0.001414753496646881
+      },
+      {
+        "test": "contract_tests::tests::mkdir_mode_adjustment_failure_keeps_later_independent_directories",
+        "seconds": 0.001413753256201744
+      },
+      {
+        "test": "contract_tests::tests::statfs_outcomes_keep_successes_after_multiple_failures",
+        "seconds": 0.0014017540961503983
+      },
+      {
+        "test": "contract_tests::tests::metadata_all_success_collection_still_attributes_the_first_failure",
+        "seconds": 0.0013938797637820244
+      },
+      {
+        "test": "contract_tests::tests::cur_offset_reads_resolve_and_advance",
+        "seconds": 0.0013875868171453476
+      },
+      {
+        "test": "io::tests::owned_adapter_moves_confirmed_prefix_without_copying_or_exposing_tail",
+        "seconds": 0.001366879791021347
+      },
+      {
+        "test": "contract_tests::tests::open_create_new_rejects_dangling_final_symlink",
+        "seconds": 0.001365254633128643
+      },
+      {
+        "test": "contract_tests::tests::vf_path_rejects_descriptors",
+        "seconds": 0.0013650450855493546
+      },
+      {
+        "test": "contract_tests::tests::absolute_offset_at_u64_max_minus_one_is_not_cur",
+        "seconds": 0.001352919265627861
+      },
+      {
+        "test": "contract_tests::tests::openv_rejects_mismatched_lengths",
+        "seconds": 0.0013516703620553017
+      },
+      {
+        "test": "io::tests::syscall_write_zero_and_invalid_counts_do_not_replay_confirmed_bytes",
+        "seconds": 0.001350543461740017
+      },
+      {
+        "test": "contract_tests::tests::getattrsv_reports_returned_mask",
+        "seconds": 0.0013465024530887604
+      },
+      {
+        "test": "contract_tests::tests::try_new_reports_setup_errors_instead_of_panicking",
+        "seconds": 0.0013353778049349785
+      },
+      {
+        "test": "contract_tests::tests::no_replace_empty_vector_is_a_noop",
+        "seconds": 0.0013280855491757393
+      },
+      {
+        "test": "io::tests::owned_adapter_rejects_bad_counts_and_cardinality_without_panicking",
+        "seconds": 0.0013164607807993889
+      },
+      {
+        "test": "contract_tests::tests::syscall_reads_keep_successes_after_bad_descriptor_access",
+        "seconds": 0.0013076700270175934
+      },
+      {
+        "test": "contract_tests::tests::borrowed_write_and_direct_read_into_preserve_offsets_and_eof",
+        "seconds": 0.0011830860748887062
+      },
+      {
+        "test": "contract_tests::tests::cwd_relative_unlink_targets_cwd",
+        "seconds": 0.0011779190972447395
+      },
+      {
+        "test": "contract_tests::tests::constructor_rejects_fifo_roots_without_waiting_for_a_writer",
+        "seconds": 0.0011644614860415459
+      },
+      {
+        "test": "contract_tests::tests::anchored_no_follow_path_survives_parent_replacement",
+        "seconds": 0.0009577944874763489
+      },
+      {
+        "test": "contract_tests::tests::adb_layout_overflow_fails_before_creating_the_file",
+        "seconds": 0.0009509185329079628
+      },
+      {
+        "test": "contract_tests::tests::alias_write_failure_does_not_suppress_later_syscalls_or_race_the_executor",
+        "seconds": 0.0009487941861152649
+      },
+      {
+        "test": "contract_tests::tests::anchored_create_cannot_be_redirected_after_resolution",
+        "seconds": 0.0008800020441412926
+      },
+      {
+        "test": "contract_tests::tests::constructor_requires_an_existing_root_and_preserves_lookup_errors",
+        "seconds": 0.0008568363264203072
+      }
+    ]
+  },
+  "fast_vs_old_smoke_ratio": 29.333333333333336,
+  "command_timings": {
+    "baseline-full-warm": [
+      {
+        "command": "python3 scripts/test-ci-scripts.py",
+        "seconds": "2",
+        "status": "0"
+      },
+      {
+        "command": "cargo test -p vfsi-core -p vfsi-sync -p vfsi-local -p vfsi-posix --features vfsi-core/test-faults vfsi-sync/test-faults vfsi-sync/test-support vfsi-local/test-faults",
+        "seconds": "5",
+        "status": "0"
+      },
+      {
+        "command": "cargo test -p vfsi-nfs --lib --all-features",
+        "seconds": "7",
+        "status": "0"
+      },
+      {
+        "command": "cargo test -p vfsi-smb --lib",
+        "seconds": "1",
+        "status": "0"
+      },
+      {
+        "command": "cargo test -p nfsv41-sys",
+        "seconds": "0",
+        "status": "0"
+      },
+      {
+        "command": "./scripts/test-libntirpc.sh",
+        "seconds": "1",
+        "status": "0"
+      },
+      {
+        "command": "cargo test -p vnfs --features test-faults --lib",
+        "seconds": "0",
+        "status": "0"
+      },
+      {
+        "command": "cargo test -p vnfs --features posix test-faults --test posix_backend",
+        "seconds": "0",
+        "status": "0"
+      },
+      {
+        "command": "cargo test -p vnfs --test public_api --test application_boundary --test tree_builder --test transfer_helpers --test canonical_examples --test readv --test client_vectors --test directory_pages --test port_helpers --test posix",
+        "seconds": "0",
+        "status": "0"
+      },
+      {
+        "command": "cargo test -p vnfs --doc",
+        "seconds": "4",
+        "status": "0"
+      },
+      {
+        "command": "cargo test -p vfsi-c --lib",
+        "seconds": "1",
+        "status": "0"
+      },
+      {
+        "command": "cargo test --manifest-path adapters/vfsi-python/Cargo.toml --locked --all-features",
+        "seconds": "1",
+        "status": "0"
+      },
+      {
+        "command": "cargo test --manifest-path adapters/nfs4fs/Cargo.toml --locked",
+        "seconds": "0",
+        "status": "0"
+      },
+      {
+        "command": "cargo test --manifest-path adapters/vsmb/Cargo.toml --locked",
+        "seconds": "0",
+        "status": "0"
+      }
+    ],
+    "candidate-full-warm-3": [
+      {
+        "command": "python3 scripts/test-ci-scripts.py",
+        "seconds": "1.884",
+        "status": "0"
+      },
+      {
+        "command": "cargo test -p vfsi-core -p vfsi-sync -p vfsi-local -p vfsi-posix --features vfsi-core/test-faults vfsi-sync/test-faults vfsi-sync/test-support vfsi-local/test-faults",
+        "seconds": "4.996",
+        "status": "0"
+      },
+      {
+        "command": "cargo test -p vfsi-nfs --lib --all-features",
+        "seconds": "6.802",
+        "status": "0"
+      },
+      {
+        "command": "cargo test -p vfsi-smb --lib",
+        "seconds": "0.250",
+        "status": "0"
+      },
+      {
+        "command": "cargo test -p nfsv41-sys",
+        "seconds": "0.241",
+        "status": "0"
+      },
+      {
+        "command": "./scripts/test-libntirpc.sh",
+        "seconds": "0.731",
+        "status": "0"
+      },
+      {
+        "command": "cargo test -p vnfs --features posix test-faults --lib --test posix_backend --test public_api --test application_boundary --test tree_builder --test transfer_helpers --test canonical_examples --test readv --test client_vectors --test directory_pages --test port_helpers --test posix",
+        "seconds": "0.447",
+        "status": "0"
+      },
+      {
+        "command": "cargo test -p vnfs --features posix test-faults --doc",
+        "seconds": "3.173",
+        "status": "0"
+      },
+      {
+        "command": "cargo test -p vfsi-c --lib",
+        "seconds": "0.579",
+        "status": "0"
+      },
+      {
+        "command": "cargo test --manifest-path adapters/vfsi-python/Cargo.toml --locked --all-features",
+        "seconds": "0.619",
+        "status": "0"
+      },
+      {
+        "command": "cargo test --manifest-path adapters/nfs4fs/Cargo.toml --locked",
+        "seconds": "0.058",
+        "status": "0"
+      },
+      {
+        "command": "cargo test --manifest-path adapters/vsmb/Cargo.toml --locked",
+        "seconds": "0.055",
+        "status": "0"
+      }
+    ],
+    "final-fast-2": [
+      {
+        "command": "cargo test -p vfsi-core -p vfsi-sync -p vfsi-local -p vfsi-posix --lib --features vfsi-core/test-faults vfsi-sync/test-faults vfsi-sync/test-support vfsi-local/test-faults -- --skip contract_tests::tests::recursive_copy_uses_bounded_directory_pages_and_native_file_batches --skip contract_tests::tests::deep_recursive_operations_use_bounded_call_stack",
+        "seconds": "0.144",
+        "status": "0"
+      }
+    ]
+  },
+  "final_runner_sha256": {
+    "scripts/test-rust.sh": "94214c332c748a84484c1de550e935900706bae578cfebc0092b5ffa0087fc09",
+    "scripts/test-ci-local.sh": "659491ad735a771bc9ba7fff796e5728bdf95b6ef30c69e7915a2f17297ff253",
+    "scripts/test-ci-scripts.py": "f8415ee64e488cc1d34d344054de93c28665a5fedbb900e35e4489942e9e00c0",
+    ".github/workflows/ci.yml": "45cdfa229c3b0f73e578101a82600795024a9710448652ca6276b7b723d4db64"
+  },
+  "verification": {
+    "runner_regressions": 72,
+    "focused_portable_api_passed": 22,
+    "fast_top_level_unit_tests": 175,
+    "full_mode_stress_cases_filtered": false,
+    "checks": [
+      "bash -n scripts/test-rust.sh scripts/test-ci-local.sh",
+      "python3 scripts/test-ci-scripts.py",
+      "./scripts/test-rust.sh --package vfsi-core --test portable_api",
+      "./scripts/test-rust.sh",
+      "./scripts/test-ci-local.sh fast",
+      "git diff --check"
+    ]
+  },
+  "raw_profile_archive": "/home/ubuntu/Documents/vfsi-artifacts/test-runners-2026-11-15.V9NC3I"
+}
