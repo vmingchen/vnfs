@@ -381,21 +381,29 @@ def test_cache_configuration_serializes_without_cached_contents(tmp_path):
     fs.close()
 
 
-def test_cached_walk_handles_trees_deeper_than_python_recursion_limit(cached_fs):
-    fs = cached_fs
-    directory = "/"
+@pytest.mark.parametrize("topdown", [False, True])
+def test_cached_walk_handles_trees_deeper_than_python_recursion_limit(
+    tmp_path, topdown
+):
     levels = sys.getrecursionlimit() + 50
-    for _ in range(levels):
-        child = directory.rstrip("/") + "/d"
-        fs.dircache[directory] = [{"name": fs._fullpath(child), "type": "directory"}]
-        directory = child
-    fs.dircache[directory] = []
-
+    # Permit the synthetic depth while still exercising iterative traversal.
+    fs = _cached_fs(tmp_path, walk_max_depth=levels)
     try:
-        walked = list(fs.walk("/"))
-    except RecursionError:
-        pytest.fail("cached walk exceeded Python's recursion limit", pytrace=False)
-    assert len(walked) == levels + 1
+        directory = "/"
+        for _ in range(levels):
+            child = directory.rstrip("/") + "/d"
+            fs.dircache[directory] = [
+                {"name": fs._fullpath(child), "type": "directory"}
+            ]
+            directory = child
+        fs.dircache[directory] = []
+        try:
+            walked = list(fs.walk("/", topdown=topdown))
+        except RecursionError:
+            pytest.fail("cached walk exceeded Python's recursion limit", pytrace=False)
+        assert len(walked) == levels + 1
+    finally:
+        fs.close()
 
 
 def test_bulk_namespace_invalidation_scans_dircache_at_most_once(cached_fs):

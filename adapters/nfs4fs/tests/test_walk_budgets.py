@@ -274,3 +274,67 @@ def test_walk_discards_prefetch_invalidated_while_fetching(
         ]
     finally:
         fs.close()
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("operation", ["topdown", "bottomup", "find"])
+@pytest.mark.parametrize("maxdepth", [None, 3, 2])
+def test_walk_depth_limit_is_independent_of_cached_listings(
+    tmp_path, cached, operation, maxdepth
+):
+    fs = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path),
+        use_listings_cache=cached,
+        walk_max_depth=1,
+        skip_instance_cache=True,
+    )
+    try:
+        fs.mkdir("/one/two", create_parents=True)
+        fs.pipe_file("/one/two/file", b"x")
+        if cached:
+            for directory in ("/", "/one", "/one/two"):
+                fs.ls(directory)
+
+        def traverse():
+            if operation == "find":
+                return fs.find("/", maxdepth=maxdepth)
+            return list(fs.walk("/", topdown=operation == "topdown", maxdepth=maxdepth))
+
+        if maxdepth == 2:
+            # A caller's explicit shallower traversal is allowed to truncate.
+            result = traverse()
+            if operation == "find":
+                assert result == []
+            else:
+                assert {directory for directory, _, _ in result} == {"/", "/one"}
+        else:
+            with pytest.raises(OSError) as error:
+                traverse()
+            assert error.value.errno == errno.EFBIG
+    finally:
+        fs.close()
+
+
+def test_cached_walk_allows_pruning_at_the_depth_limit(tmp_path):
+    fs = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path),
+        use_listings_cache=True,
+        walk_max_depth=1,
+        skip_instance_cache=True,
+    )
+    try:
+        fs.mkdir("/one/two", create_parents=True)
+        for directory in ("/", "/one", "/one/two"):
+            fs.ls(directory)
+        visited = []
+        for directory, dirs, _ in fs.walk("/"):
+            visited.append(directory)
+            if directory == "/one":
+                dirs.clear()
+        assert visited == ["/", "/one"]
+    finally:
+        fs.close()

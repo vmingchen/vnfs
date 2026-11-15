@@ -716,6 +716,8 @@ class _ClientPool:
 
     def _register(self, owner, native_fd):
         with self._lock:
+            if owner >= len(self._clients):
+                raise ValueError("filesystem is closed")
             token = self._next_fd
             self._next_fd -= 1
             self._fds[token] = (owner, native_fd)
@@ -3696,7 +3698,10 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def _cached_walk_tree(self, root, maxdepth):
         """Return a complete cached subtree, or None on any cache miss."""
-        limit = None if maxdepth is None else _depth(root) + maxdepth - 1
+        root_depth = _depth(root)
+        requested_depth = None if maxdepth is None else maxdepth - 1
+        hard_limit = requested_depth is None or requested_depth > self.walk_max_depth
+        limit = None if requested_depth is None else root_depth + requested_depth
         tree = []
         pending = [root]
         budget = _WalkBudget(self, root)
@@ -3712,7 +3717,10 @@ class VfsiFileSystem(AbstractFileSystem):
                 if info["type"] != "directory":
                     continue
                 child = self._checked_strip_protocol(info["name"])
-                if limit is None or _depth(child) <= limit:
+                child_depth = _depth(child)
+                if hard_limit and child_depth > root_depth + self.walk_max_depth:
+                    raise _oserror(errno.EFBIG, self._fullpath(root))
+                if limit is None or child_depth <= limit:
                     children.append(child)
             pending.extend(reversed(children))
         return tree
@@ -5988,9 +5996,7 @@ class VfsiFileSystem(AbstractFileSystem):
                         if name in children_by_name
                     ]
                     if _depth(directory) - root_depth >= descend_limit:
-                        if hard_limit and any(
-                            self._cached_listing(child) is None for child in children
-                        ):
+                        if hard_limit and children:
                             raise _oserror(errno.EFBIG, self._fullpath(internal))
                         if not hard_limit:
                             continue

@@ -948,3 +948,59 @@ def test_open_many_rejects_bad_sizes_before_truncating(tmp_path):
         fs.open_many([request], sizes=[])
     assert fs.cat_file("/existing") == b"preserve me"
     fs.close()
+
+
+@pytest.mark.parametrize("operation", ["open", "open_many", "open_many_independent"])
+def test_shutdown_rejects_inflight_open_registration(operation):
+    entered = threading.Event()
+    release = threading.Event()
+    registry_cleared = threading.Event()
+    shutdown_called = threading.Event()
+
+    class BlockingNative:
+        def __init__(self, *args):
+            pass
+
+        def open(self, *args, **kwargs):
+            entered.set()
+            assert release.wait(timeout=5)
+            return 17
+
+        def open_many(self, paths, modes):
+            return [self.open() for _ in paths]
+
+        def close(self, fd):
+            assert fd == 17
+
+        def shutdown(self):
+            shutdown_called.set()
+
+    class ObservedDescriptors(dict):
+        def clear(self):
+            super().clear()
+            registry_cleared.set()
+
+    native_module = SimpleNamespace(NfsClient=BlockingNative)
+    pool = engine_module._ClientPool(native_module, (), size=1)
+    pool._fds = ObservedDescriptors()
+    args = ("/file", "rb") if operation == "open" else (["/file"], ["rb"])
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            opening = executor.submit(getattr(pool, operation), *args)
+            try:
+                assert entered.wait(timeout=3)
+                closing = executor.submit(pool.shutdown)
+                assert registry_cleared.wait(timeout=3)
+                assert pool.closed
+                assert not shutdown_called.is_set()
+            finally:
+                release.set()
+            closing.result(timeout=5)
+            with pytest.raises(ValueError, match="filesystem is closed"):
+                opening.result(timeout=5)
+        assert shutdown_called.is_set()
+        assert not pool._fds
+        assert not pool._deferred_close
+    finally:
+        release.set()
+        pool.shutdown()
