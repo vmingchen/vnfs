@@ -206,6 +206,8 @@ fixed by explicitly staging both required lockfiles; every frozen manifest entry
 is staged with matching hashes. No review findings remain. The generated patch
 alone has an exact-path whitespace attribute because its context spaces are data.
 
+Stage-6 source and evidence are local commit `0b1ef93`.
+
 ## Stage 7: guide and disposable adoption
 
 The public guide describes standard causes, native/provenance inspection,
@@ -241,10 +243,8 @@ excluded from coverage. Benchmark/profile Clippy and all seven observer/runner
 regressions pass. Staged source/hash/lockfile inventory and whitespace checks
 pass. Existing and new historical source manifests remain byte-identical.
 
-## Remaining full-scope gates
+## Remaining performance decision and future release gates
 
-- Commit the two reviewed stages locally with normal hooks. No push/publication
-  is authorized.
 - Resolve the performance-cost decision. The final rebuilt run measures healthy
   POSIX at paired ratio 1.061 [1.031, 1.109] and one extra SMB allocation per
   64-file batch; healthy ring/NFS are near parity. Native/opaque boxing costs are

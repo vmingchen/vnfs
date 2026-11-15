@@ -1,7 +1,8 @@
 # Replace VfError with std::io::Error after VecResult
 
-Status: stages 1–5 are implemented and reviewed locally. Integrated performance
-measurements and adoption gates remain. See the
+Status: all seven source/documentation stages are implemented and reviewed
+locally. The integrated performance-cost decision remains open; this is not
+release/promotion approval. See the
 [migration progress](vferror-migration-progress.md).
 Date: 2026-11-14.
 Baseline: vnfs02 at 70bea6a.
@@ -68,7 +69,7 @@ results or stable layout promises.
 
 | Representation | Cause | OpError | Void-result slot | Read-result slot |
 | --- | ---: | ---: | ---: | ---: |
-| Current indexed VfError | 32 B | 48 B | 48 B | 48 B |
+| Indexed VfError baseline | 32 B | 48 B | 48 B | 48 B |
 | Minimal index-free VfError prototype | 16 B | 32 B | 32 B | 40 B |
 | Owned io::Error prototype | 8 B | 24 B | 24 B | 40 B |
 

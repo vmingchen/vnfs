@@ -321,28 +321,28 @@ first error in input order after execution finishes. It deliberately discards ot
 completion information; it does not restore stop-on-error execution or permit
 replay. The singular statfs helper uses this all-success policy for one target.
 
-The remaining operation families are being migrated as described in the
-[vector-result migration design](vector-results-migration.md). No temporary
-_outcomes method family is exposed.
+Every canonical vector operation now uses independent outcomes. The
+[standard-error migration design](vferror-simplification.md) describes the
+current cause ownership and attribution rules; no temporary method family is exposed.
 
 ### Per-input outcomes and strict conveniences
 
-Migrated `vgetattrs`, `vstatfs`, `vread`, `vopen`, `vclose` and
-`vfsync` return `VecResult<T>`: one owned value or `OpError` per input after
-dispatch. Ordinary failures do not suppress independent siblings. Remaining
-operation families still have strict aggregate signatures during migration.
-Neither form provides atomicity or rollback.
+Canonical vector operations return `VecResult<T>`, equivalent to
+`std::io::Result<Vec<Result<T, OpError>>>`: one owned value or `OpError` per
+accepted input after dispatch. An outer standard error rejects the complete call
+before dispatch and carries no input index. Ordinary item failures do not
+suppress independent siblings. No operation promises atomicity or rollback.
 
 `VfsiExt` conveniences deliberately select a simpler all-success policy.
 For OPEN, callers can retain partial handles or request strict collection:
 
 ```rust,no_run
-use vnfs::{files::OpenOp, Result, VecResult, Vfsi, VfsiExt};
+use vnfs::{files::OpenOp, error::IndexedError, VecResult, Vfsi, VfsiExt};
 
 fn open_group<C: Vfsi>(fs: &C, requests: &[OpenOp]) -> VecResult<C::File> {
     fs.vopen(requests)
 }
-fn open_all<C: Vfsi>(fs: &C, requests: &[OpenOp]) -> Result<Vec<C::File>> {
+fn open_all<C: Vfsi>(fs: &C, requests: &[OpenOp]) -> Result<Vec<C::File>, IndexedError> {
     fs.open_batch(requests)
 }
 ```
@@ -357,11 +357,13 @@ Borrowed read buffers can likewise contain partial progress when the call fails.
 
 ### Attribution and retry safety
 
-The input position is the authoritative vector index. Inner `OpError` causes
-keep that identity in the outcome position. Strict compatibility wrappers attach
-the selected input position to `Error::index()`, which returns
-`Some(n)` for a failure attributable to request `n`, or `None` when attribution
-is unknown. Never interpret `None` as zero. Backend wire operation numbers,
+The input position is the authoritative vector index. `OpError` owns an
+index-free `std::io::Error`, completion certainty and optional confirmed progress.
+Lossy multi-input helpers select the first failed slot in input order and return
+`IndexedError`; its `index()` is `Some(n)` for a selected input or `None` for
+unattributed rejection/malformed cardinality. `IndexedError` does not preserve
+certainty or progress. Never interpret `None` as zero or as evidence that no
+work occurred. Backend wire operation numbers,
 split compounds, and chunk-local offsets must be translated to logical request
 positions. An index does not describe completed bytes; a failure within one
 request can follow successful chunks of that same request.
@@ -385,22 +387,27 @@ backend calls the corresponding `std::fs::File` synchronization method.
 
 A lost transport response leaves dispatched mutations indeterminate; they
 are not replayed automatically.
-`vnfs::Error` exposes a portable `kind()`, native status/domain, optional logical
-request `index()`, and operation/path context. It does not infer completion
-certainty or retry safety from status codes.
-`transport_kind()` preserves known timeout, connection, invalid-reply, and
-authentication categories. Unclassified causes remain `Other`, without
-guessing from message text. `raw_code()` is a raw compatibility accessor;
-prefer `kind()` and `status()` for interpretation.
+`vnfs::Error` is `std::io::Error`; `vnfs::Result<T>` is the corresponding
+standard result. Match `kind()` for portable categories. Use
+`vnfs::error::native_status(&error)` for an optional typed errno/NFS/SMB status
+and `transport_kind(&error)` for known transport provenance. A local timeout
+alone does not imply an RPC failure. Native protocol codes are not OS errno.
+Library-managed standard-error payloads and context contain no logical index.
 
-Use `Error::errno(index, code)` for actual errno failures,
-`Error::from_kind(index, kind)` for client failures without a native status,
-and `Error::from_io(index, source)` to retain an I/O error and its source.
-All constructors accept an optional index; connection-wide failures should use
-`None`. `with_message()` adds diagnostics to semantic errors as well as transport
-failures. Language/legacy adapters use the lossy `to_errno()` conversion, while
-`status()` always retains the original native status. Client-only errors have no
-native status; synthetic compatibility codes are not stored as errno values.
+Construct an actual OS error with `std::io::Error::from_raw_os_error(errno)`, a
+category-only error with `std::io::Error::from(ErrorKind::Unsupported)`, or retain
+an existing standard error by moving it. `raw_os_error()` may return `None` after
+context wrapping; `native_status` recognizes library-owned wrappers. Unknown
+foreign payloads remain valid errors without invented native facts. Diagnostics
+and original sources remain available through Display/source; messages are not
+parsed to classify failures. The C/Python adapters alone maintain historical
+numeric encodings.
+
+`std::io::Error`, `OpError`, and `IndexedError` are not `Clone`/`Eq`. Move causes
+with `into_cause()` or move all fields with `into_parts()`. `IndexedError` has no
+implicit conversion to `std::io::Error`: deliberately discard helper attribution
+with `IndexedError::into_cause` only when the caller needs a scalar error.
+Applications needing all input outcomes or progress should keep `VecResult`.
 
 Prefer `try_close()` and `vclose(&mut files)` when cleanup errors matter.
 The vector returns one outcome per input and retires every confirmed success,
@@ -412,8 +419,9 @@ effect. Consuming `close`/`close_files` perform best-effort cleanup on error, an
 `Drop` queues cleanup while a client remains alive. Use `drain_cleanup` to
 observe queued failures; final-owner teardown remains synchronous.
 
-Native client and file methods retain `vnfs::Error`. Only the standard-library
-`Read`, `Write`, and `Seek` adapters translate failures to `std::io::Error`.
+Scalar client/file methods already return standard I/O errors. Standard-library
+`Read`, `Write`, and `Seek` adapters process certainty/progress before moving the
+cause into pending-error state; they do not rebox an already-correct error.
 
 The asynchronous facet is deliberately deferred to a separate future crate;
 the synchronous core does not depend on Tokio.
@@ -581,10 +589,13 @@ The pre-1.0 API uses `FileHandle` for owned open instances and `RenameMode` for
 rename choices. Use `WriteOp::at` for portable positional writes. Path mapping
 types live under `vnfs::helpers`; `nfs::mount` no longer reexports them.
 
-Errors are opaque. Use `kind()`, `status()`, `domain()`, `index()`, and context
-accessors, or `raw_code()` when integrating with a raw status interface.
-Construct unattributed semantic errors with `Error::from_status(None, status)`.
-`transport_message()` exposes the original transport diagnostic.
+Causes are owned `std::io::Error` values: use `kind()`, the optional
+`vnfs::error::native_status(&error)` and `transport_kind(&error)` views, and
+Display/source for diagnostics. Standard constructors take no input index.
+Vector positions identify accepted inputs; lossy helpers use `IndexedError`
+for selected attribution. Use `into_cause()` to discard it explicitly.
+See [durability and failure rules](#durability-and-failure-rules) for certainty
+and progress; a category alone never grants replay permission.
 
 `OpenOp::new` borrows its path; use `into_owned()` to retain a request independently.
 Depth setters take `DepthLimit`: `new(depth)` accepts finite values from 0

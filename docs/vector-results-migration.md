@@ -5,6 +5,12 @@ uses VecResult, with independent input-indexed outcomes and batching preserved.
 Convenience collection stays in VfsiExt; no temporary _outcomes API is exposed.
 C ABI v3 and the existing Python return/exception conventions are preserved.
 
+The cause representation below records the published VecResult migration.
+For current development, the [standard-error design](vferror-simplification.md)
+supersedes its `VfError` examples: outer/scalar causes are `std::io::Error`,
+item causes remain in `OpError`, and lossy helpers return `IndexedError`.
+Historical release evidence below remains unchanged.
+
 ## Coordinated release checkpoint (2026-11-09)
 
 - Published Rust packages: vfsi-core/sync/local/posix/uring/smb 0.2.0,

@@ -1,0 +1,223 @@
+--- a/src/uucore/src/lib/features/vnfs.rs
++++ b/src/uucore/src/lib/features/vnfs.rs
+@@ -108,2 +108,6 @@
+-            Self::Dummy { paths: mapper, .. } => mapper.map_many(paths, policy),
+-            Self::Nfs { session, .. } => session.map_many(paths, policy),
++            Self::Dummy { paths: mapper, .. } => mapper
++                .map_many(paths, policy)
++                .map_err(vnfs::error::IndexedError::into_cause),
++            Self::Nfs { session, .. } => session
++                .map_many(paths, policy)
++                .map_err(vnfs::error::IndexedError::into_cause),
+@@ -121,2 +125,7 @@
+-            Self::Dummy { fs, .. } => fs.getattrs_all(paths, options),
+-            Self::Nfs { session, .. } => session.fs().getattrs_all(paths, options),
++            Self::Dummy { fs, .. } => fs
++                .getattrs_all(paths, options)
++                .map_err(vnfs::error::IndexedError::into_cause),
++            Self::Nfs { session, .. } => session
++                .fs()
++                .getattrs_all(paths, options)
++                .map_err(vnfs::error::IndexedError::into_cause),
+@@ -135,3 +144,6 @@
+-            let listing = listings
+-                .get_mut(index)
+-                .ok_or_else(|| vnfs::Error::invalid_reply(None, "invalid directory root index"))?;
++            let listing = listings.get_mut(index).ok_or_else(|| {
++                std::io::Error::new(
++                    std::io::ErrorKind::InvalidData,
++                    "invalid directory root index",
++                )
++            })?;
+@@ -139,2 +151,2 @@
+-                return Err(vnfs::Error::invalid_reply(
+-                    Some(index),
++                return Err(std::io::Error::new(
++                    std::io::ErrorKind::InvalidData,
+@@ -145,4 +157 @@
+-                entry
+-                    .attrs()
+-                    .require(fields - Attributes::NAMED_ATTR)
+-                    .map_err(|error| error.with_index(index))?;
++                entry.attrs().require(fields - Attributes::NAMED_ATTR)?;
+@@ -154,2 +163,7 @@
+-            Self::Dummy { fs, .. } => fs.listdirs_all(dirs, options, &mut collect),
+-            Self::Nfs { session, .. } => session.fs().listdirs_all(dirs, options, &mut collect),
++            Self::Dummy { fs, .. } => fs
++                .listdirs_all(dirs, options, &mut collect)
++                .map_err(vnfs::error::IndexedError::into_cause),
++            Self::Nfs { session, .. } => session
++                .fs()
++                .listdirs_all(dirs, options, &mut collect)
++                .map_err(vnfs::error::IndexedError::into_cause),
+@@ -162,2 +176,2 @@
+-            return Err(vnfs::Error::invalid_reply(
+-                None,
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::InvalidData,
+@@ -172 +186 @@
+-            .ok_or_else(|| vnfs::Error::errno(0, libc::EINVAL as u32))?;
++            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+@@ -175,2 +189,7 @@
+-            Self::Dummy { fs, .. } => fs.read_files_with_options(paths, options),
+-            Self::Nfs { session, .. } => session.fs().read_files_with_options(paths, options),
++            Self::Dummy { fs, .. } => fs
++                .read_files_with_options(paths, options)
++                .map_err(vnfs::error::IndexedError::into_cause),
++            Self::Nfs { session, .. } => session
++                .fs()
++                .read_files_with_options(paths, options)
++                .map_err(vnfs::error::IndexedError::into_cause),
+@@ -197 +216,2 @@
+-            Self::Dummy { fs, .. } => vnfs::helpers::copy_to_writers(fs, paths, writers, options),
++            Self::Dummy { fs, .. } => vnfs::helpers::copy_to_writers(fs, paths, writers, options)
++                .map_err(vnfs::error::IndexedError::into_cause),
+@@ -199,0 +220 @@
++                    .map_err(vnfs::error::IndexedError::into_cause)
+@@ -235,6 +256,7 @@
+-            Self::Dummy { fs, .. } => fs.removes_all(&[path], mode, RemoveOptions::default()),
+-            Self::Nfs { session, .. } => {
+-                session
+-                    .fs()
+-                    .removes_all(&[path], mode, RemoveOptions::default())
+-            }
++            Self::Dummy { fs, .. } => fs
++                .removes_all(&[path], mode, RemoveOptions::default())
++                .map_err(vnfs::error::IndexedError::into_cause),
++            Self::Nfs { session, .. } => session
++                .fs()
++                .removes_all(&[path], mode, RemoveOptions::default())
++                .map_err(vnfs::error::IndexedError::into_cause),
+@@ -348,0 +371 @@
++            .map_err(vnfs::error::IndexedError::into_cause)
+@@ -362,0 +386 @@
++            .map_err(vnfs::error::IndexedError::into_cause)
+--- a/src/uu/cp/src/vfsi.rs
++++ b/src/uu/cp/src/vfsi.rs
+@@ -11 +11 @@
+-use vnfs::Error as VfError;
++
+@@ -26 +26 @@
+-fn vf_io_error(e: VfError) -> io::Error {
++fn vf_io_error(e: io::Error) -> io::Error {
+@@ -85 +85 @@
+-fn server_copy_completed(outcome: vnfs::OpResult<()>) -> Result<bool, VfError> {
++fn server_copy_completed(outcome: vnfs::OpResult<()>) -> Result<bool, io::Error> {
+@@ -106,2 +106,2 @@
+-        return Err(vf_io_error(VfError::invalid_reply(
+-            None,
++        return Err(vf_io_error(io::Error::new(
++            io::ErrorKind::InvalidData,
+@@ -124,2 +124,3 @@
+-                first_error
+-                    .get_or_insert_with(|| error.with_index(index).with_context("copy", source));
++                first_error.get_or_insert_with(|| {
++                    vnfs::error::IndexedError::at(index, error).with_context("copy", source)
++                });
+@@ -136 +137 @@
+-            Err(vf_io_error(error))
++            Err(vf_io_error(error.into_cause()))
+@@ -324 +325,4 @@
+-        return Err(VfError::invalid_reply(None, "cp: invalid attribute count"));
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidData,
++            "cp: invalid attribute count",
++        ));
+@@ -349 +353,4 @@
+-        return Err(VfError::invalid_reply(None, "cp: invalid read count"));
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidData,
++            "cp: invalid read count",
++        ));
+@@ -423,2 +430,2 @@
+-                    return Err(vf_io_error(VfError::invalid_reply(
+-                        None,
++                    return Err(vf_io_error(io::Error::new(
++                        io::ErrorKind::InvalidData,
+@@ -627,2 +634,4 @@
+-            !server_copy_completed(Err(OpError::not_attempted(VfError::unsupported(None))))
+-                .unwrap()
++            !server_copy_completed(Err(OpError::not_attempted(io::Error::from(
++                io::ErrorKind::Unsupported
++            ))))
++            .unwrap()
+@@ -631 +640 @@
+-            let cause = VfError::unsupported(None);
++            let cause = io::Error::from(io::ErrorKind::Unsupported);
+@@ -661 +670 @@
+-            let cause = VfError::unsupported(None);
++            let cause = io::Error::from(io::ErrorKind::Unsupported);
+@@ -698 +707 @@
+-                Err(VfError::transport(None, "rejected before dispatch"))
++                Err(io::Error::other("rejected before dispatch"))
+@@ -708 +717,3 @@
+-                    Err(OpError::not_attempted(VfError::unsupported(None))),
++                    Err(OpError::not_attempted(io::Error::from(
++                        io::ErrorKind::Unsupported
++                    ))),
+--- a/src/uu/du/src/vnfs.rs
++++ b/src/uu/du/src/vnfs.rs
+@@ -190,9 +190,11 @@
+-            backend.listdirs_all(
+-                &[vroot],
+-                backend
+-                    .limits()
+-                    .walk_options()
+-                    .with_fields(masks)
+-                    .with_allow_symlink_components(false),
+-                visitor,
+-            )
++            backend
++                .listdirs_all(
++                    &[vroot],
++                    backend
++                        .limits()
++                        .walk_options()
++                        .with_fields(masks)
++                        .with_allow_symlink_components(false),
++                    visitor,
++                )
++                .map_err(vnfs::error::IndexedError::into_cause)
+@@ -257,5 +259,8 @@
+-            return Err(vnfs::Error::invalid_reply(None, "du: invalid root index"));
+-        }
+-        let parent = *positions
+-            .get(&listing.path)
+-            .ok_or_else(|| vnfs::Error::invalid_reply(None, "du: unadmitted directory page"))?;
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidData,
++                "du: invalid root index",
++            ));
++        }
++        let parent = *positions.get(&listing.path).ok_or_else(|| {
++            io::Error::new(io::ErrorKind::InvalidData, "du: unadmitted directory page")
++        })?;
+@@ -286 +291 @@
+-                .map_err(|_| vnfs::Error::errno(0, libc::ENOTSUP as u32))?;
++                .map_err(|_| io::Error::from_raw_os_error(libc::ENOTSUP))?;
+@@ -302 +307,4 @@
+-                    return Err(vnfs::Error::invalid_reply(None, "du: duplicate directory"));
++                    return Err(io::Error::new(
++                        io::ErrorKind::InvalidData,
++                        "du: duplicate directory",
++                    ));
+@@ -354 +362 @@
+-                        .map_err(|_| vnfs::Error::errno(0, libc::EPIPE as u32))?;
++                        .map_err(|_| io::Error::from_raw_os_error(libc::EPIPE))?;
+--- a/src/uu/ls/src/nfs.rs
++++ b/src/uu/ls/src/nfs.rs
+@@ -18 +18 @@
+-use vnfs::Error as VfError;
++
+@@ -41,5 +41,3 @@
+-/// Map a vectorized error to an `io::Error`, choosing an `ErrorKind` from the
+-/// typed [`vnfs::Error`] (transport vs. filesystem status) and keeping the
+-/// operation index in the message.
+-fn vf_io_error(e: VfError) -> io::Error {
+-    e.into()
++/// Session helpers already return owned standard I/O causes.
++fn vf_io_error(e: io::Error) -> io::Error {
++    e
+@@ -145 +143 @@
+-            Err(error) if error.raw_code() == uucore::libc::EFBIG as u32 => return Ok(None),
++            Err(error) if error.kind() == io::ErrorKind::FileTooLarge => return Ok(None),

@@ -1,0 +1,14 @@
+--- a/src/find/vnfs.rs
++++ b/src/find/vnfs.rs
+@@ -152 +152 @@
+-        .map_err(|_| vnfs::Error::errno(0, 22))?;
++        .map_err(|_| std::io::Error::from_raw_os_error((22) as i32))?;
+@@ -340 +340 @@
+-                assert_eq!(result.unwrap_err().raw_code(), uucore::libc::EFBIG as u32);
++                assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::FileTooLarge);
+@@ -416 +416 @@
+-                errors.push((path.to_path_buf(), depth, error.raw_code()));
++                errors.push((path.to_path_buf(), depth, error.kind()));
+@@ -422 +422 @@
+-            [(PathBuf::from("./typed/a"), 1, uucore::libc::ENOENT as u32)]
++            [(PathBuf::from("./typed/a"), 1, std::io::ErrorKind::NotFound)]

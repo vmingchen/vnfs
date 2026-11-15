@@ -86,7 +86,7 @@ pub mod directory {
     };
 }
 
-/// Error classification without losing protocol status or the failing input index.
+/// Standard causes, native classification, per-item certainty and selected helper attribution.
 pub mod error {
     pub use crate::{Error, Result};
     pub use vfsi_core::api::ErrorKind;
