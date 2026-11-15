@@ -2110,6 +2110,25 @@ class _BufferGroup:
                     if size:
                         spool.rollover()
 
+    def _rebase_file_error(self, error, files):
+        position = getattr(error, "index", None)
+        if (
+            isinstance(position, int)
+            and not isinstance(position, bool)
+            and 0 <= position < len(files)
+        ):
+            file = files[position]
+            index = next(i for i, member in enumerate(self.files) if member is file)
+            _oserror(error, file.path, index=index)
+
+    def _read_vector(self, method, files, offsets, lengths):
+        fds = [file._raw._ensure_open() for file in files]
+        try:
+            return getattr(self.fs._client, method)(fds, offsets, lengths)
+        except Exception as error:
+            self._rebase_file_error(error, files)
+            raise
+
     def _reopen_readers(self):
         active = [
             file
@@ -2129,12 +2148,20 @@ class _BufferGroup:
         )
         if descriptor is not None:
             self.fs._client.reconnect_descriptor(descriptor)
-        fds = self.fs._client.open_many(
-            [self.fs._native_path(file.path) for file in active],
-            ["rb"] * len(active),
-        )
         try:
-            attrs = self.fs._client.fstat_many(fds)
+            fds = self.fs._client.open_many(
+                [self.fs._native_path(file.path) for file in active],
+                ["rb"] * len(active),
+            )
+        except Exception as error:
+            self._rebase_file_error(error, active)
+            raise
+        try:
+            try:
+                attrs = self.fs._client.fstat_many(fds)
+            except Exception as error:
+                self._rebase_file_error(error, active)
+                raise
             for file, attr in zip(active, attrs):
                 identity = _handle_identity(attr)
                 if file._raw._identity is None or identity != file._raw._identity:
@@ -2189,18 +2216,16 @@ class _BufferGroup:
             for file in files
         ):
             self._reopen_readers()
-        fds = [file._raw._ensure_open() for file in files]
         if getattr(self.fs._client, "_native_has_vector_outcomes", False):
             try:
-                outcomes = self.fs._client.preadv(fds, offsets, lengths)
+                outcomes = self._read_vector("preadv", files, offsets, lengths)
             except OSError as error:
                 # Native outer errors reject before dispatch. Retrying reads
                 # here cannot replay an already-delivered successful sibling.
                 if not self.fs.auto_reconnect or not _can_reconnect(error):
                     raise
                 self._reopen_readers()
-                fds = [file._raw._ensure_open() for file in files]
-                outcomes = self.fs._client.preadv(fds, offsets, lengths)
+                outcomes = self._read_vector("preadv", files, offsets, lengths)
             if len(outcomes) != len(files):
                 raise OSError(errno.EIO, "invalid positioned-read outcome count")
             retry = [
@@ -2220,8 +2245,9 @@ class _BufferGroup:
                 }
                 try:
                     self._reopen_readers()
-                    resumed = self.fs._client.preadv(
-                        [files[index]._raw._ensure_open() for index in retry],
+                    resumed = self._read_vector(
+                        "preadv",
+                        [files[index] for index in retry],
                         [offsets[index] + len(prefixes[index]) for index in retry],
                         [lengths[index] - len(prefixes[index]) for index in retry],
                     )
@@ -2256,13 +2282,12 @@ class _BufferGroup:
                 },
             )
         try:
-            return self.fs._client.pread_many(fds, offsets, lengths)
+            return self._read_vector("pread_many", files, offsets, lengths)
         except OSError as error:
             if not self.fs.auto_reconnect or not _can_reconnect(error):
                 raise
             self._reopen_readers()
-            fds = [file._raw._ensure_open() for file in files]
-            return self.fs._client.pread_many(fds, offsets, lengths)
+            return self._read_vector("pread_many", files, offsets, lengths)
 
     def fetch(self, current, start, end):
         if end <= start:
@@ -2700,10 +2725,24 @@ class _DeferredWriteFile:
             # Keep the staging component independent of the destination length;
             # a valid NAME_MAX-sized basename must still be writable atomically.
             self.temp_path = posixpath.join(parent, f".nfs4fs-txn-{uuid.uuid4().hex}")
-            if "a" in mode and fs.exists(path):
+            if "a" in mode and self._exists():
                 fs._copy_remote_to_fileobj(path, self._spool)
                 self._spool.seek(0, io.SEEK_END)
             stack.pop_all()
+
+    def _exists(self):
+        try:
+            return self.fs.exists(self.path)
+        except Exception as error:
+            # A scalar handle must not expose its singleton probe's vector index.
+            position = getattr(error, "index", None)
+            if (
+                isinstance(position, int)
+                and not isinstance(position, bool)
+                and position == 0
+            ):
+                del error.index
+            raise
 
     def writable(self):
         return True
@@ -2770,7 +2809,7 @@ class _DeferredWriteFile:
         """Upload to a same-directory temporary file without exposing target."""
         if self._prepared or self._committed:
             return
-        if "x" in self.mode and self.fs.exists(self.path):
+        if "x" in self.mode and self._exists():
             raise FileExistsError(errno.EEXIST, "File exists", self.path)
         try:
             permissions = (
@@ -3991,6 +4030,20 @@ class VfsiFileSystem(AbstractFileSystem):
                         self._rebase_directory_error(error, pending, native_paths)
                         raise
 
+    def _ensure_file_parents(self, paths):
+        parents = list(
+            dict.fromkeys(
+                posixpath.dirname(path)
+                for path in paths
+                if posixpath.dirname(path) not in ("", "/")
+            )
+        )
+        try:
+            self._ensure_dirs(parents)
+        except Exception as error:
+            self._rebase_directory_error(error, parents, paths)
+            raise
+
     def _makedirs_batched(self, paths, exist_ok=False):
         """fsspec ``makedirs`` semantics for many paths, batched."""
         paths = list(dict.fromkeys(self._checked_strip_protocol(p) for p in paths))
@@ -4508,6 +4561,7 @@ class VfsiFileSystem(AbstractFileSystem):
                             errno.EISDIR, "Is a directory", internals[i]
                         )
                 except (OSError, ValueError) as path_error:
+                    _rebase_error(path_error, [i], [internals[i]])
                     validation_errors[i] = path_error
                 else:
                     validation_errors[i] = exc
@@ -4605,6 +4659,9 @@ class VfsiFileSystem(AbstractFileSystem):
                             datas[i],
                             callback=child,
                             mode="xb" if mode == "create" else "wb",
+                            input_index=(
+                                i if input_indices is None else input_indices[i]
+                            ),
                         ),
                     )
                 return
@@ -4613,7 +4670,12 @@ class VfsiFileSystem(AbstractFileSystem):
                     report(
                         index,
                         lambda child, i=index, p=path: self._write_one_exclusive(
-                            p, datas[i], callback=child
+                            p,
+                            datas[i],
+                            callback=child,
+                            input_index=(
+                                i if input_indices is None else input_indices[i]
+                            ),
                         ),
                     )
                 return
@@ -4625,22 +4687,22 @@ class VfsiFileSystem(AbstractFileSystem):
                     report(
                         index,
                         lambda child, i=index: self._write_one_streamed(
-                            paths[i], datas[i], callback=child
+                            paths[i],
+                            datas[i],
+                            callback=child,
+                            input_index=(
+                                i if input_indices is None else input_indices[i]
+                            ),
                         ),
                     )
                     continue
                 batch_native = [native[i] for i in batch]
                 batch_datas = [datas[i] for i in batch]
-                if self.auto_mkdir:
-                    parents = {
-                        posixpath.dirname(paths[i])
-                        for i in batch
-                        if posixpath.dirname(paths[i]) != "/"
-                    }
-                    self._ensure_dirs(list(parents))
-                # A failed vector can have completed mutations. Prepare parents
-                # first and never replay writes, even for an indexed ENOENT.
+                # Parent preflight errors use the same batch positions as WRITE.
+                # Never replay writes, even for an indexed ENOENT.
                 try:
+                    if self.auto_mkdir:
+                        self._ensure_file_parents([paths[i] for i in batch])
                     written = self._client.write_many(
                         batch_native, batch_datas, truncate=True
                     )
@@ -4672,12 +4734,19 @@ class VfsiFileSystem(AbstractFileSystem):
                 for index in batch:
                     report(index)
 
-    def _write_one_streamed(self, path, value, callback=None, mode="wb"):
+    def _write_one_streamed(
+        self, path, value, callback=None, mode="wb", *, input_index=None
+    ):
         """Write one in-memory value through the existing scalar/deferred path."""
         view = memoryview(value)
         on_progress = callback.relative_update if callback is not None else None
         with ExitStack() as stack:
-            remote = self.open(path, mode)
+            try:
+                remote = self.open(path, mode)
+            except Exception as error:
+                if input_index is not None:
+                    _rebase_error(error, [input_index], [path])
+                raise
             stack.push(partial(_close_reader_on_exit, remote))
             for offset in range(0, len(view), self.transfer_chunk_size):
                 _write_fully(
@@ -4686,12 +4755,17 @@ class VfsiFileSystem(AbstractFileSystem):
                     on_progress=on_progress,
                 )
 
-    def _write_one_exclusive(self, path, value, callback=None):
+    def _write_one_exclusive(self, path, value, callback=None, *, input_index=None):
         """Atomically create one path with O_EXCL and bounded writes."""
         internal = self._checked_strip_protocol(path)
         parent = posixpath.dirname(internal)
         if self.auto_mkdir and parent not in ("", "/"):
-            self._ensure_dirs([parent])
+            try:
+                self._ensure_dirs([parent])
+            except Exception as error:
+                if input_index is not None:
+                    _rebase_error(error, [input_index], [internal])
+                raise
         fd = self._client.open(self._native_path(internal), "xb")
         write_error = None
         try:
@@ -4987,6 +5061,7 @@ class VfsiFileSystem(AbstractFileSystem):
         *,
         size=None,
         create_parents=False,
+        input_index=None,
         **open_kwargs,
     ):
         """Own upload endpoints and finish each chunk without unsafe replay."""
@@ -4998,11 +5073,16 @@ class VfsiFileSystem(AbstractFileSystem):
             callback.set_size(
                 os.fstat(source.fileno()).st_size if size is None else size
             )
-            if create_parents:
-                self._ensure_dirs([posixpath.dirname(internal) or "/"])
-            remote = self.open(
-                internal, "xb" if mode == "create" else "wb", **open_kwargs
-            )
+            try:
+                if create_parents:
+                    self._ensure_dirs([posixpath.dirname(internal) or "/"])
+                remote = self.open(
+                    internal, "xb" if mode == "create" else "wb", **open_kwargs
+                )
+            except Exception as error:
+                if input_index is not None:
+                    _rebase_error(error, [input_index], [internal])
+                raise
             stack.push(partial(_close_reader_on_exit, remote))
             while True:
                 chunk = source.read(min(self.transfer_chunk_size, self.max_batch_bytes))
@@ -5089,9 +5169,11 @@ class VfsiFileSystem(AbstractFileSystem):
         callback.set_size(len(rpaths))
         pairs = []
         remote_dirs = []
+        directory_indices = []
         for public_index, (local_path, remote_path) in enumerate(zip(lpaths, rpaths)):
             if os.path.isdir(local_path):
                 remote_dirs.append(remote_path)
+                directory_indices.append(public_index)
                 callback.relative_update()
             else:
                 pairs.append((local_path, remote_path, public_index))
@@ -5100,15 +5182,27 @@ class VfsiFileSystem(AbstractFileSystem):
                 raise NotImplementedError(
                     "transactional directory uploads are unsupported"
                 )
-            self._makedirs_batched(remote_dirs, exist_ok=True)
+            try:
+                self._makedirs_batched(remote_dirs, exist_ok=True)
+            except Exception as error:
+                positions = {}
+                for index, directory in zip(directory_indices, remote_dirs):
+                    positions.setdefault(self._checked_strip_protocol(directory), index)
+                _rebase_error(error, list(positions.values()), list(positions))
+                raise
         if not pairs:
             return
         sizes = [os.path.getsize(local_path) for local_path, _, _ in pairs]
 
-        def upload_streamed(local_path, remote_path, size):
+        def upload_streamed(local_path, remote_path, size, public_index):
             with callback.branched(local_path, remote_path) as child:
                 self._upload_file_streamed(
-                    local_path, remote_path, mode, child, size=size
+                    local_path,
+                    remote_path,
+                    mode,
+                    child,
+                    size=size,
+                    input_index=public_index,
                 )
             callback.relative_update()
 
@@ -5134,7 +5228,7 @@ class VfsiFileSystem(AbstractFileSystem):
             if len(batch) == 1 and sizes[batch[0]] > self.max_batch_bytes:
                 i = batch[0]
                 local_path, remote_path, public_index = pairs[i]
-                upload_streamed(local_path, remote_path, sizes[i])
+                upload_streamed(local_path, remote_path, sizes[i], public_index)
                 continue
             staged = []
             staged_bytes = 0
@@ -5151,7 +5245,7 @@ class VfsiFileSystem(AbstractFileSystem):
                         with open(local_path, "rb") as fh:
                             data = fh.read(self.max_batch_bytes + 1)
                     if len(data) > self.max_batch_bytes:
-                        upload_streamed(local_path, remote_path, sizes[i])
+                        upload_streamed(local_path, remote_path, sizes[i], public_index)
                         continue
                 staged.append((local_path, remote_path, data, public_index))
                 staged_bytes += len(data)
@@ -5258,18 +5352,25 @@ class VfsiFileSystem(AbstractFileSystem):
             # OpenFile already handles text/compression finalization and scalar
             # transaction enrollment. Reuse it instead of a second coordinator.
             return _enter_individually(open_files)
-        if self.auto_mkdir and any(any(c in m for c in "wax") for m in modes):
-            parents = {
-                posixpath.dirname(path)
-                for path, mode in zip(paths, modes)
-                if any(c in mode for c in "wax") and posixpath.dirname(path) != "/"
-            }
-            self._ensure_dirs(list(parents))
         mutating_paths = [
             path
             for path, mode in zip(paths, modes)
             if _normalize_mode(mode) in ("w", "w+", "a", "a+", "x", "x+")
         ]
+        if self.auto_mkdir and mutating_paths:
+            try:
+                self._ensure_file_parents(mutating_paths)
+            except Exception as error:
+                _rebase_error(
+                    error,
+                    [
+                        index
+                        for index, mode in enumerate(modes)
+                        if any(c in mode for c in "wax")
+                    ],
+                    mutating_paths,
+                )
+                raise
         fds = []
         files = []
         try:
@@ -5819,6 +5920,7 @@ class VfsiFileSystem(AbstractFileSystem):
         dir_pairs = []
         dir_indices = []
         symlink_pairs = []
+        symlink_indices = []
         first_error = None
         for i, ((src, dst), stat) in enumerate(zip(pairs, stats)):
             if i in errors:
@@ -5833,6 +5935,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 file_indices.append(i)
             elif symlinks and stat is not None and stat["type"] == "symlink":
                 symlink_pairs.append((src, dst))
+                symlink_indices.append(i)
             else:
                 callback.relative_update()
                 if on_error == "raise" and first_error is None:
@@ -5856,19 +5959,33 @@ class VfsiFileSystem(AbstractFileSystem):
             set_callback_size=False,
             positions=file_indices,
         )
-        self._copy_symlink_pairs(symlink_pairs, on_error, callback)
+        self._copy_symlink_pairs(
+            symlink_pairs, on_error, callback, positions=symlink_indices
+        )
         if first_error is not None:
             raise first_error
 
-    def _copy_symlink_pairs(self, pairs, on_error, callback):
+    def _copy_symlink_pairs(self, pairs, on_error, callback, *, positions=None):
         """Copy stored targets without following links or adding the root twice."""
         if not pairs:
             return
         # Like shutil.copyfile, reject identical objects even when preserving
         # the source link. Batch the followed identity probes across all pairs.
-        stats, _ = self._client.stat_many(
-            [self._native_path(path) for pair in pairs for path in pair]
-        )
+        try:
+            stats, _ = self._client.stat_many(
+                [self._native_path(path) for pair in pairs for path in pair]
+            )
+        except Exception as error:
+            _rebase_error(
+                error,
+                [
+                    index if positions is None else positions[index]
+                    for index in range(len(pairs))
+                    for _ in range(2)
+                ],
+                [path for pair in pairs for path in pair],
+            )
+            raise
         for index, (src, dst) in enumerate(pairs):
             try:
                 source, destination = stats[2 * index : 2 * index + 2]
@@ -5888,6 +6005,9 @@ class VfsiFileSystem(AbstractFileSystem):
                 with self._cache_mutation([dst], namespace=True):
                     self._client.symlink(target, self._native_path(dst))
             except (OSError, NotImplementedError, shutil.SameFileError) as error:
+                _rebase_error(
+                    error, [index if positions is None else positions[index]], [dst]
+                )
                 # Never suppress or replay an ambiguous link creation.
                 if _is_transport_error(error):
                     raise
@@ -5940,10 +6060,25 @@ class VfsiFileSystem(AbstractFileSystem):
                     if parent not in ("", "/")
                 ]
                 parent_errors = {}
+
+                def rebase_parent_error(error, parents):
+                    destinations = [pairs[index][1] for index in missing]
+                    self._rebase_directory_error(error, parents, destinations)
+                    _rebase_error(
+                        error,
+                        (
+                            missing
+                            if positions is None
+                            else [positions[index] for index in missing]
+                        ),
+                        destinations,
+                    )
+
                 try:
                     self._ensure_dirs(internal_parents)
                 except OSError as error:
                     if _is_transport_error(error) or error.errno is None:
+                        rebase_parent_error(error, internal_parents)
                         raise
                     # Only a semantic failure needs parent-by-parent recovery.
                     # A bad parent must not block independent successful copies
@@ -5953,6 +6088,7 @@ class VfsiFileSystem(AbstractFileSystem):
                             self._ensure_dirs([parent])
                         except OSError as failure:
                             if _is_transport_error(failure) or failure.errno is None:
+                                rebase_parent_error(failure, [parent])
                                 raise
                             parent_errors[parent] = failure
                 ready = []
