@@ -110,6 +110,17 @@ def _oserror(errno_code, path, *, index=None):
     return error
 
 
+def _rebase_error(error, indices, paths):
+    """Map an attributed vector error through the selected public inputs."""
+    position = getattr(error, "index", None)
+    if (
+        isinstance(position, int)
+        and not isinstance(position, bool)
+        and 0 <= position < len(indices)
+    ):
+        _oserror(error, paths[position], index=indices[position])
+
+
 def _info_dict(full_name, attrs):
     """Build an fsspec `info` dict from a native attribute dict."""
     info = {
@@ -1878,7 +1889,17 @@ class VfsiFile(AbstractBufferedFile):
         group = self._buffer_group
         if group is not None:
             if self._buffered_write:
-                self.flush(force=True)
+                try:
+                    self.flush(force=True)
+                except BaseException as error:
+                    # A failed writer must still join cohort cleanup, without
+                    # replaying its data or closing healthy siblings early.
+                    try:
+                        group.request_close(self)
+                    except BaseException as cleanup:
+                        raise error from cleanup
+                    self._closed = True
+                    raise
             elif self._has_read_cache():
                 cache = getattr(self, "cache", None)
                 close = getattr(cache, "close", None)
@@ -4157,9 +4178,17 @@ class VfsiFileSystem(AbstractFileSystem):
             # Stat sizes are planning hints, not permission checks or EOF.
             # A zero remaining budget still permits the native bounded EOF
             # probe, so a formerly empty file cannot silently bypass the cap.
-            dat, batch_errors = self._client.read_all_many(
-                [native[index] for index, _ in batch], remaining
-            )
+            try:
+                dat, batch_errors = self._client.read_all_many(
+                    [native[index] for index, _ in batch], remaining
+                )
+            except Exception as error:
+                _rebase_error(
+                    error,
+                    [index for index, _ in batch],
+                    [paths[index] for index, _ in batch],
+                )
+                raise
             for position, (index, _size) in enumerate(batch):
                 if position in batch_errors:
                     failures[index] = _oserror(
@@ -4338,17 +4367,32 @@ class VfsiFileSystem(AbstractFileSystem):
         native = [self._native_path(p) for p in internals]
         errors = {}
         sizes = [None] * len(paths)
-        if any(
-            (s is not None and s < 0)
-            or e is None
-            or e < 0
-            or e == (0 if s is None else s) - 1
-            for s, e in zip(starts, ends)
-        ):
-            # Slice semantics and byte-bounded batching both need file sizes.
-            stats, stat_errors = self._client.stat_many(native)
-            errors.update(stat_errors)
-            sizes = [s["size"] if s is not None else None for s in stats]
+        size_indices = [
+            index
+            for index, (start, end) in enumerate(zip(starts, ends))
+            if (start is not None and start < 0)
+            or end is None
+            or end < 0
+            or end == (0 if start is None else start) - 1
+        ]
+        if size_indices:
+            # Explicit bounded ranges do not depend on metadata permissions.
+            try:
+                stats, stat_errors = self._client.stat_many(
+                    [native[index] for index in size_indices]
+                )
+            except Exception as error:
+                _rebase_error(
+                    error, size_indices, [internals[index] for index in size_indices]
+                )
+                raise
+            errors.update(
+                (size_indices[position], error)
+                for position, error in stat_errors.items()
+            )
+            for index, stat in zip(size_indices, stats):
+                if stat is not None:
+                    sizes[index] = stat["size"]
         normalized = []
         validation_errors = {}
         for i, (start, end) in enumerate(zip(starts, ends)):
@@ -4388,11 +4432,15 @@ class VfsiFileSystem(AbstractFileSystem):
             lengths, self.batch_size, self.max_batch_bytes
         ):
             batch = [valid[position] for position in positions]
-            valid_data, read_errors = self._client.read_many(
-                [native[i] for i in batch],
-                [normalized[i][0] for i in batch],
-                [normalized[i][1] for i in batch],
-            )
+            try:
+                valid_data, read_errors = self._client.read_many(
+                    [native[i] for i in batch],
+                    [normalized[i][0] for i in batch],
+                    [normalized[i][1] for i in batch],
+                )
+            except Exception as error:
+                _rebase_error(error, batch, [internals[index] for index in batch])
+                raise
             for j, i in enumerate(batch):
                 data[i] = valid_data[j]
                 if j in read_errors:
@@ -4501,16 +4549,15 @@ class VfsiFileSystem(AbstractFileSystem):
                         batch_native, batch_datas, truncate=True
                     )
                 except Exception as error:
-                    position = getattr(error, "index", None)
-                    if isinstance(position, int) and 0 <= position < len(batch):
-                        index = batch[position]
-                        _oserror(
-                            error,
-                            paths[index],
-                            index=(
-                                index if input_indices is None else input_indices[index]
-                            ),
-                        )
+                    _rebase_error(
+                        error,
+                        (
+                            batch
+                            if input_indices is None
+                            else [input_indices[index] for index in batch]
+                        ),
+                        [paths[index] for index in batch],
+                    )
                     raise
                 for position, index in enumerate(batch):
                     expected = len(datas[index])
@@ -4816,10 +4863,11 @@ class VfsiFileSystem(AbstractFileSystem):
             try:
                 data, errors = self._client.read_all_many(native, read_batch_bytes)
             except Exception as error:
-                position = getattr(error, "index", None)
-                if isinstance(position, int) and 0 <= position < len(selected):
-                    remote_path, _, _, public_index = selected[position]
-                    _oserror(error, remote_path, index=public_index)
+                _rebase_error(
+                    error,
+                    [public_index for _, _, _, public_index in selected],
+                    [remote_path for remote_path, _, _, _ in selected],
+                )
                 raise
             for i, ((remote_path, local_path, _, public_index), buf) in enumerate(
                 zip(selected, data)
@@ -5140,9 +5188,17 @@ class VfsiFileSystem(AbstractFileSystem):
                 if _normalize_mode(mode) in ("r", "a", "a+")
             ]
             if metadata_indices:
-                attrs = self._client.fstat_many(
-                    [fds[index] for index in metadata_indices]
-                )
+                try:
+                    attrs = self._client.fstat_many(
+                        [fds[index] for index in metadata_indices]
+                    )
+                except Exception as error:
+                    _rebase_error(
+                        error,
+                        metadata_indices,
+                        [paths[index] for index in metadata_indices],
+                    )
+                    raise
                 for index, attr in zip(metadata_indices, attrs):
                     if attr["type"] == "directory":
                         raise IsADirectoryError(

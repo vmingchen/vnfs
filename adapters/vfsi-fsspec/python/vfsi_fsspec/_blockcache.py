@@ -26,6 +26,7 @@ from ._fs import (
     _normalize_mode,
     _open_with_wrappers,
     _OwnedStream,
+    _rebase_error,
 )
 
 _CACHE_FORMAT_KEY = "nfs4fs_blockcache_format"
@@ -511,7 +512,12 @@ def _raw_cache_records(cache_fs, paths):
 def _prepare_cache_records(cache_fs, paths):
     records, info_indices = _raw_cache_records(cache_fs, paths)
     if info_indices:
-        infos = cache_fs.fs._info_many([paths[index] for index in info_indices])
+        selected_paths = [paths[index] for index in info_indices]
+        try:
+            infos = cache_fs.fs._info_many(selected_paths)
+        except Exception as error:
+            _rebase_error(error, info_indices, selected_paths)
+            raise
         for index, info in zip(info_indices, infos):
             records[index]["info"] = info
 
@@ -626,12 +632,16 @@ def _open_many_with_cache(cache_fs, open_files):
                 cohorts.setdefault(blocksize, []).append(index)
             indexed_files = {}
             for blocksize, indices in cohorts.items():
-                opened = cache_fs.fs.open_many(
-                    [open_files[index] for index in indices],
-                    block_size=blocksize,
-                    cache_type="none",
-                    sizes=[records[index]["detail"]["size"] for index in indices],
-                )
+                try:
+                    opened = cache_fs.fs.open_many(
+                        [open_files[index] for index in indices],
+                        block_size=blocksize,
+                        cache_type="none",
+                        sizes=[records[index]["detail"]["size"] for index in indices],
+                    )
+                except Exception as error:
+                    _rebase_error(error, indices, [paths[index] for index in indices])
+                    raise
                 remote_files.extend(opened)
                 indexed_files.update(zip(indices, opened))
 
