@@ -606,8 +606,9 @@ pub trait VfsiExt: Vfsi {
     /// Use Vfsi::vread to retain the accompanying error and completion state.
     /// A write's acknowledged prefix is returned as a short success. Its
     /// accompanying failure is saved and reported before further I/O, on flush,
-    /// or on seek, retaining OpError as the I/O error's inner source. Nonempty
-    /// write_all also reports a failure following a fully acknowledged payload.
+    /// or on seek. It returns the underlying std::io::Error cause, discarding
+    /// the OpError wrapper; use Vfsi::vwrite to retain per-input completion state.
+    /// Nonempty write_all also reports a failure after a fully acknowledged payload.
     /// The cursor is then unresolved: progress does not contain an actual append
     /// offset. After observing the error, an explicit absolute/end-based seek
     /// re-establishes it. Whole-call rejections retain std::io::Error. Uncertain writes
