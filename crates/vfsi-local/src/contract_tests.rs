@@ -525,6 +525,50 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn constructor_allows_known_files_without_directory_read_permission() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = TempRoot::new("search-only-root");
+        std::fs::create_dir(&root.0).unwrap();
+        std::fs::set_permissions(&root.0, std::fs::Permissions::from_mode(0o300)).unwrap();
+        // Restore permissions before inspecting any result, including setup failures.
+        let result = (|| -> std::io::Result<_> {
+            let mut backend = LocalBackend::new(root.0.clone(), ())?;
+            let file = FileOperand::from_path("/known");
+            backend
+                .vwrite_impl(&borrow_writes(&[WriteOp::at(
+                    file.clone(),
+                    0,
+                    b"known data".to_vec(),
+                )
+                .with_creation()]))?
+                .remove(0)
+                .map_err(OpError::into_cause)?;
+            let read = backend
+                .vread_impl(&[ReadOp::new(file, VfOffset::At(0), 32)])?
+                .remove(0)
+                .map_err(OpError::into_cause)?;
+            let stats = backend
+                .vstatfs_impl(&[FileOperand::from_path("/")])?
+                .remove(0)
+                .map_err(OpError::into_cause)?;
+            let listing = backend.listdir_impl(Path::new("/"), AttrMask::MODE, 0, false);
+            Ok((read.data, stats, listing))
+        })();
+        std::fs::set_permissions(&root.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (data, _stats, listing) = result.unwrap();
+        assert_eq!(data, b"known data");
+        // Root bypasses DAC; ordinary test users must still lack enumeration rights.
+        // SAFETY: geteuid has no arguments or preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            assert_eq!(
+                listing.unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+        }
+    }
+
     #[test]
     fn constructor_rejects_fifo_roots_without_waiting_for_a_writer() {
         use std::os::unix::ffi::OsStrExt;

@@ -7,7 +7,6 @@ from typing import (
     BinaryIO,
     Callable,
     Iterator,
-    Mapping,
     Optional,
     Sequence,
     TypeVar,
@@ -20,6 +19,7 @@ Path = Union[str, PathLike[str]]
 BytesLike = Union[bytes, bytearray, memoryview]
 _PathT = TypeVar("_PathT", bound=Path)
 _EndT = TypeVar("_EndT", bound=Optional[int])
+_BytesT = TypeVar("_BytesT", bound=BytesLike)
 
 class VfsiFile(AbstractBufferedFile):
     fs: VfsiFileSystem
@@ -173,7 +173,7 @@ class VfsiFileSystem(AbstractFileSystem):
     ) -> list[Union[bytes, BaseException]]: ...
     def pipe(
         self,
-        path: Union[Path, Mapping[Path, BytesLike]],
+        path: Union[Path, dict[_PathT, _BytesT]],
         value: Optional[BytesLike] = None,
         callback: Any = ...,
         **kwargs: Any,

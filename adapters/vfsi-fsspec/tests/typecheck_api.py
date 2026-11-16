@@ -1,7 +1,8 @@
 """Static-use checks for vfsi-fsspec's installed typing surface."""
 
+from os import PathLike
 from pathlib import Path
-from typing import Optional, Union
+from typing import Mapping, Optional, Union
 
 from vfsi_fsspec import VfsiFile, VfsiFileSystem, install_fsspec_blockcache_compat
 
@@ -29,3 +30,19 @@ def range_inputs(fs: VfsiFileSystem) -> None:
     fs.cat_ranges(("/a",), starts, ends)  # type: ignore[arg-type]
     fs.cat_ranges(names, (0,), ends)  # type: ignore[arg-type]
     fs.cat_ranges(names, starts, (2,))  # type: ignore[arg-type]
+
+
+def pipe_inputs(fs: VfsiFileSystem) -> None:
+    names: dict[str, bytes] = {"/a": b"a"}
+    paths: dict[Path, bytearray] = {Path("/b"): bytearray(b"b")}
+    mixed: dict[Union[str, Path], Union[bytes, bytearray, memoryview]] = {
+        "/a": b"a",
+        Path("/b"): memoryview(b"b"),
+    }
+    fs.pipe(names)
+    fs.pipe(paths)
+    fs.pipe(mixed)
+    generic: Mapping[Union[str, PathLike[str]], Union[bytes, bytearray, memoryview]] = {
+        "/a": b"a"
+    }
+    fs.pipe(generic)  # type: ignore[arg-type]

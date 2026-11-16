@@ -349,9 +349,15 @@ impl LocalBackend {
             vfsi_core::internal::errors::with_context(error, "connect", &root)
         };
         let root_canon = std::fs::canonicalize(&root).map_err(root_error)?;
+        // The root is a resolution anchor, not an enumeration descriptor.
+        // O_PATH preserves access to known children in search-only directories.
+        #[cfg(target_os = "linux")]
+        let root_flags = libc::O_DIRECTORY | libc::O_PATH;
+        #[cfg(not(target_os = "linux"))]
+        let root_flags = libc::O_DIRECTORY;
         let root_dir = OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_DIRECTORY)
+            .custom_flags(root_flags)
             .open(&root_canon)
             .map_err(root_error)?;
         Ok(LocalBackend {
