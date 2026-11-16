@@ -1,7 +1,13 @@
 version: 2
 updates:
+  # Shared path dependencies span the root and detached native workspaces.
   - package-ecosystem: cargo
-    directory: "/"
+    directories:
+      - "/"
+      - "/adapters/nfs4fs"
+      - "/adapters/vfsi-python"
+      - "/adapters/vsmb"
+      - "/fuzz"
     schedule:
       interval: weekly
     groups:
@@ -16,25 +22,12 @@ updates:
       python-dependencies:
         patterns: ["*"]
 
-  - package-ecosystem: cargo
-    directory: "/adapters/nfs4fs"
-    schedule:
-      interval: weekly
-    groups:
-      python-native-dependencies:
-        patterns: ["*"]
-
   - package-ecosystem: pip
     directory: "/adapters/vfsi-fsspec"
     schedule:
       interval: weekly
 
   - package-ecosystem: pip
-    directory: "/adapters/vsmb"
-    schedule:
-      interval: weekly
-
-  - package-ecosystem: cargo
     directory: "/adapters/vsmb"
     schedule:
       interval: weekly
