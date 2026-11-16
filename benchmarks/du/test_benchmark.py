@@ -163,6 +163,98 @@ class BenchmarkTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'insufficient publishable samples'):
                 table(data)
 
+    def _frozen_checkout(self, root, problem=None):
+        baseline = json.loads((runner.HERE / 'baseline.json').read_text())
+        checkout = root / 'frozen checkout'
+        (checkout / 'target/release').mkdir(parents=True)
+        (checkout / 'target/release/du').write_bytes(b'stale executable')
+        shutil.copy(runner.HERE / 'Cargo.lock', checkout / 'Cargo.lock')
+        if problem == 'lock':
+            (checkout / 'Cargo.lock').write_text('changed lock')
+        packages = [
+            {'name': name, 'version': version, 'source': 'registry+https://example.invalid'}
+            for name, version in baseline['packages'].items()
+        ]
+        if problem == 'version':
+            packages[0]['version'] = '99.0.0'
+        if problem == 'source':
+            packages[0]['source'] = None
+        if problem == 'missing':
+            packages.pop()
+        def checked(command, **kwargs):
+            words = [str(word) for word in command]
+            if 'rev-parse' in words:
+                return 'wrong revision' if problem == 'revision' else baseline['port_revision']
+            if 'diff' in words:
+                return 'tracked edits' if problem == 'dirty' else ''
+            if words[:2] == ['cargo', 'metadata']:
+                return json.dumps({'packages': packages})
+            if words[0] in ['rustc', 'cargo']:
+                return 'test toolchain'
+            raise AssertionError(words)
+        return checkout, checked
+
+    def test_frozen_build_uses_reported_executable_with_external_or_target_directories(self):
+        for relative in [False, True]:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory(dir='/tmp') as temp:
+                root = Path(temp)
+                checkout, checked = self._frozen_checkout(root)
+                artifact = Path('custom/aarch64/release/du') if relative else root / 'external-cache/release/du'
+                executable = (checkout / artifact).resolve()
+                def build(command, **kwargs):
+                    self.assertTrue(kwargs['check'])
+                    self.assertEqual(Path(kwargs['cwd']).resolve(), checkout.resolve())
+                    executable.parent.mkdir(parents=True)
+                    executable.write_bytes(b'fresh executable')
+                    kwargs['stdout'].write(json.dumps({
+                        'reason': 'compiler-artifact', 'target': {'name': 'du', 'kind': ['bin']},
+                        'executable': str(artifact),
+                    }) + '\n')
+                with mock.patch.object(runner, 'checked', side_effect=checked), \
+                     mock.patch.object(runner.subprocess, 'run', side_effect=build):
+                    binary, provenance = runner.build(str(checkout), root)
+                self.assertEqual(binary, executable)
+                self.assertEqual(provenance['binary_sha256'], runner.sha(executable))
+                self.assertEqual((checkout / 'target/release/du').read_bytes(), b'stale executable')
+
+    def test_frozen_build_rejects_missing_ambiguous_and_failed_artifacts(self):
+        for outcome in ['missing', 'ambiguous', 'failed']:
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory(dir='/tmp') as temp:
+                root = Path(temp)
+                checkout, checked = self._frozen_checkout(root)
+                def build(command, **kwargs):
+                    if outcome == 'failed':
+                        raise subprocess.CalledProcessError(1, command)
+                    for executable in ([] if outcome == 'missing' else ['one/du', 'two/du']):
+                        kwargs['stdout'].write(json.dumps({
+                            'reason': 'compiler-artifact', 'target': {'name': 'du', 'kind': ['bin']},
+                            'executable': executable,
+                        }) + '\n')
+                with mock.patch.object(runner, 'checked', side_effect=checked), \
+                     mock.patch.object(runner.subprocess, 'run', side_effect=build):
+                    with self.assertRaises(subprocess.CalledProcessError if outcome == 'failed' else RuntimeError):
+                        runner.build(str(checkout), root)
+                self.assertEqual((checkout / 'target/release/du').read_bytes(), b'stale executable')
+
+    def test_frozen_build_preserves_source_lock_and_registry_version_gates(self):
+        for problem in ['revision', 'dirty', 'lock', 'version', 'source', 'missing']:
+            with self.subTest(problem=problem), tempfile.TemporaryDirectory(dir='/tmp') as temp:
+                root = Path(temp)
+                checkout, checked = self._frozen_checkout(root, problem)
+                executable = root / 'du'
+                executable.write_bytes(b'fresh executable')
+                def build(command, **kwargs):
+                    kwargs['stdout'].write(json.dumps({
+                        'reason': 'compiler-artifact', 'target': {'name': 'du', 'kind': ['bin']},
+                        'executable': str(executable),
+                    }) + '\n')
+                with mock.patch.object(runner, 'checked', side_effect=checked), \
+                     mock.patch.object(runner.subprocess, 'run', side_effect=build) as built:
+                    with self.assertRaises(ValueError):
+                        runner.build(str(checkout), root)
+                if problem in ['revision', 'dirty', 'lock']:
+                    built.assert_not_called()
+
     def test_candidate_build_without_du_artifact_never_uses_cached_executable(self):
         from compare import build_candidate
         with tempfile.TemporaryDirectory() as temp:
