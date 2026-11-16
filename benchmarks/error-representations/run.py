@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -92,8 +93,8 @@ def main():
     parser.add_argument("--pairs", default=9, type=int)
     parser.add_argument("--seconds", default=0.05, type=float)
     args = parser.parse_args()
-    if args.pairs < 7 or args.seconds <= 0:
-        parser.error("at least seven pairs and positive duration required")
+    if args.pairs < 7 or not math.isfinite(args.seconds) or args.seconds <= 0:
+        parser.error("at least seven pairs and positive finite duration required")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     fixture = Path(tempfile.mkdtemp(prefix="fixture-", dir=output))

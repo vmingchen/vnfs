@@ -833,6 +833,74 @@ raise SystemExit(1)
             self.benchmark.compiler_profiles('{"reason":"build-finished","success":true}\n')
 
 
+class BenchmarkPreflightTests(unittest.TestCase):
+    def setUp(self):
+        self.repo = Path(__file__).resolve().parents[1]
+        self.temp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def test_nonfinite_durations_fail_before_outputs_or_external_commands(self):
+        import importlib.util
+        from unittest.mock import patch
+        for relative, option, required in [
+            ("scripts/benchmark-write-scheduler.py", "--target-ms", []),
+            ("benchmarks/error-representations/run.py", "--seconds",
+             ["--timing", "unused", "--allocations", "unused"]),
+        ]:
+            spec = importlib.util.spec_from_file_location("duration_preflight", self.repo / relative)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            for index, value in enumerate(["nan", "inf", "-inf", "0", "-1"]):
+                with self.subTest(script=relative, value=value):
+                    output = self.root / (Path(relative).parent.name + str(index))
+                    with patch.object(sys, "argv", ["benchmark", *required, f"{option}={value}", "--output", str(output)]), \
+                         patch.object(module.subprocess, "check_output", side_effect=AssertionError("preflight dispatched a command")), \
+                         patch.object(module.subprocess, "run", side_effect=AssertionError("preflight dispatched a command")):
+                        with self.assertRaises(SystemExit) as caught:
+                            module.main()
+                    self.assertEqual(caught.exception.code, 2)
+                    self.assertFalse(output.exists())
+
+    def test_assertion_based_evidence_tools_refuse_optimized_python_before_effects(self):
+        for relative, entry, takes_args in [
+            ("benchmarks/du/compare.py", "main", True),
+            ("benchmarks/error-integration/trace.py", "main", False),
+            ("scripts/benchmark-write-scheduler.py", "main", False),
+            ("benchmarks/rsync/adoption.py", "prepare", True),
+        ]:
+            with self.subTest(script=relative):
+                path = self.repo / relative
+                code = f"""
+import importlib.util, pathlib, subprocess, sys
+from types import SimpleNamespace
+from unittest.mock import patch
+path = pathlib.Path({str(path)!r})
+sys.path.insert(0, str(path.parent))
+spec = importlib.util.spec_from_file_location('optimized_preflight', path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+output = pathlib.Path({str(self.root / "no-effects")!r})
+args = SimpleNamespace(pairs=3, captures=1, output=output, target_dir=output, checkout=output)
+sys.argv = ['benchmark', '--work', str(output)] if 'trace.py' == path.name else ['benchmark', '--output', str(output)]
+with (
+    patch.object(pathlib.Path, 'mkdir', side_effect=AssertionError('created output')),
+    patch.object(subprocess, 'run', side_effect=AssertionError('dispatched command')),
+    patch.object(subprocess, 'check_output', side_effect=AssertionError('dispatched command')),
+):
+    try:
+        getattr(module, {entry!r})(*([args] if {takes_args!r} else []))
+    except RuntimeError as error:
+        if str(error) == 'benchmark validation assertions must be enabled':
+            raise SystemExit(0)
+        raise
+raise SystemExit('optimized execution was accepted')
+"""
+                result = subprocess.run([sys.executable, "-O", "-c", code], capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse((self.root / "no-effects").exists())
+
+
 class PairedBenchmarkTests(unittest.TestCase):
     def setUp(self):
         import importlib.util

@@ -56,6 +56,8 @@ def build_candidate(checkout, output):
 
 
 def main(args):
+    if not __debug__:
+        raise RuntimeError("benchmark validation assertions must be enabled")
     if not (1 <= args.pairs <= 101 and 1 <= args.captures <= 9):
         raise ValueError('invalid sample counts')
     args.output.mkdir(parents=True, exist_ok=False)
