@@ -149,3 +149,95 @@ fn child_lookup_preserves_known_results_across_status_failure_and_reply_loss() {
     client.max_ops = max_ops;
     cleanup(&mut client, &root, &dir, &name);
 }
+
+#[test]
+fn live_lookup_type_rejects_short_and_trailing_attribute_bytes() {
+    use crate::rpc::{
+        RpcClient,
+        test_support::{accepted_reply, read_record, successful_sequence_reply},
+    };
+    use std::{net::TcpListener, time::Duration};
+    let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+        assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+        return;
+    };
+    let minor = std::env::var("VFSI_NFS_MINOR")
+        .unwrap_or_else(|_| "1".into())
+        .parse()
+        .unwrap();
+    for scalar in [true, false] {
+        for length in [0usize, 3, 4, 8] {
+            let mut client = NfsClient::connect_minor(&server, minor).unwrap();
+            let root = client.root().clone();
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let address = listener.local_addr().unwrap();
+            let peer = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let request = read_record(&mut socket).unwrap();
+                let mut payload = successful_sequence_reply(&request, 5);
+                for word in [
+                    nfs_opnum4_NFS4_OP_PUTFH,
+                    0,
+                    nfs_opnum4_NFS4_OP_LOOKUP,
+                    0,
+                    nfs_opnum4_NFS4_OP_GETFH,
+                    0,
+                    4,
+                ] {
+                    payload.extend_from_slice(&word.to_be_bytes());
+                }
+                payload.extend_from_slice(b"file");
+                for word in [
+                    nfs_opnum4_NFS4_OP_GETATTR,
+                    0,
+                    1,
+                    1 << FATTR4_TYPE,
+                    length as u32,
+                ] {
+                    payload.extend_from_slice(&word.to_be_bytes());
+                }
+                let mut attrs = nfs_ftype4_NF4REG.to_be_bytes().to_vec();
+                attrs.resize(length, 0);
+                payload.extend_from_slice(&attrs);
+                payload.resize(payload.len() + (4 - length % 4) % 4, 0);
+                accepted_reply(&mut socket, &request, &payload);
+            });
+            let rpc = RpcClient::connect_with_timeouts(
+                &address.to_string(),
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+            )
+            .unwrap();
+            let original = client.replace_test_rpc(rpc);
+            let result = if scalar {
+                client
+                    .lookup_getattr(&root, b"file")
+                    .map_err(vfsi_core::internal::errors::from_rpc)
+            } else {
+                client
+                    .lookup_getattr_many(&[(root, b"file".to_vec())])
+                    .unwrap()
+                    .remove(0)
+                    .map_err(OpError::into_cause)
+            };
+            client.replace_test_rpc(original);
+            peer.join().unwrap();
+            client.shutdown().unwrap();
+            if length == 4 {
+                let (fh, kind) = result.unwrap();
+                assert_eq!(fh.as_bytes(), b"file");
+                assert_eq!(kind, nfs_ftype4_NF4REG);
+            } else {
+                let error = result.expect_err("TYPE must occupy exactly four bytes");
+                assert_eq!(
+                    vfsi_core::transport_kind(&error),
+                    Some(vfsi_core::TransportKind::InvalidReply),
+                    "scalar={scalar}, length={length}: {error:?}",
+                );
+            }
+        }
+    }
+}

@@ -22,7 +22,6 @@ pub(super) fn remap_listing_error(
 }
 
 fn open_adb_path(
-    _index: usize,
     mut open: impl FnMut(
         crate::client::OpenCreate,
     ) -> vfsi_core::RpcResult<(NfsFh, nfsv41_sys::stateid4)>,
@@ -30,7 +29,15 @@ fn open_adb_path(
     match open(crate::client::OpenCreate::NoCreate) {
         Ok(opened) => Ok(opened),
         Err(error) if error.status == nfsstat4_NFS4ERR_NOENT => {
-            open(crate::client::OpenCreate::Guarded).map_err(vfsi_core::internal::errors::from_rpc)
+            match open(crate::client::OpenCreate::Guarded) {
+                Err(error)
+                    if error.status == nfsstat4_NFS4ERR_EXIST && error.transport_kind.is_none() =>
+                {
+                    open(crate::client::OpenCreate::NoCreate)
+                }
+                result => result,
+            }
+            .map_err(vfsi_core::internal::errors::from_rpc)
         }
         Err(error) => Err(vfsi_core::internal::errors::from_rpc(error)),
     }
@@ -1283,7 +1290,7 @@ impl VectorBackend for NfsVecFs {
                 Err(_) => return Err(std::io::Error::from_raw_os_error((ERR_NOENT) as i32)),
             };
             let dirfh = self.resolve_path(&path_from_bytes(dir), true)?;
-            let (fh, sid) = open_adb_path(i, |create| {
+            let (fh, sid) = open_adb_path(|create| {
                 self.nfs
                     .open_path(&dirfh, name, OPEN4_SHARE_ACCESS_WRITE, create)
             })?;
@@ -1326,7 +1333,7 @@ impl VectorBackend for NfsVecFs {
                 }
                 written += 1;
             }
-            let _ = self.nfs.close_path(&fh, &sid);
+            let _ = self.nfs.close_temporary_path(&fh, &sid);
             if let Some(e) = failed {
                 return Err(e);
             }
@@ -1353,10 +1360,138 @@ mod adb_path_tests {
     }
 
     #[test]
+    fn adb_creation_race_reopens_once_and_preserves_terminal_errors() {
+        use crate::client::OpenCreate;
+        for terminal in [None, Some(nfsstat4_NFS4ERR_ACCESS)] {
+            let mut calls = Vec::new();
+            let result = open_adb_path(|create| {
+                calls.push(create);
+                let status = match calls.len() {
+                    1 => Some(nfsstat4_NFS4ERR_NOENT),
+                    2 => Some(nfsstat4_NFS4ERR_EXIST),
+                    3 => terminal,
+                    _ => panic!("ADB create retry must be bounded"),
+                };
+                status.map_or_else(
+                    || Ok(opened()),
+                    |status| Err(vfsi_core::RpcError::op(0, status)),
+                )
+            });
+            assert_eq!(
+                calls,
+                [
+                    OpenCreate::NoCreate,
+                    OpenCreate::Guarded,
+                    OpenCreate::NoCreate
+                ]
+            );
+            match terminal {
+                None => assert_eq!(result.unwrap().0, opened().0),
+                Some(code) => assert_eq!(crate::test_native_code(&result.unwrap_err()), code),
+            }
+        }
+    }
+
+    #[test]
+    fn adb_does_not_retry_terminal_or_uncertain_creates() {
+        for phase in ["denied", "uncached", "lost"] {
+            let mut calls = Vec::new();
+            let error = open_adb_path(|create| {
+                calls.push(create);
+                Err(if calls.len() == 1 {
+                    vfsi_core::RpcError::op(0, nfsstat4_NFS4ERR_NOENT)
+                } else {
+                    match phase {
+                        "denied" => vfsi_core::RpcError::op(0, nfsstat4_NFS4ERR_ACCESS),
+                        "uncached" => {
+                            vfsi_core::RpcError::op(0, nfsstat4_NFS4ERR_RETRY_UNCACHED_REP)
+                        }
+                        _ => vfsi_core::RpcError::transport("lost CREATE reply"),
+                    }
+                })
+            })
+            .unwrap_err();
+            assert_eq!(
+                calls,
+                [
+                    crate::client::OpenCreate::NoCreate,
+                    crate::client::OpenCreate::Guarded
+                ]
+            );
+            if phase == "lost" {
+                assert!(vfsi_core::transport_kind(&error).is_some());
+            } else {
+                assert_eq!(
+                    crate::test_native_code(&error),
+                    if phase == "denied" {
+                        nfsstat4_NFS4ERR_ACCESS
+                    } else {
+                        nfsstat4_NFS4ERR_RETRY_UNCACHED_REP
+                    }
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[test]
+    fn live_adb_retains_temporary_close_owners_after_success_and_write_failure() {
+        use std::sync::Arc;
+        use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+        let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+            assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+            return;
+        };
+        let minor = std::env::var("VFSI_NFS_MINOR")
+            .unwrap_or_else(|_| "1".into())
+            .parse()
+            .unwrap();
+        for write_fails in [false, true] {
+            let mut fs = NfsVecFs::connect_minor(&server, minor).unwrap();
+            let path = PathBuf::from(format!(
+                "/adb-close-owner-{}-{write_fails}",
+                std::process::id()
+            ));
+            let fault = Arc::new(FaultScript::one(
+                OpenFaultPoint::BeforePathClose,
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            ));
+            fs.set_fault_injector(fault.clone());
+            if write_fails {
+                fs.nfs.inject_resource_rejection_once(b"write");
+            }
+            let result =
+                fs.vwrite_adb_impl(&[Adb::blocknum_only(path.to_str().unwrap(), 0, 8, 1, 0, 17)]);
+            let pending = fs.nfs.deferred_path_close_count();
+            let confirmed = fs.nfs.confirmed_path_closes();
+            let size = fs.stat_impl(&path).unwrap().size;
+            fs.unlink_impl(&path).unwrap();
+            fs.nfs.shutdown().unwrap();
+            assert!(fault.is_consumed());
+            assert_eq!(
+                pending, 1,
+                "exact temporary owner must survive failed CLOSE"
+            );
+            assert_eq!(fs.nfs.deferred_path_close_count(), 0);
+            assert_eq!(fs.nfs.confirmed_path_closes(), confirmed + 1);
+            if write_fails {
+                assert_eq!(
+                    crate::test_native_code(&result.unwrap_err()),
+                    nfsstat4_NFS4ERR_RESOURCE
+                );
+                assert_eq!(size, 0);
+            } else {
+                assert_eq!(result.unwrap(), [1]);
+                assert_eq!(size, 8);
+            }
+        }
+    }
+
+    #[test]
     fn adb_reuses_existing_path_and_only_creates_after_noent() {
         let expected = opened();
         let mut calls = Vec::new();
-        let actual = open_adb_path(5, |create| {
+        let actual = open_adb_path(|create| {
             calls.push(create);
             assert_eq!(create, crate::client::OpenCreate::NoCreate);
             Ok(expected.clone())
@@ -1367,7 +1502,7 @@ mod adb_path_tests {
 
         let expected = opened();
         let mut calls = Vec::new();
-        let actual = open_adb_path(7, |create| {
+        let actual = open_adb_path(|create| {
             calls.push(create);
             match create {
                 crate::client::OpenCreate::NoCreate => {
