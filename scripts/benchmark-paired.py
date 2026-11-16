@@ -33,7 +33,6 @@ def run_command(argv, stem, timeout, cpu=None):
         argv = ['taskset', '-c', str(cpu), *argv]
     with stem.with_suffix('.stdout').open('xb') as out, stem.with_suffix('.stderr').open('xb') as err:
         start = time.perf_counter_ns()
-        process = subprocess.Popen(argv, stdout=out, stderr=err, start_new_session=True)
         expired = threading.Event()
         def terminate():
             expired.set()
@@ -41,15 +40,35 @@ def run_command(argv, stem, timeout, cpu=None):
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-        deadline = threading.Timer(timeout, terminate)
-        deadline.start()
+        process = subprocess.Popen(argv, stdout=out, stderr=err, start_new_session=True)
+        deadline = None
+        primary = None
         try:
+            deadline = threading.Timer(timeout, terminate)
+            deadline.start()
             # wait(timeout=...) polls on POSIX, quantizing short app timings.
             status = process.wait()
             elapsed = time.perf_counter_ns() - start
+        except BaseException as error:
+            primary = error
+            try:
+                try:
+                    terminate()
+                finally:
+                    process.wait(timeout=5)
+            except BaseException as cleanup:
+                raise error from cleanup
+            raise
         finally:
-            deadline.cancel()
-            deadline.join()
+            try:
+                if deadline is not None:
+                    deadline.cancel()
+                    if deadline.ident is not None:
+                        deadline.join()
+            except BaseException as cleanup:
+                if primary is not None:
+                    raise primary from cleanup
+                raise
         if expired.is_set():
             raise RuntimeError(f'command timed out; logs: {stem}')
     if status:

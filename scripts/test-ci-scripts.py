@@ -868,6 +868,118 @@ class PairedBenchmarkTests(unittest.TestCase):
         self.assertEqual(calls, [None])
         self.assertGreater(result['elapsed_ns'], 0)
 
+    def test_cancelled_wait_kills_and_reaps_owned_group_without_losing_primary(self):
+        from unittest.mock import Mock, call, patch
+        import signal
+        for index, primary in enumerate([KeyboardInterrupt("stop"), SystemExit(7), OSError("wait failed")]):
+            with self.subTest(primary=primary):
+                process = Mock(pid=12345)
+                process.wait.side_effect = [primary, -signal.SIGKILL]
+                timer = Mock(ident=1)
+                with patch.object(self.paired.subprocess, 'Popen', return_value=process), \
+                     patch.object(self.paired.threading, 'Timer', return_value=timer), \
+                     patch.object(self.paired.os, 'killpg') as kill:
+                    with self.assertRaises(type(primary)) as caught:
+                        self.paired.run_command(['unused'], self.root / f'cancel-{index}', 5)
+                self.assertIs(caught.exception, primary)
+                kill.assert_called_once_with(process.pid, signal.SIGKILL)
+                self.assertEqual(process.wait.call_args_list, [call(), call(timeout=5)])
+                timer.cancel.assert_called_once_with()
+                timer.join.assert_called_once_with()
+
+    def test_cleanup_failures_are_chained_under_wait_cancellation(self):
+        from unittest.mock import Mock, call, patch
+        for boundary in ['kill', 'reap']:
+            with self.subTest(boundary=boundary):
+                primary = KeyboardInterrupt("primary")
+                cleanup = RuntimeError("cleanup")
+                process = Mock(pid=12345)
+                process.wait.side_effect = [primary, cleanup if boundary == 'reap' else 0]
+                timer = Mock(ident=1)
+                with patch.object(self.paired.subprocess, 'Popen', return_value=process), \
+                     patch.object(self.paired.threading, 'Timer', return_value=timer), \
+                     patch.object(self.paired.os, 'killpg', side_effect=cleanup if boundary == 'kill' else None):
+                    with self.assertRaises(KeyboardInterrupt) as caught:
+                        self.paired.run_command(['unused'], self.root / f'cleanup-{boundary}', 5)
+                self.assertIs(caught.exception, primary)
+                self.assertIs(caught.exception.__cause__, cleanup)
+                self.assertEqual(process.wait.call_args_list, [call(), call(timeout=5)])
+                timer.cancel.assert_called_once_with()
+                timer.join.assert_called_once_with()
+
+    def test_timer_start_failure_also_reaps_the_created_process(self):
+        from unittest.mock import Mock, call, patch
+        for started in [False, True]:
+            primary = RuntimeError("timer start failed")
+            process = Mock(pid=12345)
+            process.wait.return_value = 0
+            timer = Mock(ident=1 if started else None)
+            timer.start.side_effect = primary
+            with patch.object(self.paired.subprocess, 'Popen', return_value=process), \
+                 patch.object(self.paired.threading, 'Timer', return_value=timer), \
+                 patch.object(self.paired.os, 'killpg') as kill:
+                with self.assertRaises(RuntimeError) as caught:
+                    self.paired.run_command(['unused'], self.root / f'timer-{started}', 5)
+            self.assertIs(caught.exception, primary)
+            kill.assert_called_once()
+            self.assertEqual(process.wait.call_args_list, [call(timeout=5)])
+            timer.cancel.assert_called_once_with()
+            self.assertEqual(timer.join.call_count, int(started))
+
+    def test_timer_creation_failure_reaps_the_created_process(self):
+        from unittest.mock import Mock, call, patch
+        primary = MemoryError("timer allocation")
+        process = Mock(pid=12345)
+        process.wait.return_value = 0
+        with patch.object(self.paired.subprocess, 'Popen', return_value=process), \
+             patch.object(self.paired.threading, 'Timer', side_effect=primary), \
+             patch.object(self.paired.os, 'killpg') as kill:
+            with self.assertRaises(MemoryError) as caught:
+                self.paired.run_command(['unused'], self.root / 'timer-allocation', 5)
+        self.assertIs(caught.exception, primary)
+        kill.assert_called_once()
+        self.assertEqual(process.wait.call_args_list, [call(timeout=5)])
+
+    def test_timer_cleanup_failure_does_not_replace_wait_cancellation(self):
+        from unittest.mock import Mock, patch
+        primary = KeyboardInterrupt("primary")
+        cleanup = RuntimeError("timer join")
+        process = Mock(pid=12345)
+        process.wait.side_effect = [primary, 0]
+        timer = Mock(ident=1)
+        timer.join.side_effect = cleanup
+        with patch.object(self.paired.subprocess, 'Popen', return_value=process), \
+             patch.object(self.paired.threading, 'Timer', return_value=timer), \
+             patch.object(self.paired.os, 'killpg'):
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                self.paired.run_command(['unused'], self.root / 'timer-cleanup', 5)
+        self.assertIs(caught.exception, primary)
+        self.assertIs(caught.exception.__cause__, cleanup)
+
+    def test_real_child_is_reaped_before_cancellation_is_returned(self):
+        from unittest.mock import patch
+        import signal
+        original_wait = self.paired.subprocess.Popen.wait
+        processes = []
+        primary = KeyboardInterrupt("cancel live child")
+        def interrupted_wait(process, timeout=None):
+            if timeout is None and not processes:
+                processes.append(process)
+                raise primary
+            return original_wait(process, timeout=timeout)
+        try:
+            with patch.object(self.paired.subprocess.Popen, 'wait', interrupted_wait):
+                with self.assertRaises(KeyboardInterrupt) as caught:
+                    self.paired.run_command(['sleep', '30'], self.root / 'real-cancel', 5)
+            self.assertIs(caught.exception, primary)
+            self.assertEqual(len(processes), 1)
+            self.assertEqual(processes[0].returncode, -signal.SIGKILL)
+        finally:
+            for process in processes:
+                if process.returncode is None:
+                    self.paired.os.killpg(process.pid, signal.SIGKILL)
+                    original_wait(process, timeout=5)
+
     def test_abba_pairs_preserve_fixture_outputs_and_refuse_overwrite(self):
         command = 'printf identical'
         result = self.run_cli(command, command, '--check-output')
