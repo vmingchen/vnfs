@@ -295,8 +295,8 @@ unsafe fn cursor_snapshot<const IDS: bool>(
                                 "invalid cohort child path or cursor",
                             ));
                         }
-                        budget.charge(Some(path), 1, Some(index))?;
-                        let (projected, name) = prepare_listing_entry(&attrs, fields, Some(index))?;
+                        budget.charge(Some(path), 1)?;
+                        let (projected, name) = prepare_listing_entry(&attrs, fields)?;
                         if let Some(ids) = &mut identities {
                             ids.push(vfsi_object_id::from_attrs(fs.namespace_id, &attrs)?);
                         }
@@ -882,13 +882,11 @@ mod tests {
         assert_eq!(status, 0);
         assert_eq!(roots.children.len(), 12);
         // SAFETY: the fixture keeps this filesystem handle live for this borrow.
-        lock_or_io(&unsafe { &*fs }.fs)
-            .unwrap()
-            .vrename_impl(&[(
-                FileOperand::from_path(&root),
-                FileOperand::from_path(&moved),
-            )])
-            .unwrap();
+        let renamed = lock_or_io(&unsafe { &*fs }.fs).unwrap().vrename_impl(&[(
+            FileOperand::from_path(&root),
+            FileOperand::from_path(&moved),
+        )]);
+        vfsi_core::internal::collect_vec_result(renamed, 1).unwrap();
         let (paths, mut cursors): (Vec<_>, Vec<_>) = roots.children.drain(..).unzip();
         let _ = vfsi_nfs::compound::thread_compound_stats();
         let mut rows = Rows::default();
@@ -910,7 +908,7 @@ mod tests {
             .remove_paths_impl(&[Path::new(&moved)], true);
         // SAFETY: the fixture owns these live handles and frees each exactly once.
         unsafe { vfsi_free(fs) };
-        cleanup.unwrap();
+        vfsi_core::internal::collect_vec_result(cleanup, 1).unwrap();
         assert_eq!(status, 0);
         assert!(cursors.iter().all(|cursor| cursor.is_null()));
         assert!(results

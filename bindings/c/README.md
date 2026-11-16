@@ -104,7 +104,7 @@ For large repositories, `vfsi_read_streamv()` reads several paths in bounded
 chunks. `chunk_size` limits each read and `memory_limit` bounds the aggregate
 bytes requested per backend batch. Returning `false` from its callback stops
 successfully, providing cancellation and backpressure without buffering whole
-files. The streaming callback must not reenter the same filesystem handle.
+files. Callbacks run outside backend locks and may query the same filesystem handle.
 
 For an NFS mount whose source is `server:/exports/repos` and whose local
 mountpoint is `/mnt/repos`, use:

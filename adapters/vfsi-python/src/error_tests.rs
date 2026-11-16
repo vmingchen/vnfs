@@ -26,7 +26,7 @@ fn bulk_failures_preserve_native_status_and_original_request_positions() {
         let calls = backend.attrs_calls.clone();
         let (_, errors) = attrs_many_impl(
             &mut backend,
-            &["/first".into(), "/second".into()],
+            &[Path::new("/first"), Path::new("/second")],
             AttrMask::stat(),
             true,
         )

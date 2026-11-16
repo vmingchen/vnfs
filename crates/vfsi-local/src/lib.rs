@@ -2918,8 +2918,8 @@ impl VectorBackend for LocalBackend {
 
     fn vwrite_adb_impl(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
         let mut counts = Vec::with_capacity(patterns.len());
-        for (i, p) in patterns.iter().enumerate() {
-            let layout = vfsi_core::internal::adb_layout(p, i)?;
+        for p in patterns {
+            let layout = vfsi_core::internal::adb_layout(p)?;
             let path = self.real_path(&self.resolve(&p.path))?;
             let mut options = OpenOptions::new();
             options.write(true).create(true).truncate(false);

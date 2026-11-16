@@ -1276,7 +1276,7 @@ impl VectorBackend for NfsVecFs {
         self.ensure_writable(patterns.len())?;
         let mut counts = Vec::with_capacity(patterns.len());
         for (i, p) in patterns.iter().enumerate() {
-            let layout = vfsi_core::internal::adb_layout(p, i)?;
+            let layout = vfsi_core::internal::adb_layout(p)?;
             let full = self.server_path(&p.path);
             let (dir, name) = match split_path_bytes(path_bytes(&full)) {
                 Ok(x) => x,

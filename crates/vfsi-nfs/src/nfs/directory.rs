@@ -99,7 +99,7 @@ fn remove_status_is_retryable(status: u32) -> bool {
     )
 }
 
-/// Exponential backoff for REMOVE retries (10 ms, 20 ms, ...).
+/// Exponential backoff for REMOVE retries (20 ms, 40 ms, ...; capped at 640 ms).
 fn remove_backoff(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(10u64 << attempt.min(6))
 }

@@ -2,12 +2,24 @@
 
 import datetime
 from os import PathLike
-from typing import Any, BinaryIO, Callable, Iterator, Mapping, Optional, Sequence, Union
+from typing import (
+    Any,
+    BinaryIO,
+    Callable,
+    Iterator,
+    Mapping,
+    Optional,
+    Sequence,
+    TypeVar,
+    Union,
+)
 
 from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
 
 Path = Union[str, PathLike[str]]
 BytesLike = Union[bytes, bytearray, memoryview]
+_PathT = TypeVar("_PathT", bound=Path)
+_EndT = TypeVar("_EndT", bound=Optional[int])
 
 class VfsiFile(AbstractBufferedFile):
     fs: VfsiFileSystem
@@ -151,9 +163,9 @@ class VfsiFileSystem(AbstractFileSystem):
     ) -> bytes: ...
     def cat_ranges(
         self,
-        paths: Sequence[Path],
-        starts: Union[int, Sequence[int]],
-        ends: Union[Optional[int], Sequence[Optional[int]]],
+        paths: list[_PathT],
+        starts: Union[int, list[int]],
+        ends: Union[Optional[int], list[_EndT]],
         max_gap: Optional[int] = None,
         on_error: str = "return",
         callback: Any = ...,

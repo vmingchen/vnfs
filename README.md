@@ -142,7 +142,9 @@ remaining compatibility aliases.
 use vnfs::{files::Target, Result, Vfsi, VfsiExt};
 
 fn show_capacity(fs: &impl Vfsi) -> Result<()> {
-    let capacities = fs.vstatfs(&["/data", "/archive"])?;
+    let capacities = fs
+        .statfs_all(&["/data", "/archive"])
+        .map_err(vnfs::error::IndexedError::into_cause)?;
     let file = fs.open("/data/example")?;
     let capacity = fs.statfs(Target::File(&file))?;
     println!(
@@ -150,7 +152,8 @@ fn show_capacity(fs: &impl Vfsi) -> Result<()> {
         capacities.len(),
         capacity.available_bytes()
     );
-    fs.close_files(vec![file])?;
+    fs.close_files(vec![file])
+        .map_err(vnfs::error::IndexedError::into_cause)?;
     Ok(())
 }
 ```

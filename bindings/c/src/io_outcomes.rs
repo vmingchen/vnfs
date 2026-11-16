@@ -356,7 +356,6 @@ pub unsafe extern "C" fn vfsi_pwritev_ex(
                     results[index] = success(index, value.offset, false);
                 }
                 Err(error) => {
-                    let offset: Option<u64> = None;
                     if let Some(progress) = error.progress() {
                         let valid_state = error.state() != FailureState::NotAttempted;
                         match progress {
@@ -378,10 +377,6 @@ pub unsafe extern "C" fn vfsi_pwritev_ex(
                         }
                     }
                     results[index] = failed(index, error);
-                    if let Some(actual) = offset {
-                        results[index].offset = actual;
-                        results[index].offset_known = 1;
-                    }
                 }
             }
         }

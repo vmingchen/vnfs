@@ -125,7 +125,8 @@ def test_info_preserves_unavailable_posix_identity_fields():
 
 
 @pytest.mark.parametrize("reconnect", [False, True])
-def test_legacy_nfs_constructor_compatibility(reconnect):
+@pytest.mark.parametrize("backend", ["nfs", "smb"])
+def test_legacy_nfs_constructor_compatibility(reconnect, backend):
     class LegacyClient(_MemoryClient):
         instances = []
         # The previous PyO3 constructor has 18 positional parameters.
@@ -142,11 +143,11 @@ def test_legacy_nfs_constructor_compatibility(reconnect):
 
     class LegacyFs(VfsiFileSystem):
         _native_module = SimpleNamespace(NfsClient=LegacyClient)
-        _supported_backends = frozenset({"nfs"})
+        _supported_backends = frozenset({"nfs", "smb"})
 
     kwargs = dict(
         host="server",
-        backend="nfs",
+        backend=backend,
         auth="auth_sys",
         auto_reconnect=reconnect,
         skip_instance_cache=True,
@@ -157,7 +158,10 @@ def test_legacy_nfs_constructor_compatibility(reconnect):
         assert len(LegacyClient.instances) == 1
         assert LegacyClient.instances[0].was_shutdown
     else:
-        with pytest.raises(ImportError, match="upgrade nfs4fs alongside vfsi-fsspec"):
+        adapter = "nfs4fs" if backend == "nfs" else "vsmb"
+        with pytest.raises(
+            ImportError, match=f"upgrade {adapter} alongside vfsi-fsspec"
+        ):
             LegacyFs(**kwargs)
         assert not LegacyClient.instances, "fail before opening a connection"
 
@@ -371,3 +375,46 @@ def test_truncate_accepts_integer_protocol_without_moving_cursor():
             assert file.tell() == 1
     finally:
         fs.close()
+
+
+@pytest.mark.parametrize("backend", ["nfs", "smb"])
+@pytest.mark.parametrize("reconnect", [False, True])
+def test_native_recovery_policy_reaches_both_network_backends(backend, reconnect):
+    class RecoveryClient(_MemoryClient):
+        instances = []
+        __signature__ = inspect.Signature(
+            [
+                inspect.Parameter(f"p{i}", inspect.Parameter.POSITIONAL_ONLY)
+                for i in range(17)
+            ]
+            + [
+                inspect.Parameter(
+                    "mount_config",
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    default=None,
+                ),
+                inspect.Parameter(
+                    "auto_reconnect",
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    default=True,
+                ),
+            ]
+        )
+
+    class RecoveryFs(VfsiFileSystem):
+        _native_module = SimpleNamespace(NfsClient=RecoveryClient)
+        _supported_backends = frozenset({"nfs", "smb"})
+
+    with RecoveryFs(
+        backend=backend,
+        auth="auth_sys",
+        auto_reconnect=reconnect,
+        skip_instance_cache=True,
+    ):
+        args = RecoveryClient.instances[-1].factory_args
+        assert args[1] == backend
+        actual_recovery = args[18] if len(args) > 18 else True
+        assert actual_recovery is reconnect
+        if not reconnect:
+            assert args[17] is None
+    assert RecoveryClient.instances[-1].was_shutdown

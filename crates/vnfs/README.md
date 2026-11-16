@@ -133,4 +133,4 @@ MIT OR Apache-2.0, at your option.
 
 The API uses independent per-operation vector results.
 Its owned std::io::Error causes and backend trait changes require the coordinated
-vfsi-* 0.3.0 series; see the workspace migration guide before upgrading an implementor.
+vfsi-* 0.4.0 series; see the workspace migration guide before upgrading an implementor.

@@ -309,9 +309,7 @@ impl NfsVecFs {
         let mut hops = 0usize;
         loop {
             if hops > 40 {
-                return Err(std::io::Error::from_raw_os_error(
-                    (nfsstat4_NFS4ERR_IO) as i32,
-                )); // symlink loop
+                return Err(std::io::Error::from_raw_os_error(libc::ELOOP));
             }
             match self.nfs.resolve(&path) {
                 Ok(fh) => {
@@ -457,9 +455,7 @@ impl NfsVecFs {
                 return Ok(path_from_bytes(&current));
             }
             if hops >= 40 {
-                return Err(std::io::Error::from_raw_os_error(
-                    (nfsstat4_NFS4ERR_IO) as i32,
-                )); // symlink loop
+                return Err(std::io::Error::from_raw_os_error(libc::ELOOP));
             }
             let target = self.readlink_raw_impl(&abs_path)?;
             current = self.resolve_target(&current, &target);

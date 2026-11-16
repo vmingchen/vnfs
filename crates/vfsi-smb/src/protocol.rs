@@ -254,9 +254,9 @@ pub(super) async fn open_close_on_connection(
             .execute_compound(&operations)
             .await
             .map_err(|error| smb_error(error, 0))?;
+        let mut is_reparse_point = false;
         let OpenCompoundResponseState {
             file_id,
-            create_response,
             close_result,
             cardinality_error,
             ..
@@ -265,9 +265,10 @@ pub(super) async fn open_close_on_connection(
             operations.len(),
             |response| {
                 require_status(response, Command::Create, 0)?;
-                CreateResponse::unpack(&mut ReadCursor::new(&response.body))
-                    .map(|opened| opened.file_id)
-                    .map_err(|error| smb_error(error, 0))
+                let opened = CreateResponse::unpack(&mut ReadCursor::new(&response.body))
+                    .map_err(|error| smb_error(error, 0))?;
+                is_reparse_point = opened.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+                Ok(opened.file_id)
             },
             |response| {
                 require_status(response, Command::Close, 0)
@@ -275,16 +276,13 @@ pub(super) async fn open_close_on_connection(
             },
             |error| smb_error(error, 0),
         )?;
-        let is_reparse_point = CreateResponse::unpack(&mut ReadCursor::new(&create_response.body))
-            .map(|opened| opened.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0)
-            .map_err(|error| smb_error(error, 0));
         let close_result =
             close_compound_on_connection(&tree, file_id, close_result, &mut deferred_close).await;
         if let Some(error) = cardinality_error {
             return Err(error);
         }
         close_result?;
-        is_reparse_point
+        Ok(is_reparse_point)
     }
     .await;
     CompoundOutcome {
@@ -911,14 +909,13 @@ pub(super) fn require_status(
 
 pub(super) struct OpenCompoundResponseState<T, E> {
     pub(super) file_id: FileId,
-    pub(super) create_response: T,
     pub(super) operation_responses: Vec<Result<T, E>>,
     pub(super) close_result: OpResult<()>,
     pub(super) cardinality_error: Option<std::io::Error>,
 }
 
 /// Keep a successful CREATE response and its FileId even when a later waiter
-/// fails or the compound response vector is truncated. Callers can then issue
+/// fails or the compound response vector is truncated. Callers can then
 /// retain cleanup ownership without replaying an uncertain CLOSE.
 pub(super) fn decode_open_compound_responses<T, E>(
     responses: Vec<Result<T, E>>,
@@ -963,7 +960,6 @@ pub(super) fn decode_open_compound_responses<T, E>(
 
     Ok(OpenCompoundResponseState {
         file_id,
-        create_response,
         operation_responses: responses,
         close_result,
         cardinality_error,

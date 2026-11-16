@@ -16,10 +16,11 @@ For local test selection and port checks, use [scripts/README.md](../scripts/REA
 NFS authentication, failure recovery, and standard-I/O examples are maintained
 with the [Rust crate guides](../crates/vnfs/src/guides) and compiled into rustdoc.
 
-## Proposed designs
+## Design and migration records
 
-- [Per-operation vector results](vector-results-migration.md): staged migration
+- [Per-operation vector results](vector-results-migration.md): the completed migration
   to `VecResult`, preserving backend concurrency and individual failure outcomes.
+  Use the current API guide above for the supported interface.
 
 ## Performance and historical records
 

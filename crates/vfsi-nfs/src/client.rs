@@ -164,7 +164,7 @@ pub enum OpenCreate {
     NoCreate,
     /// Create with EXCLUSIVE4 semantics: fail with NFS4ERR_EXIST if present.
     Exclusive,
-    /// Create with GUARDED4 semantics: create if absent, succeed if present.
+    /// Create with GUARDED4 semantics: fail with NFS4ERR_EXIST if present.
     Guarded,
     /// Create with UNCHECKED4 semantics: create if absent, open if present.
     /// Lets a compound skip the existence probe entirely.

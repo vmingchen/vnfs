@@ -1,12 +1,12 @@
 use vnfs::directory::{Attributes, ControlFlow, ListDirOptions};
-use vnfs::files::Vfsi;
+use vnfs::files::{Vfsi, VfsiExt};
 use vnfs::nfs::Nfs;
 
 pub fn run(fs: &impl Vfsi, paths: &[String], tree: &str) -> vnfs::Result<usize> {
     // Attributes arrive with the listings, avoiding a scalar stat per entry.
     // Bound each cohort; walk the tree once, not once per listing batch.
     for cohort in paths.chunks(64) {
-        fs.vlistdirs(
+        fs.listdirs_all(
             cohort,
             ListDirOptions::new().with_fields(Attributes::MODE | Attributes::SIZE),
             |_, listing| {
@@ -15,19 +15,21 @@ pub fn run(fs: &impl Vfsi, paths: &[String], tree: &str) -> vnfs::Result<usize> 
                 }
                 Ok(ControlFlow::Continue(()))
             },
-        )?;
+        )
+        .map_err(vnfs::error::IndexedError::into_cause)?;
     }
     // Visit bounded pages instead of collecting a large tree.
     // Symlinks are not followed; iteration order is backend-defined.
     let mut entries = 0;
-    fs.vlistdirs(
+    fs.listdirs_all(
         &[tree],
         ListDirOptions::new().with_recursive(true),
         |_, page| {
             entries += page.entries.len();
             Ok(ControlFlow::Continue(()))
         },
-    )?;
+    )
+    .map_err(vnfs::error::IndexedError::into_cause)?;
     Ok(entries)
 }
 

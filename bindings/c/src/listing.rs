@@ -76,7 +76,6 @@ impl<'a> ListingBudget<'a> {
         &mut self,
         path: Option<&Path>,
         copies: usize,
-        _index: Option<usize>,
     ) -> Result<(), std::io::Error> {
         let entries = self.entries.checked_add(copies);
         let bytes = path
@@ -96,7 +95,6 @@ impl<'a> ListingBudget<'a> {
 pub(super) fn prepare_listing_entry(
     attrs: &VfAttrs,
     fields: AttrMask,
-    _index: Option<usize>,
 ) -> Result<(vfsi_attrs, CString), std::io::Error> {
     if !attrs.returned.contains(fields | AttrMask::MODE) {
         return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
@@ -299,16 +297,13 @@ unsafe fn listdirs_snapshot(
                                     overflow = true;
                                     return false;
                                 };
-                                if budget
-                                    .charge(attrs.file.path(), indices.len(), None)
-                                    .is_err()
-                                {
+                                if budget.charge(attrs.file.path(), indices.len()).is_err() {
                                     overflow = true;
                                     return false;
                                 }
                                 if projection_error.is_none() {
-                                    let prepared = prepare_listing_entry(attrs, fields, None)
-                                        .and_then(|entry| {
+                                    let prepared =
+                                        prepare_listing_entry(attrs, fields).and_then(|entry| {
                                             if let Some(identities) = &mut identities {
                                                 identities.push(vfsi_object_id::from_attrs(
                                                     fs.namespace_id,
@@ -593,7 +588,7 @@ pub unsafe extern "C" fn vfsi_listdir_with_limits(
                 return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
             }
             for a in entries {
-                let (attrs, name) = prepare_listing_entry(&a, mask(), Some(0))?;
+                let (attrs, name) = prepare_listing_entry(&a, mask())?;
                 // SAFETY: callback was provided by C and is called from the same
                 // thread while `attrs`/`name` are alive.
                 if !unsafe { cb(name.as_ptr(), &attrs, userdata) } {
@@ -648,18 +643,15 @@ pub unsafe extern "C" fn vfsi_listdirv(
             paths.push(path);
         }
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let original_paths = paths.clone();
             let vpaths: Result<Vec<PathBuf>, std::io::Error> =
                 paths.iter().map(|p| vpath_for(fs, p)).collect();
             let vpaths = vpaths?;
             let refs: Vec<&Path> = vpaths.iter().map(PathBuf::as_path).collect();
-            let vpath_index: std::collections::HashMap<PathBuf, usize> = vpaths
+            let vpath_index: std::collections::HashMap<&Path, usize> = vpaths
                 .iter()
                 .enumerate()
-                .map(|(i, p)| (p.clone(), i))
+                .map(|(i, p)| (p.as_path(), i))
                 .collect();
-            let mountpoint = fs.mountpoint.clone();
-            let backend_root = fs.backend_root.clone();
             let c_cb = cb;
             let mut rows = Vec::new();
             {
@@ -678,20 +670,20 @@ pub unsafe extern "C" fn vfsi_listdirv(
                 return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
             }
             for (attrs, dir) in rows {
-                let kernel_dir = match vpath_index.get(&dir) {
-                    Some(&i) => original_paths[i].clone(),
+                let kernel_dir = match vpath_index.get(dir.as_path()) {
+                    Some(&i) => paths[i].clone(),
                     None => {
                         let rel = dir
-                            .strip_prefix(&backend_root)
+                            .strip_prefix(&fs.backend_root)
                             .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-                        mountpoint.join(rel)
+                        fs.mountpoint.join(rel)
                     }
                 };
                 let dir = kernel_dir.as_os_str().as_bytes();
                 let dir = cstr_from_os(dir).ok_or_else(|| {
                     vfsi_core::internal::errors::invalid_reply("invalid listing directory name")
                 })?;
-                let (a, name) = prepare_listing_entry(&attrs, mask(), None)?;
+                let (a, name) = prepare_listing_entry(&attrs, mask())?;
                 // SAFETY: `c_cb` was provided by C and is invoked from the same
                 // thread while its arguments are alive. No filesystem mutex is held.
                 if !unsafe { c_cb(dir.as_ptr(), name.as_ptr(), &a, userdata) } {

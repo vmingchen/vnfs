@@ -109,6 +109,24 @@ fn directory_batches_and_no_follow_walk() -> Result<()> {
 }
 
 #[test]
+fn directory_example_propagates_cohort_and_tree_failures() -> Result<()> {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Posix::new(root.path())?;
+    fs.create_dir("/tree")?;
+    fs.write("/tree/file", b"keep")?;
+    for (paths, tree) in [
+        (vec!["/missing".to_owned()], "/tree"),
+        (vec!["/tree".to_owned(), "/missing".to_owned()], "/tree"),
+        (vec!["/tree".to_owned()], "/missing"),
+    ] {
+        let error = directories::run(&fs, &paths, tree).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(fs.read("/tree/file")?, b"keep");
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires VFSI_NFS_SERVER and a writable VFSI_NFS_EXPORT"]
 fn canonical_workflows_on_nfsv41_and_nfsv42() -> Result<()> {
     use vnfs::helpers::TreeBuilder;

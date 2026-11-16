@@ -6,8 +6,8 @@ Raw FFI bindings for the NFSv4.1 protocol, vendored from NFS-Ganesha's
 as a low-level foundation for the `vnfs` client.
 
 This is a `-sys` crate: it exposes unsafe `extern` types and functions with
-manual memory management. Higher-level, safe wrappers live in the `vnfs`
-crate.
+manual memory management. Higher-level protocol wrappers live in `vfsi-nfs`;
+`vnfs` supplies the application API.
 
 ## What's in the box
 
@@ -16,7 +16,7 @@ crate.
 | `src/nfsv41.h` | NFS-Ganesha's NFSv4.1 protocol header (structs + static-inline XDR codecs) |
 | `src/wrapper.c` | Five `xdr_wrap_*` extern entry points around the `static inline` codecs (Rust cannot call static-inline functions directly) |
 | `src/wrapper.h` | The bindgen input header (includes `nfsv41.h`, declares the wrappers) |
-| `src/lib.rs` | `include!` of the generated bindings, plus the `-lntirpc` link directive |
+| `src/lib.rs` | `include!` of generated bindings; native linkage comes from `libntirpc-sys` |
 | `build.rs` | Compiles `wrapper.c` into `libnfsv41.a` and runs bindgen |
 
 ## Build

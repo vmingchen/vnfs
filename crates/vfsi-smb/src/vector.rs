@@ -957,8 +957,8 @@ impl VectorBackend for SmbVecFs {
     }
     fn vwrite_adb_impl(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
         let mut counts = Vec::with_capacity(patterns.len());
-        for (index, pattern) in patterns.iter().enumerate() {
-            let layout = vfsi_core::internal::adb_layout(pattern, index)?;
+        for pattern in patterns {
+            let layout = vfsi_core::internal::adb_layout(pattern)?;
             let file = self.open_raw_impl(&pattern.path, libc::O_WRONLY | libc::O_CREAT, 0o666)?;
             let result = (|| {
                 for (block_number, number_offset, pattern_offset) in layout {

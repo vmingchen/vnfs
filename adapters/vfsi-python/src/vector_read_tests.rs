@@ -371,3 +371,108 @@ fn whole_file_validation_charges_only_valid_returned_prefixes() {
         Some(TransportKind::InvalidReply)
     );
 }
+
+#[test]
+fn mixed_ranges_only_fetch_metadata_for_open_ends() {
+    Python::initialize();
+    let root = TestRoot::new();
+    for name in ["bounded", "open", "tail"] {
+        std::fs::write(root.0.join(name), b"abcdef").unwrap();
+    }
+    let backend = FaultBackend::new(&root.0, None);
+    let attrs = backend.attrs_calls.clone();
+    Python::attach(|py| {
+        let (data, errors) = client(backend)
+            .read_many(
+                py,
+                vec!["/bounded".into(), "/open".into(), "/tail".into()],
+                vec![1, 2, 3],
+                Some(vec![Some(3), None, Some(5)]),
+            )
+            .unwrap();
+        assert_eq!(
+            data,
+            [
+                Some(b"bc".to_vec()),
+                Some(b"cdef".to_vec()),
+                Some(b"de".to_vec())
+            ]
+        );
+        assert!(errors.is_empty());
+    });
+    assert_eq!(*attrs.lock().unwrap(), vec![vec![PathBuf::from("/open")]]);
+}
+
+#[test]
+fn mixed_range_metadata_errors_keep_original_slots() {
+    Python::initialize();
+    for transport in [false, true] {
+        let root = TestRoot::new();
+        for name in ["bounded", "first", "tail", "last"] {
+            std::fs::write(root.0.join(name), b"abcdef").unwrap();
+        }
+        let mut backend = FaultBackend::new(&root.0, None);
+        let cause = if transport {
+            vfsi_core::internal::errors::transport(
+                vfsi_core::TransportKind::Timeout,
+                "metadata timeout",
+            )
+        } else {
+            std::io::Error::from_raw_os_error(libc::EACCES)
+        };
+        backend.attrs_item_errors.push((1, cause));
+        let attrs = backend.attrs_calls.clone();
+        let reads = backend.read_calls.clone();
+        Python::attach(|py| {
+            let result = client(backend).read_many(
+                py,
+                vec![
+                    "/bounded".into(),
+                    "/first".into(),
+                    "/tail".into(),
+                    "/last".into(),
+                ],
+                vec![0; 4],
+                Some(vec![Some(2), None, Some(2), None]),
+            );
+            if transport {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    error
+                        .value(py)
+                        .getattr("index")
+                        .unwrap()
+                        .extract::<usize>()
+                        .unwrap(),
+                    3
+                );
+                assert_eq!(
+                    error
+                        .value(py)
+                        .getattr("transport_kind")
+                        .unwrap()
+                        .extract::<String>()
+                        .unwrap(),
+                    "timeout"
+                );
+                assert!(reads.lock().unwrap().is_empty());
+            } else {
+                let (data, errors) = result.unwrap();
+                assert_eq!(error_codes(&errors), HashMap::from([(3, ERR_ACCES)]));
+                assert_eq!(
+                    data,
+                    [
+                        Some(b"ab".to_vec()),
+                        Some(b"abcdef".to_vec()),
+                        Some(b"ab".to_vec()),
+                        None
+                    ]
+                );
+            }
+        });
+        assert_eq!(
+            *attrs.lock().unwrap(),
+            vec![vec![PathBuf::from("/first"), "/last".into()]]
+        );
+    }
+}

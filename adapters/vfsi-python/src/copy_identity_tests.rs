@@ -226,3 +226,41 @@ fn oversized_copy_rejects_missing_size_without_truncating_destination() {
     );
     assert_eq!(std::fs::read(root.0.join("new")).unwrap(), vec![b'h'; 2048]);
 }
+
+#[test]
+fn zero_listing_quotas_never_authorize_copying_to_source_aliases() {
+    Python::initialize();
+    for symlink in [false, true] {
+        for (entries, path_bytes) in [(0, usize::MAX), (100, 0)] {
+            let root = TestRoot::new();
+            let source = root.0.join("source");
+            std::fs::write(&source, b"protected").unwrap();
+            let mut pairs = Vec::new();
+            for i in 0..12 {
+                let alias = format!("alias-{i}");
+                if symlink {
+                    std::os::unix::fs::symlink("source", root.0.join(&alias)).unwrap();
+                } else {
+                    std::fs::hard_link(&source, root.0.join(&alias)).unwrap();
+                }
+                pairs.push((PathBuf::from("/source"), PathBuf::from(format!("/{alias}"))));
+            }
+            pairs.push(("/source".into(), "/healthy".into()));
+            // Use the real listing implementation: the fault backend's
+            // unsupported listing deliberately takes the safe identity fallback.
+            let backend = vfsi_posix::backend(&root.0).unwrap();
+            Python::attach(|py| {
+                let mut client = client(backend);
+                client.directory_max_entries = entries;
+                client.directory_max_path_bytes = path_bytes;
+                let (copied, errors) = client.copy_many(py, pairs).unwrap();
+                assert_eq!(&copied[..12], &[None; 12]);
+                assert_eq!(copied[12], Some(9));
+                assert_eq!(errors.len(), 12);
+                assert!((0..12).all(|i| error_codes(&errors)[&i] == ERR_SAME_FILE));
+            });
+            assert_eq!(std::fs::read(&source).unwrap(), b"protected");
+            assert_eq!(std::fs::read(root.0.join("healthy")).unwrap(), b"protected");
+        }
+    }
+}

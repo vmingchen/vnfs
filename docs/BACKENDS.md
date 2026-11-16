@@ -124,10 +124,12 @@ with explicit gates, not timing sleeps.
 
 Required assertions include:
 
-- exact original indices for attributable failures; `index() == None` for
-  unattributable transport failures, never a fabricated zero;
-- no partial OPEN vector escapes; every confirmed handle, including an SMB
-  suffix success, is cleaned without losing ownership after cleanup failure;
+- exact input/result association, with no index stored in an item cause;
+  strict collectors use `index() == None` for unattributed failures, never a
+  fabricated zero;
+- partial OPEN outcomes retain every successful owner; strict OPEN collectors
+  clean every confirmed handle, including an SMB suffix success, without losing
+  ownership after cleanup failure;
 - the primary error survives a secondary cleanup failure;
 - ordered NFS prefixes and concurrent/out-of-order outcomes preserve request
   association and malformed replies produce errors, not panics;

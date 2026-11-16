@@ -5,19 +5,28 @@
 An NFS COMPOUND executes in order until the first failing protocol operation.
 Its prefix may have succeeded; its suffix was not executed. A logical vector
 can span compounds, and a logical request can span chunks. Public vector
-methods return all results on success or one structured `Error` on failure.
-They do not roll back completed work.
+methods return `VecResult<T>`: an outer `std::io::Error` rejects the call before
+dispatch; otherwise every input has its own value or `OpError`. Result positions
+preserve input order, while execution order is backend-defined. Completed work
+is not rolled back, and an ordinary item error does not cancel independent inputs.
 
-`Error::index()` identifies a logical input when known, **not a committed-prefix
-count**. A request at that index may have completed some chunks. Transport
-failures can have unknown indices and ambiguous remote effects. Neither
-status nor index alone proves that retrying a mutation is safe.
+An `OpError` retains an index-free standard error, `FailureState`
+(`NotAttempted`, `Failed`, or `Unknown`), and optional `IoProgress` describing
+acknowledged read or write progress. Neither a result position nor an error
+category proves that retrying a mutation is safe. A failed request can follow
+successful chunks of that same request.
 
-Use `kind()` for portable classification, `status()` and `domain()` for native
-details, and `transport_kind()` for known timeout, connection, invalid-reply,
-or authentication provenance. Unknown causes remain `Other`. `raw_code()` is a
-compatibility value, not universally a POSIX errno. Standard-I/O adapters
-preserve the original error as an `io::Error` source.
+Use the cause's `kind()` for portable classification,
+`vnfs::error::native_status(cause)` for optional typed errno/NFS/SMB details, and
+`transport_kind(cause)` for known timeout, connection, invalid-reply, or
+authentication provenance. `raw_os_error()` is not a protocol status accessor.
+Unknown foreign causes remain valid standard errors without invented native facts.
+
+Strict `VfsiExt` helpers such as `read_batch` and `listdirs_all` select the first
+failed input after execution and return `IndexedError`. Its `index()` is helper
+attribution, not a completed-prefix count; it does not retain certainty, progress,
+or sibling outcomes. Keep `VecResult` when those details matter. Singular helpers
+and standard-I/O adapters return `std::io::Error`.
 
 ## Short I/O and ownership
 

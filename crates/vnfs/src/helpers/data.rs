@@ -241,7 +241,9 @@ fn copy_to_writers_round_robin<P: AsRef<Path>, W: Write>(
         })?;
         let operation = (|| {
             let mut active: Vec<_> = (0..files.len()).collect();
+            let mut pending = Vec::with_capacity(active.len());
             while !active.is_empty() {
+                pending.clear();
                 let requests: Vec<_> = active
                     .iter()
                     .map(|&i| ReadOp::range(&files[i], written[base + i], chunk))
@@ -249,7 +251,6 @@ fn copy_to_writers_round_robin<P: AsRef<Path>, W: Write>(
                 let results = source.read_batch(requests, reads).map_err(|error| {
                     writer_stream_error(error, base, |i| active.get(i).copied())
                 })?;
-                let mut pending = Vec::with_capacity(active.len());
                 for (&local, result) in active.iter().zip(results) {
                     let index = base + local;
                     if result.offset() != written[index] {
@@ -292,7 +293,7 @@ fn copy_to_writers_round_robin<P: AsRef<Path>, W: Write>(
                         pending.push(local);
                     }
                 }
-                active = pending;
+                std::mem::swap(&mut active, &mut pending);
             }
             Ok(())
         })();

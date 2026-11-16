@@ -7,7 +7,6 @@ type Block = (u64, Option<u64>, Option<u64>);
 /// the earlier blocks and field ends fit. Execution borrows the payload.
 pub fn adb_layout(
     pattern: &Adb,
-    _index: usize,
 ) -> VfResult<impl ExactSizeIterator<Item = Block> + DoubleEndedIterator> {
     let overflow = || std::io::Error::from_raw_os_error(libc::EOVERFLOW);
     let pattern_len = u64::try_from(pattern.adb_pattern_data.len()).map_err(|_| overflow())?;
@@ -53,7 +52,7 @@ mod tests {
     #[test]
     fn huge_block_count_returns_overflow_without_allocating() {
         let p = Adb::blocknum_only("/unused", u64::MAX, 1, usize::MAX, 0, 0);
-        match adb_layout(&p, 7) {
+        match adb_layout(&p) {
             Err(error) => {
                 let _: &std::io::Error = &error;
                 assert_eq!(
@@ -72,7 +71,7 @@ mod tests {
             Adb::blocknum_only("/unused", 0, u64::MAX, 3, 0, 0),
             Adb::blocknum_only("/unused", 0, u64::MAX / 2, 3, 0, 0),
         ] {
-            match adb_layout(&p, 3) {
+            match adb_layout(&p) {
                 Err(error) => {
                     let _: &std::io::Error = &error;
                     assert_eq!(
@@ -91,18 +90,18 @@ mod tests {
         p.adb_reloff_pattern = Some(20);
         p.adb_pattern_data = b"payload".to_vec();
         assert_eq!(
-            adb_layout(&p, 0).unwrap().collect::<Vec<_>>(),
+            adb_layout(&p).unwrap().collect::<Vec<_>>(),
             [(7, Some(14), Some(30)), (8, Some(114), Some(130))]
         );
         p.adb_reloff_blocknum = None;
         p.adb_reloff_pattern = None;
         assert_eq!(
-            adb_layout(&p, 0).unwrap().collect::<Vec<_>>(),
+            adb_layout(&p).unwrap().collect::<Vec<_>>(),
             [(7, None, None), (8, None, None)]
         );
         p.adb_block_count = 0;
         p.adb_offset = u64::MAX;
-        assert_eq!(adb_layout(&p, 0).unwrap().len(), 0);
+        assert_eq!(adb_layout(&p).unwrap().len(), 0);
     }
 
     proptest! {
@@ -130,7 +129,7 @@ mod tests {
                 expected.push((n as u64, number.map(|x| (offset + x as u128) as u64),
                     pattern.map(|x| (offset + x as u128) as u64)));
             }
-            match adb_layout(&p, 4) {
+            match adb_layout(&p) {
                 Ok(layout) => { prop_assert!(valid); prop_assert_eq!(layout.collect::<Vec<_>>(), expected); }
                 Err(error) => { prop_assert!(!valid); let _: &std::io::Error = &error;
                     prop_assert_eq!(error.raw_os_error().expect("OS errno") as u32, libc::EOVERFLOW as u32); }

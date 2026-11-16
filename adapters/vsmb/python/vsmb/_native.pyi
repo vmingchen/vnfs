@@ -11,25 +11,7 @@ CAP_NON_UTF8_PATHS: int
 CAP_LSTAT: int
 ERR_UNSUPPORTED: int
 
-class NfsClient:
-    def __init__(
-        self,
-        host: str,
-        backend: str = "nfs",
-        root: Optional[str] = None,
-        compound_size_limit: Optional[int] = None,
-        minor_version: Optional[int] = None,
-        share: Optional[str] = None,
-        username: str = "",
-        password: str = "",
-        domain: str = "",
-        connect_timeout: float = 10.0,
-        request_timeout: float = 5.0,
-        read_all_max_total_bytes: int = 16_777_216,
-        directory_max_entries: int = 100_000,
-        directory_max_path_bytes: int = 16_777_216,
-        walk_max_depth: int = 128,
-    ) -> None: ...
+class _ClientMethods:
     def minor_version(self) -> Optional[int]: ...
     def smb_dialect(self) -> Optional[int]: ...
     def capabilities(self) -> int: ...
@@ -42,7 +24,6 @@ class NfsClient:
     def open(
         self, path: str, mode: str, *, permissions: Optional[int] = None
     ) -> int: ...
-    def close(self, fd: int) -> None: ...
     def read(self, fd: int, length: int) -> bytes: ...
     def write(self, fd: int, data: bytes) -> int: ...
     def write_positioned(self, fd: int, data: bytes) -> Tuple[int, int]: ...
@@ -51,6 +32,20 @@ class NfsClient:
     def fseek(self, fd: int, offset: int, whence: int) -> int: ...
     def fstat(self, fd: int) -> dict: ...
     def fstat_many(self, fds: List[int]) -> List[dict]: ...
+    # Failed slots are existing exception instances carrying failure_state
+    # and optional read_prefix/read_offset/read_eof or bytes_written.
+    def read_allv(
+        self, paths: List[str], max_total_bytes: Optional[int] = None
+    ) -> List[bytes | OSError | NotImplementedError]: ...
+    def preadv(
+        self, fds: List[int], offsets: List[int], lengths: List[int]
+    ) -> List[bytes | OSError | NotImplementedError]: ...
+    def pwritev(
+        self, fds: List[int], offsets: List[int], datas: List[bytes]
+    ) -> List[int | OSError | NotImplementedError]: ...
+    def appendv(
+        self, fds: List[int], datas: List[bytes]
+    ) -> List[Tuple[int, int] | OSError | NotImplementedError]: ...
     def pread_many(
         self, fds: List[int], offsets: List[int], lengths: List[int]
     ) -> Tuple[List[Optional[bytes]], Dict[int, Exception]]: ...
@@ -85,7 +80,7 @@ class NfsClient:
         ends: Optional[List[Optional[int]]] = None,
     ) -> Tuple[List[Optional[bytes]], Dict[int, Exception]]: ...
     def read_all_many(
-        self, paths: List[str]
+        self, paths: List[str], max_total_bytes: Optional[int] = None
     ) -> Tuple[List[Optional[bytes]], Dict[int, Exception]]: ...
     def write_many(
         self, paths: List[str], datas: List[bytes], truncate: bool = True
@@ -109,7 +104,12 @@ class NfsClient:
         max_entries: Optional[int] = None,
         max_path_bytes: Optional[int] = None,
     ) -> List[List[dict]]: ...
-    def walk(self, root: str, sort: bool = True) -> List[Tuple[str, List[dict]]]: ...
+    def walk(
+        self,
+        root: str,
+        sort: bool = True,
+        max_depth: Optional[int] = None,
+    ) -> List[Tuple[str, List[dict]]]: ...
     def remove_many(self, paths: List[str]) -> None: ...
     def rename_many(self, pairs: List[Tuple[str, str]]) -> None: ...
     def copy_many(
@@ -119,6 +119,27 @@ class NfsClient:
     def rm(self, paths: List[str], recursive: bool) -> None: ...
     def compound_stats(self) -> Tuple[int, int, int, int]: ...
     def rpc_stats(self) -> Tuple[int, int]: ...
+
+class NfsClient(_ClientMethods):
+    def __init__(
+        self,
+        host: str,
+        backend: str = "nfs",
+        root: Optional[str] = None,
+        compound_size_limit: Optional[int] = None,
+        minor_version: Optional[int] = None,
+        share: Optional[str] = None,
+        username: str = "",
+        password: str = "",
+        domain: str = "",
+        connect_timeout: float = 10.0,
+        request_timeout: float = 5.0,
+        read_all_max_total_bytes: int = 16_777_216,
+        directory_max_entries: int = 100_000,
+        directory_max_path_bytes: int = 16_777_216,
+        walk_max_depth: int = 128,
+    ) -> None: ...
+    def close(self, fd: int) -> None: ...
 
 def compound_stats_py() -> Tuple[int, int, int, int]: ...
 def rpc_stats_py() -> Tuple[int, int]: ...

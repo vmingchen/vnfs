@@ -9,7 +9,7 @@ CAP_NON_UTF8_PATHS: int
 CAP_LSTAT: int
 ERR_UNSUPPORTED: int
 
-class SmbClient(_native.NfsClient):
+class SmbClient(_native._ClientMethods):
     def __init__(
         self,
         host: str,

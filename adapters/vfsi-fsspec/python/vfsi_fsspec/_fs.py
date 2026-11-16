@@ -3206,7 +3206,7 @@ class VfsiFileSystem(AbstractFileSystem):
             self.auth,
             self.service_principal,
         )
-        disable_native_recovery = backend == "nfs" and not self.auto_reconnect
+        disable_native_recovery = backend in ("nfs", "smb") and not self.auto_reconnect
         if _mount_config is not None or disable_native_recovery:
             factory_args += (_mount_config,)
         if disable_native_recovery:
@@ -3214,9 +3214,10 @@ class VfsiFileSystem(AbstractFileSystem):
                 "auto_reconnect"
                 not in inspect.signature(native_module.NfsClient).parameters
             ):
+                adapter = "nfs4fs" if backend == "nfs" else "vsmb"
                 raise ImportError(
                     "auto_reconnect=False requires a native adapter with recovery "
-                    "control; upgrade nfs4fs alongside vfsi-fsspec"
+                    f"control; upgrade {adapter} alongside vfsi-fsspec"
                 )
             factory_args += (False,)
         try:
@@ -6505,46 +6506,28 @@ class VfsiFileSystem(AbstractFileSystem):
             for directory in by_dir
             if depth_limit is None or _depth(directory) <= depth_limit
         }
-        if topdown:
-            pending = [internal]
-            while pending:
-                directory = pending.pop()
-                if directory not in visible:
-                    continue
-                dirs, files = by_dir[directory]
-                yielded_dirs = dirs if detail else list(dirs)
-                yielded_files = files if detail else list(files)
-                yield directory, yielded_dirs, yielded_files
-                names = yielded_dirs.keys() if detail else yielded_dirs
-                children = [
-                    posixpath.join(directory, name)
-                    for name in names
-                    if posixpath.join(directory, name) in visible
-                ]
-                pending.extend(reversed(children))
-        else:
-            order = []
-            pending = [(internal, False)]
-            while pending:
-                directory, visited = pending.pop()
-                if directory not in visible:
-                    continue
-                if visited:
-                    order.append(directory)
-                    continue
-                pending.append((directory, True))
-                children = [
-                    self._checked_strip_protocol(info["name"])
-                    for info in by_dir.get(directory, ({}, {}))[0].values()
-                    if self._checked_strip_protocol(info["name"]) in visible
-                ]
-                pending.extend((child, False) for child in reversed(children))
-            for directory in order:
-                dirs, files = by_dir[directory]
-                if not detail:
-                    dirs = list(dirs)
-                    files = list(files)
-                yield directory, dirs, files
+        order = []
+        pending = [(internal, False)]
+        while pending:
+            directory, visited = pending.pop()
+            if directory not in visible:
+                continue
+            if visited:
+                order.append(directory)
+                continue
+            pending.append((directory, True))
+            children = [
+                self._checked_strip_protocol(info["name"])
+                for info in by_dir.get(directory, ({}, {}))[0].values()
+                if self._checked_strip_protocol(info["name"]) in visible
+            ]
+            pending.extend((child, False) for child in reversed(children))
+        for directory in order:
+            dirs, files = by_dir[directory]
+            if not detail:
+                dirs = list(dirs)
+                files = list(files)
+            yield directory, dirs, files
 
     def find(self, path, maxdepth=None, withdirs=False, detail=False, **kwargs):
         internal = self._checked_strip_protocol(path)

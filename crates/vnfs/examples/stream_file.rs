@@ -12,7 +12,7 @@ pub fn run(fs: &impl Vfsi, path: &str) -> vnfs::Result<u64> {
             assert_eq!(index, 0);
             assert_eq!(offset, bytes);
             bytes += chunk.len() as u64;
-            Ok(std::ops::ControlFlow::Continue(())) // false stops successfully; callback errors propagate.
+            Ok(std::ops::ControlFlow::Continue(())) // Break stops successfully; callback errors propagate.
         },
     )
     .map_err(vfsi_core::IndexedError::into_cause)?;
