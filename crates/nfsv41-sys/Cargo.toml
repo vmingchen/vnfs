@@ -9,6 +9,8 @@ repository = "https://github.com/vmingchen/vnfs"
 documentation = "https://docs.rs/nfsv41-sys"
 keywords = ["nfs", "nfs4", "xdr", "ffi", "vfsi"]
 links = "nfsv41"
+# Keep metadata-only consumers aware of this native path dependency build script.
+build = "build.rs"
 
 [dependencies]
 libntirpc-sys = { workspace = true }
