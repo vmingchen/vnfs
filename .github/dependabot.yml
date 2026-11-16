@@ -1,6 +1,6 @@
 version: 2
 updates:
-  # Shared path dependencies span the root and detached native workspaces.
+  # Group shared path dependencies; native crates declare their build scripts.
   - package-ecosystem: cargo
     directories:
       - "/"
