@@ -2117,9 +2117,15 @@ impl NfsClient {
                             validate_read_completion("read_many", slot, &ops[slot], &read)?;
                             let no_progress = read.data.is_empty();
                             progress[index] += read.data.len();
-                            results[index]
-                                .get_or_insert_with(Vec::new)
-                                .extend(read.data);
+                            if results[index].is_none() && read.data.capacity() == read.data.len() {
+                                // Move the first complete allocation; keep compacting
+                                // oversized backend buffers and accumulating short reads.
+                                results[index] = Some(read.data);
+                            } else {
+                                results[index]
+                                    .get_or_insert_with(Vec::new)
+                                    .extend(read.data);
+                            }
                             if progress[index] < lengths[index] && !read.eof {
                                 if no_progress {
                                     results[index] = None;
@@ -2644,9 +2650,9 @@ impl NfsClient {
                 candidates
             };
             if !existing_candidates.is_empty() {
-                let identity_paths: Vec<PathBuf> = existing_candidates
+                let identity_paths: Vec<&Path> = existing_candidates
                     .iter()
-                    .flat_map(|&index| [sources[index].clone(), dests[index].clone()])
+                    .flat_map(|&index| [sources[index].as_path(), dests[index].as_path()])
                     .collect();
                 let identity_positions: Vec<usize> = existing_candidates
                     .iter()
@@ -2736,9 +2742,9 @@ impl NfsClient {
             if oversized.is_empty() {
                 return Ok((copied, errors));
             }
-            let oversized_sources: Vec<PathBuf> = oversized
+            let oversized_sources: Vec<&Path> = oversized
                 .iter()
-                .map(|&index| sources[index].clone())
+                .map(|&index| sources[index].as_path())
                 .collect();
             let identity_mask = AttrMask::SIZE | AttrMask::identity();
             let (attrs, stat_errors) = attrs_many_impl(fs, &oversized_sources, identity_mask, true)
@@ -2772,9 +2778,9 @@ impl NfsClient {
             // Symlink aliases do not increase nlink. Check every oversized
             // source before any extent can truncate the shared inode.
             if !identity_candidates.is_empty() {
-                let candidate_dests: Vec<PathBuf> = identity_candidates
+                let candidate_dests: Vec<&Path> = identity_candidates
                     .iter()
-                    .map(|&index| dests[index].clone())
+                    .map(|&index| dests[index].as_path())
                     .collect();
                 let (dest_attrs, dest_errors) =
                     attrs_many_impl(fs, &candidate_dests, AttrMask::identity(), true).map_err(

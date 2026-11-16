@@ -54,7 +54,9 @@ const FULL_ATTR_IDS: [u32; 15] = [
 ];
 
 pub(super) fn request_mask_to_attr_list(masks: &AttrMask) -> Vec<u32> {
-    let mut ids = Vec::new();
+    // Every supported mask bit contributes one attribute, plus mandatory TYPE.
+    let count = 1 + (*masks & AttrMask::all()).bits().count_ones() as usize;
+    let mut ids = Vec::with_capacity(count);
     for id in FULL_ATTR_IDS {
         let wanted = match id {
             FATTR4_TYPE => true, // always fetch type (cheap, aids listdir)

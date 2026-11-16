@@ -41,6 +41,7 @@ fn operand_trace(file: &FileOperand) -> PathBuf {
 }
 
 type ReadRequestTrace = Arc<Mutex<Vec<Vec<(u64, usize)>>>>;
+type ReadBufferTrace = Arc<Mutex<Vec<(usize, usize, usize)>>>;
 
 pub(crate) struct FaultBackend {
     pub(crate) inner: LocalBackend,
@@ -58,6 +59,8 @@ pub(crate) struct FaultBackend {
     pub(crate) read_error_on_call: usize,
     pub(crate) read_limit: Option<usize>,
     pub(crate) read_eof_at: Option<u64>,
+    pub(crate) read_buffer_capacity: Option<usize>,
+    pub(crate) read_buffers: ReadBufferTrace,
     pub(crate) read_requests: ReadRequestTrace,
     pub(crate) grow_before_read: Option<(PathBuf, Vec<u8>)>,
     pub(crate) read_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
@@ -92,6 +95,8 @@ impl FaultBackend {
             read_error_on_call: 0,
             read_limit: None,
             read_eof_at: None,
+            read_buffer_capacity: None,
+            read_buffers: Arc::default(),
             read_requests: Arc::default(),
             grow_before_read: None,
             read_calls: Arc::default(),
@@ -300,6 +305,19 @@ impl VectorBackend for FaultBackend {
             })
             .collect();
         let mut results = self.inner.vread_impl(&limited)?;
+        if let Some(capacity) = self.read_buffer_capacity {
+            for result in results.iter_mut().filter_map(|result| result.as_mut().ok()) {
+                result.data.shrink_to_fit();
+                result
+                    .data
+                    .reserve_exact(capacity.saturating_sub(result.data.len()));
+                self.read_buffers.lock().unwrap().push((
+                    result.data.as_ptr() as usize,
+                    result.data.len(),
+                    result.data.capacity(),
+                ));
+            }
+        }
         if let Some(end) = self.read_eof_at {
             for result in results.iter_mut().filter_map(|result| result.as_mut().ok()) {
                 result.eof |= result.offset.saturating_add(result.data.len() as u64) >= end;

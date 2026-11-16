@@ -3271,7 +3271,7 @@ impl NfsClient {
                             }
                             match self.repair_path_write(
                                 ops,
-                                &map.ranges[..report.completed.len()
+                                &map.ranges[..report.completed_count
                                     + usize::from(report.failure.is_some())],
                                 *caller,
                                 part + received,
@@ -4880,14 +4880,13 @@ impl NfsClient {
             let ent = unsafe { &*e };
             let name_len = ent.name.utf8string_len as usize;
             let name = if name_len == 0 {
-                Vec::new()
+                &[][..]
             } else {
                 // SAFETY: the live decoded entry owns name_len initialized name bytes; the
                 // zero-length case was handled separately.
                 unsafe {
                     std::slice::from_raw_parts(ent.name.utf8string_val as *const u8, name_len)
                 }
-                .to_vec()
             };
             if name.is_empty() || name.contains(&b'/') || name.contains(&0) {
                 return Err(RpcError::transport_with_kind(
@@ -4911,7 +4910,7 @@ impl NfsClient {
                     .to_vec()
                 };
                 out.push(DirEntry {
-                    name,
+                    name: name.to_vec(),
                     cookie: ent.cookie,
                     attrmask: ent.attrs.attrmask,
                     attrs,
@@ -5649,6 +5648,48 @@ mod tests {
                 .unwrap_err()
                 .is_transport()
         );
+    }
+
+    #[test]
+    fn readdir_filtered_names_preserve_raw_cookie_and_verifier() {
+        for dot_only in [false, true] {
+            let mut names = [
+                b".".to_vec(),
+                if dot_only { b"..".to_vec() } else { vec![0xff] },
+                b"..".to_vec(),
+            ];
+            // SAFETY: zero is valid for generated C scalar fields and nullable pointers.
+            let mut entries: [nfsv41_sys::entry4; 3] = unsafe { std::mem::zeroed() };
+            let base = entries.as_mut_ptr();
+            for (index, (entry, name)) in entries.iter_mut().zip(&mut names).enumerate() {
+                entry.cookie = [41, 42, 99][index];
+                entry.name.utf8string_len = name.len() as _;
+                entry.name.utf8string_val = name.as_mut_ptr().cast();
+                entry.nextentry = if index == 2 {
+                    std::ptr::null_mut()
+                } else {
+                    // SAFETY: index+1 is inside the live, fixed-size entries array.
+                    unsafe { base.add(index + 1) }
+                };
+            }
+            // SAFETY: zero is valid for this generated C response's fields.
+            let mut reply: nfsv41_sys::READDIR4resok = unsafe { std::mem::zeroed() };
+            reply.reply.entries = base;
+            reply.cookieverf = [3; 8];
+            for eof in [false, true] {
+                reply.reply.eof = i32::from(eof);
+                let (visible, next) = super::NfsClient::collect_readdir(&reply).unwrap();
+                if dot_only {
+                    assert!(visible.is_empty());
+                } else {
+                    assert_eq!(visible.len(), 1);
+                    assert_eq!(visible[0].name, [0xff]);
+                    assert_eq!(visible[0].cookie, 42);
+                }
+                assert_eq!(next.value, if eof { 0 } else { 99 });
+                assert_eq!(next.verifier, [3; 8]);
+            }
+        }
     }
 
     #[test]

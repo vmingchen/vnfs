@@ -476,3 +476,42 @@ fn mixed_range_metadata_errors_keep_original_slots() {
         );
     }
 }
+
+#[test]
+fn first_ranged_read_reuses_exact_payload_without_retaining_spare_capacity() {
+    Python::initialize();
+    let root = TestRoot::new();
+    let expected = vec![b'x'; 4096];
+    std::fs::write(root.0.join("payload"), &expected).unwrap();
+    for capacity in [4096, 1024 * 1024] {
+        let mut backend = FaultBackend::new(&root.0, None);
+        backend.read_buffer_capacity = Some(capacity);
+        let buffers = backend.read_buffers.clone();
+        Python::attach(|py| {
+            let (mut data, errors) = client(backend)
+                .read_many(py, vec!["/payload".into()], vec![0], Some(vec![Some(4096)]))
+                .unwrap();
+            assert!(errors.is_empty());
+            let data = data.remove(0).unwrap();
+            assert_eq!(data, expected);
+            let buffers = buffers.lock().unwrap();
+            assert_eq!(buffers.len(), 1);
+            let (pointer, length, supplied_capacity) = buffers[0];
+            assert_eq!(length, data.len());
+            if supplied_capacity == length {
+                assert_eq!(
+                    data.as_ptr() as usize,
+                    pointer,
+                    "first exact payload must move"
+                );
+                assert_eq!(data.capacity(), supplied_capacity);
+            } else {
+                assert_ne!(data.as_ptr() as usize, pointer);
+                assert!(
+                    data.capacity() < supplied_capacity,
+                    "do not retain oversized backend allocations"
+                );
+            }
+        });
+    }
+}
