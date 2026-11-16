@@ -3010,7 +3010,7 @@ impl NfsClient {
                         },
                         &op.file,
                         PathIoOpen {
-                            access: OPEN4_SHARE_ACCESS_BOTH,
+                            access: OPEN4_SHARE_ACCESS_WRITE,
                             create: if op.create && start == 0 {
                                 OpenCreate::Unchecked
                             } else {
@@ -4706,7 +4706,7 @@ impl NfsClient {
     }
 
     /// GETATTR the requested FATTR4 attributes of `fh`; returns the raw XDR
-    /// attribute list in request order.
+    /// attribute list in ascending attribute-number order, as defined by XDR.
     pub fn getattr(&mut self, fh: &NfsFh, attrs: &[u32]) -> RpcResult<Vec<u8>> {
         self.getattr_with_bitmap(fh, attrs).map(|(_, bytes)| bytes)
     }

@@ -5,8 +5,9 @@
 //! the server supports, and destroys its session/clientid on drop.
 //!
 //! NFSv4 referrals and filesystem migration are unsupported. `NFS4ERR_MOVED`
-//! is surfaced as `Unsupported` with the original NFS status and request index;
-//! it does not trigger referral following or mutation replay. Connect directly
+//! is surfaced as `Unsupported` with the original NFS status. Vector outcomes
+//! identify the affected input; causes are index-free. This does not trigger
+//! referral following or mutation replay. Connect directly
 //! to the destination server/export instead.
 
 // bindgen emits lowercase constants (e.g. nfs_ftype4_NF4DIR) matched here.

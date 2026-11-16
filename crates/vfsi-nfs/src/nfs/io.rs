@@ -1763,7 +1763,7 @@ impl NfsVecFs {
                 paths.push(self.visible_path(&path));
                 path_indices.push(index);
                 flags.push(
-                    libc::O_RDWR
+                    libc::O_WRONLY
                         | if write.creates() { libc::O_CREAT } else { 0 }
                         | if write.truncates() { libc::O_TRUNC } else { 0 },
                 );
@@ -2569,6 +2569,83 @@ mod phased_write_tests {
     use super::*;
     use std::sync::Arc;
     use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+
+    #[test]
+    fn live_path_writes_require_only_write_access_in_every_mode() {
+        let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+            assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+            return;
+        };
+        let minor = std::env::var("VFSI_NFS_MINOR")
+            .unwrap_or_else(|_| "1".into())
+            .parse()
+            .unwrap();
+        for mode in ["off", "openwrite", "full"] {
+            let mut fs = NfsVecFs::connect_minor(&server, minor).unwrap();
+            fs.set_merged_mode(mode);
+            let directory =
+                PathBuf::from(format!("/write-only-paths-{}-{mode}", std::process::id()));
+            fs.ensure_dir_impl(&directory, 0o700).unwrap();
+            let paths: Vec<_> = ["at", "append", "truncate", "create"]
+                .iter()
+                .map(|name| directory.join(name))
+                .collect();
+            let observed = (|| -> VfResult<_> {
+                for path in &paths[..3] {
+                    let file = fs.open_raw_impl(
+                        path,
+                        libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY,
+                        0o200,
+                    )?;
+                    fs.write_raw_impl(&file, 0, b"old")?;
+                    fs.close_impl(&file)?;
+                }
+                let denied = match fs.open_raw_impl(&paths[0], libc::O_RDONLY, 0) {
+                    Err(error) => Some(error.kind()),
+                    Ok(file) => {
+                        fs.close_impl(&file)?;
+                        None
+                    }
+                };
+                // Reopening WRITE-only is the control for the path-vector failure.
+                let file = fs.open_raw_impl(&paths[0], libc::O_WRONLY, 0)?;
+                fs.write_raw_impl(&file, 0, b"old")?;
+                fs.close_impl(&file)?;
+                let files: Vec<_> = paths
+                    .iter()
+                    .map(|path| FileOperand::from_os_path(path))
+                    .collect();
+                let writes = [
+                    WriteOp::at(&files[0], 0, b"NEW".as_slice()),
+                    WriteOp::new(&files[1], VfOffset::End, b"X".as_slice()),
+                    WriteOp::at(&files[2], 0, b"Z".as_slice()).with_truncate(),
+                    WriteOp::at(&files[3], 0, b"fresh".as_slice()).with_creation(),
+                ];
+                let outcomes = fs.write_results(&writes)?;
+                let mut contents = Vec::new();
+                for (path, file) in paths.iter().zip(&files) {
+                    fs.vsetattrs_raw_impl(&[VfAttrs {
+                        file: file.clone(),
+                        masks: AttrMask::MODE,
+                        mode: 0o600,
+                        ..Default::default()
+                    }])?
+                    .remove(0)
+                    .map_err(OpError::into_cause)?;
+                    contents.push(fs.read_raw_impl(&FileOperand::from_os_path(path), 0, 32)?);
+                }
+                Ok((denied, outcomes, contents))
+            })();
+            fs.remove_impl(&directory, true).unwrap();
+            fs.shutdown().unwrap();
+            let (denied, outcomes, contents) = observed.unwrap();
+            assert_eq!(denied, Some(std::io::ErrorKind::PermissionDenied));
+            for outcome in outcomes {
+                assert!(outcome.is_ok(), "mode={mode}: {outcome:?}");
+            }
+            assert_eq!(contents, [b"NEW".as_slice(), b"oldX", b"Z", b"fresh"]);
+        }
+    }
 
     #[test]
     fn live_full_data_failure_retains_exact_owner_after_unlink() {
