@@ -1,5 +1,50 @@
 # Release build-time baseline
 
+## 2026-11-15 buffered I/O and corrected Rust version cohorts
+
+The Rust/C cohort uses clean source bdc0313c01d958493453edd2bf54e916c3517248; Python
+distributions use 5b96dde6ccdf58b8109e02f72734cdaf054d05de. Both passed canonical CI and the
+exact four-port/ABI gate before publication. C ABI remains v3. The
+[publication ledger](migrations/buffered-io-publication-2026-11-15.json) records
+registry digests, source commits, workflow links and step timings.
+
+The initial 0.3.1 core/backend patches, vnfs 0.0.37 and vfsi-c 0.3.21 are
+superseded. The ReadOutput/WriteOutput rename belongs in a separate 0.4.x
+Rust dependency range so it is not selected by older 0.3.x clients.
+
+Locked Cargo publication reused the existing target cache with two build jobs.
+These are complete publish-command times, including packaging, verification,
+upload and index visibility; archive checksum/source verification is separate.
+
+| Crate | Publish command |
+|---|---:|
+| vfsi-core 0.4.0 | 3.615s |
+| vfsi-sync 0.4.0 | 4.510s |
+| vfsi-local 0.4.0 | 4.809s |
+| vfsi-posix 0.4.0 | 3.813s |
+| vfsi-uring 0.4.0 | 2.184s |
+| vfsi-nfs 0.4.0 | 11.083s |
+| vfsi-smb 0.4.0 | 9.881s |
+| vnfs 0.0.38 | 11.378s |
+| vfsi-c 0.3.22 | 16.016s |
+
+Python workflow times include queueing, builds, installed-wheel tests, security,
+publication and applicable live Kerberos checks. Native and emulated builds
+must be compared using the per-step timings in the ledger.
+
+| Python release | Workflow wall time |
+|---|---:|
+| [vfsi-fsspec 0.1.16](https://github.com/vmingchen/vnfs/actions/runs/43773528597) | 76s |
+| [vsmb 0.1.11](https://github.com/vmingchen/vnfs/actions/runs/43773528768) | 230s |
+| [vsmbfs 0.1.10](https://github.com/vmingchen/vnfs/actions/runs/43774029108) | 226s |
+| [nfs4fs 0.3.17](https://github.com/vmingchen/vnfs/actions/runs/43773745616) | 1593s |
+
+The vsmbfs release required one retry after a regional PyPI index initially
+omitted the newly uploaded vsmb dependency. Its first failed build is retained
+in the durable VM release records. No package files were published by that
+failed attempt. Local validation used fast and focused tests; full coverage
+ran in CI.
+
 ## 2026-11-14 coordinated maintenance patches
 
 All ten Rust/C crates and four Python distributions use clean source `e39cbbcde72749000ab03f71a78f7ed2cdcb1fdc`.
