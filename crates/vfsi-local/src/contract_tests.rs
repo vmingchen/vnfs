@@ -570,6 +570,39 @@ mod tests {
     }
 
     #[test]
+    fn followed_symlink_cycles_report_eloop_without_breaking_nofollow_operations() {
+        use std::os::unix::fs::symlink;
+        let (root, mut backend) = fs("symlink-cycle-errors");
+        symlink("self", root.0.join("self")).unwrap();
+        symlink("second", root.0.join("first")).unwrap();
+        symlink("first", root.0.join("second")).unwrap();
+        for path in ["/self", "/first", "/second"] {
+            let path = Path::new(path);
+            let stat_error = backend.stat_impl(path).unwrap_err();
+            assert_eq!(stat_error.raw_os_error(), Some(libc::ELOOP));
+            let open_error = backend.open_raw_impl(path, libc::O_RDONLY, 0).unwrap_err();
+            assert_eq!(open_error.raw_os_error(), Some(libc::ELOOP));
+            let read_error = backend
+                .read_raw_impl(&FileOperand::from_os_path(path), 0, 1)
+                .unwrap_err();
+            assert_eq!(read_error.raw_os_error(), Some(libc::ELOOP));
+            assert_eq!(backend.lstat_impl(path).unwrap().ftype, VfType::Symlink);
+            assert!(
+                !backend
+                    .vreadlink_impl(&[path])
+                    .unwrap()
+                    .remove(0)
+                    .unwrap()
+                    .is_empty()
+            );
+            let create_error = backend
+                .open_raw_impl(path, libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY, 0o600)
+                .unwrap_err();
+            assert_eq!(create_error.raw_os_error(), Some(libc::EEXIST));
+        }
+    }
+
+    #[test]
     fn constructor_rejects_fifo_roots_without_waiting_for_a_writer() {
         use std::os::unix::ffi::OsStrExt;
         let root = TempRoot::new("fifo-root");

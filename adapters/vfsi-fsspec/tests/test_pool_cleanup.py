@@ -201,3 +201,90 @@ def test_interrupted_executor_shutdown_defers_late_open_success(
         for executor in executors:
             executor.shutdown(wait=True)
         pool.shutdown()
+
+
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize("operation", ["open", "open_many", "open_many_independent"])
+@pytest.mark.parametrize("boundary", ["close", "reconnect"])
+def test_deferred_cleanup_cancellation_prevents_new_opens(
+    monkeypatch, error_type, operation, boundary
+):
+    cancelled = error_type("cancel deferred cleanup")
+
+    class Native:
+        def __init__(self):
+            self.opens = []
+            self.closes = []
+            self.fail = True
+
+        def open(self, path, mode):
+            self.opens.append((path, mode))
+            return 12
+
+        def open_many(self, paths, modes):
+            self.opens.extend(zip(paths, modes))
+            return [12] * len(paths)
+
+        def close_many(self, fds):
+            self.closes.append(list(fds))
+            if self.fail:
+                if boundary == "close":
+                    raise cancelled
+                raise ConnectionResetError("retry connection")
+
+        def shutdown(self):
+            pass
+
+    pool = _ClientPool(SimpleNamespace(NfsClient=Native), (), size=1)
+    native = pool._clients[0]._native
+    token = pool._register(0, 11)
+    pool.defer_close_many([token])
+    if boundary == "reconnect":
+
+        def reconnect(owner):
+            raise cancelled
+
+        monkeypatch.setattr(pool, "_reconnect_client", reconnect)
+    args = ("/victim", "wb") if operation == "open" else (["/victim"], ["wb"])
+    try:
+        with pytest.raises(error_type) as caught:
+            getattr(pool, operation)(*args)
+        assert caught.value is cancelled
+        assert not native.opens
+        assert native.closes == [[11]]
+        assert set(pool._fds) == pool._deferred_close == {token}
+        native.fail = False
+        pool._retry_deferred_closes()
+        assert native.closes == [[11], [11]]
+        assert not pool._fds
+        assert not pool._deferred_close
+    finally:
+        pool.shutdown()
+
+
+def test_ordinary_deferred_close_failure_still_allows_new_opens():
+    class Native:
+        def __init__(self):
+            self.opens = []
+
+        def close_many(self, fds):
+            raise PermissionError("deferred close unavailable")
+
+        def open(self, path, mode):
+            self.opens.append((path, mode))
+            return 12
+
+        def shutdown(self):
+            pass
+
+    pool = _ClientPool(SimpleNamespace(NfsClient=Native), (), size=1)
+    native = pool._clients[0]._native
+    token = pool._register(0, 11)
+    pool.defer_close_many([token])
+    try:
+        opened = pool.open("/allowed", "wb")
+        assert native.opens == [("/allowed", "wb")]
+        assert pool._deferred_close == {token}
+        assert set(pool._fds) == {token, opened}
+    finally:
+        pool.shutdown()

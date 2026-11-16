@@ -654,7 +654,7 @@ impl LocalBackend {
 
     fn real_path_depth(&self, p: &Path, depth: usize) -> VfResult<AnchoredPath> {
         if depth > 40 {
-            return Err(std::io::Error::from_raw_os_error((ERR_ACCES) as i32)); // symlink loop / too deep
+            return Err(std::io::Error::from_raw_os_error(libc::ELOOP));
         }
         // Resolve the final symlink manually so absolute targets retain the
         // backend's chroot-relative semantics. The parent is held open while

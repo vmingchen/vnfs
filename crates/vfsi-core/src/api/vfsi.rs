@@ -45,8 +45,9 @@ use super::{DirHandle, FileHandle};
 /// A leading `/` refers to the configured root; this is not security confinement.
 /// Handles in a vector must belong to this client's connection. Successful
 /// vector results match input order; one vector may span several compounds.
-/// Callback cancellation returns a completed/stopped prefix for vector visitors;
-/// directory-page waves may leave several started roots stopped.
+/// Callback cancellation retains known completions and failures; unfinished
+/// inputs are stopped. Submitted waves may have completed independent siblings,
+/// so the retained outcomes need not form a prefix.
 /// A failed mutation can have partial effects. The result slot identifies its
 /// input; an `OpError` records completion certainty and acknowledged I/O progress.
 /// Neither implies a committed prefix. Preserve that evidence rather than

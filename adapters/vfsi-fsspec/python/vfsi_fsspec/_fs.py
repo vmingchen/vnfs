@@ -800,11 +800,13 @@ class _ClientPool:
                     )
                 except BaseException as error:
                     self._discard_confirmed_closes(error, [token for token, _ in live])
+                    if not isinstance(error, Exception):
+                        raise
                     if _is_transport_error(error):
                         if self._auto_reconnect and _can_reconnect(error):
                             try:
                                 self._reconnect_client(owner)
-                            except BaseException:
+                            except Exception:
                                 pass
                 else:
                     self._discard_tokens([token for token, _ in live])
