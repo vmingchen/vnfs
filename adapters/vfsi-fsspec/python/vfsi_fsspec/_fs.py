@@ -2867,7 +2867,7 @@ class _DeferredWriteFile:
                     _write_fully(remote, chunk)
             if permissions is not None:
                 self.fs._client.chmod(self.fs._native_path(self.temp_path), permissions)
-        except BaseException:
+        except BaseException as primary:
             try:
                 self._run_scalar(self.fs.rm, self.temp_path)
             except FileNotFoundError:
@@ -2875,6 +2875,8 @@ class _DeferredWriteFile:
             except OSError:
                 # Retain ownership so transaction/manual discard can retry.
                 pass
+            except BaseException as cleanup:
+                raise primary from cleanup
             else:
                 self._stage_owned = False
             raise
@@ -4665,7 +4667,9 @@ class VfsiFileSystem(AbstractFileSystem):
         _validate_write_mode(mode)
         with self._cache_mutation(paths, namespace=True):
             native = [self._native_path(p) for p in paths]
-            datas = [v if isinstance(v, bytes) else bytes(v) for v in values]
+            datas = [
+                v if isinstance(v, bytes) else bytes(memoryview(v)) for v in values
+            ]
             is_bulk = callback_pairs is not None
             if callback is not None:
                 callback.set_size(len(paths) if is_bulk else len(datas[0]))
