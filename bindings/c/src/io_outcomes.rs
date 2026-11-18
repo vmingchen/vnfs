@@ -214,7 +214,8 @@ pub unsafe extern "C" fn vfsi_preadv_ex(
 /// progress never grants replay permission. Never fall back after dispatch.
 /// # Safety
 /// Same pointer, lifetime and non-aliasing contract as the legacy vector API,
-/// with count writable vfsi_io_result outputs. Read buffers may be uninitialized.
+/// with count writable vfsi_io_result outputs. Each nonempty write payload
+/// must contain initialized bytes for the full call.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_pwritev_ex(
     fs: *mut vfsi_fs,

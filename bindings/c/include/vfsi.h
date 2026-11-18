@@ -995,7 +995,8 @@ struct vfsi_result vfsi_preadv_ex(struct vfsi_fs *fs,
  * progress never grants replay permission. Never fall back after dispatch.
  * # Safety
  * Same pointer, lifetime and non-aliasing contract as the legacy vector API,
- * with count writable vfsi_io_result outputs. Read buffers may be uninitialized.
+ * with count writable vfsi_io_result outputs. Each nonempty write payload
+ * must contain initialized bytes for the full call.
  */
 struct vfsi_result vfsi_pwritev_ex(struct vfsi_fs *fs,
                                    struct vfsi_pwrite_op *ops,
