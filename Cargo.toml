@@ -15,12 +15,9 @@ resolver = "2"
 
 [workspace.dependencies]
 bitfields = "3.1.0"
-clap = { version = "4.5.17", features = ["derive"] }
 libc = "0.2"
 libntirpc-sys = "0.3.6"
 nfsv41-sys = { path = "crates/nfsv41-sys", version = "0.1.17" }
-xdr-codec = "0.4.4"
-xdrgen = "0.4.4"
 vfsi-core = { path = "crates/vfsi-core", version = "0.4.0" }
 vfsi-local = { path = "crates/vfsi-local", version = "0.4.0" }
 vfsi-posix = { path = "crates/vfsi-posix", version = "0.4.0" }
