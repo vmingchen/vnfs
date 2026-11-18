@@ -288,3 +288,66 @@ def test_ordinary_deferred_close_failure_still_allows_new_opens():
         assert set(pool._fds) == {token, opened}
     finally:
         pool.shutdown()
+
+
+def test_fork_hook_tracks_only_live_pools_and_resets_all_child_locks():
+    import os
+    import subprocess
+    import sys
+
+    if not hasattr(os, "fork") or not hasattr(os, "register_at_fork"):
+        pytest.skip("requires POSIX fork hooks")
+    code = """
+import gc
+import os
+import weakref
+from types import SimpleNamespace
+
+callbacks = []
+register = os.register_at_fork
+def record_registration(**kwargs):
+    hook = kwargs.get("after_in_child")
+    if getattr(hook, "__module__", None) == "vfsi_fsspec._fs":
+        callbacks.append(weakref.ref(hook))
+    register(**kwargs)
+os.register_at_fork = record_registration
+from vfsi_fsspec._fs import _ClientPool
+
+class Native:
+    def shutdown(self):
+        pass
+
+def pool():
+    return _ClientPool(SimpleNamespace(NfsClient=Native), (), size=2)
+
+retired = []
+for _ in range(32):
+    client = pool()
+    retired.append(weakref.ref(client))
+    client.shutdown()
+    del client
+gc.collect()
+assert all(ref() is None for ref in retired)
+parents = [pool(), pool()]
+assert len(callbacks) == 1
+locks = [(pool._lock, pool._reconnect_lock, pool._client_locks) for pool in parents]
+pid = os.fork()
+if pid == 0:
+    try:
+        for pool, (lock, reconnect, clients) in zip(parents, locks):
+            assert pool._lock is not lock
+            assert pool._reconnect_lock is not reconnect
+            assert len(pool._client_locks) == len(clients)
+            assert all(a is not b for a, b in zip(pool._client_locks, clients))
+    except BaseException:
+        os._exit(1)
+    os._exit(0)
+_, status = os.waitpid(pid, 0)
+assert status == 0, status
+for pool, (lock, reconnect, clients) in zip(parents, locks):
+    assert pool._lock is lock
+    assert pool._reconnect_lock is reconnect
+    assert pool._client_locks is clients
+    pool.shutdown()
+"""
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=10)

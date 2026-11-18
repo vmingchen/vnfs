@@ -286,7 +286,7 @@ impl NfsClientBuilder {
                 Path::new(self.host.as_ref()),
             ));
         }
-        let pool_id = NEXT_CLIENT_POOL_ID.fetch_add(1, Ordering::Relaxed);
+        let pool_id = crate::session::next_client_token();
         (0..size)
             .map(|member| self.pool_member(pool_id, member).connect())
             .collect()
@@ -480,7 +480,6 @@ pub struct NfsVecFs {
 }
 
 static NEXT_DIR_OWNER: AtomicU64 = AtomicU64::new(1);
-static NEXT_CLIENT_POOL_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Which merged-compound strategy the NFS backend uses for path-based bulk
 /// I/O, downgraded automatically when the server rejects the current form.

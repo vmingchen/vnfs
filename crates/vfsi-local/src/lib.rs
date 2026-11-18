@@ -402,13 +402,7 @@ impl LocalBackend {
     /// Map a (possibly cwd-relative) path onto the real filesystem.
     /// The result is lexically normalized and cannot escape `root` via `..`.
     fn resolve(&self, path: &Path) -> PathBuf {
-        let suffix = if path.is_absolute() {
-            path.strip_prefix("/").unwrap_or(path).to_path_buf()
-        } else {
-            self.cwd.join(path)
-        };
-        self.root
-            .join(OsStr::from_bytes(&normalize_bytes(path_bytes(&suffix))))
+        self.root.join(self.abs_path(path))
     }
 
     /// Resolve `p` (already mapped under the root) to a real path that is
@@ -2125,12 +2119,16 @@ impl HandleBackend for LocalBackend {
     }
 
     fn abs_path(&self, path: &Path) -> PathBuf {
-        let root_rel = if path.is_absolute() {
-            path.strip_prefix("/").unwrap_or(path).to_path_buf()
+        let joined;
+        let root_relative = if path.is_absolute() {
+            path.strip_prefix("/").unwrap_or(path)
+        } else if self.cwd.as_os_str().is_empty() {
+            path
         } else {
-            self.cwd.join(path)
+            joined = self.cwd.join(path);
+            &joined
         };
-        OsString::from_vec(normalize_bytes(path_bytes(&root_rel))).into()
+        OsString::from_vec(normalize_bytes(path_bytes(root_relative))).into()
     }
 
     fn open_path_impl(

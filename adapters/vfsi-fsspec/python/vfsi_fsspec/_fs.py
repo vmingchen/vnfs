@@ -627,6 +627,20 @@ class _ResilientClient:
         return call
 
 
+_FORK_POOLS = weakref.WeakSet()
+
+
+def _reset_pool_locks_after_fork():
+    for pool in _FORK_POOLS:
+        pool._reset_locks_after_fork()
+
+
+if hasattr(os, "register_at_fork"):
+    # The interpreter retains registered hooks for its lifetime. Keep one
+    # hook and weak ownership so retired filesystems leave no callbacks.
+    os.register_at_fork(after_in_child=_reset_pool_locks_after_fork)
+
+
 class _ClientPool:
     """Bounded pool of independent native sessions with virtual descriptors.
 
@@ -694,14 +708,7 @@ class _ClientPool:
         self._pid = os.getpid()
         self._cwd = "/"
         if hasattr(os, "register_at_fork"):
-            pool_ref = weakref.ref(self)
-
-            def reset_pool_locks():
-                pool = pool_ref()
-                if pool is not None:
-                    pool._reset_locks_after_fork()
-
-            os.register_at_fork(after_in_child=reset_pool_locks)
+            _FORK_POOLS.add(self)
 
     def _reset_locks_after_fork(self):
         """Discard locks that may be owned by threads absent in the child."""
