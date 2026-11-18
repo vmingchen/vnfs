@@ -15,38 +15,53 @@ mod live_shutdown_tests {
             .unwrap_or_else(|_| "2".into())
             .parse()
             .unwrap();
-        let mut client = NfsClient::connect_minor(&host, minor).unwrap();
-        let root = client.root().clone();
-        let name = format!("prr-shutdown-deferred-{}-{minor}", std::process::id());
-        let dir = client.mkdir(&root, &name).unwrap();
-        let (fh, stateid) = client
-            .open(
-                &dir,
-                b"file",
-                nfsv41_sys::OPEN4_SHARE_ACCESS_READ,
-                OpenCreate::Unchecked,
-            )
-            .unwrap();
-        let script = Arc::new(FaultScript::new([(
-            OpenFaultPoint::BeforePathCloseBatch,
-            vfsi_core::internal::errors::transport(
-                vfsi_core::TransportKind::Other,
-                "defer cleanup",
-            ),
-        )]));
-        client.set_fault_injector(script.clone());
-        client.close_path_or_defer(vec![CloseOp { fh, stateid }]);
-        assert!(script.is_consumed());
-        assert_eq!(client.deferred_path_close_count(), 1);
-        client.remove(&dir, "file").unwrap();
-        client.remove(&root, &name).unwrap();
-        let result = client.shutdown();
+        let mut teardown_calls = Vec::new();
+        for label in ["explicit", "implicit"] {
+            let mut client = NfsClient::connect_minor(&host, minor).unwrap();
+            let root = client.root().clone();
+            let name = format!(
+                "prr-shutdown-deferred-{}-{minor}-{label}",
+                std::process::id()
+            );
+            let dir = client.mkdir(&root, &name).unwrap();
+            let (fh, stateid) = client
+                .open(
+                    &dir,
+                    b"file",
+                    nfsv41_sys::OPEN4_SHARE_ACCESS_READ,
+                    OpenCreate::Unchecked,
+                )
+                .unwrap();
+            let script = Arc::new(FaultScript::new([(
+                OpenFaultPoint::BeforePathCloseBatch,
+                vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "defer cleanup",
+                ),
+            )]));
+            client.set_fault_injector(script.clone());
+            client.close_path_or_defer(vec![CloseOp { fh, stateid }]);
+            assert!(script.is_consumed());
+            assert_eq!(client.deferred_path_close_count(), 1);
+            client.remove(&dir, "file").unwrap();
+            client.remove(&root, &name).unwrap();
+            let _ = crate::compound::thread_compound_stats();
+            if label == "explicit" {
+                let result = client.shutdown();
+                assert_eq!(
+                    client.deferred_path_close_count(),
+                    0,
+                    "shutdown retains responsibility for deferred OPENs"
+                );
+                result.unwrap();
+            }
+            drop(client);
+            teardown_calls.push(crate::compound::thread_compound_stats().0);
+        }
         assert_eq!(
-            client.deferred_path_close_count(),
-            0,
-            "shutdown retains responsibility for deferred OPENs"
+            teardown_calls[1], teardown_calls[0],
+            "Drop must also send the retained CLOSE before destroying the session"
         );
-        result.unwrap();
     }
 
     #[test]

@@ -322,9 +322,13 @@ impl Session {
             .map_or(Ok(()), |(index, status)| Err(RpcError::op(index, status)))
     }
 
+    pub(crate) fn has_active_clientid(&self) -> bool {
+        self.clientid != 0
+    }
+
     /// Tear down the session and clientid, reporting the first failure.
     pub(crate) fn shutdown(&mut self) -> RpcResult<()> {
-        if self.clientid == 0 {
+        if !self.has_active_clientid() {
             return Ok(());
         }
         let mut first_error = None;

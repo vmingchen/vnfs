@@ -158,6 +158,17 @@ pub struct NfsClient {
     pub(crate) fail_merged_truncate_once: bool,
 }
 
+impl Drop for NfsClient {
+    fn drop(&mut self) {
+        // Session::drop destroys the active session after releasing these
+        // retained path OPENs. An explicitly shut down or abandoned client
+        // must not send any more CLOSEs.
+        if !self.deferred_path_closes.is_empty() && self.session.has_active_clientid() {
+            let _ = self.drain_deferred_path_closes();
+        }
+    }
+}
+
 /// Upper bound for the per-compound payload cap for merged path I/O; the
 /// actual default comes from the server-confirmed `ca_maxrequestsize`.
 pub const DEFAULT_MAX_COMPOUND_BYTES: usize = 4 << 20;
