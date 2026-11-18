@@ -23,7 +23,7 @@ manual memory management. Higher-level protocol wrappers live in `vfsi-nfs`;
 
 `build.rs` performs two steps:
 
-1. **C codec archive**: `gcc` compiles `src/wrapper.c` (with libntirpc's
+1. **C codec archive**: the C compiler selected by `cc` compiles `src/wrapper.c` (with libntirpc's
    include directories, supplied by `libntirpc-sys` via its `links`
    metadata as `DEP_NTIRPC_INCLUDE` / `DEP_NTIRPC_INCLUDE2`) into
    `libnfsv41.a`.
@@ -72,7 +72,7 @@ cargo test -p nfsv41-sys
 - **Pure-Rust codecs via `xdrgen`.** The workspace already carries
   `protocols/nfsv4/nfsv41.x` (the RFC 5661 XDR spec) and the `xdrgen` /
   `xdr-codec` dependencies. `xdrgen` parses the `.x` spec and emits typed
-  `Pack`/`Unpack` implementations, which would remove gcc, `wrapper.c`,
+  `Pack`/`Unpack` implementations, which would remove the C compiler, `wrapper.c`,
   bindgen, and the `-Wno-incompatible-pointer-types` workaround. See below.
 - **Safe wrapper layer.** Owned buffer types (`Vec<u8>`, `String`), RAII for
   decoded trees (no manual `xdr_free_null_stream`), and safe accessors for

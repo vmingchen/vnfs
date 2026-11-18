@@ -4929,7 +4929,14 @@ class VfsiFileSystem(AbstractFileSystem):
             try:
                 file = self.open(path, native_mode, _defer_cache=True, **kwargs)
             except Exception as error:
-                _rebase_error(error, [input_index], [path])
+                if (
+                    isinstance(error, OSError)
+                    and getattr(error, "index", None) is None
+                    and not _is_transport_error(error)
+                ):
+                    _oserror(error, path, index=input_index)
+                else:
+                    _rebase_error(error, [input_index], [path])
                 raise
             # Configurable cache factories are application code, like codecs.
             if isinstance(file, VfsiFile):
@@ -4951,6 +4958,7 @@ class VfsiFileSystem(AbstractFileSystem):
         *,
         outfile=None,
         input_index=None,
+        source_size=None,
         **open_kwargs,
     ):
         from fsspec.implementations.local import LocalFileSystem
@@ -4964,7 +4972,9 @@ class VfsiFileSystem(AbstractFileSystem):
                     internal, "rb", input_index, **open_kwargs
                 )
             stack.push(partial(_close_reader_on_exit, remote))
-            callback.set_size(getattr(remote, "size", None))
+            if source_size is None:
+                source_size = getattr(remote, "size", None)
+            callback.set_size(source_size)
             if outfile is None:
                 local = LocalFileSystem(auto_mkdir=True)
                 local.makedirs(local._parent(lpath), exist_ok=True)
@@ -5116,22 +5126,15 @@ class VfsiFileSystem(AbstractFileSystem):
             [size for _, _, size, _ in pairs], self.batch_size, read_batch_bytes
         ):
             if len(batch) == 1 and pairs[batch[0]][2] > read_batch_bytes:
-                remote_path, local_path, size, _ = pairs[batch[0]]
+                remote_path, local_path, size, public_index = pairs[batch[0]]
                 with callback.branched(remote_path, local_path) as child:
-                    child.set_size(size)
-                    local.makedirs(local._parent(local_path), exist_ok=True)
-                    # Validate and own the source before truncating a local
-                    # destination; failed remote OPEN must preserve old data.
-                    with ExitStack() as stack:
-                        remote = self.open(remote_path, "rb", cache_type="none")
-                        stack.push(partial(_close_reader_on_exit, remote))
-                        with open(local_path, "wb") as out:
-                            self._copy_remote_to_fileobj(
-                                remote_path,
-                                out,
-                                on_progress=child.relative_update,
-                                source=remote,
-                            )
+                    self._download_file_streamed(
+                        self._checked_strip_protocol(remote_path),
+                        local_path,
+                        child,
+                        input_index=public_index,
+                        source_size=size,
+                    )
                 callback.relative_update()
                 continue
             selected = [pairs[i] for i in batch]

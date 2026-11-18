@@ -142,7 +142,13 @@ pub fn copy_tree_batches_with_pages<F: VectorBackend + ?Sized>(
             .contains(AttrMask::identity())
             .then_some((attrs.fs_id, attrs.fileid))
     };
-    let source_identity = identity(&backend.stat_impl(source).map_err(&map_error)?);
+    let source_attrs = backend.stat_impl(source).map_err(&map_error)?;
+    if source_attrs.ftype != VfType::Directory {
+        return Err(map_error(std::io::Error::from(
+            std::io::ErrorKind::NotADirectory,
+        )));
+    }
+    let source_identity = identity(&source_attrs);
     let directory_mode = if backend
         .capabilities()
         .contains(Capabilities::POSIX_METADATA)
@@ -219,13 +225,13 @@ pub fn copy_tree_batches_with_pages<F: VectorBackend + ?Sized>(
                             .map_err(&map_error)?;
                     }
                 } else {
-                    copies.push(ExtentPair::from_os_paths(
-                        &source_child,
-                        0,
-                        &destination_child,
-                        0,
-                        None,
-                    ));
+                    copies.push(ExtentPair {
+                        src_path: source_child,
+                        dst_path: destination_child,
+                        src_offset: 0,
+                        dst_offset: 0,
+                        length: None,
+                    });
                     if copies.len() == 32 {
                         copy_files(backend, &copies).map_err(&map_error)?;
                         copies.clear();

@@ -216,6 +216,31 @@ def test_get_error_index_survives_filtering_and_batching(
     assert not os.path.exists(targets[-1])
 
 
+@pytest.mark.parametrize("explicit_options", [False, True])
+def test_streamed_get_attributes_disappeared_source_without_creating_parents(
+    dummy_fs, tmp_path, monkeypatch, explicit_options
+):
+    dummy_fs.max_batch_bytes = 8
+    dummy_fs.pipe({"/small": b"ok", "/large": b"0123456789"})
+    original = dummy_fs.open
+
+    def open_after_disappearance(path, *args, **kwargs):
+        if path == "/large":
+            dummy_fs.rm_file(path)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(dummy_fs, "open", open_after_disappearance)
+    small = tmp_path / "small"
+    large = tmp_path / "absent" / "large"
+    options = {"cache_type": "none"} if explicit_options else {}
+    with pytest.raises(FileNotFoundError) as caught:
+        dummy_fs.get(["/small", "/large"], [str(small), str(large)], **options)
+    assert getattr(caught.value, "index", None) == 1
+    assert caught.value.filename == "/large"
+    assert small.read_bytes() == b"ok"
+    assert not large.parent.exists()
+
+
 @pytest.mark.parametrize("operation", ["pipe", "put", "put_with_directory"])
 def test_write_transfer_error_index_survives_filtering_and_batching(
     dummy_fs, tmp_path, operation

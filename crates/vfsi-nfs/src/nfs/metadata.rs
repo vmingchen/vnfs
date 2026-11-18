@@ -252,13 +252,6 @@ pub(super) fn apply_attrs(a: &mut VfAttrs, v: &AttrValues) {
     copy!(NAMED_ATTR, has_named_attr);
 }
 
-/// Whether a single `FATTR4_TYPE` attribute payload names a symlink. A
-/// malformed list is an error, never an implicit "not a symlink".
-pub(super) fn type_is_symlink(attrs: &[u8]) -> VfResult<bool> {
-    let mut off = 0;
-    Ok(read_u32(attrs, &mut off)? == nfs_ftype4_NF4LNK)
-}
-
 fn read_u32(buf: &[u8], off: &mut usize) -> VfResult<u32> {
     let end = off.checked_add(4).ok_or_else(attr_decode_error)?;
     let bytes = buf.get(*off..end).ok_or_else(attr_decode_error)?;
@@ -1351,6 +1344,72 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn live_namespace_resolution_rejects_trailing_type_bytes() {
+        use crate::rpc::{
+            RpcClient,
+            test_support::{accepted_reply, read_record, successful_sequence_reply},
+        };
+        use std::{net::TcpListener, time::Duration};
+        let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+            assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+            return;
+        };
+        let minor = std::env::var("VFSI_NFS_MINOR")
+            .unwrap_or_else(|_| "1".into())
+            .parse()
+            .unwrap();
+        for length in [4u32, 8] {
+            let mut fs = NfsVecFs::connect_minor(&server, minor).unwrap();
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let address = listener.local_addr().unwrap();
+            let peer = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let request = read_record(&mut socket).unwrap();
+                let mut payload = successful_sequence_reply(&request, 3);
+                for word in [
+                    nfs_opnum4_NFS4_OP_PUTFH,
+                    0,
+                    nfs_opnum4_NFS4_OP_GETATTR,
+                    0,
+                    1,
+                    1 << FATTR4_TYPE,
+                    length,
+                    nfs_ftype4_NF4DIR,
+                ] {
+                    payload.extend_from_slice(&word.to_be_bytes());
+                }
+                if length == 8 {
+                    payload.extend_from_slice(&[0; 4]);
+                }
+                accepted_reply(&mut socket, &request, &payload);
+            });
+            let rpc = RpcClient::connect_with_timeouts(
+                &address.to_string(),
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+            )
+            .unwrap();
+            let original = fs.nfs.replace_test_rpc(rpc);
+            // The known root handle needs no LOOKUP before GETATTR.
+            let result = fs.resolve_path_and_type(Path::new(""), true);
+            fs.nfs.replace_test_rpc(original);
+            peer.join().unwrap();
+            fs.shutdown().unwrap();
+            if length == 4 {
+                assert_eq!(result.unwrap().1, nfs_ftype4_NF4DIR);
+            } else {
+                assert_eq!(
+                    vfsi_core::transport_kind(&result.unwrap_err()),
+                    Some(vfsi_core::TransportKind::InvalidReply)
+                );
+            }
+        }
+    }
+
     #[test]
     fn returned_attribute_bitmaps_reject_unknown_ids_without_panicking() {
         for (len, map) in [(1, [1, 0, 0]), (3, [0, 0, 1u32 << 31]), (4, [0, 0, 0])] {

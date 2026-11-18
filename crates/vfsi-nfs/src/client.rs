@@ -39,11 +39,11 @@ pub(crate) fn uncertain_completion(cause: &std::io::Error) -> bool {
             ))
 }
 
-fn decode_lookup_type(bytes: &[u8]) -> RpcResult<u32> {
+pub(crate) fn decode_type_attribute(bytes: &[u8]) -> RpcResult<u32> {
     let bytes = bytes.try_into().map_err(|_| {
         RpcError::transport_with_kind(
             vfsi_core::TransportKind::InvalidReply,
-            "invalid LOOKUP type attribute",
+            "invalid NFS type attribute",
         )
     })?;
     Ok(u32::from_be_bytes(bytes))
@@ -1741,7 +1741,7 @@ impl NfsClient {
         let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         let fh = NfsFh::from_nfs_fh(res.getfh(3));
-        let ftype = decode_lookup_type(res.getattr(4))?;
+        let ftype = decode_type_attribute(res.getattr(4))?;
         Ok((fh, ftype))
     }
 
@@ -1763,7 +1763,7 @@ impl NfsClient {
             },
             |reply, local, _| {
                 let start = 1 + 4 * local;
-                let ftype = decode_lookup_type(reply.getattr(start + 3)).map_err(|error| {
+                let ftype = decode_type_attribute(reply.getattr(start + 3)).map_err(|error| {
                     vfsi_core::OpError::unknown(vfsi_core::internal::errors::from_rpc(error), None)
                 })?;
                 Ok((NfsFh::from_nfs_fh(reply.getfh(start + 2)), ftype))

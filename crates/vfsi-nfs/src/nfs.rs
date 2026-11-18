@@ -1,7 +1,7 @@
-//! NFSv4.1 implementation of the vectorized [`VectorBackend`] API.
+//! NFSv4.1 and NFSv4.2 implementation of the vectorized [`VectorBackend`] API.
 //!
 //! [`NfsVecFs`] is the analog of the C `tc_init()` module handle: it connects
-//! to an NFSv4.1 server, coalesces vector operations into as few compounds as
+//! to an NFSv4.1 or NFSv4.2 server, coalesces vector operations into as few compounds as
 //! the server supports, and destroys its session/clientid on drop.
 //!
 //! NFSv4 referrals and filesystem migration are unsupported. `NFS4ERR_MOVED`

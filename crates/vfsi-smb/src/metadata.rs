@@ -210,7 +210,7 @@ impl SmbVecFs {
         if info.attributes.0 & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
             return Ok(info);
         }
-        // smb2 0.34's stat describes the final link. Our followed metadata
+        // The SMB client's stat can describe the final link. Our followed metadata
         // contract needs its target instead. Only links pay for this fallback;
         // ordinary files retain the concurrent, single-compound fast path.
         let mut request = self.open_request(path, libc::O_RDONLY)?;

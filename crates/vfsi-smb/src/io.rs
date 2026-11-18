@@ -323,77 +323,46 @@ impl SmbVecFs {
             return Err(error);
         }
         let (_, original_state, progress) = error.into_parts();
-        let mut prefix = match progress {
-            Some(IoProgress::Read(read)) => read.into_data().ok_or_else(|| {
-                OpError::unknown(
-                    vfsi_core::internal::errors::invalid_reply(
-                        "SMB path read returned buffered progress",
-                    ),
-                    None,
-                )
-            })?,
-            Some(_) => {
-                return Err(OpError::unknown(
-                    vfsi_core::internal::errors::invalid_reply("invalid SMB read progress"),
-                    None,
-                ));
-            }
-            None => Vec::new(),
-        };
-        if let Err(cause) = self.client_stat(path) {
-            let uncertain = vfsi_core::transport_kind(&(cause)).is_some()
-                || original_state == FailureState::Unknown;
-            let progress = (!prefix.is_empty()).then(|| {
-                IoProgress::Read(vfsi_core::api::ReadOutput::owned(offset, prefix, false))
-            });
-            return Err(if uncertain {
-                OpError::unknown(cause, progress)
-            } else {
-                OpError::failed(cause, progress)
-            });
+        if progress.as_ref().is_some_and(
+            |progress| !matches!(progress, IoProgress::Read(read) if read.data().is_some()),
+        ) {
+            return Err(OpError::unknown(
+                vfsi_core::internal::errors::invalid_reply("invalid SMB read progress"),
+                None,
+            ));
         }
-        let remaining = length - prefix.len();
-        let retry = self.compound_read_path(path, offset + prefix.len() as u64, remaining);
-        match retry {
-            Ok(data) => {
-                if prefix.is_empty() {
-                    return Ok(data);
-                }
-                prefix.extend_from_slice(&data);
-                Ok(prefix)
-            }
-            Err(error) => {
+        if let Err(cause) = self.client_stat(path) {
+            return Err(
+                if vfsi_core::transport_kind(&cause).is_some()
+                    || original_state == FailureState::Unknown
+                {
+                    OpError::unknown(cause, None)
+                } else {
+                    OpError::failed(cause, None)
+                },
+            );
+        }
+        self.compound_read_path(path, offset, length)
+            .map_err(|error| {
                 let (cause, state, progress) = error.into_parts();
-                let mut eof = false;
-                let had_progress = progress.is_some();
-                if let Some(IoProgress::Read(read)) = progress {
-                    eof = read.eof();
-                    let Some(data) = read.into_data() else {
-                        return Err(OpError::unknown(
+                match &progress {
+                    Some(IoProgress::Read(read)) if read.data().is_some() => {}
+                    None => {}
+                    _ => {
+                        return OpError::unknown(
                             vfsi_core::internal::errors::invalid_reply(
                                 "invalid SMB retry progress",
                             ),
                             None,
-                        ));
-                    };
-                    if prefix.is_empty() {
-                        prefix = data;
-                    } else {
-                        prefix.extend_from_slice(&data);
+                        );
                     }
                 }
-                let progress = (!prefix.is_empty() || had_progress).then(|| {
-                    IoProgress::Read(vfsi_core::api::ReadOutput::owned(offset, prefix, eof))
-                });
-                Err(
-                    if state == FailureState::Unknown || original_state == FailureState::Unknown {
-                        OpError::unknown(cause, progress)
-                    } else {
-                        OpError::failed(cause, progress)
-                    },
-                )
-            }
-        }
+                if state == FailureState::Unknown || original_state == FailureState::Unknown {
+                    OpError::unknown(cause, progress)
+                } else {
+                    OpError::failed(cause, progress)
+                }
+            })
     }
 
     pub(super) fn read_one(&mut self, op: &ReadOp) -> OpResult<ReadOutput> {

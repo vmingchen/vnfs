@@ -2929,6 +2929,11 @@ mod tests {
             "an empty directory must not be reported copied over a regular file"
         );
         assert_eq!(std::fs::read(root.0.join("file")).unwrap(), b"keep");
+        let error = backend
+            .copy_tree_impl(Path::new("/file"), Path::new("/new"), false, false)
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
+        assert!(!root.0.join("new").exists());
         for target in ["/source", "/source/inside"] {
             assert!(
                 backend

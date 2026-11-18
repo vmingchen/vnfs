@@ -320,9 +320,9 @@ impl NfsVecFs {
                         .nfs
                         .getattr(&fh, &[FATTR4_TYPE])
                         .map_err(vfsi_core::internal::errors::from_rpc)?;
-                    let is_symlink = type_is_symlink(&attrs)?;
-                    let ftype = u32::from_be_bytes(attrs[0..4].try_into().unwrap());
-                    if !is_symlink {
+                    let ftype = crate::client::decode_type_attribute(&attrs)
+                        .map_err(vfsi_core::internal::errors::from_rpc)?;
+                    if ftype != nfs_ftype4_NF4LNK {
                         return Ok((fh, ftype));
                     }
                     let target = self

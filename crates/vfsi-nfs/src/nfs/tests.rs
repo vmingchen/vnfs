@@ -163,13 +163,13 @@ fn abs_path_is_namespace_relative_and_server_path_prepends_the_export_root() {
 
 #[test]
 fn malformed_type_attribute_is_an_error_not_a_regular_type() {
-    // An empty or truncated FATTR4_TYPE payload must not be silently
-    // treated as "not a symlink" (which would skip following a link).
-    assert!(type_is_symlink(&[]).is_err());
-    assert!(type_is_symlink(&[0, 0, 0]).is_err());
-
-    assert!(type_is_symlink(&nfs_ftype4_NF4LNK.to_be_bytes()).unwrap());
-    assert!(!type_is_symlink(&nfs_ftype4_NF4REG.to_be_bytes()).unwrap());
+    use crate::client::decode_type_attribute;
+    for malformed in [&[][..], &[0, 0, 0], &[0; 8]] {
+        assert!(decode_type_attribute(malformed).is_err());
+    }
+    for ftype in [nfs_ftype4_NF4LNK, nfs_ftype4_NF4REG] {
+        assert_eq!(decode_type_attribute(&ftype.to_be_bytes()).unwrap(), ftype);
+    }
 }
 
 #[test]
