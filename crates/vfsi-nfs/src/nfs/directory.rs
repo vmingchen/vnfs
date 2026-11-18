@@ -10,7 +10,6 @@ pub(super) fn validate_readdir_progress(
     requested_cookie: u64,
     next_cookie: u64,
     seen_cookies: &mut HashSet<u64>,
-    _index: Option<usize>,
 ) -> VfRes {
     if next_cookie != 0 && (next_cookie == requested_cookie || !seen_cookies.insert(next_cookie)) {
         Err(vfsi_core::internal::errors::transport(
@@ -368,12 +367,7 @@ impl NfsVecFs {
                         return Ok(());
                     }
                 }
-                validate_readdir_progress(
-                    cookie.value,
-                    next_cookie.value,
-                    &mut seen_cookies,
-                    None,
-                )?;
+                validate_readdir_progress(cookie.value, next_cookie.value, &mut seen_cookies)?;
                 cookie = next_cookie;
                 if cookie.value == 0 {
                     break;
@@ -680,12 +674,13 @@ impl NfsVecFs {
             }
             return Ok(());
         }
-        validate_readdir_progress(cookie.value, next_cookie.value, &mut seen_cookies, None)
-            .map_err(|cause| {
+        validate_readdir_progress(cookie.value, next_cookie.value, &mut seen_cookies).map_err(
+            |cause| {
                 note_read_error(roots, dir.root, cause, options)
                     .err()
                     .unwrap_or(RemoveStop::Root)
-            })?;
+            },
+        )?;
 
         let mut file_names = Vec::new();
         let mut dir_names = Vec::new();
@@ -1232,7 +1227,7 @@ impl NfsVecFs {
         for (&index, result) in child_indices.iter().zip(child_pages) {
             states[index] = Some(result.and_then(|page| {
                 let mut seen_cookies = std::collections::HashSet::new();
-                validate_readdir_progress(0, page.cookie.value, &mut seen_cookies, None)
+                validate_readdir_progress(0, page.cookie.value, &mut seen_cookies)
                     .map_err(|cause| OpError::unknown(cause, None))?;
                 Ok(NfsDirectoryCursor {
                     fh: page.fh,
@@ -1297,7 +1292,6 @@ impl NfsVecFs {
                         state.cookie.value,
                         cookie.value,
                         &mut state.seen_cookies,
-                        None,
                     )
                     .map_err(|cause| OpError::unknown(cause, None))?;
                     state.cookie = cookie;

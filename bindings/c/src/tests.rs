@@ -973,9 +973,10 @@ fn stream_callbacks_can_query_same_filesystem_without_lock() {
         available: bool,
         calls: usize,
         data: [Vec<u8>; 2],
+        paths: [Vec<u8>; 2],
     }
     unsafe extern "C" fn callback(
-        _: *const c_char,
+        path: *const c_char,
         index: usize,
         _: u64,
         data: *const u8,
@@ -1011,15 +1012,17 @@ fn stream_callbacks_can_query_same_filesystem_without_lock() {
         };
         // SAFETY: the streaming callback lends len initialized bytes.
         output.extend_from_slice(unsafe { std::slice::from_raw_parts(data, len) });
+        // SAFETY: the callback also lends a live, terminated path string.
+        seen.paths[index] = unsafe { CStr::from_ptr(path) }.to_bytes().to_vec();
         true
     }
     let root = tempfile::tempdir().unwrap();
     for (name, bytes) in [
-        ("first", b"abcdef".as_slice()),
-        ("second", b"xyzq"),
-        ("other", b"stat"),
+        (b"first-\xff".as_slice(), b"abcdef".as_slice()),
+        (b"second", b"xyzq"),
+        (b"other", b"stat"),
     ] {
-        std::fs::write(root.path().join(name), bytes).unwrap();
+        std::fs::write(root.path().join(std::ffi::OsStr::from_bytes(name)), bytes).unwrap();
     }
     let fs = make_fs(
         Box::new(vfsi_posix::backend(root.path()).unwrap()),
@@ -1031,8 +1034,9 @@ fn stream_callbacks_can_query_same_filesystem_without_lock() {
         available: true,
         calls: 0,
         data: Default::default(),
+        paths: Default::default(),
     };
-    let paths = [c"/first".as_ptr(), c"/second".as_ptr()];
+    let paths = [c"/first-\xff".as_ptr(), c"/second".as_ptr()];
     // SAFETY: all inputs, outputs and callback state outlive this call.
     let result = unsafe {
         vfsi_read_streamv(
@@ -1047,6 +1051,7 @@ fn stream_callbacks_can_query_same_filesystem_without_lock() {
     };
     assert!(seen.available, "stream callback ran under the backend lock");
     assert!(seen.calls > 2);
+    assert_eq!(seen.paths, [b"/first-\xff".to_vec(), b"/second".to_vec()]);
     assert_eq!((result.category, result.index), (VFSI_ERROR_NONE, 2));
     assert_eq!(seen.data, [b"abcdef".to_vec(), b"xyzq".to_vec()]);
     // SAFETY: the fixture uniquely owns the live handle.
@@ -2727,7 +2732,7 @@ fn read_paths_batches_full_file_contents() {
 
     let path_a = {
         let mut p = dir.as_bytes().to_vec();
-        p.extend_from_slice(b"/a.bin");
+        p.extend_from_slice(b"/a-\xff.bin");
         CString::new(p).unwrap()
     };
     let path_b = {
@@ -2763,7 +2768,7 @@ fn read_paths_batches_full_file_contents() {
 
     #[derive(Default)]
     struct Seen {
-        rows: Vec<(String, Vec<u8>)>,
+        rows: Vec<(Vec<u8>, Vec<u8>)>,
     }
     unsafe extern "C" fn cb(
         path: *const c_char,
@@ -2773,10 +2778,8 @@ fn read_paths_batches_full_file_contents() {
     ) -> bool {
         let seen = &mut *(user as *mut Seen);
         let bytes = unsafe { std::slice::from_raw_parts(data, len) };
-        seen.rows.push((
-            CStr::from_ptr(path).to_string_lossy().into_owned(),
-            bytes.to_vec(),
-        ));
+        seen.rows
+            .push((CStr::from_ptr(path).to_bytes().to_vec(), bytes.to_vec()));
         true
     }
 
@@ -2794,6 +2797,8 @@ fn read_paths_batches_full_file_contents() {
         },
         0
     );
+    assert_eq!(seen.rows[0].0, path_a.as_bytes());
+    assert_eq!(seen.rows[1].0, path_b.as_bytes());
     assert_eq!(seen.rows[0].1, b"first");
     assert_eq!(seen.rows[1].1, b"second-longer");
 

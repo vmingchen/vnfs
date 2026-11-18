@@ -229,7 +229,6 @@ impl VectorBackend for NfsVecFs {
                 state.cookie.value,
                 next_cookie.value,
                 &mut state.seen_cookies,
-                None,
             )?;
             state.cookie = next_cookie;
             state.buffered = page.into();
@@ -344,7 +343,7 @@ impl VectorBackend for NfsVecFs {
             if next.value == 0 {
                 return Ok(());
             }
-            validate_readdir_progress(cookie.value, next.value, &mut seen_cookies, None)?;
+            validate_readdir_progress(cookie.value, next.value, &mut seen_cookies)?;
             cookie = next;
         }
     }
@@ -455,7 +454,7 @@ impl VectorBackend for NfsVecFs {
                     return Ok(());
                 }
                 let mut seen_cookies = std::collections::HashSet::new();
-                validate_readdir_progress(0, cookie.value, &mut seen_cookies, Some(level[idx].2))
+                validate_readdir_progress(0, cookie.value, &mut seen_cookies)
                     .map_err(|cause| IndexedError::at(level[idx].2, cause))?;
                 if cookie.value != 0 {
                     pending.push((idx, level[idx].0.clone(), cookie, seen_cookies));
@@ -484,7 +483,6 @@ impl VectorBackend for NfsVecFs {
                         previous_cookie.value,
                         cookie.value,
                         &mut seen_cookies,
-                        Some(level[idx].2),
                     )
                     .map_err(|cause| IndexedError::at(level[idx].2, cause))?;
                     if !emit_page(idx, entries)? {
@@ -542,7 +540,7 @@ impl VectorBackend for NfsVecFs {
                 &mut budget,
                 &mut root_attrs,
             )?;
-            validate_readdir_progress(cookie.value, next_cookie.value, &mut seen_cookies, None)?;
+            validate_readdir_progress(cookie.value, next_cookie.value, &mut seen_cookies)?;
             cookie = next_cookie;
             if cookie.value == 0 {
                 break;
@@ -602,7 +600,7 @@ impl VectorBackend for NfsVecFs {
                     &mut level_attrs[index],
                 )?;
                 let mut seen_cookies = std::collections::HashSet::new();
-                validate_readdir_progress(0, result.cookie.value, &mut seen_cookies, None)?;
+                validate_readdir_progress(0, result.cookie.value, &mut seen_cookies)?;
                 if result.cookie.value != 0 {
                     pending.push((index, result.fh.clone(), result.cookie, seen_cookies));
                 }
@@ -629,7 +627,6 @@ impl VectorBackend for NfsVecFs {
                         previous_cookie.value,
                         cookie.value,
                         &mut seen_cookies,
-                        None,
                     )?;
                     append_bounded_walk_page(
                         root,
@@ -1268,7 +1265,7 @@ impl VectorBackend for NfsVecFs {
     fn vwrite_adb_impl(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
         self.ensure_writable(patterns.len())?;
         let mut counts = Vec::with_capacity(patterns.len());
-        for (i, p) in patterns.iter().enumerate() {
+        for p in patterns {
             let layout = vfsi_core::internal::adb_layout(p)?;
             let full = self.server_path(&p.path);
             let (dir, name) = match split_path_bytes(path_bytes(&full)) {
@@ -1287,7 +1284,6 @@ impl VectorBackend for NfsVecFs {
                     let adbn = block_number.to_be_bytes();
                     if let Err(error) = super::io::write_all_at(
                         &mut self.nfs,
-                        i,
                         offset,
                         &adbn,
                         |nfs, offset, data| {
@@ -1304,7 +1300,6 @@ impl VectorBackend for NfsVecFs {
                     && !p.adb_pattern_data.is_empty()
                     && let Err(error) = super::io::write_all_at(
                         &mut self.nfs,
-                        i,
                         offset,
                         &p.adb_pattern_data,
                         |nfs, offset, data| {

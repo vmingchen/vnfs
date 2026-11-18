@@ -1898,20 +1898,16 @@ impl LocalBackend {
         recursive: bool,
         out: &mut Vec<VfAttrs>,
     ) -> VfRes {
-        let reached_limit = |out: &Vec<VfAttrs>| max_count != 0 && out.len() >= max_count;
+        if max_count != 0 && out.len() >= max_count {
+            return Ok(());
+        }
         let mut pending = vec![dir.to_path_buf()];
         while let Some(current) = pending.pop() {
-            if reached_limit(out) {
-                break;
-            }
             let p = self.open_directory_no_follow_final(&self.resolve(&current))?;
             let rd = std::fs::read_dir(&p)?;
             let mut children = Vec::new();
             for entry in rd {
                 let entry = entry?;
-                if reached_limit(out) {
-                    break;
-                }
                 let name = entry.file_name();
                 let path = current.join(&name);
                 let attrs = self.directory_entry_attrs(&p, &path, &name, masks)?;
@@ -1919,6 +1915,9 @@ impl LocalBackend {
                     children.push(path);
                 }
                 out.push(attrs);
+                if max_count != 0 && out.len() == max_count {
+                    return Ok(());
+                }
             }
             for child in children.into_iter().rev() {
                 pending.push(child);

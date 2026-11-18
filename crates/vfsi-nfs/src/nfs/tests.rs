@@ -1022,22 +1022,22 @@ fn live_guarded_setattr_handles_symlink_cohorts_on_a_bounded_stack() {
 #[test]
 fn recursive_readdir_rejects_a_stalled_continuation_cookie() {
     let mut seen = std::collections::HashSet::new();
-    assert!(validate_readdir_progress(0, 7, &mut seen, None).is_ok());
-    assert!(validate_readdir_progress(7, 11, &mut seen, None).is_ok());
-    assert!(validate_readdir_progress(11, 0, &mut seen, None).is_ok());
+    assert!(validate_readdir_progress(0, 7, &mut seen).is_ok());
+    assert!(validate_readdir_progress(7, 11, &mut seen).is_ok());
+    assert!(validate_readdir_progress(11, 0, &mut seen).is_ok());
 
     let mut seen = std::collections::HashSet::new();
-    assert!(validate_readdir_progress(0, 7, &mut seen, None).is_ok());
-    let error = validate_readdir_progress(7, 7, &mut seen, None).unwrap_err();
+    assert!(validate_readdir_progress(0, 7, &mut seen).is_ok());
+    let error = validate_readdir_progress(7, 7, &mut seen).unwrap_err();
     assert!(vfsi_core::transport_kind(&(error)).is_some());
 }
 
 #[test]
 fn recursive_readdir_rejects_nonadjacent_cookie_cycles() {
     let mut seen = std::collections::HashSet::new();
-    assert!(validate_readdir_progress(0, 7, &mut seen, None).is_ok());
-    assert!(validate_readdir_progress(7, 11, &mut seen, None).is_ok());
-    let error = validate_readdir_progress(11, 7, &mut seen, Some(3)).unwrap_err();
+    assert!(validate_readdir_progress(0, 7, &mut seen).is_ok());
+    assert!(validate_readdir_progress(7, 11, &mut seen).is_ok());
+    let error = validate_readdir_progress(11, 7, &mut seen).unwrap_err();
     assert!(vfsi_core::transport_kind(&(error)).is_some());
     let _: &std::io::Error = &error;
 }

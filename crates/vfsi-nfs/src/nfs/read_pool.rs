@@ -483,7 +483,6 @@ impl NfsReadPool {
                             }
                         }
                         Err(error) => {
-                            let _index = usize::try_from(index).unwrap_or(usize::MAX);
                             primary_error = Some(vfsi_core::internal::errors::with_context(
                                 error,
                                 "read_stream_pipelined",

@@ -730,14 +730,13 @@ impl NfsVecFs {
                 .and_then(|values| {
                     apply_attrs(&mut attrs[index], &values);
                     if follow && attrs[index].ftype == VfType::Symlink {
-                        self.stat_one_following(index, &mut attrs[index])
-                            .map_err(|error| {
-                                if vfsi_core::transport_kind(&(error)).is_some() {
-                                    vfsi_core::OpError::unknown(error, None)
-                                } else {
-                                    vfsi_core::OpError::failed(error, None)
-                                }
-                            })
+                        self.stat_one_following(&mut attrs[index]).map_err(|error| {
+                            if vfsi_core::transport_kind(&(error)).is_some() {
+                                vfsi_core::OpError::unknown(error, None)
+                            } else {
+                                vfsi_core::OpError::failed(error, None)
+                            }
+                        })
                     } else {
                         Ok(())
                     }
@@ -847,7 +846,7 @@ impl NfsVecFs {
     }
 
     /// stat one path following final-component symlinks (phased).
-    fn stat_one_following(&mut self, _index: usize, a: &mut VfAttrs) -> VfResult<()> {
+    fn stat_one_following(&mut self, a: &mut VfAttrs) -> VfResult<()> {
         let path = self.server_vf_path(&a.file)?;
         let fh = self.resolve_follow(&path)?;
         let ids = request_mask_to_attr_list(&a.masks);
@@ -1320,7 +1319,7 @@ mod tests {
                     )
                     .map(|_| ())
                     .map_err(vfsi_core::IndexedError::into_cause),
-                    _ => fs.stat_one_following(0, &mut attrs[0]),
+                    _ => fs.stat_one_following(&mut attrs[0]),
                 };
                 fs.nfs.replace_test_rpc(original);
                 assert!(peer.join().unwrap() > 0);

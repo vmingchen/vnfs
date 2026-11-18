@@ -162,7 +162,7 @@ fn copy_extent_data<C>(
         }
         let chunk_size = u64::try_from(chunk.len())
             .map_err(|_| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
-        super::io::write_all_at(client, 0, doff, &chunk, |client, offset, suffix| {
+        super::io::write_all_at(client, doff, &chunk, |client, offset, suffix| {
             write(client, offset, suffix)
         })?;
         so = so

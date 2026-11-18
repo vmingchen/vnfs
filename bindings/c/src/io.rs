@@ -423,6 +423,21 @@ pub unsafe extern "C" fn vfsi_pwritev(
     })
 }
 
+/// # Safety
+/// A non-null path must point to a live NUL-terminated C string.
+unsafe fn copy_callback_path(path: *const c_char) -> Option<CString> {
+    if path.is_null() {
+        return None;
+    }
+    // SAFETY: the caller supplies a readable, terminated string.
+    Some(unsafe { CStr::from_ptr(path) }.to_owned())
+}
+
+fn callback_file_operand(fs: &vfsi_fs, path: &CStr) -> Result<FileOperand, std::io::Error> {
+    let path = Path::new(std::ffi::OsStr::from_bytes(path.to_bytes()));
+    vpath_for(fs, path).map(|path| FileOperand::from_os_path(&path))
+}
+
 /// Stream several paths in bounded vectorized chunks. Returning `false` from
 /// `cb` cancels successfully. Callbacks provide backpressure between bounded
 /// read waves and run outside the backend lock; they may query this filesystem.
@@ -469,18 +484,15 @@ pub unsafe extern "C" fn vfsi_read_streamv(
         for (index, path) in paths.iter().enumerate() {
             // SAFETY: non-null C strings are NUL-terminated and readable throughout this
             // call, as required by the exported ABI.
-            let Some(kernel_path) = (unsafe { cstr_path(*path) }) else {
+            let Some(cpath) = (unsafe { copy_callback_path(*path) }) else {
                 return vfsi_result::invalid(index, "null path");
             };
-            let Some(cpath) = cstr_from_os(kernel_path.as_os_str().as_bytes()) else {
-                return vfsi_result::invalid(index, "path contains NUL");
-            };
-            let vpath = match vpath_for(fs, &kernel_path) {
-                Ok(path) => path,
+            let file = match callback_file_operand(fs, &cpath) {
+                Ok(file) => file,
                 Err(error) => return vfsi_result::from_cause(&error, Some(index)),
             };
             cpaths.push(cpath);
-            files.push(FileOperand::from_os_path(&vpath));
+            files.push(file);
         }
         let mut completed = 0;
         let result = vfsi_sync::backend::helpers::stream_read_chunks(
@@ -569,25 +581,22 @@ pub unsafe extern "C" fn vfsi_read_paths_with_limit(
         let Some(cb) = cb else {
             return libc::EINVAL;
         };
-        let mut kernel_paths = Vec::with_capacity(count);
+        let mut cpaths = Vec::with_capacity(count);
         for i in 0..count {
             // SAFETY: `paths` points to `count` NUL-terminated strings.
             let p = unsafe { *paths.add(i) };
             // SAFETY: non-null C strings are NUL-terminated and readable throughout this
             // call, as required by the exported ABI.
-            let Some(path) = (unsafe { cstr_path(p) }) else {
+            let Some(path) = (unsafe { copy_callback_path(p) }) else {
                 return libc::EINVAL;
             };
-            kernel_paths.push(path);
+            cpaths.push(path);
         }
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let vpaths: Result<Vec<PathBuf>, std::io::Error> =
-                kernel_paths.iter().map(|p| vpath_for(fs, p)).collect();
-            let vpaths = vpaths?;
-            let files: Vec<FileOperand> = vpaths
+        let res = (|| {
+            let files = cpaths
                 .iter()
-                .map(|p| FileOperand::from_os_path(p))
-                .collect();
+                .map(|path| callback_file_operand(fs, path))
+                .collect::<Result<Vec<_>, _>>()?;
             let datas = lock_or_io(&fs.fs)?
                 .vread_all_with_options_impl(
                     &files,
@@ -597,23 +606,15 @@ pub unsafe extern "C" fn vfsi_read_paths_with_limit(
                     vfsi_sync::internal::collect_vec_result(Ok(outcomes), files.len())
                         .map_err(vfsi_core::IndexedError::into_cause)
                 })?;
-            let c_cb = cb;
-            for (i, data) in datas.iter().enumerate() {
-                let Some(path) = cstr_from_os(kernel_paths[i].as_os_str().as_bytes()) else {
-                    continue;
-                };
-                // SAFETY: `c_cb` was provided by C and is invoked from the same
-                // thread while `path`/`data` are alive.
-                if !unsafe { c_cb(path.as_ptr(), data.as_ptr(), data.len(), userdata) } {
+            for (path, data) in cpaths.iter().zip(datas.iter()) {
+                // SAFETY: the supplied callback runs on the calling thread
+                // while the path snapshot and result data are alive.
+                if !unsafe { cb(path.as_ptr(), data.as_ptr(), data.len(), userdata) } {
                     break;
                 }
             }
             Ok::<_, std::io::Error>(())
-        }));
-        match res {
-            Ok(Ok(())) => 0,
-            Ok(Err(e)) => vf_code(&e),
-            Err(_) => libc::EIO,
-        }
+        })();
+        res.map_or_else(|error| vf_code(&error), |()| 0)
     })
 }

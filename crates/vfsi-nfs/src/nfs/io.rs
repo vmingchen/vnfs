@@ -58,7 +58,6 @@ fn retry_path_write<'a>(
 
 pub(super) fn write_all_at<C>(
     client: &mut C,
-    _index: usize,
     offset: u64,
     data: &[u8],
     mut write: impl FnMut(&mut C, u64, &[u8]) -> VfResult<usize>,
@@ -2013,7 +2012,7 @@ mod path_write_tests {
     #[test]
     fn path_write_retries_short_counts_and_rejects_zero_progress() {
         let mut calls = Vec::new();
-        write_all_at(&mut calls, 0, 10, b"abcdefg", |calls, offset, suffix| {
+        write_all_at(&mut calls, 10, b"abcdefg", |calls, offset, suffix| {
             let count = suffix.len().min(3);
             calls.push((offset, suffix.to_vec()));
             Ok(count)
@@ -2029,7 +2028,7 @@ mod path_write_tests {
         );
 
         let mut attempts = 0;
-        let error = write_all_at(&mut attempts, 0, 0, b"x", |attempts, _, _| {
+        let error = write_all_at(&mut attempts, 0, b"x", |attempts, _, _| {
             *attempts += 1;
             Ok(0)
         })
