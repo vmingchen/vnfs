@@ -2213,6 +2213,15 @@ class _BufferGroup:
             file._raw._fd = fd
             file._raw._fd_generation = self.fs._client.generation
 
+    @staticmethod
+    def _prepend_read_prefix(error, prefix, offset):
+        error.read_prefix = bytes(prefix) + getattr(error, "read_prefix", b"")
+        error.read_offset = offset
+        if not hasattr(error, "read_eof"):
+            error.read_eof = False
+        if getattr(error, "failure_state", None) == "not_attempted":
+            error.failure_state = "failed"
+
     def _pread_many(self, files, offsets, lengths, *, required=None):
         data, errors = self._pread_many_once(files, offsets, lengths)
         # Speculation gets one wave. Complete only required cache fills;
@@ -2235,7 +2244,9 @@ class _BufferGroup:
             remaining = []
             for position, index in enumerate(pending):
                 if position in failures:
-                    errors[index] = failures[position]
+                    error = _oserror(failures[position], files[index].path)
+                    self._prepend_read_prefix(error, partial[index], offsets[index])
+                    errors[index] = error
                     data[index] = None
                 elif more[position]:
                     partial[index].extend(more[position])
@@ -2298,12 +2309,11 @@ class _BufferGroup:
                 for index, result in zip(retry, resumed):
                     prefix = prefixes[index]
                     if isinstance(result, BaseException):
+                        if getattr(result, "failure_state", None) == "not_attempted":
+                            # A rejected suffix did not replace the first read failure.
+                            continue
                         if prefix:
-                            result.read_prefix = prefix + getattr(
-                                result, "read_prefix", b""
-                            )
-                            result.read_offset = offsets[index]
-                            result.read_eof = False
+                            self._prepend_read_prefix(result, prefix, offsets[index])
                     else:
                         result = prefix + result
                     outcomes[index] = result

@@ -54,6 +54,64 @@ def test_group_reads_retry_only_failed_suffixes(dummy_fs, monkeypatch, recovery_
             assert calls == [([0, 0], [4, 4]), ([1], [3])]
 
 
+@pytest.mark.parametrize("first_failed", [False, True])
+@pytest.mark.parametrize("suffix_eof", [False, True])
+def test_group_read_keeps_confirmed_prefix_on_suffix_error(
+    dummy_fs, monkeypatch, first_failed, suffix_eof
+):
+    fs = dummy_fs
+    fs.pipe({"/a": b"abcd", "/b": b"efgh"})
+    with opened(fs, ["/a", "/b"], "rb") as files:
+        first_error = failure(b"a")
+        if suffix_eof:
+            suffix_error = failure(b"bc", eof=True)
+            suffix_error.read_offset = 1
+        else:
+            suffix_error = OSError(errno.EBADF, "suffix was rejected")
+            suffix_error.failure_state = "not_attempted"
+        calls = []
+
+        def preadv(fds, offsets, lengths):
+            calls.append((list(offsets), list(lengths)))
+            if len(calls) == 1:
+                return [first_error if first_failed else b"a", b"efgh"]
+            return [suffix_error]
+
+        monkeypatch.setattr(fs._client, "preadv", preadv)
+        monkeypatch.setattr(files[0]._buffer_group, "_reopen_readers", lambda: None)
+        with pytest.raises(OSError) as caught:
+            files[0].read()
+        error = caught.value
+        assert error is (
+            first_error if first_failed and not suffix_eof else suffix_error
+        )
+        assert error.failure_state == (
+            "unknown" if first_failed or suffix_eof else "failed"
+        )
+        assert error.read_prefix == (b"abc" if suffix_eof else b"a")
+        assert error.read_offset == 0
+        assert error.read_eof is suffix_eof
+        assert error.index == 0
+        assert calls == [([0, 0], [4, 4]), ([1], [3])]
+
+
+def test_group_read_keeps_prefix_with_legacy_errno_outcome(dummy_fs, monkeypatch):
+    fs = dummy_fs
+    fs.pipe_file("/a", b"abcd")
+    monkeypatch.setattr(fs._client, "_native_has_vector_outcomes", False)
+    replies = iter([([b"a"], {}), ([None], {0: errno.EIO})])
+    monkeypatch.setattr(fs._client, "pread_many", lambda *args: next(replies))
+    with opened(fs, ["/a"], "rb") as files:
+        with pytest.raises(OSError) as caught:
+            files[0].read()
+    error = caught.value
+    assert error.errno == errno.EIO
+    assert error.read_prefix == b"a"
+    assert error.read_offset == 0
+    assert error.read_eof is False
+    assert error.index == 0
+
+
 @pytest.mark.parametrize("eof", [False, True])
 def test_complete_failed_prefix_is_not_reported_as_success(dummy_fs, monkeypatch, eof):
     fs = dummy_fs
