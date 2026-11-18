@@ -498,6 +498,37 @@ fn client_pool_validates_size_and_gives_explicit_owners_distinct_ids() {
 }
 
 #[test]
+fn invalid_explicit_client_owners_are_rejected_before_connecting() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let host = listener.local_addr().unwrap().to_string();
+    for client_owner in [vec![], vec![b'x'; NFS4_OPAQUE_LIMIT as usize + 1]] {
+        let options = NfsConnectOptions {
+            minorversion: Some(1),
+            client_owner: Some(client_owner.clone()),
+            connect_timeout: Duration::from_millis(100),
+            request_timeout: Duration::from_millis(100),
+            ..Default::default()
+        };
+        let direct = NfsVecFs::connect_with_options(&host, options);
+        let pooled = NfsVecFs::builder(&host)
+            .client_owner(client_owner)
+            .connect_pool(1);
+        for cause in [direct.err().unwrap(), pooled.err().unwrap()] {
+            assert_eq!(cause.kind(), std::io::ErrorKind::InvalidInput);
+            assert_eq!(
+                vfsi_core::internal::errors::operation(&cause),
+                Some("connect")
+            );
+        }
+    }
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
 fn fs_id_and_fileid_decode_as_one_fs_obj_id() {
     let major = 0x0102_0304_0506_0708u64;
     let minor = 0x1112_1314_1516_1718u64;

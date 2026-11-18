@@ -1249,6 +1249,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn adb_native_offset_preflight_checks_last_written_field_before_open() {
+        let (root, mut backend) = fs("adb-native-offset");
+        let max = i64::MAX as u64;
+        let mut pattern = Adb::blocknum_only("/pattern", max, 2, 1, 0, 0);
+        pattern.adb_reloff_blocknum = None;
+        pattern.adb_reloff_pattern = Some(0);
+        pattern.adb_pattern_data = vec![1];
+        for request in [
+            Adb::blocknum_only("/single", max, 2, 1, 0, 0),
+            Adb::blocknum_only("/last", max - 16, 16, 2, 0, 0),
+            pattern.clone(),
+        ] {
+            let path = root.0.join(request.path.strip_prefix("/").unwrap());
+            let result = backend.vwrite_adb_impl(&[request]);
+            assert!(result.is_err());
+            assert!(!path.exists());
+        }
+        pattern.adb_offset = max + 1;
+        pattern.adb_pattern_data.clear();
+        assert_eq!(backend.vwrite_adb_impl(&[pattern]).unwrap(), [1]);
+        assert_eq!(std::fs::read(root.0.join("pattern")).unwrap(), b"");
+    }
+
     // ------------------------------------------------------------------
     // FileOperand base/cwd resolution is honored by every path-taking method
     // ------------------------------------------------------------------
@@ -4845,17 +4869,23 @@ mod tests {
         let pairs = [
             ExtentPair::new("/source", 0, "/invalid", impossible, Some(1)),
             ExtentPair::new("/source", 0, "/empty", impossible, Some(0)),
+            ExtentPair::new("/source", impossible, "/invalid-source", 0, None),
             ExtentPair::new("/source", 1, "/valid", 1, Some(u64::MAX)),
+            ExtentPair::new("/source", impossible, "/zero", 0, Some(0)),
         ];
         let outcomes = backend.vcopy_data_impl(&pairs).unwrap();
-        for (outcome, file) in outcomes[..2].iter().zip(["invalid", "empty"]) {
+        for (outcome, file) in outcomes[..3]
+            .iter()
+            .zip(["invalid", "empty", "invalid-source"])
+        {
             assert_eq!(
                 outcome.as_ref().unwrap_err().cause().kind(),
                 std::io::ErrorKind::InvalidInput
             );
             assert!(!root.0.join(file).exists());
         }
-        assert!(outcomes[2].is_ok());
+        assert!(outcomes[3].is_ok() && outcomes[4].is_ok());
+        assert_eq!(std::fs::read(root.0.join("zero")).unwrap(), b"");
         assert_eq!(std::fs::read(root.0.join("valid")).unwrap(), b"\0bc");
     }
     #[test]

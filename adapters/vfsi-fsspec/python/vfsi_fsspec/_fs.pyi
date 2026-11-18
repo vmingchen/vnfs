@@ -18,6 +18,7 @@ from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
 Path = Union[str, PathLike[str]]
 BytesLike = Union[bytes, bytearray, memoryview]
 _PathT = TypeVar("_PathT", bound=Path)
+_StartT = TypeVar("_StartT", bound=Optional[int])
 _EndT = TypeVar("_EndT", bound=Optional[int])
 _BytesT = TypeVar("_BytesT", bound=BytesLike)
 
@@ -45,7 +46,7 @@ class VfsiFile(AbstractBufferedFile):
     def writable(self) -> bool: ...
     def seekable(self) -> bool: ...
     def readinto(self, b: Any) -> int: ...
-    def read(self, size: int = -1) -> bytes: ...
+    def read(self, size: Optional[int] = -1) -> bytes: ...
     def readline(self, size: Optional[int] = -1) -> bytes: ...
     def readuntil(
         self, char: BytesLike = b"\n", blocks: Optional[int] = None
@@ -167,7 +168,7 @@ class VfsiFileSystem(AbstractFileSystem):
     def cat_ranges(
         self,
         paths: list[_PathT],
-        starts: Union[int, list[int]],
+        starts: Union[Optional[int], list[_StartT]],
         ends: Union[Optional[int], list[_EndT]],
         max_gap: Optional[int] = None,
         on_error: str = "return",

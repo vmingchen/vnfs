@@ -1940,9 +1940,11 @@ impl LocalBackend {
         src_options.read(true);
         Self::protect_create_open(&sp, &mut src_options);
         let src = src_options.open(&sp)?;
-        if i64::try_from(p.dst_offset).is_err() {
-            // FileExt and set_len cannot represent this destination offset,
-            // even when the copy reaches EOF without writing any bytes.
+        if i64::try_from(p.dst_offset).is_err()
+            || (p.length != Some(0) && i64::try_from(p.src_offset).is_err())
+        {
+            // FileExt and set_len use signed offsets. A zero-count copy
+            // never reads the source, but still sets the destination length.
             return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
         }
         let mut dst_options = OpenOptions::new();
@@ -2929,14 +2931,25 @@ impl VectorBackend for LocalBackend {
     fn vwrite_adb_impl(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
         let mut counts = Vec::with_capacity(patterns.len());
         for p in patterns {
-            let layout = vfsi_core::internal::adb_layout(p)?;
+            let mut layout = vfsi_core::internal::adb_layout(p)?;
+            let last = layout.next_back();
+            if let Some((_, number, pattern)) = last {
+                // The layout already checked unsigned arithmetic. The final
+                // nonempty fields also bound every earlier signed file offset.
+                let fields = [(number, 8), (pattern, p.adb_pattern_data.len() as u64)];
+                if fields.into_iter().any(|(offset, len)| {
+                    len != 0 && offset.is_some_and(|offset| i64::try_from(offset + len).is_err())
+                }) {
+                    return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                }
+            }
             let path = self.real_path(&self.resolve(&p.path))?;
             let mut options = OpenOptions::new();
             options.write(true).create(true).truncate(false);
             Self::protect_create_open(&path, &mut options);
             let file = options.open(&path)?;
             let mut written = 0usize;
-            for (block_number, number_offset, pattern_offset) in layout {
+            for (block_number, number_offset, pattern_offset) in layout.chain(last) {
                 if let Some(offset) = number_offset {
                     let adbn = block_number.to_be_bytes();
                     file.write_all_at(&adbn, offset)?;

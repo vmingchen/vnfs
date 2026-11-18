@@ -46,12 +46,8 @@ def _read_pipelined(fs, path: str, chunk_bytes: int, workers: int, in_flight: in
 
 
 def _pool_stats(fs):
-    """Read reset-on-read counters for every native session in a pool."""
-    clients = fs._client._clients
-    return (
-        sum(client.compound_stats()[0] for client in clients),
-        sum(client.rpc_stats()[0] for client in clients),
-    )
+    """Read and reset the process-wide native counters once."""
+    return fs._client.compound_stats()[0], fs._client.rpc_stats()[0]
 
 
 def _summary(samples: list[float], size_bytes: int) -> dict[str, float]:
@@ -94,7 +90,7 @@ def main() -> None:
         parser.error("--pipeline-workers must be non-negative and --in-flight positive")
     if args.pipeline_workers and args.chunk_kib > 1024:
         parser.error("pipelined reads currently require --chunk-kib <= 1024")
-    if args.pipeline_workers and args.in_flight * args.chunk_kib > 16 * 1024:
+    if min(args.pipeline_workers, args.in_flight) * args.chunk_kib > 16 * 1024:
         parser.error("pipelined read-ahead must stay within 16 MiB")
 
     run_name = f"nfs4fs-large-{uuid.uuid4().hex}"

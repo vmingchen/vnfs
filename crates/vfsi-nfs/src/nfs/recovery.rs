@@ -112,6 +112,7 @@ impl NfsVecFs {
 
     /// Connect using explicit protocol, timeout, and authentication options.
     pub fn connect_with_options(host: &str, options: NfsConnectOptions) -> VfResult<NfsVecFs> {
+        options.validate_client_owner(host)?;
         let root = OsString::from_vec(normalize_bytes(path_bytes(&options.root))).into();
         let connection = ConnectionConfig {
             telemetry: None,

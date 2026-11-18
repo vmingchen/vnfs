@@ -24,6 +24,9 @@ def range_inputs(fs: VfsiFileSystem) -> None:
     ends: list[int] = [2]
     optional_ends: list[Optional[int]] = [None]
     fs.cat_ranges(names, starts, ends)
+    optional_starts: list[Optional[int]] = [None]
+    fs.cat_ranges(names, optional_starts, ends)
+    fs.cat_ranges(names, None, ends)
     fs.cat_ranges(paths, 0, optional_ends)
     fs.cat_ranges(mixed, 0, None)
     # Strict mode rejects unused ignores, pinning the runtime's list-only contract.
@@ -50,4 +53,5 @@ def pipe_inputs(fs: VfsiFileSystem) -> None:
 
 def buffered_file_methods(file: VfsiFile) -> bytes:
     file.flush(force=True)
+    file.read(None)
     return file.readuntil(bytearray(b"END"), blocks=8)

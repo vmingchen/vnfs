@@ -107,8 +107,8 @@ pub struct NfsConnectOptions {
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
     pub authentication: NfsAuth,
-    /// Stable NFS client-owner identity. Must be unique among simultaneously
-    /// active clients using the same server and credential. If an OPEN loses
+    /// Stable NFS client-owner identity, containing 1 to 1024 bytes. Must be
+    /// unique among simultaneous clients using the same server and credential. If an OPEN loses
     /// its cleanup identity, recovery retires this owner and uses a fresh one.
     pub client_owner: Option<Vec<u8>>,
     pub recovery_policy: NfsRecoveryPolicy,
@@ -134,6 +134,21 @@ impl Default for NfsConnectOptions {
 }
 
 impl NfsConnectOptions {
+    fn validate_client_owner(&self, host: &str) -> VfResult<()> {
+        if self
+            .client_owner
+            .as_ref()
+            .is_some_and(|owner| owner.is_empty() || owner.len() > NFS4_OPAQUE_LIMIT as usize)
+        {
+            return Err(vfsi_core::internal::errors::with_context(
+                std::io::Error::from(std::io::ErrorKind::InvalidInput),
+                "connect",
+                Path::new(host),
+            ));
+        }
+        Ok(())
+    }
+
     /// Configure automatic read-only recovery.
     pub fn with_auto_reconnect(mut self, enabled: bool) -> Self {
         self.flags.set_auto_reconnect(enabled);
@@ -281,7 +296,7 @@ impl NfsClientBuilder {
         let mut builder = self.clone();
         if let Some(owner) = &mut builder.options.client_owner {
             let suffix = format!("-pool-{}-{pool_id:x}-{member}", std::process::id());
-            owner.truncate(1024usize.saturating_sub(suffix.len()));
+            owner.truncate((NFS4_OPAQUE_LIMIT as usize).saturating_sub(suffix.len()));
             owner.extend_from_slice(suffix.as_bytes());
         }
         builder
@@ -316,19 +331,7 @@ impl NfsClientBuilder {
         if let Some(mount) = &self.mount {
             mount.validate_options(&self.host, &self.options)?;
         }
-        if self
-            .options
-            .client_owner
-            .as_ref()
-            .is_some_and(|owner| owner.is_empty() || owner.len() > 1024)
-        {
-            return Err(vfsi_core::internal::errors::with_context(
-                std::io::Error::from(std::io::ErrorKind::InvalidInput),
-                "connect",
-                Path::new(self.host.as_ref()),
-            ));
-        }
-        Ok(())
+        self.options.validate_client_owner(&self.host)
     }
 }
 
