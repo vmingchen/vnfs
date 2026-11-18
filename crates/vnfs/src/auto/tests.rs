@@ -1622,6 +1622,67 @@ fn live_remove_keeps_each_route_error_without_replay() {
     assert_eq!(fs::read(&local_file).unwrap(), b"keep");
 }
 
+#[cfg(feature = "test-faults")]
+#[test]
+fn live_cleanup_drains_a_shared_alias_client_only_once() {
+    use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+    let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+        assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+        return;
+    };
+    let minor = std::env::var("VFSI_NFS_MINOR")
+        .unwrap_or_else(|_| "1".into())
+        .parse()
+        .unwrap();
+    let mut backend = vfsi_nfs::NfsVecFs::connect_minor(&server, minor).unwrap();
+    let fault = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeCloseDispatch { index: 0 },
+        std::io::Error::from_raw_os_error(libc::EIO),
+    ));
+    backend.set_fault_injector(fault.clone());
+    let remote = FsClient::new(backend);
+    let path = PathBuf::from(format!("/routed-cleanup-{}", std::process::id()));
+    drop(remote.create(&path).unwrap());
+    let root = tempfile::tempdir().unwrap();
+    let auto = Auto::new(root.path()).unwrap();
+    let identity = Arc::new(());
+    for id in [1, 2] {
+        auto.connections.lock().unwrap().insert(
+            id,
+            Arc::new(routing::NfsConnectionState {
+                spec: MountSpec {
+                    id,
+                    mount_point: root.path().join(id.to_string()),
+                    export: PathBuf::from("/"),
+                    server: server.clone().into_boxed_str(),
+                    minor,
+                },
+                client: remote.clone(),
+                identity: identity.clone(),
+                credentials: AuthSysIdentity::current().unwrap(),
+            }),
+        );
+    }
+
+    let _ = vfsi_nfs::compound::thread_compound_stats();
+    let first = auto.drain_cleanup();
+    let first_calls = vfsi_nfs::compound::thread_compound_stats().0;
+    let second = auto.drain_cleanup();
+    let second_calls = vfsi_nfs::compound::thread_compound_stats().0;
+    remote.remove_file(&path).unwrap();
+    assert!(fault.is_consumed());
+    assert_eq!(
+        vfsi_core::native_status(&first.unwrap_err()),
+        Some(vfsi_core::StatusCode::Errno(libc::EIO as u32))
+    );
+    assert_eq!(
+        first_calls, 0,
+        "a mount alias must not retry the failed close"
+    );
+    second.unwrap();
+    assert_eq!(second_calls, 1, "the next cleanup owns the pending close");
+}
+
 #[test]
 fn live_directory_open_results_keep_siblings_across_route_cohorts() {
     use crate::{

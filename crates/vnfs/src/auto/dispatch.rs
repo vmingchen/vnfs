@@ -7,13 +7,16 @@ impl Auto {
         self.limits
     }
     /// Drain Drop cleanup on mounted and already-connected NFS backends.
+    /// Each connected backend is drained once, including when mount aliases share it.
     /// No new connections are created; failed targets retain cleanup ownership.
     pub fn drain_cleanup(&self) -> VfResult<()> {
+        let mut seen = HashSet::new();
         let clients: Vec<_> = self
             .connections
             .lock()
             .map_err(|_| std::io::Error::from_raw_os_error(libc::EIO))?
             .values()
+            .filter(|connection| seen.insert(Arc::as_ptr(&connection.identity)))
             .map(|connection| connection.client.clone())
             .collect();
         let mut result = self.mounted.drain_cleanup();

@@ -168,12 +168,15 @@ impl NfsReadPool {
         options: NfsReadPoolOptions,
     ) -> VfResult<Self> {
         let (worker_count, in_flight) = options.effective()?;
+        // The contiguous in-flight window is assigned round-robin. Each worker
+        // receives at most this many reads, with control messages sent between windows.
+        let queue_capacity = in_flight.div_ceil(worker_count);
         let (event_tx, events) = mpsc::channel();
         let pool_id = crate::session::next_client_token();
         let mut commands = Vec::with_capacity(worker_count);
         let mut threads = Vec::with_capacity(worker_count);
         for worker in 0..worker_count {
-            let (command_tx, command_rx) = mpsc::sync_channel(in_flight);
+            let (command_tx, command_rx) = mpsc::sync_channel(queue_capacity);
             commands.push(command_tx);
             let worker_builder = builder.pool_member(pool_id, worker);
             let worker_events = event_tx.clone();
@@ -386,7 +389,7 @@ impl NfsReadPool {
                     .checked_mul(chunk_size as u64)
                     .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
                 let length = (size - offset).min(chunk_size as u64) as usize;
-                let worker = (next_job as usize) % self.effective_workers;
+                let worker = (next_job % self.effective_workers as u64) as usize;
                 if self.commands[worker]
                     .send(WorkerCommand::Read {
                         stream_id,
