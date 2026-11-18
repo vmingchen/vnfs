@@ -255,6 +255,15 @@ class BenchmarkTests(unittest.TestCase):
                 if problem in ['revision', 'dirty', 'lock']:
                     built.assert_not_called()
 
+    def test_fingerprint_rejects_symlink_to_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            generate(root / "fixture", branches=1, depth=1, files=1, size=0)
+            tree = root / "fixture/tree"
+            (tree / "alias").symlink_to("d00", target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "unexpected fixture object"):
+                fingerprint(tree)
+
     def test_candidate_build_without_du_artifact_never_uses_cached_executable(self):
         from compare import build_candidate
         with tempfile.TemporaryDirectory() as temp:

@@ -1752,6 +1752,8 @@ class VfsiFile(AbstractBufferedFile):
     def _read_until(self, char, blocks, size):
         if size == 0:
             return self.read(0)
+        if not isinstance(char, bytes):
+            char = bytes(memoryview(char))
         if not char:
             raise ValueError("delimiter must not be empty")
         block_size = self.blocksize if blocks is None else operator.index(blocks)

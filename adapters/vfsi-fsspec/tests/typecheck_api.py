@@ -46,3 +46,8 @@ def pipe_inputs(fs: VfsiFileSystem) -> None:
         "/a": b"a"
     }
     fs.pipe(generic)  # type: ignore[arg-type]
+
+
+def buffered_file_methods(file: VfsiFile) -> bytes:
+    file.flush(force=True)
+    return file.readuntil(bytearray(b"END"), blocks=8)

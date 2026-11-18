@@ -55,6 +55,15 @@ impl Route {
     }
 }
 
+impl Resolved {
+    fn posix(path: &Path) -> Self {
+        Self {
+            route: Route::Posix,
+            path: path.to_path_buf(),
+        }
+    }
+}
+
 impl Auto {
     pub(crate) fn same_object_namespace_impl(&self, left: &Path, right: &Path) -> bool {
         let mounts = read_mounts(false);
@@ -84,16 +93,15 @@ impl Auto {
     /// Recursive operations retain kernel routing if another mount appears
     /// underneath their root, rather than bypassing that mounted subtree.
     pub(super) fn resolve_tree(&self, path: &Path, mounts: &MountTable) -> Resolved {
-        if self.host_path(path).is_some_and(|host| {
-            mounts
-                .mount_points
-                .iter()
-                .any(|point| point != &host && point.starts_with(&host))
-        }) {
-            return Resolved {
-                route: Route::Posix,
-                path: path.to_path_buf(),
-            };
+        if mounts.eligible.is_empty()
+            || self.host_path(path).is_some_and(|host| {
+                mounts
+                    .mount_points
+                    .iter()
+                    .any(|point| point != &host && point.starts_with(&host))
+            })
+        {
+            return Resolved::posix(path);
         }
         self.resolve(path, mounts)
     }
@@ -118,10 +126,10 @@ impl Auto {
     }
 
     pub(super) fn resolve(&self, path: &Path, mounts: &MountTable) -> Resolved {
-        let mounted = || Resolved {
-            route: Route::Posix,
-            path: path.to_path_buf(),
-        };
+        let mounted = || Resolved::posix(path);
+        if mounts.eligible.is_empty() {
+            return mounted();
+        }
         let Some(host_path) = self.host_path(path) else {
             return mounted();
         };
@@ -173,7 +181,7 @@ impl Auto {
     /// for symlink ancestors, mountpoints, and special terminal operands.
     pub(super) fn resolve_entry(&self, path: &Path, mounts: &MountTable) -> Resolved {
         let resolved = self.resolve(path, mounts);
-        if matches!(&resolved.route, Route::Nfs(_)) {
+        if mounts.eligible.is_empty() || matches!(&resolved.route, Route::Nfs(_)) {
             return resolved;
         }
         let Some(host) = self.host_path(path) else {
@@ -287,14 +295,17 @@ impl Auto {
         requests: &[OpenOp],
         mounts: &MountTable,
     ) -> Vec<Resolved> {
+        if mounts.eligible.is_empty() {
+            return requests
+                .iter()
+                .map(|request| Resolved::posix(request.path()))
+                .collect();
+        }
         let mut parents: HashMap<PathBuf, Option<NfsConnection>> = HashMap::new();
         let mut resolved: Vec<_> = requests
             .iter()
             .map(|request| {
-                let fallback = || Resolved {
-                    route: Route::Posix,
-                    path: request.path().to_path_buf(),
-                };
+                let fallback = || Resolved::posix(request.path());
                 let Some(host) = self.host_path(request.path()) else {
                     return fallback();
                 };

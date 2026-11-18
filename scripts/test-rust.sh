@@ -49,7 +49,9 @@ if [[ -n "$package$target$filter" ]]; then
   [[ -z "$filter" ]] || focused+=("$filter")
   # Explicit live selections must not silently succeed without their server.
   case "$package:$target" in
-    vfsi-nfs:nfs|vnfs:tree_builder_nfs|vnfs:transfer_helpers_nfs|vnfs:ordered_directory_nfs)
+    vfsi-nfs:nfs|vfsi-nfs:prr_exclusive_symlinks|vfsi-nfs:prr_rust20_round11|\
+    vfsi-nfs:prr_rust20_round12|vfsi-nfs:prr_session_identity|\
+    vnfs:tree_builder_nfs|vnfs:transfer_helpers_nfs|vnfs:ordered_directory_nfs)
       [[ -n "${VFSI_NFS_SERVER:-}" ]] || bad_args 'Set VFSI_NFS_SERVER for live NFS tests'
       export VFSI_NFS_REQUIRED=1 ;;
     vfsi-smb:smb)

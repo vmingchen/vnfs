@@ -2287,6 +2287,53 @@ fn copy_results_keep_healthy_siblings_for_client_and_server_strategies() {
 }
 
 #[test]
+fn copy_range_overflow_leaves_missing_destination_and_keeps_healthy_sibling() {
+    let Some(mut backend) = connect() else {
+        return;
+    };
+    let root = PathBuf::from(format!("/vfsi-copy-overflow-{}", std::process::id()));
+    backend.ensure_dir_impl(&root, 0o777).unwrap();
+    let source = root.join("source");
+    let file = backend
+        .open_raw_impl(&source, libc::O_CREAT | libc::O_WRONLY, 0o666)
+        .unwrap();
+    backend.write_raw_impl(&file, 0, b"ab").unwrap();
+    backend.close_impl(&file).unwrap();
+
+    let mut observations = Vec::new();
+    for server in [false, true] {
+        let invalid = root.join(format!("invalid-{server}"));
+        let valid = root.join(format!("valid-{server}"));
+        let pairs = [
+            ExtentPair::from_os_paths(&source, 0, &invalid, u64::MAX, Some(1)),
+            ExtentPair::from_os_paths(&source, 1, &valid, 1, Some(u64::MAX)),
+        ];
+        let results = if server {
+            backend.vcopy_impl(&pairs, CopyOptions::new())
+        } else {
+            backend.vcopy_data_impl(&pairs)
+        }
+        .unwrap();
+        let exists = backend.exists_impl(&invalid).unwrap();
+        let read = backend
+            .vread_all_impl(&[FileOperand::from_os_path(&valid)])
+            .unwrap()
+            .remove(0);
+        observations.push((results, exists, read));
+    }
+    cleanup_test_tree(&root);
+    for (results, exists, read) in observations {
+        assert_eq!(
+            results[0].as_ref().unwrap_err().cause().raw_os_error(),
+            Some(libc::EOVERFLOW)
+        );
+        assert!(!exists, "overflow must not create the destination");
+        assert!(results[1].is_ok(), "{:?}", results[1]);
+        assert_eq!(read.unwrap(), b"\0b");
+    }
+}
+
+#[test]
 fn native_page_vectors_keep_siblings_and_pinned_directory_cursors() {
     let Some(mut backend) = connect() else {
         return;

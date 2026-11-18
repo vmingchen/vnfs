@@ -1,5 +1,35 @@
 use super::*;
 
+impl SmbVecFs {
+    fn copy_extent_results(
+        &mut self,
+        pairs: &[ExtentPair],
+        allow_server: bool,
+    ) -> Vec<vfsi_core::OpResult<()>> {
+        let mut fatal: Option<Arc<std::io::Error>> = None;
+        pairs
+            .iter()
+            .map(|pair| {
+                if let Some(cause) = &fatal {
+                    return Err(vfsi_core::OpError::not_attempted(
+                        vfsi_core::internal::errors::from_shared(cause),
+                    ));
+                }
+                let result =
+                    self.copy_extent_with_strategy(pair, allow_server && self.server_copy_enabled);
+                result.map_err(|mut cause| {
+                    if vfsi_core::transport_kind(&(cause)).is_some() {
+                        fatal = Some(vfsi_core::internal::errors::share_in_place(&mut cause));
+                        vfsi_core::OpError::unknown(cause, None)
+                    } else {
+                        vfsi_core::OpError::failed(cause, None)
+                    }
+                })
+            })
+            .collect()
+    }
+}
+
 impl VectorBackend for SmbVecFs {
     fn vopen_raw_impl(
         &mut self,
@@ -862,25 +892,7 @@ impl VectorBackend for SmbVecFs {
     }
 
     fn vcopy_data_impl(&mut self, pairs: &[ExtentPair]) -> vfsi_core::VecResult<()> {
-        let mut fatal: Option<Arc<std::io::Error>> = None;
-        Ok(pairs
-            .iter()
-            .map(|pair| {
-                if let Some(cause) = &fatal {
-                    return Err(vfsi_core::OpError::not_attempted(
-                        vfsi_core::internal::errors::from_shared(cause),
-                    ));
-                }
-                self.copy_client_side(pair).map_err(|mut cause| {
-                    if vfsi_core::transport_kind(&(cause)).is_some() {
-                        fatal = Some(vfsi_core::internal::errors::share_in_place(&mut cause));
-                        vfsi_core::OpError::unknown(cause, None)
-                    } else {
-                        vfsi_core::OpError::failed(cause, None)
-                    }
-                })
-            })
-            .collect())
+        Ok(self.copy_extent_results(pairs, false))
     }
 
     fn vcopy_impl(
@@ -894,26 +906,7 @@ impl VectorBackend for SmbVecFs {
         if !options.follow_source_symlinks() {
             return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
         }
-        let mut fatal: Option<Arc<std::io::Error>> = None;
-        Ok(pairs
-            .iter()
-            .map(|pair| {
-                if let Some(cause) = &fatal {
-                    return Err(vfsi_core::OpError::not_attempted(
-                        vfsi_core::internal::errors::from_shared(cause),
-                    ));
-                }
-                let result = self.copy_extent_with_strategy(pair, self.server_copy_enabled);
-                result.map_err(|mut cause| {
-                    if vfsi_core::transport_kind(&(cause)).is_some() {
-                        fatal = Some(vfsi_core::internal::errors::share_in_place(&mut cause));
-                        vfsi_core::OpError::unknown(cause, None)
-                    } else {
-                        vfsi_core::OpError::failed(cause, None)
-                    }
-                })
-            })
-            .collect())
+        Ok(self.copy_extent_results(pairs, true))
     }
 
     fn copy_tree_impl(

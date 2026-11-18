@@ -629,6 +629,10 @@ class RustRunnerTests(unittest.TestCase):
     def test_live_focused_targets_require_fixture_configuration(self):
         for package, target, env in [
             ("vfsi-nfs", "nfs", dict(VFSI_NFS_SERVER="")),
+            *(("vfsi-nfs", target, dict(VFSI_NFS_SERVER="")) for target in (
+                "prr_exclusive_symlinks", "prr_rust20_round11",
+                "prr_rust20_round12", "prr_session_identity",
+            )),
             ("vnfs", "tree_builder_nfs", dict(VFSI_NFS_SERVER="", VFSI_NFS_REQUIRED="0")),
             ("vnfs", "transfer_helpers_nfs", dict(VFSI_NFS_SERVER="", VFSI_NFS_REQUIRED="0")),
             ("vfsi-smb", "smb", dict(VFSI_SMB_SERVER="", VFSI_SMB_SHARE="")),
@@ -645,6 +649,10 @@ class RustRunnerTests(unittest.TestCase):
         stub = cargo.read_text().split("\n", 1)[1]
         for package, target, required in [
             ("vfsi-nfs", "nfs", "VFSI_NFS_REQUIRED"),
+            *(("vfsi-nfs", target, "VFSI_NFS_REQUIRED") for target in (
+                "prr_exclusive_symlinks", "prr_rust20_round11",
+                "prr_rust20_round12", "prr_session_identity",
+            )),
             ("vnfs", "tree_builder_nfs", "VFSI_NFS_REQUIRED"),
             ("vnfs", "transfer_helpers_nfs", "VFSI_NFS_REQUIRED"),
             ("vfsi-smb", "smb", "VFSI_SMB_REQUIRED"),
