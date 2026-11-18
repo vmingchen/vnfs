@@ -498,6 +498,68 @@ fn client_pool_validates_size_and_gives_explicit_owners_distinct_ids() {
 }
 
 #[test]
+fn shutdown_closes_the_healthy_suffix_after_a_definite_close_failure() {
+    let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+        assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+        return;
+    };
+    let minor = std::env::var("VFSI_NFS_MINOR")
+        .unwrap_or_else(|_| "1".into())
+        .parse()
+        .unwrap();
+    let mut records = Vec::new();
+    for first_fails in [false, true] {
+        let mut fs = NfsVecFs::connect_minor(&server, minor).unwrap();
+        let paths = [0, 1].map(|i| {
+            PathBuf::from(format!(
+                "/vnfs-shutdown-suffix-{}-{i}-{first_fails}",
+                std::process::id()
+            ))
+        });
+        for (index, path) in paths.iter().enumerate() {
+            let file = fs
+                .open_raw_impl(path, libc::O_CREAT | libc::O_WRONLY, 0o600)
+                .unwrap();
+            let mut open = fs.open_files.remove(&file.fd().unwrap()).unwrap();
+            if index == 0 && first_fails {
+                fs.nfs.close(&open.fh, &open.stateid).unwrap();
+                open.stateid = stateid4 {
+                    seqid: 1,
+                    other: [0x27; 12],
+                };
+            }
+            fs.deferred_descriptor_closes.push(open);
+        }
+        let _ = crate::compound::thread_compound_stats();
+        let result = fs.shutdown();
+        let compounds = crate::compound::thread_compound_stats().0;
+        let mut cleaner = NfsVecFs::connect_minor(&server, minor).unwrap();
+        for path in &paths {
+            cleaner.unlink_impl(path).unwrap();
+        }
+        cleaner.shutdown().unwrap();
+        records.push((result, compounds));
+    }
+    let [(normal, normal_compounds), (failed, failed_compounds)] = records.try_into().unwrap();
+    normal.unwrap();
+    let cause = failed.unwrap_err();
+    assert!(
+        matches!(
+            vfsi_core::native_status(&cause),
+            Some(vfsi_core::StatusCode::Nfs(
+                nfsstat4_NFS4ERR_BAD_STATEID | nfsstat4_NFS4ERR_STALE_STATEID
+            ))
+        ),
+        "{cause:?}"
+    );
+    assert_eq!(
+        failed_compounds,
+        normal_compounds + 1,
+        "healthy suffix requires a separate CLOSE after the first result"
+    );
+}
+
+#[test]
 fn invalid_explicit_client_owners_are_rejected_before_connecting() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     listener.set_nonblocking(true).unwrap();

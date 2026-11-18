@@ -6,17 +6,7 @@ impl Drop for NfsVecFs {
     /// `tc_deinit()`: close every open file so the client has no state left,
     /// allowing the session teardown to destroy the clientid on the server.
     fn drop(&mut self) {
-        let closes: Vec<crate::client::CloseOp> = self
-            .open_files
-            .drain()
-            .map(|(_, open)| open)
-            .chain(self.deferred_descriptor_closes.drain(..))
-            .map(|open| crate::client::CloseOp {
-                fh: open.fh,
-                stateid: open.stateid,
-            })
-            .collect();
-        let _ = self.nfs.close_many(&closes);
+        let _ = self.close_open_descriptors();
     }
 }
 
@@ -28,20 +18,7 @@ impl NfsVecFs {
             callback();
         }
         let observer = self.observer.clone();
-        let closes: Vec<crate::client::CloseOp> = self
-            .open_files
-            .drain()
-            .map(|(_, open)| open)
-            .chain(self.deferred_descriptor_closes.drain(..))
-            .map(|open| crate::client::CloseOp {
-                fh: open.fh,
-                stateid: open.stateid,
-            })
-            .collect();
-        let close_result = self
-            .nfs
-            .close_many(&closes)
-            .map_err(vfsi_core::internal::errors::from_rpc);
+        let close_result = self.close_open_descriptors();
         let shutdown_result = self
             .nfs
             .shutdown()
@@ -59,6 +36,27 @@ impl NfsVecFs {
             });
         }
         result
+    }
+
+    fn close_open_descriptors(&mut self) -> VfResult<()> {
+        if self.open_files.is_empty() && self.deferred_descriptor_closes.is_empty() {
+            return Ok(());
+        }
+        let closes: Vec<crate::client::CloseOp> = self
+            .open_files
+            .drain()
+            .map(|(_, open)| open)
+            .chain(self.deferred_descriptor_closes.drain(..))
+            .map(|open| crate::client::CloseOp {
+                fh: open.fh,
+                stateid: open.stateid,
+            })
+            .collect();
+        // These are independent user OPEN owners. A definite item failure
+        // must not prevent CLOSE for the proven unexecuted suffix.
+        vfsi_core::internal::collect_vec_result(self.nfs.close_descriptors(&closes), closes.len())
+            .map(|_| ())
+            .map_err(vfsi_core::IndexedError::into_cause)
     }
 
     pub(super) fn notify(&mut self, event: NfsEvent) {
