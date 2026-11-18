@@ -95,6 +95,20 @@ fn independent_read_prefix(reads: &[ReadOp]) -> usize {
         .unwrap_or(reads.len())
 }
 
+fn read_can_reconnect(request: &ReadOp, error: &OpError) -> bool {
+    match error.progress() {
+        Some(IoProgress::Read(prefix)) => {
+            // Reconnect reopens retained descriptors by handle. Resolving a
+            // pathname again could select a different object for its suffix.
+            !prefix.eof()
+                && prefix.bytes_read() < request.length
+                && (prefix.bytes_read() == 0 || request.file.is_fd())
+        }
+        Some(_) => false,
+        None => true,
+    }
+}
+
 struct DescriptorReadPlan {
     ops: Vec<crate::client::ReadOp>,
     owners: Vec<usize>,
@@ -188,11 +202,7 @@ impl NfsVecFs {
             return Ok(output);
         }
         type SavedPrefix = (FailureState, Option<vfsi_core::api::ReadOutput>);
-        let retryable = |index: usize, error: &OpError| match error.progress() {
-            Some(IoProgress::Read(read)) => !read.eof() && read.bytes_read() < reads[index].length,
-            Some(_) => false,
-            None => true,
-        };
+        let retryable = |index: usize, error: &OpError| read_can_reconnect(&reads[index], error);
         let mut saved: Vec<Option<SavedPrefix>> = Vec::new();
         let result = if self.recovery_in_progress {
             self.read_unrecovered(reads)
@@ -925,11 +935,7 @@ impl NfsVecFs {
         // Saved progress is only metadata: confirmed bytes stay in the caller's
         // destination while recovery borrows disjoint remaining suffixes.
         type Prefix = (FailureState, u64, usize, bool);
-        let retryable = |index: usize, error: &OpError| match error.progress() {
-            Some(IoProgress::Read(read)) => !read.eof() && read.bytes_read() < reads[index].length,
-            Some(_) => false,
-            None => true,
-        };
+        let retryable = |index: usize, error: &OpError| read_can_reconnect(&reads[index], error);
         let mut saved: Vec<Option<Prefix>> = Vec::new();
         let outcomes = if self.recovery_in_progress {
             self.read_into_unrecovered(reads, buffers)
@@ -2305,6 +2311,85 @@ mod descriptor_outcome_tests {
         let error = failure.unwrap();
         assert_eq!(crate::test_native_code(error.cause()), libc::EACCES as u32);
         assert_eq!(error.state(), FailureState::Unknown);
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[test]
+    fn live_path_read_does_not_reconnect_after_confirmed_bytes() {
+        use std::sync::Arc;
+        use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+        let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+            assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+            return;
+        };
+        let minor = std::env::var("VFSI_NFS_MINOR")
+            .unwrap_or_else(|_| "1".into())
+            .parse()
+            .unwrap();
+        for owned in [false, true] {
+            let mut fs = NfsVecFs::connect_minor(&server, minor).unwrap();
+            fs.set_merged_mode("full");
+            fs.set_auto_reconnect(true);
+            let path = format!("/no-path-resume-{}-{owned}", std::process::id());
+            let file = fs
+                .open_raw_impl(
+                    Path::new(&path),
+                    libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                    0o666,
+                )
+                .unwrap();
+            assert_eq!(fs.write_raw_impl(&file, 0, b"abcdefgh").unwrap(), 8);
+            fs.close_impl(&file).unwrap();
+
+            let script = Arc::new(FaultScript::one(
+                OpenFaultPoint::BeforeReadRepair { index: 0 },
+                vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "injected path read repair disconnect",
+                ),
+            ));
+            fs.set_fault_injector(script.clone());
+            fs.nfs.test_short_merged_read_once(2);
+            let reads = [
+                ReadOp::from_path(&path, VfOffset::At(0), 4),
+                ReadOp::from_path(&path, VfOffset::At(4), 4),
+            ];
+            let mut storage = [[99; 4]; 2];
+            let result = if owned {
+                let mut results = fs.read_results(&reads).unwrap().into_iter();
+                let result = results.next().unwrap().map(|_| ());
+                assert_eq!(results.next().unwrap().unwrap().data, b"efgh");
+                result
+            } else {
+                let mut buffers = storage.each_mut().map(|buffer| buffer.as_mut_slice());
+                let mut results = fs
+                    .read_into_results(&reads, &mut buffers)
+                    .unwrap()
+                    .into_iter();
+                let result = results.next().unwrap().map(|_| ());
+                assert_eq!(results.next().unwrap().unwrap().bytes_read, 4);
+                result
+            };
+            fs.unlink_impl(Path::new(&path)).unwrap();
+            assert!(script.is_consumed());
+            let error = result.expect_err("a positive pathname prefix must not be resumed");
+            assert_eq!(
+                vfsi_core::transport_kind(error.cause()),
+                Some(vfsi_core::TransportKind::Other)
+            );
+            let Some(IoProgress::Read(prefix)) = error.progress() else {
+                panic!("missing confirmed read prefix");
+            };
+            assert_eq!(prefix.offset(), 0);
+            assert_eq!(prefix.bytes_read(), 2);
+            assert!(!prefix.eof());
+            if owned {
+                assert_eq!(prefix.data().unwrap(), b"ab");
+            } else {
+                assert!(prefix.is_buffered());
+                assert_eq!(storage, [[b'a', b'b', 99, 99], *b"efgh"]);
+            }
+        }
     }
 
     #[cfg(feature = "test-faults")]

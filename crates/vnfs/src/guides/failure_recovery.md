@@ -53,7 +53,8 @@ The direct NFS client can reconnect and retry side-effect-free reads and
 metadata queries once after supported transport or session failures. Reconnect
 attempts use bounded exponential backoff through `NfsRecoveryPolicy`.
 Configure `Nfs::builder(host).auto_reconnect(false)` before connecting to disable
-automatic recovery.
+automatic recovery. A pathname read that has already confirmed bytes returns
+its prefix and error if it would need to reconnect for the remaining range.
 
 Recovery reopens retained NFS objects with batched `OPEN(CLAIM_FH)`, preserving
 descriptor numbers, offsets, and independent open owners. Saved paths are
