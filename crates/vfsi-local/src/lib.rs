@@ -1708,13 +1708,12 @@ impl LocalBackend {
                 // before CREATE/TRUNCATE can mutate the target.
                 match op.offset() {
                     VfOffset::At(offset) => {
-                        checked_offset(offset, op.data().len() as u64, 0)
+                        let end = checked_offset(offset, op.data().len() as u64, 0)
                             .map_err(OpError::not_attempted)?;
-                        // FileExt requires a signed native offset. Reject it
-                        // before OPEN can create or truncate the path. Empty
-                        // writes perform no positional syscall.
+                        // A nonempty write must fit in a signed native file size
+                        // before OPEN creates or truncates the path.
                         if !op.data().is_empty() {
-                            i64::try_from(offset)
+                            i64::try_from(end)
                                 .map_err(|_| OpError::not_attempted(Self::overflow(0)))?;
                         }
                     }
@@ -1941,6 +1940,11 @@ impl LocalBackend {
         src_options.read(true);
         Self::protect_create_open(&sp, &mut src_options);
         let src = src_options.open(&sp)?;
+        if i64::try_from(p.dst_offset).is_err() {
+            // FileExt and set_len cannot represent this destination offset,
+            // even when the copy reaches EOF without writing any bytes.
+            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+        }
         let mut dst_options = OpenOptions::new();
         dst_options.write(true).create(true).truncate(false);
         Self::protect_create_open(&dp, &mut dst_options);

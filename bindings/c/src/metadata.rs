@@ -4,23 +4,7 @@ use super::*;
 pub(super) fn attrs_from_metadata(metadata: &vfsi_sync::Attrs) -> vfsi_attrs {
     fn time(value: Option<std::time::SystemTime>) -> (i64, u32) {
         value
-            .and_then(|v| match v.duration_since(std::time::UNIX_EPOCH) {
-                Ok(d) => i64::try_from(d.as_secs())
-                    .ok()
-                    .map(|s| (s, d.subsec_nanos())),
-                Err(e) => {
-                    let d = e.duration();
-                    i64::try_from(d.as_secs()).ok().and_then(|s| {
-                        if d.subsec_nanos() == 0 {
-                            s.checked_neg().map(|s| (s, 0))
-                        } else {
-                            s.checked_neg()
-                                .and_then(|s| s.checked_sub(1))
-                                .map(|s| (s, 1_000_000_000 - d.subsec_nanos()))
-                        }
-                    })
-                }
-            })
+            .and_then(|time| vfsi_core::internal::system_time_parts(time).ok())
             .unwrap_or_default()
     }
     let (atime_sec, atime_nsec) = time(metadata.accessed());
@@ -276,4 +260,17 @@ pub unsafe extern "C" fn vfsi_setattrv(
             |_| {},
         )
     })
+}
+
+#[cfg(all(test, target_os = "linux", target_pointer_width = "64"))]
+#[test]
+fn walk_projection_preserves_the_earliest_representable_timestamp() {
+    let metadata = vfsi_core::metadata_from_attrs(VfAttrs {
+        returned: AttrMask::MTIME,
+        mtime_sec: i64::MIN,
+        ..Default::default()
+    });
+    assert!(metadata.modified().is_some());
+    let attrs = attrs_from_metadata(&metadata);
+    assert_eq!((attrs.mtime_sec, attrs.mtime_nsec), (i64::MIN, 0));
 }

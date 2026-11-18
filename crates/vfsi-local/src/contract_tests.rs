@@ -4614,7 +4614,7 @@ mod tests {
         let (root, mut backend) = fs("write-signed-offset-preflight");
         let existing = FileOperand::from_path("/existing");
         let missing = FileOperand::from_path("/missing");
-        for offset in [i64::MAX as u64 + 1, u64::MAX - 1] {
+        for offset in [i64::MAX as u64, i64::MAX as u64 + 1, u64::MAX - 1] {
             std::fs::write(root.0.join("existing"), b"preserved").unwrap();
             let writes = [
                 WriteOp::at(&existing, offset, b"x".as_slice()).with_truncate(),
@@ -4836,6 +4836,27 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+    #[test]
+    fn impossible_copy_offset_leaves_missing_destinations_absent() {
+        let (root, mut backend) = fs("copy-offset-preflight");
+        std::fs::write(root.0.join("source"), b"abc").unwrap();
+        let impossible = i64::MAX as u64 + 1;
+        let pairs = [
+            ExtentPair::new("/source", 0, "/invalid", impossible, Some(1)),
+            ExtentPair::new("/source", 0, "/empty", impossible, Some(0)),
+            ExtentPair::new("/source", 1, "/valid", 1, Some(u64::MAX)),
+        ];
+        let outcomes = backend.vcopy_data_impl(&pairs).unwrap();
+        for (outcome, file) in outcomes[..2].iter().zip(["invalid", "empty"]) {
+            assert_eq!(
+                outcome.as_ref().unwrap_err().cause().kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+            assert!(!root.0.join(file).exists());
+        }
+        assert!(outcomes[2].is_ok());
+        assert_eq!(std::fs::read(root.0.join("valid")).unwrap(), b"\0bc");
     }
     #[test]
     fn finite_forward_alias_copy_stops_at_original_source_eof() {

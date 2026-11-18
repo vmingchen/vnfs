@@ -54,6 +54,8 @@ if [[ -n "$package$target$filter" ]]; then
     vnfs:tree_builder_nfs|vnfs:transfer_helpers_nfs|vnfs:ordered_directory_nfs)
       [[ -n "${VFSI_NFS_SERVER:-}" ]] || bad_args 'Set VFSI_NFS_SERVER for live NFS tests'
       export VFSI_NFS_REQUIRED=1 ;;
+    vnfs:uring)
+      focused+=(--features uring) ;;
     vfsi-smb:smb)
       [[ -n "${VFSI_SMB_SERVER:-}" && -n "${VFSI_SMB_SHARE:-}" ]] ||
         bad_args 'Set VFSI_SMB_SERVER and VFSI_SMB_SHARE for live SMB tests'

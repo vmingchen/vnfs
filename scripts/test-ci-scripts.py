@@ -589,6 +589,13 @@ class RustRunnerTests(unittest.TestCase):
         self.assertNotIn("--lib", calls[0])
         self.assertNotIn("public_api", calls[0])
 
+    def test_focused_public_uring_target_enables_the_backend(self):
+        result = self.run_script("test-rust.sh", "--package", "vnfs", "--test", "uring")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command = self.log.read_text().strip()
+        self.assertIn("--features uring", command)
+        self.assertIn("--test uring", command)
+
     def test_focused_zero_tests_skips_and_cargo_failures_are_not_success(self):
         for output, status in [
             ("test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out", "0"),

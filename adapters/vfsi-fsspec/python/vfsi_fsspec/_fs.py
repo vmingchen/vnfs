@@ -4206,11 +4206,15 @@ class VfsiFileSystem(AbstractFileSystem):
         except (FileNotFoundError, NotADirectoryError):
             return False
 
-    def isdir(self, path):
+    def _directory_info(self, path):
         try:
-            return self.info(path)["type"] == "directory"
+            info = self.info(path)
         except (FileNotFoundError, NotADirectoryError):
-            return False
+            return None
+        return info if info["type"] == "directory" else None
+
+    def isdir(self, path):
+        return self._directory_info(path) is not None
 
     def size(self, path):
         return self.info(path).get("size")
@@ -6544,8 +6548,10 @@ class VfsiFileSystem(AbstractFileSystem):
         internal = self._checked_strip_protocol(path)
         root_depth = _depth(internal)
         out = {}
-        if withdirs and internal != "" and self.isdir(internal):
-            out[internal] = self.info(internal)
+        if withdirs and internal != "":
+            info = self._directory_info(internal)
+            if info is not None:
+                out[internal] = info
         for _, dirs, files in self.walk(
             internal, maxdepth=maxdepth, detail=True, **kwargs
         ):
@@ -6569,9 +6575,10 @@ class VfsiFileSystem(AbstractFileSystem):
         root_depth = _depth(internal)
         max_entry_depth = None if maxdepth is None else root_depth + maxdepth
         sizes = {}
-        if withdirs and self.isdir(internal):
-            info = self.info(internal)
-            sizes[info["name"]] = info.get("size") or 0
+        if withdirs:
+            info = self._directory_info(internal)
+            if info is not None:
+                sizes[info["name"]] = info.get("size") or 0
         for _, dirs, files in self.walk(
             internal, maxdepth=maxdepth, detail=True, **kwargs
         ):
