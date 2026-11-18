@@ -316,8 +316,8 @@ pub trait Vfsi {
         options: crate::api::ReadOptions,
     ) -> crate::VecResult<crate::api::ReadOutput>;
     /// Write positional ranges with explicit short-write policy.
-    /// With default options, report accepted byte counts without completing short writes.
-    /// With `write_all(true)`, complete each eligible input through short-write waves.
+    /// With default options, report accepted byte counts. A backend may return a short write.
+    /// `WriteOptions::with_write_all(true)` requests completion through short-write waves.
     /// Return one outcome per input, retaining healthy siblings and confirmed
     /// payload prefixes when another input fails. Input-local rejection does not
     /// suppress independent writes. An outer error rejects before dispatch.
@@ -328,7 +328,7 @@ pub trait Vfsi {
     /// This is not transactional or a vector-wide execution-order guarantee.
     ///
     /// Handles opened for append select EOF regardless of the requested offset.
-    /// With completion enabled, success means every request's payload was written.
+    /// With completion enabled, a successful input means its full payload was written.
     /// Short writes are completed at their remaining offsets; this does not
     /// authorize replay after an ambiguous failure or guarantee durability.
     ///

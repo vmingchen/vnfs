@@ -55,10 +55,10 @@ cleanup to Drop on failure; `close_files` similarly consumes a group. Drop
 is best-effort, may perform or defer cleanup, and cannot report errors. An
 armed handle after a failed close is not proof that it remains open remotely.
 
-Vector errors retain protocol details. Standard-I/O adapters wrap them in
-`std::io::Error`, retaining the original error as its source. Sparse attribute
-getters such as `Attrs::len()` return `None` for missing fields; missing does
-not mean zero.
+Standard-I/O adapters report the operation's `std::io::Error` cause. Use
+`Vfsi` vector results to inspect individual completion states and confirmed
+progress. Sparse attribute getters such as `Attrs::len()` return `None` for
+missing fields.
 
 See [failure and recovery](crate::nfs) and
 [resource limits](crate::nfs).

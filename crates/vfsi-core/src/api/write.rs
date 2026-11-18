@@ -8,7 +8,7 @@ struct WriteFlags {
     _reserved: u8,
 }
 
-/// Policy for positional vector writes. Defaults to reporting short writes.
+/// Policy for positional vector writes. By default, callers handle short writes.
 /// Completion is not atomicity, durability, or permission to replay failed RPCs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[must_use = "configuration and requests have no effect until used"]
@@ -16,7 +16,7 @@ pub struct WriteOptions {
     flags: WriteFlags,
 }
 impl WriteOptions {
-    /// Report each request's accepted byte count without completing short writes.
+    /// Report accepted byte counts. A backend may return a short write.
     pub const fn new() -> Self {
         Self {
             flags: WriteFlags::new(),
@@ -30,7 +30,7 @@ impl WriteOptions {
         self.flags.set_write_all(complete);
         self
     }
-    /// Whether successful short writes should be completed.
+    /// Whether the caller requires complete writes.
     pub const fn write_all(self) -> bool {
         self.flags.write_all()
     }

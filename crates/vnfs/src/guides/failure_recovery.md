@@ -52,7 +52,8 @@ Retained ownership does not establish remote open state.
 The direct NFS client can reconnect and retry side-effect-free reads and
 metadata queries once after supported transport or session failures. Reconnect
 attempts use bounded exponential backoff through `NfsRecoveryPolicy`.
-`set_auto_reconnect(false)` disables automatic recovery.
+Configure `Nfs::builder(host).auto_reconnect(false)` before connecting to disable
+automatic recovery.
 
 Recovery reopens retained NFS objects with batched `OPEN(CLAIM_FH)`, preserving
 descriptor numbers, offsets, and independent open owners. Saved paths are

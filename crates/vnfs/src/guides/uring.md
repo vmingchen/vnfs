@@ -93,7 +93,7 @@ Completion IDs restore input order, and merged short writes are mapped back to
 each request's contiguous progress before retrying its remaining suffix. Default bounds:
 256 SQEs and 2 MiB of in-flight transfer bytes (and at most that much reusable
 scratch), configurable through
-`vnfs::uring::Options::{queue_depth,max_batch_bytes}`. Queue depths must be
+`Options::with_queue_depth` and `Options::with_max_batch_bytes`. Queue depths must be
 1..=4096. Application read budgets remain independently controlled by
 `ReadOptions` and `ResourceLimits` (16 MiB by default). Large requests use bounded
 contiguous chunks; short writes complete their remaining suffix, never skip gaps.

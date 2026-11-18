@@ -15,7 +15,7 @@ pub fn run(fs: &impl Vfsi, path: &str) -> vnfs::Result<u64> {
             Ok(std::ops::ControlFlow::Continue(())) // Break stops successfully; callback errors propagate.
         },
     )
-    .map_err(vfsi_core::IndexedError::into_cause)?;
+    .map_err(vnfs::error::IndexedError::into_cause)?;
     Ok(bytes)
 }
 

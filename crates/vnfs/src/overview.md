@@ -122,6 +122,7 @@ helpers, not core execution methods. Import the traits with `vnfs::prelude::*` a
 | `auto` (default) | Linux mounted clients and conservative direct-NFS routing |
 | `rpcsec-gss` | Optional Kerberos authentication or integrity protection |
 | `posix` | Rooted kernel filesystem access through ordinary POSIX syscalls |
+| `uring` | Rooted local filesystem access with batched Linux io_uring I/O |
 | `test-faults` | Fault injection for tests, not normal application use |
 
 SMB is provided by the separate `vfsi-smb` library, not this crate.
