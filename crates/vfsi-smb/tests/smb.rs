@@ -2198,6 +2198,77 @@ fn public_write_outcomes_preserve_smb_siblings() {
 }
 
 #[test]
+fn path_only_mutations_reject_open_descriptors_per_input() {
+    let Some(mut fs) = connect() else { return };
+    let root = PathBuf::from(format!("/vfsi-descriptor-mutations-{}", std::process::id()));
+    fs.mkdir_raw_impl(&root, 0o777).unwrap();
+    let original = root.join("original");
+    let invalid_rename = root.join("invalid-rename");
+    let ordinary = root.join("ordinary");
+    let renamed = root.join("renamed");
+    let directory = root.join("directory");
+    let retained = fs
+        .open_raw_impl(
+            &original,
+            libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+            0o666,
+        )
+        .unwrap();
+    let sibling = fs
+        .open_raw_impl(
+            &ordinary,
+            libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+            0o666,
+        )
+        .unwrap();
+    fs.close_impl(&sibling).unwrap();
+
+    let mkdir = fs
+        .vmkdir_impl(
+            &[retained.clone(), FileOperand::from_os_path(&directory)].map(|file| VfAttrs {
+                file,
+                masks: AttrMask::MODE,
+                mode: 0o777,
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+    let rename = fs
+        .vrename_impl(&[
+            (retained.clone(), FileOperand::from_os_path(&invalid_rename)),
+            (
+                FileOperand::from_os_path(&ordinary),
+                FileOperand::from_os_path(&renamed),
+            ),
+        ])
+        .unwrap();
+    let remove = fs
+        .vremove_impl(&[retained.clone(), FileOperand::from_os_path(&renamed)])
+        .unwrap();
+
+    fs.close_impl(&retained).unwrap();
+    let original_exists = fs.exists_impl(&original).unwrap();
+    let invalid_rename_exists = fs.exists_impl(&invalid_rename).unwrap();
+    let directory_exists = fs.exists_impl(&directory).unwrap();
+    let sibling_removed = !fs.exists_impl(&ordinary).unwrap() && !fs.exists_impl(&renamed).unwrap();
+    cleanup_test_tree(&root);
+
+    for (operation, results) in [("mkdir", mkdir), ("rename", rename), ("remove", remove)] {
+        assert_eq!(results.len(), 2);
+        let error = results[0].as_ref().expect_err(operation);
+        assert_eq!(error.state(), FailureState::NotAttempted, "{operation}");
+        assert_eq!(
+            error.cause().kind(),
+            std::io::ErrorKind::InvalidInput,
+            "{operation}"
+        );
+        assert!(results[1].is_ok(), "{operation}: {:?}", results[1]);
+    }
+    assert!(original_exists && !invalid_rename_exists);
+    assert!(directory_exists && sibling_removed);
+}
+
+#[test]
 fn directory_vector_preserves_healthy_inputs_around_mode_and_creation_failures() {
     let Some(mut fs) = connect() else { return };
     let root = PathBuf::from(format!("/vfsi-mkdir-results-{}", std::process::id()));

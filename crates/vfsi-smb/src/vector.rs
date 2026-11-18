@@ -143,9 +143,7 @@ impl VectorBackend for SmbVecFs {
                 .collect());
         }
         let mut output = Vec::with_capacity(paths.len());
-        for (((path, flags), _mode), result) in
-            resolved.into_iter().zip(flags).zip(modes).zip(results)
-        {
+        for (flags, result) in flags.iter().zip(results) {
             #[cfg(feature = "test-faults")]
             let index = output.len();
             let (file_id, size) = match result {
@@ -171,7 +169,6 @@ impl VectorBackend for SmbVecFs {
             let fd = match self.insert_open_file(SmbOpen {
                 file_id,
                 tree: self.tree.clone(),
-                path,
                 cur_offset: if *flags & libc::O_APPEND != 0 {
                     size
                 } else {
