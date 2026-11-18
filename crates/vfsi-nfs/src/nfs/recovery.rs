@@ -6,17 +6,7 @@ impl Drop for NfsVecFs {
     /// `tc_deinit()`: close every open file so the client has no state left,
     /// allowing the session teardown to destroy the clientid on the server.
     fn drop(&mut self) {
-        let closes: Vec<crate::client::CloseOp> = self
-            .open_files
-            .drain()
-            .map(|(_, open)| open)
-            .chain(self.deferred_descriptor_closes.drain(..))
-            .map(|open| crate::client::CloseOp {
-                fh: open.fh,
-                stateid: open.stateid,
-            })
-            .collect();
-        let _ = self.nfs.close_many(&closes);
+        let _ = self.close_open_descriptors();
     }
 }
 
@@ -24,10 +14,41 @@ impl NfsVecFs {
     /// Close all descriptors and explicitly tear down NFS session state.
     /// `Drop` remains a best-effort fallback when this result is not needed.
     pub fn shutdown(mut self) -> VfResult<()> {
-        for callback in HandleBackend::take_notifications(&mut self) {
-            callback();
+        self.deliver_queued_notifications();
+        let close_result = self.close_open_descriptors();
+        let shutdown_result = self
+            .nfs
+            .shutdown()
+            .map_err(vfsi_core::internal::errors::from_rpc);
+        let mut result = close_result.and(shutdown_result);
+        if let Some(observer) = &self.observer {
+            let event = NfsEvent::Shutdown {
+                result: match &mut result {
+                    Ok(()) => Ok(()),
+                    Err(error) => {
+                        let source = vfsi_core::internal::errors::share_in_place(error);
+                        Err(vfsi_core::internal::errors::from_shared(&source))
+                    }
+                },
+            };
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                observer.on_event(&event);
+            }));
         }
-        let observer = self.observer.clone();
+        result
+    }
+
+    // These delivery sites own the backend outright and hold no client lock.
+    pub(super) fn deliver_queued_notifications(&mut self) {
+        for callback in HandleBackend::take_notifications(self) {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
+        }
+    }
+
+    fn close_open_descriptors(&mut self) -> VfResult<()> {
+        if self.open_files.is_empty() && self.deferred_descriptor_closes.is_empty() {
+            return Ok(());
+        }
         let closes: Vec<crate::client::CloseOp> = self
             .open_files
             .drain()
@@ -38,27 +59,11 @@ impl NfsVecFs {
                 stateid: open.stateid,
             })
             .collect();
-        let close_result = self
-            .nfs
-            .close_many(&closes)
-            .map_err(vfsi_core::internal::errors::from_rpc);
-        let shutdown_result = self
-            .nfs
-            .shutdown()
-            .map_err(vfsi_core::internal::errors::from_rpc);
-        let mut result = close_result.and(shutdown_result);
-        if let Some(observer) = observer {
-            observer.on_event(&NfsEvent::Shutdown {
-                result: match &mut result {
-                    Ok(()) => Ok(()),
-                    Err(error) => {
-                        let source = vfsi_core::internal::errors::share_in_place(error);
-                        Err(vfsi_core::internal::errors::from_shared(&source))
-                    }
-                },
-            });
-        }
-        result
+        // These are independent user OPEN owners. A definite item failure
+        // must not prevent CLOSE for the proven unexecuted suffix.
+        vfsi_core::internal::collect_vec_result(self.nfs.close_descriptors(&closes), closes.len())
+            .map(|_| ())
+            .map_err(vfsi_core::IndexedError::into_cause)
     }
 
     pub(super) fn notify(&mut self, event: NfsEvent) {
@@ -112,6 +117,7 @@ impl NfsVecFs {
 
     /// Connect using explicit protocol, timeout, and authentication options.
     pub fn connect_with_options(host: &str, options: NfsConnectOptions) -> VfResult<NfsVecFs> {
+        options.validate_client_owner(host)?;
         let root = OsString::from_vec(normalize_bytes(path_bytes(&options.root))).into();
         let connection = ConnectionConfig {
             telemetry: None,

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare an explicit development du binary with the frozen release.
 
-The frozen runner/lock remain unchanged. Candidate source diffs, lock and
+The frozen release checkout and lock remain pinned. Candidate source diffs, lock and
 binary hashes are retained separately; never interpret this as a release bump.
 """
 import argparse
@@ -33,29 +33,15 @@ def postorder(stem):
 def build_candidate(checkout, output):
     """Rebuild outside timing; use Cargo's artifact path, never a stale guess."""
     checkout = checkout.resolve()
-    baseline = json.loads((run.HERE/'baseline.json').read_text())
-    command = ['cargo', *baseline['build_args'], '--message-format=json-render-diagnostics']
-    artifacts = output/'candidate-build.jsonl'
-    with artifacts.open('w') as messages, (output/'candidate-build.log').open('w') as log:
-        subprocess.run(command, cwd=checkout, stdout=messages, stderr=log,
-                       check=True, timeout=1800)
-    executables = set()
-    for line in artifacts.read_text().splitlines():
-        record = json.loads(line)
-        target = record.get('target', {})
-        if (record.get('reason') == 'compiler-artifact' and target.get('name') == 'du'
-                and 'bin' in target.get('kind', []) and record.get('executable')):
-            executable = Path(record['executable'])
-            executables.add((checkout/executable).resolve())
-    if len(executables) != 1:
-        raise RuntimeError('candidate build did not report exactly one du executable')
-    binary = executables.pop()
+    binary, command = run.build_du_executable(checkout, output, 'candidate-')
     return binary, dict(command=command, executable=str(binary), binary_sha256=run.sha(binary),
                         rustc=run.checked(['rustc', '-Vv'], cwd=checkout),
                         cargo=run.checked(['cargo', '-V'], cwd=checkout))
 
 
 def main(args):
+    if not __debug__:
+        raise RuntimeError("benchmark validation assertions must be enabled")
     if not (1 <= args.pairs <= 101 and 1 <= args.captures <= 9):
         raise ValueError('invalid sample counts')
     args.output.mkdir(parents=True, exist_ok=False)

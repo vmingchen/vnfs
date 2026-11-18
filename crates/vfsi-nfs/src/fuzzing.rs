@@ -23,11 +23,12 @@ const OPS: [nfs_opnum4; 6] = [
     u32::MAX,
 ];
 
-const ATTRS: [u32; 14] = [
+const ATTRS: [u32; 15] = [
     FATTR4_TYPE,
     FATTR4_CHANGE,
     FATTR4_SIZE,
     FATTR4_NAMED_ATTR,
+    FATTR4_FSID,
     FATTR4_FILEID,
     FATTR4_MODE,
     FATTR4_NUMLINKS,

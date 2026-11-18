@@ -113,7 +113,17 @@ fn open_destination_with_create_fallback<C, T>(
     let destination = match open(client, crate::client::OpenCreate::NoCreate) {
         Ok(destination) => return Ok(destination),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            open(client, crate::client::OpenCreate::Guarded)
+            match open(client, crate::client::OpenCreate::Guarded) {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AlreadyExists
+                        && !crate::client::uncertain_completion(&error) =>
+                {
+                    // Another creator won after NOENT. Open once without
+                    // CREATE; never replay a creation with an uncertain reply.
+                    open(client, crate::client::OpenCreate::NoCreate)
+                }
+                result => result,
+            }
         }
         Err(error) => Err(error),
     };
@@ -152,7 +162,7 @@ fn copy_extent_data<C>(
         }
         let chunk_size = u64::try_from(chunk.len())
             .map_err(|_| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
-        super::io::write_all_at(client, 0, doff, &chunk, |client, offset, suffix| {
+        super::io::write_all_at(client, doff, &chunk, |client, offset, suffix| {
             write(client, offset, suffix)
         })?;
         so = so
@@ -648,6 +658,71 @@ mod tests {
     }
 
     #[test]
+    fn destination_create_race_reopens_existing_without_replaying_create() {
+        use crate::client::OpenCreate;
+        for terminal in [None, Some(nfsstat4_NFS4ERR_ACCESS)] {
+            let mut client = (Vec::new(), false);
+            let result = open_destination_with_create_fallback(
+                &mut client,
+                |client, create| {
+                    client.0.push(create);
+                    let status = match client.0.len() {
+                        1 => Some(nfsstat4_NFS4ERR_NOENT),
+                        2 => Some(nfsstat4_NFS4ERR_EXIST),
+                        3 => terminal,
+                        _ => panic!("create race retry must be bounded"),
+                    };
+                    match status {
+                        Some(status) => Err(vfsi_core::internal::errors::from_status(
+                            vfsi_core::StatusCode::Nfs(status),
+                        )),
+                        None => Ok(17),
+                    }
+                },
+                |client| client.1 = true,
+            );
+            assert_eq!(
+                client.0,
+                [
+                    OpenCreate::NoCreate,
+                    OpenCreate::Guarded,
+                    OpenCreate::NoCreate
+                ]
+            );
+            assert_eq!(client.1, terminal.is_some());
+            match terminal {
+                Some(code) => assert_eq!(crate::test_native_code(&result.unwrap_err()), code),
+                None => assert_eq!(result.unwrap(), 17),
+            }
+        }
+    }
+
+    #[test]
+    fn uncertain_destination_create_is_not_replayed() {
+        let mut client = (Vec::new(), false);
+        let result = open_destination_with_create_fallback(
+            &mut client,
+            |client, create| {
+                client.0.push(create);
+                if client.0.len() == 1 {
+                    Err::<(), _>(std::io::Error::from(std::io::ErrorKind::NotFound))
+                } else {
+                    Err(vfsi_core::internal::errors::invalid_reply(
+                        "lost create reply",
+                    ))
+                }
+            },
+            |client| client.1 = true,
+        );
+        assert_eq!(client.0.len(), 2);
+        assert!(client.1);
+        assert_eq!(
+            vfsi_core::transport_kind(&result.unwrap_err()),
+            Some(vfsi_core::TransportKind::InvalidReply)
+        );
+    }
+
+    #[test]
     fn failed_guarded_destination_open_closes_the_source() {
         #[derive(Default)]
         struct Client {
@@ -663,7 +738,7 @@ mod tests {
                 Err::<(), _>(vfsi_core::internal::errors::from_status(
                     vfsi_core::StatusCode::Nfs(match create {
                         crate::client::OpenCreate::NoCreate => nfsstat4_NFS4ERR_NOENT,
-                        crate::client::OpenCreate::Guarded => nfsstat4_NFS4ERR_EXIST,
+                        crate::client::OpenCreate::Guarded => nfsstat4_NFS4ERR_ACCESS,
                         _ => unreachable!(),
                     }),
                 ))
@@ -672,12 +747,12 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(crate::test_native_code(&(error)), nfsstat4_NFS4ERR_EXIST);
+        assert_eq!(crate::test_native_code(&(error)), nfsstat4_NFS4ERR_ACCESS);
         assert_eq!(
             client.attempts,
             [
                 crate::client::OpenCreate::NoCreate,
-                crate::client::OpenCreate::Guarded
+                crate::client::OpenCreate::Guarded,
             ]
         );
         assert!(client.source_closed);

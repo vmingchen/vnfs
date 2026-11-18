@@ -874,8 +874,8 @@ impl std::fmt::Debug for Attrs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Attrs")
             .field("file_type", &self.file_type)
-            .field("len", &self.len)
-            .field("permissions", &self.permissions)
+            .field("len", &self.len())
+            .field("permissions", &self.permissions())
             .field("returned", &self.returned)
             .field("mode", &self.mode())
             .field("blocks", &self.blocks())

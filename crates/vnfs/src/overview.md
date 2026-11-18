@@ -73,7 +73,7 @@ helpers, not core execution methods. Import the traits with `vnfs::prelude::*` a
 - [`nfs`]: direct connections, owned handles, authentication, read pools, tuning.
 - [`files`]: portable I/O traits, read/write results, resource limits.
 - [`directory`]: metadata selection, listings, traversal and removal options.
-- [`error`]: error kinds, protocol statuses, and failing vector indices.
+- [`error`]: standard causes, protocol statuses, per-input certainty and indexed helper errors.
 - [`helpers`]: high-level workflows such as creating a directory tree.
 - `mounted` (Linux, `auto` feature): kernel access and automatic routing, **not** coherent caching
   between kernel and direct clients.
@@ -84,10 +84,12 @@ helpers, not core execution methods. Import the traits with `vnfs::prelude::*` a
 
 ## Guarantees and operational choices
 
-- Vector calls are strict, ordered, and **non-atomic**. An error can follow
-  completed mutations. Its input index is not a committed-prefix count; do not
-  blindly replay writes after an ambiguous transport failure. Inspect `Error`
-  using [`error`] and preserve it when reporting failures.
+- Vector calls return one independent outcome per accepted input and are
+  **non-atomic**. Results retain input order; execution order is backend-defined.
+  `OpError` preserves certainty and confirmed progress without a separate index.
+  Strict helpers select one `IndexedError` after execution and discard other
+  outcomes. Neither a result position nor a helper index is a committed-prefix
+  count; do not blindly replay writes after an ambiguous transport failure.
 - `vread` defaults to the client’s 16 MiB aggregate byte budget.
   Adjust [`ResourceLimits`] or [`ReadOptions`],
   or stream instead. Directory collection and traversal have separate budgets.
@@ -120,6 +122,7 @@ helpers, not core execution methods. Import the traits with `vnfs::prelude::*` a
 | `auto` (default) | Linux mounted clients and conservative direct-NFS routing |
 | `rpcsec-gss` | Optional Kerberos authentication or integrity protection |
 | `posix` | Rooted kernel filesystem access through ordinary POSIX syscalls |
+| `uring` | Rooted local filesystem access with batched Linux io_uring I/O |
 | `test-faults` | Fault injection for tests, not normal application use |
 
 SMB is provided by the separate `vfsi-smb` library, not this crate.

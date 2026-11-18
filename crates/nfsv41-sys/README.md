@@ -6,8 +6,8 @@ Raw FFI bindings for the NFSv4.1 protocol, vendored from NFS-Ganesha's
 as a low-level foundation for the `vnfs` client.
 
 This is a `-sys` crate: it exposes unsafe `extern` types and functions with
-manual memory management. Higher-level, safe wrappers live in the `vnfs`
-crate.
+manual memory management. Higher-level protocol wrappers live in `vfsi-nfs`;
+`vnfs` supplies the application API.
 
 ## What's in the box
 
@@ -16,14 +16,14 @@ crate.
 | `src/nfsv41.h` | NFS-Ganesha's NFSv4.1 protocol header (structs + static-inline XDR codecs) |
 | `src/wrapper.c` | Five `xdr_wrap_*` extern entry points around the `static inline` codecs (Rust cannot call static-inline functions directly) |
 | `src/wrapper.h` | The bindgen input header (includes `nfsv41.h`, declares the wrappers) |
-| `src/lib.rs` | `include!` of the generated bindings, plus the `-lntirpc` link directive |
+| `src/lib.rs` | `include!` of generated bindings; native linkage comes from `libntirpc-sys` |
 | `build.rs` | Compiles `wrapper.c` into `libnfsv41.a` and runs bindgen |
 
 ## Build
 
 `build.rs` performs two steps:
 
-1. **C codec archive**: `gcc` compiles `src/wrapper.c` (with libntirpc's
+1. **C codec archive**: the C compiler selected by `cc` compiles `src/wrapper.c` (with libntirpc's
    include directories, supplied by `libntirpc-sys` via its `links`
    metadata as `DEP_NTIRPC_INCLUDE` / `DEP_NTIRPC_INCLUDE2`) into
    `libnfsv41.a`.
@@ -69,11 +69,11 @@ cargo test -p nfsv41-sys
 
 ## Improvement roadmap
 
-- **Pure-Rust codecs via `xdrgen`.** The workspace already carries
-  `protocols/nfsv4/nfsv41.x` (the RFC 5661 XDR spec) and the `xdrgen` /
-  `xdr-codec` dependencies. `xdrgen` parses the `.x` spec and emits typed
-  `Pack`/`Unpack` implementations, which would remove gcc, `wrapper.c`,
-  bindgen, and the `-Wno-incompatible-pointer-types` workaround. See below.
+- **Pure-Rust codecs via `xdrgen`.** The workspace carries
+  `protocols/nfsv4/nfsv41.x`, the RFC 5661 XDR specification. A Rust codec could
+  use `xdrgen` to generate typed `Pack`/`Unpack` implementations with the
+  `xdr-codec` runtime. This would remove the C compiler, `wrapper.c`, bindgen,
+  and the `-Wno-incompatible-pointer-types` workaround from XDR generation.
 - **Safe wrapper layer.** Owned buffer types (`Vec<u8>`, `String`), RAII for
   decoded trees (no manual `xdr_free_null_stream`), and safe accessors for
   the `nfs_argop4_u` / `nfs_resop4_u` unions.

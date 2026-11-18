@@ -203,12 +203,12 @@ pub struct vfsi_attrs {
 
 /// Uniform ABI-v3 result for scalar and vector operations.
 ///
-/// `index` is the completed count on success, the failing operation index on
-/// an attributable error, or `VFSI_INDEX_UNKNOWN`. Vector calls also populate
-/// a caller-owned result per element;
-/// after a submitted concurrent batch fails, every non-failing element is
-/// marked indeterminate because it may already have completed. `err_no`
-/// retains the backend status while `category` is portable across protocols.
+/// `index` is the function's count on success, the failing operation index on
+/// an attributable error, or `VFSI_INDEX_UNKNOWN`. When the function takes an
+/// item result array, inspect every item even when the overall result fails.
+/// Confirmed outcomes can survive a sibling failure. An indeterminate item
+/// has an unconfirmed outcome. `err_no` retains the backend status and
+/// `category` is portable across protocols.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct vfsi_result {

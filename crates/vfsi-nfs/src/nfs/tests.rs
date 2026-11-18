@@ -163,13 +163,13 @@ fn abs_path_is_namespace_relative_and_server_path_prepends_the_export_root() {
 
 #[test]
 fn malformed_type_attribute_is_an_error_not_a_regular_type() {
-    // An empty or truncated FATTR4_TYPE payload must not be silently
-    // treated as "not a symlink" (which would skip following a link).
-    assert!(type_is_symlink(&[]).is_err());
-    assert!(type_is_symlink(&[0, 0, 0]).is_err());
-
-    assert!(type_is_symlink(&nfs_ftype4_NF4LNK.to_be_bytes()).unwrap());
-    assert!(!type_is_symlink(&nfs_ftype4_NF4REG.to_be_bytes()).unwrap());
+    use crate::client::decode_type_attribute;
+    for malformed in [&[][..], &[0, 0, 0], &[0; 8]] {
+        assert!(decode_type_attribute(malformed).is_err());
+    }
+    for ftype in [nfs_ftype4_NF4LNK, nfs_ftype4_NF4REG] {
+        assert_eq!(decode_type_attribute(&ftype.to_be_bytes()).unwrap(), ftype);
+    }
 }
 
 #[test]
@@ -495,6 +495,99 @@ fn client_pool_validates_size_and_gives_explicit_owners_distinct_ids() {
     assert_ne!(first, second);
     assert_ne!(first, next_pool);
     assert!(first.len() <= 1024);
+}
+
+#[test]
+fn shutdown_closes_the_healthy_suffix_after_a_definite_close_failure() {
+    let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+        assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+        return;
+    };
+    let minor = std::env::var("VFSI_NFS_MINOR")
+        .unwrap_or_else(|_| "1".into())
+        .parse()
+        .unwrap();
+    let mut records = Vec::new();
+    for first_fails in [false, true] {
+        let mut fs = NfsVecFs::connect_minor(&server, minor).unwrap();
+        let paths = [0, 1].map(|i| {
+            PathBuf::from(format!(
+                "/vnfs-shutdown-suffix-{}-{i}-{first_fails}",
+                std::process::id()
+            ))
+        });
+        for (index, path) in paths.iter().enumerate() {
+            let file = fs
+                .open_raw_impl(path, libc::O_CREAT | libc::O_WRONLY, 0o600)
+                .unwrap();
+            let mut open = fs.open_files.remove(&file.fd().unwrap()).unwrap();
+            if index == 0 && first_fails {
+                fs.nfs.close(&open.fh, &open.stateid).unwrap();
+                open.stateid = stateid4 {
+                    seqid: 1,
+                    other: [0x27; 12],
+                };
+            }
+            fs.deferred_descriptor_closes.push(open);
+        }
+        let _ = crate::compound::thread_compound_stats();
+        let result = fs.shutdown();
+        let compounds = crate::compound::thread_compound_stats().0;
+        let mut cleaner = NfsVecFs::connect_minor(&server, minor).unwrap();
+        for path in &paths {
+            cleaner.unlink_impl(path).unwrap();
+        }
+        cleaner.shutdown().unwrap();
+        records.push((result, compounds));
+    }
+    let [(normal, normal_compounds), (failed, failed_compounds)] = records.try_into().unwrap();
+    normal.unwrap();
+    let cause = failed.unwrap_err();
+    assert!(
+        matches!(
+            vfsi_core::native_status(&cause),
+            Some(vfsi_core::StatusCode::Nfs(
+                nfsstat4_NFS4ERR_BAD_STATEID | nfsstat4_NFS4ERR_STALE_STATEID
+            ))
+        ),
+        "{cause:?}"
+    );
+    assert_eq!(
+        failed_compounds,
+        normal_compounds + 1,
+        "healthy suffix requires a separate CLOSE after the first result"
+    );
+}
+
+#[test]
+fn invalid_explicit_client_owners_are_rejected_before_connecting() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let host = listener.local_addr().unwrap().to_string();
+    for client_owner in [vec![], vec![b'x'; NFS4_OPAQUE_LIMIT as usize + 1]] {
+        let options = NfsConnectOptions {
+            minorversion: Some(1),
+            client_owner: Some(client_owner.clone()),
+            connect_timeout: Duration::from_millis(100),
+            request_timeout: Duration::from_millis(100),
+            ..Default::default()
+        };
+        let direct = NfsVecFs::connect_with_options(&host, options);
+        let pooled = NfsVecFs::builder(&host)
+            .client_owner(client_owner)
+            .connect_pool(1);
+        for cause in [direct.err().unwrap(), pooled.err().unwrap()] {
+            assert_eq!(cause.kind(), std::io::ErrorKind::InvalidInput);
+            assert_eq!(
+                vfsi_core::internal::errors::operation(&cause),
+                Some("connect")
+            );
+        }
+    }
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }
 
 #[test]
@@ -929,22 +1022,22 @@ fn live_guarded_setattr_handles_symlink_cohorts_on_a_bounded_stack() {
 #[test]
 fn recursive_readdir_rejects_a_stalled_continuation_cookie() {
     let mut seen = std::collections::HashSet::new();
-    assert!(validate_readdir_progress(0, 7, &mut seen, None).is_ok());
-    assert!(validate_readdir_progress(7, 11, &mut seen, None).is_ok());
-    assert!(validate_readdir_progress(11, 0, &mut seen, None).is_ok());
+    assert!(validate_readdir_progress(0, 7, &mut seen).is_ok());
+    assert!(validate_readdir_progress(7, 11, &mut seen).is_ok());
+    assert!(validate_readdir_progress(11, 0, &mut seen).is_ok());
 
     let mut seen = std::collections::HashSet::new();
-    assert!(validate_readdir_progress(0, 7, &mut seen, None).is_ok());
-    let error = validate_readdir_progress(7, 7, &mut seen, None).unwrap_err();
+    assert!(validate_readdir_progress(0, 7, &mut seen).is_ok());
+    let error = validate_readdir_progress(7, 7, &mut seen).unwrap_err();
     assert!(vfsi_core::transport_kind(&(error)).is_some());
 }
 
 #[test]
 fn recursive_readdir_rejects_nonadjacent_cookie_cycles() {
     let mut seen = std::collections::HashSet::new();
-    assert!(validate_readdir_progress(0, 7, &mut seen, None).is_ok());
-    assert!(validate_readdir_progress(7, 11, &mut seen, None).is_ok());
-    let error = validate_readdir_progress(11, 7, &mut seen, Some(3)).unwrap_err();
+    assert!(validate_readdir_progress(0, 7, &mut seen).is_ok());
+    assert!(validate_readdir_progress(7, 11, &mut seen).is_ok());
+    let error = validate_readdir_progress(11, 7, &mut seen).unwrap_err();
     assert!(vfsi_core::transport_kind(&(error)).is_some());
     let _: &std::io::Error = &error;
 }
@@ -2710,6 +2803,51 @@ fn live_directory_visit_continuation_reuses_resolved_nfs_handle() {
     })
     .unwrap();
     let raw_compounds = crate::compound::thread_compound_stats().0;
+    // Derive each limit from its own first page so this checks exact wire-page
+    // boundaries even if scalar and vector requests use different page sizes.
+    let path = Path::new(&dir);
+    let ids = request_mask_to_attr_list(&mask);
+    let fh = raw.resolve_path(&raw.server_path(path), true).unwrap();
+    let (scalar_page, scalar_cookie) = raw.nfs.readdir(&fh, DirCookie::default(), &ids).unwrap();
+    let (vector_page, vector_cookie) = raw
+        .nfs
+        .readdir_pages(&[(fh, DirCookie::default())], &ids)
+        .unwrap()
+        .pop()
+        .unwrap()
+        .unwrap();
+    assert!(!scalar_page.is_empty() && scalar_cookie.value != 0);
+    assert!(!vector_page.is_empty() && vector_cookie.value != 0);
+    let mut rpc_counts = Vec::new();
+    for honor_limit in [false, true] {
+        let mut scalar_count = 0;
+        let scalar_limit = if honor_limit { scalar_page.len() } else { 0 };
+        let _ = crate::compound::thread_compound_stats();
+        raw.visit_dir_impl(path, mask, scalar_limit, &mut |_| {
+            scalar_count += 1;
+            honor_limit || scalar_count < scalar_page.len()
+        })
+        .unwrap();
+        let scalar_calls = crate::compound::thread_compound_stats().0;
+        assert_eq!(scalar_count, scalar_page.len());
+
+        let mut vector_count = 0;
+        let vector_limit = if honor_limit { vector_page.len() } else { 0 };
+        raw.vlistdirs_impl(&[path], mask, vector_limit, false, &mut |_, _| {
+            vector_count += 1;
+            honor_limit || vector_count < vector_page.len()
+        })
+        .unwrap();
+        let vector_calls = crate::compound::thread_compound_stats().0;
+        assert_eq!(vector_count, vector_page.len());
+
+        rpc_counts.push((scalar_calls, vector_calls));
+    }
+    let limited = raw
+        .listdir_impl(path, mask, scalar_page.len(), false)
+        .unwrap();
+    let collection_calls = crate::compound::thread_compound_stats().0;
+    assert_eq!(limited.len(), scalar_page.len());
 
     let mut backend = NfsVecFs::connect_minor(&host, minor).unwrap();
     backend.nfs.max_response_bytes = 4 * 1024;
@@ -2742,4 +2880,12 @@ fn live_directory_visit_continuation_reuses_resolved_nfs_handle() {
         .map(|_| ())
     }
     .unwrap();
+    assert_eq!(
+        rpc_counts[1], rpc_counts[0],
+        "exact limits must stop like cancellation"
+    );
+    assert_eq!(
+        collection_calls, rpc_counts[0].0,
+        "collecting must stop at the same limit"
+    );
 }

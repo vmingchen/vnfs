@@ -1784,3 +1784,15 @@ def test_closed_ordinary_file_rejects_position_and_flush(
     if "w" in mode:
         assert dummy_fs.cat_file("/closed") == b"retained"
     assert not dummy_fs._client._fds
+
+
+@pytest.mark.parametrize("blocks", [2, 11])
+@pytest.mark.parametrize(
+    "delimiter", [memoryview(b"WXYZ").cast("I"), memoryview(b"W-X-Y-Z-")[::2]]
+)
+def test_readuntil_uses_delimiter_bytes_for_memoryviews(dummy_fs, blocks, delimiter):
+    dummy_fs.pipe_file("/delimiter", b"abcWXYZtail")
+    with dummy_fs.open("/delimiter", "rb", cache_type="none") as file:
+        assert file.readuntil(delimiter, blocks=blocks) == b"abcWXYZ"
+        assert file.tell() == 7
+        assert file.read() == b"tail"

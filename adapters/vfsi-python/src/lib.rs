@@ -749,7 +749,7 @@ fn remap_subset_error(error: IndexedError, positions: &[usize]) -> IndexedError 
 /// convention. Successful siblings are never replayed to repair another input.
 fn attrs_many_impl(
     fs: &mut dyn BindingBackend,
-    paths: &[PathBuf],
+    paths: &[impl AsRef<Path>],
     masks: AttrMask,
     follow: bool,
 ) -> AttrsManyResult {
@@ -759,7 +759,7 @@ fn attrs_many_impl(
     let mut attrs: Vec<_> = paths
         .iter()
         .map(|path| VfAttrs {
-            file: FileOperand::from_os_path(path),
+            file: FileOperand::from_os_path(path.as_ref()),
             masks,
             ..Default::default()
         })
@@ -1491,7 +1491,7 @@ impl NfsClient {
     }
 
     fn exists(&self, py: Python<'_>, path: PathBuf) -> PyResult<bool> {
-        Ok(self.exists_many(py, vec![path.clone()])?[0])
+        Ok(self.exists_many(py, vec![path])?[0])
     }
 
     /// Open a file; returns the backend descriptor (an int).
@@ -2031,27 +2031,57 @@ impl NfsClient {
             let mut results: Vec<Option<Vec<u8>>> = vec![None; paths.len()];
             let mut errors = ErrorMap::new();
 
-            // Resolve lengths; batch-fetch sizes when any end is None.
-            let mut lengths: Vec<usize> = vec![0; paths.len()];
-            let need_sizes = ends.iter().any(Option::is_none);
-            if need_sizes {
-                let (attrs, errs) = attrs_many_impl(fs, &paths, AttrMask::SIZE, true)
-                    .map_err(|e| to_py_indexed(e, None))?;
-                errors = errs;
-                for (i, a) in attrs.iter().enumerate() {
-                    if let Some(a) = a {
-                        let end = ends[i].unwrap_or(a.size);
-                        lengths[i] = end.saturating_sub(starts[i]).min(usize::MAX as u64) as usize;
-                    }
+            // Explicit ends need no metadata permissions or GETATTR requests.
+            let mut lengths: Vec<usize> = ends
+                .iter()
+                .zip(&starts)
+                .map(|(end, start)| {
+                    end.map_or(0, |end| {
+                        end.saturating_sub(*start).min(usize::MAX as u64) as usize
+                    })
+                })
+                .collect();
+            let size_count = ends.iter().filter(|end| end.is_none()).count();
+            if size_count != 0 {
+                // Keep the all-open-ended path allocation-free beyond the
+                // existing metadata vector; mixed requests borrow only their subset.
+                let size_indices: Vec<_> = if size_count == paths.len() {
+                    Vec::new()
+                } else {
+                    ends.iter()
+                        .enumerate()
+                        .filter_map(|(i, end)| end.is_none().then_some(i))
+                        .collect()
+                };
+                let fetched = if size_indices.is_empty() {
+                    attrs_many_impl(fs, &paths, AttrMask::SIZE, true)
+                } else {
+                    let selected: Vec<_> =
+                        size_indices.iter().map(|&i| paths[i].as_path()).collect();
+                    attrs_many_impl(fs, &selected, AttrMask::SIZE, true)
+                };
+                let (attrs, errs) = fetched.map_err(|error| {
+                    to_py_indexed(
+                        if size_indices.is_empty() {
+                            error
+                        } else {
+                            remap_subset_error(error, &size_indices)
+                        },
+                        None,
+                    )
+                })?;
+                for (slot, error) in errs {
+                    errors.insert(size_indices.get(slot).copied().unwrap_or(slot), error);
                 }
-            } else {
-                for (i, end) in ends.iter().enumerate() {
-                    lengths[i] = end
-                        .ok_or_else(|| {
-                            contract_error("read_many", "missing range end after validation")
-                        })?
-                        .saturating_sub(starts[i])
-                        .min(usize::MAX as u64) as usize;
+                for (slot, attrs) in attrs.into_iter().enumerate() {
+                    let index = size_indices.get(slot).copied().unwrap_or(slot);
+                    if let Some(attrs) = attrs {
+                        lengths[index] = attrs
+                            .size
+                            .saturating_sub(starts[index])
+                            .min(usize::MAX as u64)
+                            as usize;
+                    }
                 }
             }
 
@@ -2087,9 +2117,15 @@ impl NfsClient {
                             validate_read_completion("read_many", slot, &ops[slot], &read)?;
                             let no_progress = read.data.is_empty();
                             progress[index] += read.data.len();
-                            results[index]
-                                .get_or_insert_with(Vec::new)
-                                .extend(read.data);
+                            if results[index].is_none() && read.data.capacity() == read.data.len() {
+                                // Move the first complete allocation; keep compacting
+                                // oversized backend buffers and accumulating short reads.
+                                results[index] = Some(read.data);
+                            } else {
+                                results[index]
+                                    .get_or_insert_with(Vec::new)
+                                    .extend(read.data);
+                            }
                             if progress[index] < lengths[index] && !read.eof {
                                 if no_progress {
                                     results[index] = None;
@@ -2558,10 +2594,11 @@ impl NfsClient {
             for index in 0..n {
                 if sources[index] == dests[index] && !errors.contains_key(&index) {
                     data[index] = None;
-                    oversized.retain(|&candidate| candidate != index);
                     errors.insert(index, same_file_error());
                 }
             }
+
+            oversized.retain(|index| !errors.contains_key(index));
 
             // A hard link or a symlink can give the destination a different
             // spelling for the source inode. Check the small-file path too:
@@ -2595,16 +2632,12 @@ impl NfsClient {
                             path_bytes = path_bytes.saturating_add(path.as_os_str().len());
                             existing.insert(path.to_path_buf());
                         }
-                        exhausted = (max_directory_entries != 0 && entries > max_directory_entries)
-                            || (max_directory_path_bytes != 0
-                                && path_bytes > max_directory_path_bytes);
+                        exhausted = entries > max_directory_entries
+                            || path_bytes > max_directory_path_bytes;
                         !exhausted
                     },
                 );
-                if listed.is_ok()
-                    && !exhausted
-                    && (max_directory_entries == 0 || entries <= max_directory_entries)
-                {
+                if listed.is_ok() && !exhausted {
                     candidates
                         .iter()
                         .copied()
@@ -2617,9 +2650,9 @@ impl NfsClient {
                 candidates
             };
             if !existing_candidates.is_empty() {
-                let identity_paths: Vec<PathBuf> = existing_candidates
+                let identity_paths: Vec<&Path> = existing_candidates
                     .iter()
-                    .flat_map(|&index| [sources[index].clone(), dests[index].clone()])
+                    .flat_map(|&index| [sources[index].as_path(), dests[index].as_path()])
                     .collect();
                 let identity_positions: Vec<usize> = existing_candidates
                     .iter()
@@ -2709,9 +2742,9 @@ impl NfsClient {
             if oversized.is_empty() {
                 return Ok((copied, errors));
             }
-            let oversized_sources: Vec<PathBuf> = oversized
+            let oversized_sources: Vec<&Path> = oversized
                 .iter()
-                .map(|&index| sources[index].clone())
+                .map(|&index| sources[index].as_path())
                 .collect();
             let identity_mask = AttrMask::SIZE | AttrMask::identity();
             let (attrs, stat_errors) = attrs_many_impl(fs, &oversized_sources, identity_mask, true)
@@ -2745,9 +2778,9 @@ impl NfsClient {
             // Symlink aliases do not increase nlink. Check every oversized
             // source before any extent can truncate the shared inode.
             if !identity_candidates.is_empty() {
-                let candidate_dests: Vec<PathBuf> = identity_candidates
+                let candidate_dests: Vec<&Path> = identity_candidates
                     .iter()
-                    .map(|&index| dests[index].clone())
+                    .map(|&index| dests[index].as_path())
                     .collect();
                 let (dest_attrs, dest_errors) =
                     attrs_many_impl(fs, &candidate_dests, AttrMask::identity(), true).map_err(

@@ -4,7 +4,7 @@ Enable the optional Linux backend without bringing in the NFS native library:
 
 ```toml
 [dependencies]
-vnfs = { version = "0.0.36", default-features = false, features = ["uring"] }
+vnfs = { version = "0.0.38", default-features = false, features = ["uring"] }
 ```
 
 The optional uring feature is available on Linux in the published vnfs crate.
@@ -79,7 +79,8 @@ policy over the existing kernel page cache, not a new client-side data cache.
 
 `syscall_writes(true)` selects the shared ordered positional-write executor,
 avoiding worker wakeups and the owned scratch copy for buffered writes. It
-stops after a known error; it does not add atomicity or durability. Neither
+retains independent per-input outcomes; a failed write is not replayed. It
+does not add atomicity or durability. Neither
 fast path bypasses a poisoned executor. Both settings are disabled by default
 pending the execution-policy decision; ring setup is still required.
 
@@ -92,7 +93,7 @@ Completion IDs restore input order, and merged short writes are mapped back to
 each request's contiguous progress before retrying its remaining suffix. Default bounds:
 256 SQEs and 2 MiB of in-flight transfer bytes (and at most that much reusable
 scratch), configurable through
-`vnfs::uring::Options::{queue_depth,max_batch_bytes}`. Queue depths must be
+`Options::with_queue_depth` and `Options::with_max_batch_bytes`. Queue depths must be
 1..=4096. Application read budgets remain independently controlled by
 `ReadOptions` and `ResourceLimits` (16 MiB by default). Large requests use bounded
 contiguous chunks; short writes complete their remaining suffix, never skip gaps.
@@ -103,16 +104,17 @@ an all-opcode backend. `write_files` still batches its descriptor-write phase.
 Repeated cursor reads and overlapping writes, including hard-link aliases,
 preserve ordering rather than racing. Nothing promises batch atomicity.
 
-All completions are drained before returning an indexed CQE failure; other
-independent writes in the submitted wave may already have completed. No later
-wave or remaining short-write suffix is submitted after a known failure. Ring-level
-submission failures poison the executor and do not replay writes. If completion
+All completions are drained before returning per-input outcomes; independent
+writes in the same or later waves remain eligible after an ordinary CQE failure.
+A failed input is not replayed, and a successful short write completes only its
+remaining suffix. Ring-level submission failures poison the executor, prevent
+later submissions and do not replay writes. If completion
 draining becomes impossible, the in-flight wave's owned buffers and
 shared file descriptors are deliberately retained rather than freed while the
 kernel may still reference them. This exceptional path leaks bounded resources;
 final owned result allocations are bounded by the application read budget,
 while scratch is bounded by the wave byte budget.
-replace the client after such an error. Setup restrictions (kernel policy,
+Replace the client after such an error. Setup restrictions (kernel policy,
 seccomp, unavailable opcodes) return an error, not silent syscall fallback.
 
 In ring-only mode, owned `ReadOp::range` cohorts whose total requested storage

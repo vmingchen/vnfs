@@ -144,6 +144,8 @@ def cases():
 
 
 def main():
+    if not __debug__:
+        raise RuntimeError("benchmark validation assertions must be enabled")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--baseline', default='4b9ff87', help='baseline Git commit/ref')
     parser.add_argument('--samples', type=int, default=9, help='paired samples per case')
@@ -154,8 +156,8 @@ def main():
     parser.add_argument('--case', action='append', dest='selected_cases', help='exact backend/scenario/count selection; repeatable')
     parser.add_argument('--reuse-baseline', type=Path, help='reuse a previous baseline executable')
     args = parser.parse_args()
-    if args.samples < 5 or args.target_ms <= 0:
-        parser.error('use at least five paired samples and a positive target time')
+    if args.samples < 5 or not math.isfinite(args.target_ms) or args.target_ms <= 0:
+        parser.error('use at least five paired samples and a positive finite target time')
     repo = Path(__file__).resolve().parents[1]
     stamp = datetime.datetime.now(datetime.UTC).strftime('%Y%m%dT%H%M%S%fZ')
     output = (args.output or repo / 'target' / 'write-scheduler-benchmark' / stamp).resolve()

@@ -155,21 +155,13 @@ impl Session {
 
     fn exchange_id(&mut self, client_verifier: Option<verifier4>) -> RpcResult<()> {
         let verifier = client_verifier.unwrap_or_else(make_verifier);
-        // A unique owner id per connection so concurrent clients (parallel
-        // tests, multiple processes) don't collide on the server's client
-        // table and replace each other's confirmed clients mid-flight.
+        // Generate a fresh owner for each implicit connection. A clock reading
+        // alone can be identical across simultaneous connections.
         let generated;
         let owner_id = if let Some(owner) = &self.client_owner {
             owner.as_ref()
         } else {
-            generated = format!(
-                "vnfs-client-{}-{:x}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            );
+            generated = generated_client_owner();
             generated.as_bytes()
         };
         let mut c = Compound::new();
@@ -330,9 +322,13 @@ impl Session {
             .map_or(Ok(()), |(index, status)| Err(RpcError::op(index, status)))
     }
 
+    pub(crate) fn has_active_clientid(&self) -> bool {
+        self.clientid != 0
+    }
+
     /// Tear down the session and clientid, reporting the first failure.
     pub(crate) fn shutdown(&mut self) -> RpcResult<()> {
-        if self.clientid == 0 {
+        if !self.has_active_clientid() {
             return Ok(());
         }
         let mut first_error = None;
@@ -422,8 +418,8 @@ impl Drop for Session {
     }
 }
 
-/// 8-byte opaque verifier unique within this process and seeded from wall time.
-pub fn make_verifier() -> verifier4 {
+/// Monotonic process-local token seeded from wall time.
+pub(crate) fn next_client_token() -> u64 {
     static NEXT: OnceLock<AtomicU64> = OnceLock::new();
     let next = NEXT.get_or_init(|| {
         let now = SystemTime::now()
@@ -433,8 +429,21 @@ pub fn make_verifier() -> verifier4 {
         AtomicU64::new(now)
     });
     next.fetch_add(1, Ordering::Relaxed)
+}
+
+/// 8-byte opaque verifier unique within this process.
+pub fn make_verifier() -> verifier4 {
+    next_client_token()
         .to_le_bytes()
         .map(|byte| byte as libc::c_char)
+}
+
+fn generated_client_owner() -> String {
+    format!(
+        "vnfs-client-{}-{:x}",
+        std::process::id(),
+        next_client_token()
+    )
 }
 
 /// Highest NFSv4 minor version attempted before falling back.
@@ -530,6 +539,25 @@ mod tests {
     fn generated_verifiers_are_unique_for_distinct_requests() {
         let verifiers: std::collections::HashSet<_> = (0..1024).map(|_| make_verifier()).collect();
         assert_eq!(verifiers.len(), 1024);
+    }
+
+    #[test]
+    fn concurrent_implicit_client_owners_are_distinct() {
+        let workers = std::thread::scope(|scope| {
+            let jobs: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        (0..1024)
+                            .map(|_| generated_client_owner())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            jobs.into_iter()
+                .flat_map(|job| job.join().unwrap())
+                .collect::<std::collections::HashSet<_>>()
+        });
+        assert_eq!(workers.len(), 8 * 1024);
     }
 
     #[test]

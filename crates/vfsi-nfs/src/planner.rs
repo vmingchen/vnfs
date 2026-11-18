@@ -229,7 +229,7 @@ impl ExecutionMap {
     /// the first failing operation. Borrow their ranges directly instead of
     /// searching once per completed caller (which makes extraction quadratic).
     pub(crate) fn completed_ranges(&self, report: &ExecutionReport) -> &[(usize, usize, usize)] {
-        &self.ranges[..report.completed.len()]
+        &self.ranges[..report.completed_count]
     }
 
     /// Operation ranges whose success is confirmed, including the successful
@@ -260,9 +260,8 @@ impl ExecutionMap {
         if reply.nops() == 0 {
             if reply.status() != NFS_OK {
                 return Ok(ExecutionReport {
-                    completed: Vec::new(),
+                    completed_count: 0,
                     failure: None,
-                    unexecuted: self.ranges.iter().map(|r| r.0).collect(),
                     compound_failure: Some(reply.status()),
                     compound_failure_op: None,
                 });
@@ -271,21 +270,18 @@ impl ExecutionMap {
         }
         if reply.op_status(0) != NFS_OK {
             return Ok(ExecutionReport {
-                completed: Vec::new(),
+                completed_count: 0,
                 failure: None,
-                unexecuted: self.ranges.iter().map(|r| r.0).collect(),
                 compound_failure: Some(reply.op_status(0)),
                 compound_failure_op: Some(0),
             });
         }
 
-        let mut completed = Vec::new();
+        let mut completed_count = 0;
         let mut failure = None;
-        let mut unexecuted = Vec::new();
 
-        for (position, &(caller, start, end)) in self.ranges.iter().enumerate() {
+        for &(caller, start, end) in &self.ranges {
             if start >= reply.nops() {
-                unexecuted.extend(self.ranges[position..].iter().map(|r| r.0));
                 break;
             }
 
@@ -317,7 +313,6 @@ impl ExecutionMap {
                     });
                 }
                 failure = Some(item_failure);
-                unexecuted.extend(self.ranges[position + 1..].iter().map(|r| r.0));
                 break;
             }
 
@@ -328,7 +323,7 @@ impl ExecutionMap {
                     actual: reply.nops(),
                 });
             }
-            completed.push(caller);
+            completed_count += 1;
         }
 
         let (compound_failure, compound_failure_op) =
@@ -349,9 +344,8 @@ impl ExecutionMap {
             };
 
         Ok(ExecutionReport {
-            completed,
+            completed_count,
             failure,
-            unexecuted,
             compound_failure,
             compound_failure_op,
         })
@@ -367,9 +361,9 @@ pub(crate) struct ItemFailure {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ExecutionReport {
-    pub completed: Vec<usize>,
+    /// Number of successful ranges at the start of the submitted compound.
+    pub completed_count: usize,
     pub failure: Option<ItemFailure>,
-    pub unexecuted: Vec<usize>,
     pub compound_failure: Option<u32>,
     /// Response-op index for a SEQUENCE or trailing-op failure. `None` means
     /// the server rejected the compound before returning any operation.
@@ -512,6 +506,18 @@ mod tests {
         map
     }
 
+    fn completed_callers(map: &ExecutionMap, report: &ExecutionReport) -> Vec<usize> {
+        map.completed_ranges(report)
+            .iter()
+            .map(|range| range.0)
+            .collect()
+    }
+
+    fn unexecuted_callers(map: &ExecutionMap, report: &ExecutionReport) -> Vec<usize> {
+        let first = report.completed_count + usize::from(report.failure.is_some());
+        map.ranges[first..].iter().map(|range| range.0).collect()
+    }
+
     #[test]
     fn executed_ranges_include_successful_prefix_of_failed_item() {
         let mut map = ExecutionMap::new();
@@ -557,6 +563,10 @@ mod tests {
             assert_eq!(
                 report.failure.unwrap().caller,
                 [71, 3, 999][successful_items]
+            );
+            assert_eq!(
+                unexecuted_callers(&map, &report),
+                [71, 3, 999][successful_items + 1..],
             );
         }
         let report = map
@@ -623,7 +633,7 @@ mod tests {
             ops: vec![0, 0, 0, 0, 0, 2],
         };
         let report = map.analyze(&reply).unwrap();
-        assert_eq!(report.completed, vec![0]);
+        assert_eq!(completed_callers(&map, &report), vec![0]);
         assert_eq!(
             report.failure,
             Some(ItemFailure {
@@ -632,7 +642,7 @@ mod tests {
                 status: 2,
             })
         );
-        assert_eq!(report.unexecuted, vec![2, 3]);
+        assert_eq!(unexecuted_callers(&map, &report), vec![2, 3]);
         assert_eq!(report.compound_failure, None);
     }
 
@@ -647,10 +657,13 @@ mod tests {
                         let mut ops = vec![0; failed_op + 1];
                         ops[failed_op] = 5;
                         let report = map.analyze(&MockReply { status: 5, ops }).unwrap();
-                        assert_eq!(report.completed, (0..failed_item).collect::<Vec<_>>());
+                        assert_eq!(
+                            completed_callers(&map, &report),
+                            (0..failed_item).collect::<Vec<_>>()
+                        );
                         assert_eq!(report.failure.unwrap().caller, failed_item);
                         assert_eq!(
-                            report.unexecuted,
+                            unexecuted_callers(&map, &report),
                             (failed_item + 1..items).collect::<Vec<_>>()
                         );
                     }
@@ -690,7 +703,7 @@ mod tests {
                 },
             };
             let report = map.analyze(&reply).unwrap();
-            for caller in report.completed {
+            for caller in completed_callers(&map, &report) {
                 executed[caller] += 1;
             }
             if let Some(failure) = report.failure {
@@ -720,14 +733,15 @@ mod tests {
                 ops: vec![0; 13],
             })
             .unwrap();
-        assert_eq!(report.completed, vec![0, 1, 2]);
+        assert_eq!(completed_callers(&map, &report), vec![0, 1, 2]);
         assert!(report.failure.is_none());
-        assert!(report.unexecuted.is_empty());
+        assert!(unexecuted_callers(&map, &report).is_empty());
     }
 
     #[test]
     fn sequence_failure_leaves_all_items_unexecuted() {
-        let report = fixed_map(3, 2)
+        let map = fixed_map(3, 2);
+        let report = map
             .analyze(&MockReply {
                 status: 10026,
                 ops: vec![10026],
@@ -735,7 +749,7 @@ mod tests {
             .unwrap();
         assert_eq!(report.compound_failure, Some(10026));
         assert_eq!(report.compound_failure_op, Some(0));
-        assert_eq!(report.unexecuted, vec![0, 1, 2]);
+        assert_eq!(unexecuted_callers(&map, &report), vec![0, 1, 2]);
     }
 
     #[test]
@@ -749,16 +763,17 @@ mod tests {
                 ops: vec![0, 0, 0, 0, 0, 10025],
             })
             .unwrap();
-        assert_eq!(report.completed, vec![0, 1]);
+        assert_eq!(completed_callers(&map, &report), vec![0, 1]);
         assert_eq!(report.compound_failure, Some(10025));
         assert_eq!(report.compound_failure_op, Some(5));
         assert!(report.failure.is_none());
-        assert!(report.unexecuted.is_empty());
+        assert!(unexecuted_callers(&map, &report).is_empty());
     }
 
     #[test]
     fn pre_sequence_resource_rejection_is_recoverable() {
-        let report = fixed_map(4, 3)
+        let map = fixed_map(4, 3);
+        let report = map
             .analyze(&MockReply {
                 status: 10070,
                 ops: vec![],
@@ -766,8 +781,8 @@ mod tests {
             .unwrap();
         assert_eq!(report.compound_failure, Some(10070));
         assert_eq!(report.compound_failure_op, None);
-        assert_eq!(report.unexecuted, vec![0, 1, 2, 3]);
-        assert!(report.completed.is_empty());
+        assert_eq!(unexecuted_callers(&map, &report), vec![0, 1, 2, 3]);
+        assert!(completed_callers(&map, &report).is_empty());
         assert!(report.failure.is_none());
     }
 
@@ -883,15 +898,15 @@ mod tests {
                             ops,
                         })
                         .unwrap();
-                    (failed_item, report)
+                    (failed_item, map, report)
                 })
             })
             .collect();
         for worker in workers {
-            let (failed_item, report) = worker.join().unwrap();
+            let (failed_item, map, report) = worker.join().unwrap();
             assert_eq!(report.failure.unwrap().caller, failed_item);
-            assert_eq!(report.completed.len(), failed_item);
-            assert_eq!(report.unexecuted.len(), 31 - failed_item);
+            assert_eq!(completed_callers(&map, &report).len(), failed_item);
+            assert_eq!(unexecuted_callers(&map, &report).len(), 31 - failed_item);
         }
     }
 

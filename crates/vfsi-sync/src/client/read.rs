@@ -112,7 +112,9 @@ impl<F: VectorBackend> FsClient<F> {
                                     .map_err(|error| OpError::unknown(error, None))?;
                                     Ok(read_result(result))
                                 })
-                                .map_err(|error| validate_read_error(request, error, true))
+                                .map_err(|error| {
+                                    validate_read_error(request.offset, request.length, error, true)
+                                })
                         })
                         .collect()
                 }
@@ -265,7 +267,14 @@ impl<F: VectorBackend> FsClient<F> {
                                         eof: result.eof,
                                     })
                                 })
-                                .map_err(|error| validate_read_error(request, error, false))
+                                .map_err(|error| {
+                                    validate_read_error(
+                                        request.offset,
+                                        request.length,
+                                        error,
+                                        false,
+                                    )
+                                })
                         })
                         .collect()
                 }
@@ -344,9 +353,8 @@ impl<F: VectorBackend> FsClient<F> {
             .into_iter()
             .enumerate()
             .map(|(index, result)| {
-                let request = ReadOp::at(files[index].clone(), 0, remaining);
                 let result = result
-                    .map_err(|error| validate_read_error(&request, error, true))
+                    .map_err(|error| validate_read_error(VfOffset::At(0), remaining, error, true))
                     .and_then(|data| {
                         if data.len() > remaining {
                             Err(OpError::unknown(
@@ -375,7 +383,8 @@ impl<F: VectorBackend> FsClient<F> {
 // Malformed progress is not safe to publish as confirmed data. Preserve valid
 // prefixes without cloning their allocation; sibling results stay intact.
 fn validate_read_error(
-    request: &ReadOp,
+    offset: VfOffset,
+    length: usize,
     error: vfsi_core::OpError,
     owned: bool,
 ) -> vfsi_core::OpError {
@@ -385,8 +394,8 @@ fn validate_read_error(
         Some(IoProgress::Read(progress)) => {
             error.state() != FailureState::NotAttempted
                 && progress.data().is_some() == owned
-                && progress.bytes_read() <= request.length
-                && match request.offset {
+                && progress.bytes_read() <= length
+                && match offset {
                     VfOffset::At(offset) => progress.offset() == offset,
                     _ => true,
                 }

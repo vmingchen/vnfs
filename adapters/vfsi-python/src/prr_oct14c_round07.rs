@@ -168,7 +168,7 @@ fn attribute_transport_keeps_original_slot_without_replay_for_both_follow_modes(
         ]);
         let error = attrs_many_impl(
             &mut backend,
-            &["/missing".into(), "/a".into(), "/b".into()],
+            &[Path::new("/missing"), Path::new("/a"), Path::new("/b")],
             AttrMask::SIZE,
             follow,
         )

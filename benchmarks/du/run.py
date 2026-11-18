@@ -256,7 +256,30 @@ class Link:
                 'client_qdisc': json.loads(self.client('tc', '-s', '-j', 'qdisc', 'show', 'dev', self.peer))}
 
 
+def build_du_executable(checkout, output, prefix=''):
+    """Build outside timing and select the unique executable Cargo reported."""
+    checkout = Path(checkout).resolve()
+    baseline = json.loads((HERE / 'baseline.json').read_text())
+    command = ['cargo', *baseline['build_args'], '--message-format=json-render-diagnostics']
+    artifacts = output / (prefix + 'build.jsonl')
+    with artifacts.open('w') as messages, (output / (prefix + 'build.log')).open('w') as log:
+        subprocess.run(command, cwd=checkout, stdout=messages, stderr=log,
+                       check=True, timeout=1800)
+    executables = set()
+    for line in artifacts.read_text().splitlines():
+        record = json.loads(line)
+        target = record.get('target', {})
+        if (record.get('reason') == 'compiler-artifact' and target.get('name') == 'du'
+                and 'bin' in target.get('kind', []) and record.get('executable')):
+            executables.add((checkout / record['executable']).resolve())
+    if len(executables) != 1:
+        label = prefix.rstrip('-') or 'frozen'
+        raise RuntimeError(label + ' build did not report exactly one du executable')
+    return executables.pop(), command
+
+
 def build(checkout, output):
+    checkout = Path(checkout).resolve()
     baseline = json.loads((HERE / 'baseline.json').read_text())
     if checked(['git', '-C', checkout, 'rev-parse', 'HEAD']).strip() != baseline['port_revision']:
         raise ValueError('checkout does not match frozen port revision')
@@ -266,8 +289,7 @@ def build(checkout, output):
         raise ValueError('Cargo.lock differs from frozen baseline')
     if sha(HERE / 'Cargo.lock') != baseline['cargo_lock_sha256']:
         raise ValueError('checked-in baseline lock changed')
-    with (output / 'build.log').open('w') as log:
-        subprocess.run(['cargo', *baseline['build_args']], cwd=checkout, stdout=log, stderr=log, check=True, timeout=1800)
+    binary, command = build_du_executable(checkout, output)
     metadata = json.loads(checked(['cargo', 'metadata', '--locked', '--format-version', '1',
                                   '--manifest-path', str(Path(checkout) / 'src/uu/du/Cargo.toml'),
                                   '--features', 'vnfs'], cwd=checkout))
@@ -275,9 +297,10 @@ def build(checkout, output):
     for name, version in baseline['packages'].items():
         if name not in packages or packages[name]['version'] != version or not (packages[name]['source'] or '').startswith('registry+'):
             raise ValueError('dependency drift: ' + name)
-    binary = Path(checkout).resolve() / 'target/release/du'
     return binary, {'baseline': baseline, 'binary_sha256': sha(binary),
-                    'rustc': checked(['rustc', '-Vv']), 'cargo': checked(['cargo', '-V']),
+                    'command': command, 'executable': str(binary),
+                    'rustc': checked(['rustc', '-Vv'], cwd=checkout),
+                    'cargo': checked(['cargo', '-V'], cwd=checkout),
                     'resolved_packages': {name: {'version': p['version'], 'source': p['source']}
                                           for name, p in packages.items()},
                     'build_environment': {k: v for k, v in os.environ.items()

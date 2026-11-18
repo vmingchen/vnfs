@@ -589,6 +589,13 @@ class RustRunnerTests(unittest.TestCase):
         self.assertNotIn("--lib", calls[0])
         self.assertNotIn("public_api", calls[0])
 
+    def test_focused_public_uring_target_enables_the_backend(self):
+        result = self.run_script("test-rust.sh", "--package", "vnfs", "--test", "uring")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command = self.log.read_text().strip()
+        self.assertIn("--features uring", command)
+        self.assertIn("--test uring", command)
+
     def test_focused_zero_tests_skips_and_cargo_failures_are_not_success(self):
         for output, status in [
             ("test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out", "0"),
@@ -629,6 +636,10 @@ class RustRunnerTests(unittest.TestCase):
     def test_live_focused_targets_require_fixture_configuration(self):
         for package, target, env in [
             ("vfsi-nfs", "nfs", dict(VFSI_NFS_SERVER="")),
+            *(("vfsi-nfs", target, dict(VFSI_NFS_SERVER="")) for target in (
+                "prr_exclusive_symlinks", "prr_rust20_round11",
+                "prr_rust20_round12", "prr_session_identity",
+            )),
             ("vnfs", "tree_builder_nfs", dict(VFSI_NFS_SERVER="", VFSI_NFS_REQUIRED="0")),
             ("vnfs", "transfer_helpers_nfs", dict(VFSI_NFS_SERVER="", VFSI_NFS_REQUIRED="0")),
             ("vfsi-smb", "smb", dict(VFSI_SMB_SERVER="", VFSI_SMB_SHARE="")),
@@ -645,6 +656,10 @@ class RustRunnerTests(unittest.TestCase):
         stub = cargo.read_text().split("\n", 1)[1]
         for package, target, required in [
             ("vfsi-nfs", "nfs", "VFSI_NFS_REQUIRED"),
+            *(("vfsi-nfs", target, "VFSI_NFS_REQUIRED") for target in (
+                "prr_exclusive_symlinks", "prr_rust20_round11",
+                "prr_rust20_round12", "prr_session_identity",
+            )),
             ("vnfs", "tree_builder_nfs", "VFSI_NFS_REQUIRED"),
             ("vnfs", "transfer_helpers_nfs", "VFSI_NFS_REQUIRED"),
             ("vfsi-smb", "smb", "VFSI_SMB_REQUIRED"),
@@ -833,6 +848,74 @@ raise SystemExit(1)
             self.benchmark.compiler_profiles('{"reason":"build-finished","success":true}\n')
 
 
+class BenchmarkPreflightTests(unittest.TestCase):
+    def setUp(self):
+        self.repo = Path(__file__).resolve().parents[1]
+        self.temp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def test_nonfinite_durations_fail_before_outputs_or_external_commands(self):
+        import importlib.util
+        from unittest.mock import patch
+        for relative, option, required in [
+            ("scripts/benchmark-write-scheduler.py", "--target-ms", []),
+            ("benchmarks/error-representations/run.py", "--seconds",
+             ["--timing", "unused", "--allocations", "unused"]),
+        ]:
+            spec = importlib.util.spec_from_file_location("duration_preflight", self.repo / relative)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            for index, value in enumerate(["nan", "inf", "-inf", "0", "-1"]):
+                with self.subTest(script=relative, value=value):
+                    output = self.root / (Path(relative).parent.name + str(index))
+                    with patch.object(sys, "argv", ["benchmark", *required, f"{option}={value}", "--output", str(output)]), \
+                         patch.object(module.subprocess, "check_output", side_effect=AssertionError("preflight dispatched a command")), \
+                         patch.object(module.subprocess, "run", side_effect=AssertionError("preflight dispatched a command")):
+                        with self.assertRaises(SystemExit) as caught:
+                            module.main()
+                    self.assertEqual(caught.exception.code, 2)
+                    self.assertFalse(output.exists())
+
+    def test_assertion_based_evidence_tools_refuse_optimized_python_before_effects(self):
+        for relative, entry, takes_args in [
+            ("benchmarks/du/compare.py", "main", True),
+            ("benchmarks/error-integration/trace.py", "main", False),
+            ("scripts/benchmark-write-scheduler.py", "main", False),
+            ("benchmarks/rsync/adoption.py", "prepare", True),
+        ]:
+            with self.subTest(script=relative):
+                path = self.repo / relative
+                code = f"""
+import importlib.util, pathlib, subprocess, sys
+from types import SimpleNamespace
+from unittest.mock import patch
+path = pathlib.Path({str(path)!r})
+sys.path.insert(0, str(path.parent))
+spec = importlib.util.spec_from_file_location('optimized_preflight', path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+output = pathlib.Path({str(self.root / "no-effects")!r})
+args = SimpleNamespace(pairs=3, captures=1, output=output, target_dir=output, checkout=output)
+sys.argv = ['benchmark', '--work', str(output)] if 'trace.py' == path.name else ['benchmark', '--output', str(output)]
+with (
+    patch.object(pathlib.Path, 'mkdir', side_effect=AssertionError('created output')),
+    patch.object(subprocess, 'run', side_effect=AssertionError('dispatched command')),
+    patch.object(subprocess, 'check_output', side_effect=AssertionError('dispatched command')),
+):
+    try:
+        getattr(module, {entry!r})(*([args] if {takes_args!r} else []))
+    except RuntimeError as error:
+        if str(error) == 'benchmark validation assertions must be enabled':
+            raise SystemExit(0)
+        raise
+raise SystemExit('optimized execution was accepted')
+"""
+                result = subprocess.run([sys.executable, "-O", "-c", code], capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse((self.root / "no-effects").exists())
+
+
 class PairedBenchmarkTests(unittest.TestCase):
     def setUp(self):
         import importlib.util
@@ -867,6 +950,118 @@ class PairedBenchmarkTests(unittest.TestCase):
         self.assertTrue(calls)
         self.assertEqual(calls, [None])
         self.assertGreater(result['elapsed_ns'], 0)
+
+    def test_cancelled_wait_kills_and_reaps_owned_group_without_losing_primary(self):
+        from unittest.mock import Mock, call, patch
+        import signal
+        for index, primary in enumerate([KeyboardInterrupt("stop"), SystemExit(7), OSError("wait failed")]):
+            with self.subTest(primary=primary):
+                process = Mock(pid=12345)
+                process.wait.side_effect = [primary, -signal.SIGKILL]
+                timer = Mock(ident=1)
+                with patch.object(self.paired.subprocess, 'Popen', return_value=process), \
+                     patch.object(self.paired.threading, 'Timer', return_value=timer), \
+                     patch.object(self.paired.os, 'killpg') as kill:
+                    with self.assertRaises(type(primary)) as caught:
+                        self.paired.run_command(['unused'], self.root / f'cancel-{index}', 5)
+                self.assertIs(caught.exception, primary)
+                kill.assert_called_once_with(process.pid, signal.SIGKILL)
+                self.assertEqual(process.wait.call_args_list, [call(), call(timeout=5)])
+                timer.cancel.assert_called_once_with()
+                timer.join.assert_called_once_with()
+
+    def test_cleanup_failures_are_chained_under_wait_cancellation(self):
+        from unittest.mock import Mock, call, patch
+        for boundary in ['kill', 'reap']:
+            with self.subTest(boundary=boundary):
+                primary = KeyboardInterrupt("primary")
+                cleanup = RuntimeError("cleanup")
+                process = Mock(pid=12345)
+                process.wait.side_effect = [primary, cleanup if boundary == 'reap' else 0]
+                timer = Mock(ident=1)
+                with patch.object(self.paired.subprocess, 'Popen', return_value=process), \
+                     patch.object(self.paired.threading, 'Timer', return_value=timer), \
+                     patch.object(self.paired.os, 'killpg', side_effect=cleanup if boundary == 'kill' else None):
+                    with self.assertRaises(KeyboardInterrupt) as caught:
+                        self.paired.run_command(['unused'], self.root / f'cleanup-{boundary}', 5)
+                self.assertIs(caught.exception, primary)
+                self.assertIs(caught.exception.__cause__, cleanup)
+                self.assertEqual(process.wait.call_args_list, [call(), call(timeout=5)])
+                timer.cancel.assert_called_once_with()
+                timer.join.assert_called_once_with()
+
+    def test_timer_start_failure_also_reaps_the_created_process(self):
+        from unittest.mock import Mock, call, patch
+        for started in [False, True]:
+            primary = RuntimeError("timer start failed")
+            process = Mock(pid=12345)
+            process.wait.return_value = 0
+            timer = Mock(ident=1 if started else None)
+            timer.start.side_effect = primary
+            with patch.object(self.paired.subprocess, 'Popen', return_value=process), \
+                 patch.object(self.paired.threading, 'Timer', return_value=timer), \
+                 patch.object(self.paired.os, 'killpg') as kill:
+                with self.assertRaises(RuntimeError) as caught:
+                    self.paired.run_command(['unused'], self.root / f'timer-{started}', 5)
+            self.assertIs(caught.exception, primary)
+            kill.assert_called_once()
+            self.assertEqual(process.wait.call_args_list, [call(timeout=5)])
+            timer.cancel.assert_called_once_with()
+            self.assertEqual(timer.join.call_count, int(started))
+
+    def test_timer_creation_failure_reaps_the_created_process(self):
+        from unittest.mock import Mock, call, patch
+        primary = MemoryError("timer allocation")
+        process = Mock(pid=12345)
+        process.wait.return_value = 0
+        with patch.object(self.paired.subprocess, 'Popen', return_value=process), \
+             patch.object(self.paired.threading, 'Timer', side_effect=primary), \
+             patch.object(self.paired.os, 'killpg') as kill:
+            with self.assertRaises(MemoryError) as caught:
+                self.paired.run_command(['unused'], self.root / 'timer-allocation', 5)
+        self.assertIs(caught.exception, primary)
+        kill.assert_called_once()
+        self.assertEqual(process.wait.call_args_list, [call(timeout=5)])
+
+    def test_timer_cleanup_failure_does_not_replace_wait_cancellation(self):
+        from unittest.mock import Mock, patch
+        primary = KeyboardInterrupt("primary")
+        cleanup = RuntimeError("timer join")
+        process = Mock(pid=12345)
+        process.wait.side_effect = [primary, 0]
+        timer = Mock(ident=1)
+        timer.join.side_effect = cleanup
+        with patch.object(self.paired.subprocess, 'Popen', return_value=process), \
+             patch.object(self.paired.threading, 'Timer', return_value=timer), \
+             patch.object(self.paired.os, 'killpg'):
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                self.paired.run_command(['unused'], self.root / 'timer-cleanup', 5)
+        self.assertIs(caught.exception, primary)
+        self.assertIs(caught.exception.__cause__, cleanup)
+
+    def test_real_child_is_reaped_before_cancellation_is_returned(self):
+        from unittest.mock import patch
+        import signal
+        original_wait = self.paired.subprocess.Popen.wait
+        processes = []
+        primary = KeyboardInterrupt("cancel live child")
+        def interrupted_wait(process, timeout=None):
+            if timeout is None and not processes:
+                processes.append(process)
+                raise primary
+            return original_wait(process, timeout=timeout)
+        try:
+            with patch.object(self.paired.subprocess.Popen, 'wait', interrupted_wait):
+                with self.assertRaises(KeyboardInterrupt) as caught:
+                    self.paired.run_command(['sleep', '30'], self.root / 'real-cancel', 5)
+            self.assertIs(caught.exception, primary)
+            self.assertEqual(len(processes), 1)
+            self.assertEqual(processes[0].returncode, -signal.SIGKILL)
+        finally:
+            for process in processes:
+                if process.returncode is None:
+                    self.paired.os.killpg(process.pid, signal.SIGKILL)
+                    original_wait(process, timeout=5)
 
     def test_abba_pairs_preserve_fixture_outputs_and_refuse_overwrite(self):
         command = 'printf identical'

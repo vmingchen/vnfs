@@ -36,6 +36,8 @@ SDK_SHA = "a8cdd7c5e57b3d46dc42fe7603b1180c44ea1e5ad95e185f71596531bb7b472c"
 
 
 def prepare(args):
+    if not __debug__:
+        raise RuntimeError("benchmark validation assertions must be enabled")
     args.output = args.output.resolve()
     args.target_dir = args.target_dir.resolve()
     args.checkout = args.checkout.resolve()

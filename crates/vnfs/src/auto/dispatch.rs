@@ -7,13 +7,16 @@ impl Auto {
         self.limits
     }
     /// Drain Drop cleanup on mounted and already-connected NFS backends.
+    /// Each connected backend is drained once, including when mount aliases share it.
     /// No new connections are created; failed targets retain cleanup ownership.
     pub fn drain_cleanup(&self) -> VfResult<()> {
+        let mut seen = HashSet::new();
         let clients: Vec<_> = self
             .connections
             .lock()
             .map_err(|_| std::io::Error::from_raw_os_error(libc::EIO))?
             .values()
+            .filter(|connection| seen.insert(Arc::as_ptr(&connection.identity)))
             .map(|connection| connection.client.clone())
             .collect();
         let mut result = self.mounted.drain_cleanup();
@@ -762,20 +765,21 @@ impl Auto {
     }
 
     pub(crate) fn directory_page_batch_size(&self, paths: &[&Path]) -> VfResult<usize> {
-        if paths.is_empty() {
+        let Some((first, rest)) = paths.split_first() else {
             return Ok(1);
-        }
+        };
         let mounts = read_mounts(false);
-        let routes: Vec<_> = paths
+        let first = self.resolve(first, &mounts).route;
+        let Route::Nfs(connection) = &first else {
+            return Ok(1);
+        };
+        let limit = connection.client.directory_page_batch_size()?;
+        let siblings = rest
             .iter()
-            .map(|path| self.resolve(path, &mounts))
-            .collect();
-        match &routes[0].route {
-            Route::Posix => Ok(1),
-            Route::Nfs(connection) => {
-                Ok(cohort_end(&routes, 0).min(connection.client.directory_page_batch_size()?))
-            }
-        }
+            .take(limit - 1)
+            .take_while(|path| first.same_backend(&self.resolve(path, &mounts).route))
+            .count();
+        Ok(1 + siblings)
     }
     pub(crate) fn read_dir_pages_with_fields(
         &self,

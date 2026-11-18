@@ -31,7 +31,8 @@ pub fn validate_setattrs<P>(op: &crate::SetAttrsOp<P>) -> VfResult<[Option<(i64,
     ])
 }
 
-fn system_time_parts(time: std::time::SystemTime) -> VfResult<(i64, u32)> {
+/// Normalize a timestamp to signed seconds and nonnegative nanoseconds.
+pub fn system_time_parts(time: std::time::SystemTime) -> VfResult<(i64, u32)> {
     match time.duration_since(std::time::UNIX_EPOCH) {
         Ok(duration) => Ok((
             i64::try_from(duration.as_secs())

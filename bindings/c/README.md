@@ -35,14 +35,17 @@ API. Attribute structures also carry their size and ABI version.
 ABI v3 retains every ABI-v2 symbol and adds genuinely vectorized `vfsi_openv`,
 `vfsi_closev`, `vfsi_statv`, `vfsi_setattrv`, `vfsi_preadv`, `vfsi_pwritev`,
 `vfsi_mkdirv`, `vfsi_removev`, `vfsi_renamev`, and `vfsi_copyv` calls. They
-return a uniform `vfsi_result`: the overall result's `index` is the completed
-count on success or the failing element on error, `category` is
-protocol-independent, `err_no` retains the backend status, and `message`
-carries transport diagnostics. Callers also provide one `vfsi_result` per
-element. Successful batches mark every element successful. A request rejected
-before submission marks the failing element and leaves the rest not attempted;
-after a submitted concurrent batch fails, non-failing elements are explicitly
-marked indeterminate because they may already have completed.
+return a uniform `vfsi_result`. The overall `index` is the completed count on
+success, the failing element when known, or `VFSI_INDEX_UNKNOWN`. The
+`category` is protocol-independent, `err_no` retains the backend status, and
+`message` carries transport diagnostics.
+
+Provide one `vfsi_result` per element and inspect every slot, including after
+an overall failure. A request rejected before submission marks the failing
+element when known and leaves the rest not attempted. Close, attribute updates, mkdir,
+remove, rename, and copy preserve independently confirmed outcomes after
+submission. Some other calls mark sibling outcomes indeterminate when their
+completion cannot be established.
 
 ## Scoped object identity (additive ABI v3)
 
@@ -104,7 +107,7 @@ For large repositories, `vfsi_read_streamv()` reads several paths in bounded
 chunks. `chunk_size` limits each read and `memory_limit` bounds the aggregate
 bytes requested per backend batch. Returning `false` from its callback stops
 successfully, providing cancellation and backpressure without buffering whole
-files. The streaming callback must not reenter the same filesystem handle.
+files. Callbacks run outside backend locks and may query the same filesystem handle.
 
 For an NFS mount whose source is `server:/exports/repos` and whose local
 mountpoint is `/mnt/repos`, use:
@@ -134,8 +137,8 @@ The username, password, and domain may be empty strings for guest access.
 independent vector elements are multiplexed concurrently while dependent
 mutations remain ordered. Large transfers honor the negotiated read/write
 limits. `vfsi_copy()` uses
-SMB server-side copy when supported and permanently switches that connection
-to the client-side fallback if the server rejects the operation.
+SMB server-side copy when supported and switches that connection to client-side
+copying after an unsupported response that confirms no progress.
 
 SMB paths must be valid UTF-8. Unix permission modes and symlink/hard-link
 operations require SMB POSIX extensions, which this backend does not yet

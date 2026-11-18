@@ -409,3 +409,48 @@ fn test_native_code(error: &std::io::Error) -> u32 {
         _ => panic!("expected a native error, got {error:?}"),
     }
 }
+
+#[test]
+fn followed_symlink_cycles_report_eloop_and_keep_nofollow_operations_valid() {
+    let Some(mut fs) = connect() else { return };
+    let root = format!("/prr-symlink-cycle-{}", std::process::id());
+    fs.ensure_dir_impl(Path::new(&root), 0o755).unwrap();
+    let names = ["self", "left", "right"];
+    let links: Vec<_> = names.iter().map(|name| format!("{root}/{name}")).collect();
+    let targets = [Path::new("self"), Path::new("right"), Path::new("left")];
+    let link_paths: Vec<_> = links.iter().map(Path::new).collect();
+    vfsi_core::internal::collect_vec_result(fs.vsymlink_impl(&targets, &link_paths), links.len())
+        .unwrap();
+    let mut errors = Vec::new();
+    for suffix in ["self", "left", "self/child", "left/child"] {
+        let path = format!("{root}/{suffix}");
+        errors.push(fs.stat_impl(Path::new(&path)).unwrap_err());
+        for flags in [libc::O_RDONLY, libc::O_WRONLY | libc::O_CREAT] {
+            let opened = fs.open_raw_impl(Path::new(&path), flags, 0o600);
+            if let Ok(file) = &opened {
+                fs.close_impl(file).unwrap();
+            }
+            match opened {
+                Ok(_) => panic!("unexpectedly opened a symlink cycle"),
+                Err(error) => errors.push(error),
+            }
+        }
+    }
+    let link_type = fs.lstat_impl(Path::new(&links[0])).unwrap().ftype;
+    let link_target = fs.read_link_impl(Path::new(&links[0])).unwrap();
+    let exclusive = fs
+        .open_raw_impl(
+            Path::new(&links[0]),
+            libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY,
+            0o600,
+        )
+        .unwrap_err();
+    vfsi_core::internal::collect_vec_result(fs.remove_paths_impl(&[Path::new(&root)], true), 1)
+        .unwrap();
+    for error in errors {
+        assert_eq!(test_native_code(&error), libc::ELOOP as u32, "{error:?}");
+    }
+    assert_eq!(link_type, VfType::Symlink);
+    assert_eq!(link_target, Path::new("self"));
+    assert_eq!(test_native_code(&exclusive), libc::EEXIST as u32);
+}

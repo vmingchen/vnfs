@@ -9,6 +9,8 @@ import subprocess
 import sys
 
 
+LIBRARY_NAME = "libvfsi_c.dylib" if sys.platform == "darwin" else "libvfsi_c.so"
+
 def dependencies(metadata):
     root = metadata["resolve"]["root"]
     if root is None:
@@ -42,14 +44,38 @@ def install(source, output, prefix, metadata):
         raise ValueError("SDK source is missing include/vfsi.h")
     for header in (source / "include").glob("*.h"):
         shutil.copy2(header, include / header.name)
-    name = "libvfsi_c.dylib" if sys.platform == "darwin" else "libvfsi_c.so"
-    shutil.copy2(output / name, library / name)
+    shutil.copy2(output / LIBRARY_NAME, library / LIBRARY_NAME)
     if (output / "vfsi-libs").is_dir():
         shutil.copytree(output / "vfsi-libs", library / "vfsi-libs", dirs_exist_ok=True)
     versions = {p["name"]: p["version"] for p in dependencies(metadata)
                 if p["name"].startswith(("vfsi-", "vnfs", "libntirpc", "nfsv41"))}
     (prefix / "versions.json").write_text(json.dumps(versions, indent=2, sort_keys=True) + "\n")
-    return {"include": str(include), "library": str(library / name)}
+    return {"include": str(include), "library": str(library / LIBRARY_NAME)}
+
+
+def build_output(manifest, target, profile, metadata):
+    root = metadata["resolve"]["root"]
+    if root is None:
+        raise ValueError("SDK manifest must identify one root package")
+    messages = subprocess.check_output([
+        "cargo", "build", "--locked", "--manifest-path", str(manifest),
+        "--target-dir", str(target), "--profile", profile,
+        "--message-format=json-render-diagnostics",
+    ], text=True)
+    artifacts = set()
+    for line in messages.splitlines():
+        message = json.loads(line)
+        if (message.get("reason") != "compiler-artifact"
+                or message.get("package_id") != root
+                or "cdylib" not in message["target"]["crate_types"]):
+            continue
+        for filename in message["filenames"]:
+            artifact = Path(filename)
+            if artifact.name == LIBRARY_NAME:
+                artifacts.add(artifact.resolve())
+    if len(artifacts) != 1:
+        raise ValueError(f"Cargo must report exactly one root {LIBRARY_NAME} artifact")
+    return artifacts.pop().parent
 
 
 def main():
@@ -67,9 +93,7 @@ def main():
     if args.registry_only:
         verify_sources(metadata)
     target = (args.target_dir or Path(metadata["target_directory"])).resolve()
-    subprocess.run(["cargo", "build", "--locked", "--manifest-path", str(manifest),
-                    "--target-dir", str(target), "--profile", args.profile], check=True)
-    output = target / ("debug" if args.profile == "dev" else "release")
+    output = build_output(manifest, target, args.profile, metadata)
     paths = install(manifest.parent, output, args.prefix.resolve(), metadata)
     for name, path in paths.items():
         print(f"{name}={path}")

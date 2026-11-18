@@ -113,7 +113,15 @@ mod application;
 // Other public types have one canonical path under files, directory, error,
 // or a backend-specific namespace. Crate-private aliases keep implementation
 // modules concise without expanding the external API.
-pub(crate) use vfsi_core::{DirHandle, FileHandle, Target};
+#[cfg(any(
+    feature = "nfs",
+    all(feature = "posix", unix),
+    all(any(feature = "auto", feature = "uring"), target_os = "linux")
+))]
+pub(crate) use vfsi_core::{
+    Capabilities, DirHandle, FileHandle, FilesystemStats, Target,
+    api::{DirectoryListing, ReadOutput, ResourceLimits, SyncMode, WriteOutput},
+};
 pub use vfsi_core::{Vfsi, VfsiExt};
 #[cfg(any(
     feature = "nfs",
@@ -126,8 +134,7 @@ pub(crate) use read::ReadRequest;
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use vfsi_core::api::internal::OwnedReadResult;
 pub(crate) use vfsi_core::api::{
-    AttrsOptions, ListDirOptions, ReadOp, ReadOptions, ReadOutput, RenameMode, SyncMode, WriteOp,
-    WriteOptions,
+    AttrsOptions, ListDirOptions, ReadOp, ReadOptions, RenameMode, WriteOp, WriteOptions,
 };
 
 // Keep negative API-contract doctests without presenting unsupported calls
@@ -257,7 +264,7 @@ pub mod prelude {
 
 // Internal compatibility imports for implementation modules only. These are
 // deliberately crate-private; external callers use the grouped namespaces.
-#[cfg(test)]
+#[cfg(all(test, feature = "auto", target_os = "linux"))]
 pub(crate) use std::io::ErrorKind;
 pub(crate) use std::ops::ControlFlow;
 pub(crate) use vfsi_core::AttrMask as Attributes;
@@ -265,12 +272,10 @@ pub(crate) use vfsi_core::AttrMask as Attributes;
 pub(crate) use vfsi_core::DirEntry;
 pub(crate) use vfsi_core::VfType as FileType;
 pub(crate) use vfsi_core::api::{
-    DepthLimit, DirectoryListing, MkDirOp, RemoveMode, RemoveOptions, ResourceLimits, SetAttrsOp,
-    StreamCompletion, StreamOptions, TraversalCompletion, WriteOutput,
+    DepthLimit, MkDirOp, RemoveMode, RemoveOptions, SetAttrsOp, StreamCompletion, StreamOptions,
+    TraversalCompletion,
 };
-pub(crate) use vfsi_core::{
-    Attrs, Capabilities, CopyOptions, FilesystemStats, OpenFlags, OpenOp, TransportKind,
-};
+pub(crate) use vfsi_core::{Attrs, CopyOptions, OpenFlags, OpenOp, TransportKind};
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use vfsi_sync::ReadAllOptions;
 #[cfg(feature = "nfs")]

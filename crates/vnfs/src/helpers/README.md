@@ -166,8 +166,9 @@ prewalk. Relative paths start at the client's root, not the process's working
 directory; `..`, lexical overlaps and duplicate container destinations are rejected.
 
 Files default to exclusive creation (`Existing::Error`). `Existing::Skip` retains
-existing files; its destination reservations are necessarily scalar because a
-failed all-success OPEN collection cannot roll back creation or truncation. `Existing::Replace`
+existing files; it currently reserves destinations individually to preserve
+its reservation/failure phases. Failed all-success OPEN collection cannot undo
+creation or truncation; per-input outcomes do not provide rollback. `Existing::Replace`
 unlinks existing regular files before exclusive creation, protecting unrelated
 hard links from truncation. It selects native vector COPY when neither progress
 nor permission preservation is requested. Native COPY has no portable byte-count

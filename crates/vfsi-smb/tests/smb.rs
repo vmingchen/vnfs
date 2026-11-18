@@ -2198,6 +2198,77 @@ fn public_write_outcomes_preserve_smb_siblings() {
 }
 
 #[test]
+fn path_only_mutations_reject_open_descriptors_per_input() {
+    let Some(mut fs) = connect() else { return };
+    let root = PathBuf::from(format!("/vfsi-descriptor-mutations-{}", std::process::id()));
+    fs.mkdir_raw_impl(&root, 0o777).unwrap();
+    let original = root.join("original");
+    let invalid_rename = root.join("invalid-rename");
+    let ordinary = root.join("ordinary");
+    let renamed = root.join("renamed");
+    let directory = root.join("directory");
+    let retained = fs
+        .open_raw_impl(
+            &original,
+            libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+            0o666,
+        )
+        .unwrap();
+    let sibling = fs
+        .open_raw_impl(
+            &ordinary,
+            libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+            0o666,
+        )
+        .unwrap();
+    fs.close_impl(&sibling).unwrap();
+
+    let mkdir = fs
+        .vmkdir_impl(
+            &[retained.clone(), FileOperand::from_os_path(&directory)].map(|file| VfAttrs {
+                file,
+                masks: AttrMask::MODE,
+                mode: 0o777,
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+    let rename = fs
+        .vrename_impl(&[
+            (retained.clone(), FileOperand::from_os_path(&invalid_rename)),
+            (
+                FileOperand::from_os_path(&ordinary),
+                FileOperand::from_os_path(&renamed),
+            ),
+        ])
+        .unwrap();
+    let remove = fs
+        .vremove_impl(&[retained.clone(), FileOperand::from_os_path(&renamed)])
+        .unwrap();
+
+    fs.close_impl(&retained).unwrap();
+    let original_exists = fs.exists_impl(&original).unwrap();
+    let invalid_rename_exists = fs.exists_impl(&invalid_rename).unwrap();
+    let directory_exists = fs.exists_impl(&directory).unwrap();
+    let sibling_removed = !fs.exists_impl(&ordinary).unwrap() && !fs.exists_impl(&renamed).unwrap();
+    cleanup_test_tree(&root);
+
+    for (operation, results) in [("mkdir", mkdir), ("rename", rename), ("remove", remove)] {
+        assert_eq!(results.len(), 2);
+        let error = results[0].as_ref().expect_err(operation);
+        assert_eq!(error.state(), FailureState::NotAttempted, "{operation}");
+        assert_eq!(
+            error.cause().kind(),
+            std::io::ErrorKind::InvalidInput,
+            "{operation}"
+        );
+        assert!(results[1].is_ok(), "{operation}: {:?}", results[1]);
+    }
+    assert!(original_exists && !invalid_rename_exists);
+    assert!(directory_exists && sibling_removed);
+}
+
+#[test]
 fn directory_vector_preserves_healthy_inputs_around_mode_and_creation_failures() {
     let Some(mut fs) = connect() else { return };
     let root = PathBuf::from(format!("/vfsi-mkdir-results-{}", std::process::id()));
@@ -2284,6 +2355,53 @@ fn copy_results_keep_healthy_siblings_for_client_and_server_strategies() {
         assert_eq!(read[2].as_ref().unwrap(), b"last");
     }
     cleanup_test_tree(&root);
+}
+
+#[test]
+fn copy_range_overflow_leaves_missing_destination_and_keeps_healthy_sibling() {
+    let Some(mut backend) = connect() else {
+        return;
+    };
+    let root = PathBuf::from(format!("/vfsi-copy-overflow-{}", std::process::id()));
+    backend.ensure_dir_impl(&root, 0o777).unwrap();
+    let source = root.join("source");
+    let file = backend
+        .open_raw_impl(&source, libc::O_CREAT | libc::O_WRONLY, 0o666)
+        .unwrap();
+    backend.write_raw_impl(&file, 0, b"ab").unwrap();
+    backend.close_impl(&file).unwrap();
+
+    let mut observations = Vec::new();
+    for server in [false, true] {
+        let invalid = root.join(format!("invalid-{server}"));
+        let valid = root.join(format!("valid-{server}"));
+        let pairs = [
+            ExtentPair::from_os_paths(&source, 0, &invalid, u64::MAX, Some(1)),
+            ExtentPair::from_os_paths(&source, 1, &valid, 1, Some(u64::MAX)),
+        ];
+        let results = if server {
+            backend.vcopy_impl(&pairs, CopyOptions::new())
+        } else {
+            backend.vcopy_data_impl(&pairs)
+        }
+        .unwrap();
+        let exists = backend.exists_impl(&invalid).unwrap();
+        let read = backend
+            .vread_all_impl(&[FileOperand::from_os_path(&valid)])
+            .unwrap()
+            .remove(0);
+        observations.push((results, exists, read));
+    }
+    cleanup_test_tree(&root);
+    for (results, exists, read) in observations {
+        assert_eq!(
+            results[0].as_ref().unwrap_err().cause().raw_os_error(),
+            Some(libc::EOVERFLOW)
+        );
+        assert!(!exists, "overflow must not create the destination");
+        assert!(results[1].is_ok(), "{:?}", results[1]);
+        assert_eq!(read.unwrap(), b"\0b");
+    }
 }
 
 #[test]

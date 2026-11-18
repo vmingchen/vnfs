@@ -45,8 +45,9 @@ use super::{DirHandle, FileHandle};
 /// A leading `/` refers to the configured root; this is not security confinement.
 /// Handles in a vector must belong to this client's connection. Successful
 /// vector results match input order; one vector may span several compounds.
-/// Callback cancellation returns a completed/stopped prefix for vector visitors;
-/// directory-page waves may leave several started roots stopped.
+/// Callback cancellation retains known completions and failures; unfinished
+/// inputs are stopped. Submitted waves may have completed independent siblings,
+/// so the retained outcomes need not form a prefix.
 /// A failed mutation can have partial effects. The result slot identifies its
 /// input; an `OpError` records completion certainty and acknowledged I/O progress.
 /// Neither implies a committed prefix. Preserve that evidence rather than
@@ -175,8 +176,9 @@ pub trait Vfsi {
     type Dir: DirHandle + 'static;
 
     /// Open genuine directory handles in input order without following final
-    /// symlinks. Path-only backends report unsupported. Successful owned handles
-    /// remain available across sibling failures. Empty vectors perform no I/O.
+    /// symlinks. Path-only backends report unsupported for valid directories and
+    /// may report path validation errors for other inputs. Successful owned
+    /// handles remain available across sibling failures. Empty vectors perform no I/O.
     /// Use VfsiExt::open_dirs for strict collection with sibling cleanup.
     fn vopen_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> crate::VecResult<Self::Dir> {
         if paths.is_empty() {
@@ -315,8 +317,8 @@ pub trait Vfsi {
         options: crate::api::ReadOptions,
     ) -> crate::VecResult<crate::api::ReadOutput>;
     /// Write positional ranges with explicit short-write policy.
-    /// With default options, report accepted byte counts without completing short writes.
-    /// With `write_all(true)`, complete each eligible input through short-write waves.
+    /// With default options, report accepted byte counts. A backend may return a short write.
+    /// `WriteOptions::with_write_all(true)` requests completion through short-write waves.
     /// Return one outcome per input, retaining healthy siblings and confirmed
     /// payload prefixes when another input fails. Input-local rejection does not
     /// suppress independent writes. An outer error rejects before dispatch.
@@ -327,7 +329,7 @@ pub trait Vfsi {
     /// This is not transactional or a vector-wide execution-order guarantee.
     ///
     /// Handles opened for append select EOF regardless of the requested offset.
-    /// With completion enabled, success means every request's payload was written.
+    /// With completion enabled, a successful input means its full payload was written.
     /// Short writes are completed at their remaining offsets; this does not
     /// authorize replay after an ambiguous failure or guarantee durability.
     ///

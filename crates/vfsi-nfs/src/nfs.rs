@@ -1,12 +1,13 @@
-//! NFSv4.1 implementation of the vectorized [`VectorBackend`] API.
+//! NFSv4.1 and NFSv4.2 implementation of the vectorized [`VectorBackend`] API.
 //!
 //! [`NfsVecFs`] is the analog of the C `tc_init()` module handle: it connects
-//! to an NFSv4.1 server, coalesces vector operations into as few compounds as
+//! to an NFSv4.1 or NFSv4.2 server, coalesces vector operations into as few compounds as
 //! the server supports, and destroys its session/clientid on drop.
 //!
 //! NFSv4 referrals and filesystem migration are unsupported. `NFS4ERR_MOVED`
-//! is surfaced as `Unsupported` with the original NFS status and request index;
-//! it does not trigger referral following or mutation replay. Connect directly
+//! is surfaced as `Unsupported` with the original NFS status. Vector outcomes
+//! identify the affected input; causes are index-free. This does not trigger
+//! referral following or mutation replay. Connect directly
 //! to the destination server/export instead.
 
 // bindgen emits lowercase constants (e.g. nfs_ftype4_NF4DIR) matched here.
@@ -106,8 +107,8 @@ pub struct NfsConnectOptions {
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
     pub authentication: NfsAuth,
-    /// Stable NFS client-owner identity. Must be unique among simultaneously
-    /// active clients using the same server and credential. If an OPEN loses
+    /// Stable NFS client-owner identity, containing 1 to 1024 bytes. Must be
+    /// unique among simultaneous clients using the same server and credential. If an OPEN loses
     /// its cleanup identity, recovery retires this owner and uses a fresh one.
     pub client_owner: Option<Vec<u8>>,
     pub recovery_policy: NfsRecoveryPolicy,
@@ -133,6 +134,21 @@ impl Default for NfsConnectOptions {
 }
 
 impl NfsConnectOptions {
+    fn validate_client_owner(&self, host: &str) -> VfResult<()> {
+        if self
+            .client_owner
+            .as_ref()
+            .is_some_and(|owner| owner.is_empty() || owner.len() > NFS4_OPAQUE_LIMIT as usize)
+        {
+            return Err(vfsi_core::internal::errors::with_context(
+                std::io::Error::from(std::io::ErrorKind::InvalidInput),
+                "connect",
+                Path::new(host),
+            ));
+        }
+        Ok(())
+    }
+
     /// Configure automatic read-only recovery.
     pub fn with_auto_reconnect(mut self, enabled: bool) -> Self {
         self.flags.set_auto_reconnect(enabled);
@@ -270,7 +286,7 @@ impl NfsClientBuilder {
                 Path::new(self.host.as_ref()),
             ));
         }
-        let pool_id = NEXT_CLIENT_POOL_ID.fetch_add(1, Ordering::Relaxed);
+        let pool_id = crate::session::next_client_token();
         (0..size)
             .map(|member| self.pool_member(pool_id, member).connect())
             .collect()
@@ -280,7 +296,7 @@ impl NfsClientBuilder {
         let mut builder = self.clone();
         if let Some(owner) = &mut builder.options.client_owner {
             let suffix = format!("-pool-{}-{pool_id:x}-{member}", std::process::id());
-            owner.truncate(1024usize.saturating_sub(suffix.len()));
+            owner.truncate((NFS4_OPAQUE_LIMIT as usize).saturating_sub(suffix.len()));
             owner.extend_from_slice(suffix.as_bytes());
         }
         builder
@@ -304,9 +320,7 @@ impl NfsClientBuilder {
             minor_version: filesystem.minorversion(),
         });
         // Construction has not installed the backend behind a client lock.
-        for callback in HandleBackend::take_notifications(&mut filesystem) {
-            callback();
-        }
+        filesystem.deliver_queued_notifications();
         Ok(filesystem)
     }
 
@@ -315,19 +329,7 @@ impl NfsClientBuilder {
         if let Some(mount) = &self.mount {
             mount.validate_options(&self.host, &self.options)?;
         }
-        if self
-            .options
-            .client_owner
-            .as_ref()
-            .is_some_and(|owner| owner.is_empty() || owner.len() > 1024)
-        {
-            return Err(vfsi_core::internal::errors::with_context(
-                std::io::Error::from(std::io::ErrorKind::InvalidInput),
-                "connect",
-                Path::new(self.host.as_ref()),
-            ));
-        }
-        Ok(())
+        self.options.validate_client_owner(&self.host)
     }
 }
 
@@ -345,7 +347,7 @@ pub enum NfsEvent {
 /// Observer hook which does not impose a logging or metrics framework.
 /// Owned clients deliver events after releasing their backend lock, allowing
 /// reentrant client operations. Callbacks run synchronously and should be short.
-/// Owned-client delivery isolates callback panics from filesystem results.
+/// Built-in delivery isolates callback panics from filesystem results.
 /// Store weak client references to avoid an observer/client ownership cycle.
 /// Direct backend users must drain `HandleBackend::take_notifications` outside locks.
 pub trait NfsObserver: Send + Sync + 'static {
@@ -476,7 +478,6 @@ pub struct NfsVecFs {
 }
 
 static NEXT_DIR_OWNER: AtomicU64 = AtomicU64::new(1);
-static NEXT_CLIENT_POOL_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Which merged-compound strategy the NFS backend uses for path-based bulk
 /// I/O, downgraded automatically when the server rejects the current form.

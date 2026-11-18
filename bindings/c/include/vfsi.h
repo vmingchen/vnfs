@@ -182,12 +182,12 @@ typedef struct vfsi_fs vfsi_fs;
 /**
  * Uniform ABI-v3 result for scalar and vector operations.
  *
- * `index` is the completed count on success, the failing operation index on
- * an attributable error, or `VFSI_INDEX_UNKNOWN`. Vector calls also populate
- * a caller-owned result per element;
- * after a submitted concurrent batch fails, every non-failing element is
- * marked indeterminate because it may already have completed. `err_no`
- * retains the backend status while `category` is portable across protocols.
+ * `index` is the function's count on success, the failing operation index on
+ * an attributable error, or `VFSI_INDEX_UNKNOWN`. When the function takes an
+ * item result array, inspect every item even when the overall result fails.
+ * Confirmed outcomes can survive a sibling failure. An indeterminate item
+ * has an unconfirmed outcome. `err_no` retains the backend status and
+ * `category` is portable across protocols.
  */
 typedef struct vfsi_result {
   uint32_t struct_size;
@@ -995,7 +995,8 @@ struct vfsi_result vfsi_preadv_ex(struct vfsi_fs *fs,
  * progress never grants replay permission. Never fall back after dispatch.
  * # Safety
  * Same pointer, lifetime and non-aliasing contract as the legacy vector API,
- * with count writable vfsi_io_result outputs. Read buffers may be uninitialized.
+ * with count writable vfsi_io_result outputs. Each nonempty write payload
+ * must contain initialized bytes for the full call.
  */
 struct vfsi_result vfsi_pwritev_ex(struct vfsi_fs *fs,
                                    struct vfsi_pwrite_op *ops,

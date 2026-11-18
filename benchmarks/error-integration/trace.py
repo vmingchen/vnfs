@@ -32,6 +32,8 @@ def decode_commands(text, response):
 
 
 def main():
+    if not __debug__:
+        raise RuntimeError("benchmark validation assertions must be enabled")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     w = parser.parse_args().work

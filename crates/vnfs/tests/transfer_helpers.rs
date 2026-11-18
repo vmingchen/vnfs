@@ -42,6 +42,9 @@ enum Fault {
     DirectoryBackendFirst,
     DirectoryCallbacksReverse,
     DirectoryCallbacksForward,
+    DestinationDenied,
+    ShortDestinationMetadata,
+    ExtraDestinationMetadata,
 }
 #[derive(Default)]
 struct Calls {
@@ -49,6 +52,7 @@ struct Calls {
     directory_waves: Vec<Vec<std::path::PathBuf>>,
     stream_calls: usize,
     metadata: Vec<usize>,
+    destination_probes: Vec<Vec<std::path::PathBuf>>,
     syncs: Vec<(SyncMode, usize)>,
     attrs: Vec<usize>,
     opens: usize,
@@ -148,7 +152,46 @@ impl Vfsi for Harness {
                 .map(Ok)
                 .collect());
         }
-        self.fs.vgetattrs(p, o)
+        let destinations: Vec<_> = p
+            .iter()
+            .filter_map(|target| match target.as_target() {
+                Target::Path(path) if path.parent() == Some(Path::new("/dst")) => {
+                    Some(path.to_path_buf())
+                }
+                _ => None,
+            })
+            .collect();
+        let destination_query = !o.follow_final_symlink() && !destinations.is_empty();
+        if destination_query {
+            assert_eq!(destinations.len(), p.len());
+            self.calls
+                .borrow_mut()
+                .destination_probes
+                .push(destinations.clone());
+        }
+        let mut results = self.fs.vgetattrs(p, o)?;
+        if destination_query {
+            match self.fault.get() {
+                Fault::DestinationDenied => {
+                    for (index, path) in destinations.iter().enumerate() {
+                        if path == Path::new("/dst/c") {
+                            results[index] = Err(OpError::failed(
+                                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                                None,
+                            ));
+                        }
+                    }
+                }
+                Fault::ShortDestinationMetadata => {
+                    results.pop();
+                }
+                Fault::ExtraDestinationMetadata => results.push(Err(OpError::not_attempted(
+                    std::io::Error::from(std::io::ErrorKind::Other),
+                ))),
+                _ => {}
+            }
+        }
+        Ok(results)
     }
     fn vopen(&self, r: &[OpenOp]) -> vnfs::VecResult<Self::File> {
         self.calls.borrow_mut().opens += 1;
@@ -1712,4 +1755,115 @@ fn single_writer_rejects_discontinuous_stream_offsets_before_writing_them() {
         }
         assert_eq!(fs.calls.borrow().stream_calls, 1, "never replay the stream");
     }
+}
+
+#[test]
+fn replacement_preflight_batches_existing_and_missing_destinations_before_mutation() {
+    for preserve in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let fs = Harness::new(root.path());
+        std::fs::create_dir(root.path().join("dst")).unwrap();
+        for name in ["a", "b", "c"] {
+            std::fs::write(root.path().join(name), name.as_bytes()).unwrap();
+        }
+        for name in ["a", "c"] {
+            std::fs::write(root.path().join("dst").join(name), b"old").unwrap();
+        }
+        let result = copy_items(
+            &fs,
+            &["/a", "/b", "/c"],
+            "/dst",
+            TransferOptions::new()
+                .with_existing(Existing::Replace)
+                .with_preserve_permissions(preserve),
+        )
+        .unwrap();
+        assert_eq!(result.files_copied, 3);
+        for name in ["a", "b", "c"] {
+            assert_eq!(
+                std::fs::read(root.path().join("dst").join(name)).unwrap(),
+                name.as_bytes()
+            );
+        }
+        assert_eq!(
+            fs.calls.borrow().destination_probes,
+            [vec![
+                std::path::PathBuf::from("/dst/a"),
+                "/dst/b".into(),
+                "/dst/c".into()
+            ]]
+        );
+        assert_eq!(fs.calls.borrow().removes, 1);
+    }
+}
+
+#[test]
+fn replacement_preflight_errors_preserve_every_destination_and_original_root_index() {
+    for preserve in [false, true] {
+        for fault in [
+            Fault::DestinationDenied,
+            Fault::ShortDestinationMetadata,
+            Fault::ExtraDestinationMetadata,
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let fs = Harness::new(root.path());
+            std::fs::create_dir(root.path().join("dst")).unwrap();
+            for name in ["a", "b", "c"] {
+                std::fs::write(root.path().join(name), b"new").unwrap();
+            }
+            for name in ["a", "c"] {
+                std::fs::write(root.path().join("dst").join(name), b"old").unwrap();
+            }
+            fs.fault.set(fault);
+            let error = copy_items(
+                &fs,
+                &["/a", "/b", "/c"],
+                "/dst",
+                TransferOptions::new()
+                    .with_existing(Existing::Replace)
+                    .with_preserve_permissions(preserve),
+            )
+            .unwrap_err();
+            if fault == Fault::DestinationDenied {
+                assert_eq!(error.index(), Some(2));
+                assert_eq!(error.cause().kind(), std::io::ErrorKind::PermissionDenied);
+                assert_eq!(
+                    vfsi_core::internal::errors::path(error.cause()),
+                    Some(Path::new("/c"))
+                );
+            } else {
+                assert_eq!(error.index(), None);
+                assert_eq!(
+                    vfsi_core::transport_kind(error.cause()),
+                    Some(vfsi_core::TransportKind::InvalidReply)
+                );
+            }
+            assert_eq!(std::fs::read(root.path().join("dst/a")).unwrap(), b"old");
+            assert_eq!(std::fs::read(root.path().join("dst/c")).unwrap(), b"old");
+            assert!(!root.path().join("dst/b").exists());
+            let calls = fs.calls.borrow();
+            assert_eq!(calls.removes, 0);
+            assert_eq!(calls.copies, 0);
+            assert_eq!(calls.writes, 0);
+            assert_eq!(calls.closes, if preserve { 3 } else { 0 });
+        }
+    }
+}
+
+#[test]
+fn replacement_preflight_skips_new_directory_destinations() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Harness::new(root.path());
+    for name in ["a", "b"] {
+        std::fs::write(root.path().join(name), b"new").unwrap();
+    }
+    copy_items(
+        &fs,
+        &["/a", "/b"],
+        "/dst",
+        TransferOptions::new().with_existing(Existing::Replace),
+    )
+    .unwrap();
+    assert!(fs.calls.borrow().destination_probes.is_empty());
+    assert_eq!(fs.calls.borrow().removes, 0);
 }

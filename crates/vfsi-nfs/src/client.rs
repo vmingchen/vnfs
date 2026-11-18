@@ -39,6 +39,16 @@ pub(crate) fn uncertain_completion(cause: &std::io::Error) -> bool {
             ))
 }
 
+pub(crate) fn decode_type_attribute(bytes: &[u8]) -> RpcResult<u32> {
+    let bytes = bytes.try_into().map_err(|_| {
+        RpcError::transport_with_kind(
+            vfsi_core::TransportKind::InvalidReply,
+            "invalid NFS type attribute",
+        )
+    })?;
+    Ok(u32::from_be_bytes(bytes))
+}
+
 /// Opaque NFS protocol reference to a server-side filesystem object.
 ///
 /// This addresses the object for NFS operations; it is not the
@@ -148,6 +158,17 @@ pub struct NfsClient {
     pub(crate) fail_merged_truncate_once: bool,
 }
 
+impl Drop for NfsClient {
+    fn drop(&mut self) {
+        // Session::drop destroys the active session after releasing these
+        // retained path OPENs. An explicitly shut down or abandoned client
+        // must not send any more CLOSEs.
+        if !self.deferred_path_closes.is_empty() && self.session.has_active_clientid() {
+            let _ = self.drain_deferred_path_closes();
+        }
+    }
+}
+
 /// Upper bound for the per-compound payload cap for merged path I/O; the
 /// actual default comes from the server-confirmed `ca_maxrequestsize`.
 pub const DEFAULT_MAX_COMPOUND_BYTES: usize = 4 << 20;
@@ -164,7 +185,7 @@ pub enum OpenCreate {
     NoCreate,
     /// Create with EXCLUSIVE4 semantics: fail with NFS4ERR_EXIST if present.
     Exclusive,
-    /// Create with GUARDED4 semantics: create if absent, succeed if present.
+    /// Create with GUARDED4 semantics: fail with NFS4ERR_EXIST if present.
     Guarded,
     /// Create with UNCHECKED4 semantics: create if absent, open if present.
     /// Lets a compound skip the existence probe entirely.
@@ -1731,12 +1752,7 @@ impl NfsClient {
         let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         let fh = NfsFh::from_nfs_fh(res.getfh(3));
-        let t = res.getattr_bytes(4);
-        let ftype = if t.len() >= 4 {
-            u32::from_be_bytes(t[0..4].try_into().unwrap())
-        } else {
-            0
-        };
+        let ftype = decode_type_attribute(res.getattr(4))?;
         Ok((fh, ftype))
     }
 
@@ -1758,17 +1774,10 @@ impl NfsClient {
             },
             |reply, local, _| {
                 let start = 1 + 4 * local;
-                let bytes = reply.getattr(start + 3);
-                if bytes.len() != 4 {
-                    return Err(vfsi_core::OpError::unknown(
-                        vfsi_core::internal::errors::invalid_reply("invalid LOOKUP type attribute"),
-                        None,
-                    ));
-                }
-                Ok((
-                    NfsFh::from_nfs_fh(reply.getfh(start + 2)),
-                    u32::from_be_bytes(bytes.try_into().unwrap()),
-                ))
+                let ftype = decode_type_attribute(reply.getattr(start + 3)).map_err(|error| {
+                    vfsi_core::OpError::unknown(vfsi_core::internal::errors::from_rpc(error), None)
+                })?;
+                Ok((NfsFh::from_nfs_fh(reply.getfh(start + 2)), ftype))
             },
         )
     }
@@ -3010,7 +3019,7 @@ impl NfsClient {
                         },
                         &op.file,
                         PathIoOpen {
-                            access: OPEN4_SHARE_ACCESS_BOTH,
+                            access: OPEN4_SHARE_ACCESS_WRITE,
                             create: if op.create && start == 0 {
                                 OpenCreate::Unchecked
                             } else {
@@ -3273,7 +3282,7 @@ impl NfsClient {
                             }
                             match self.repair_path_write(
                                 ops,
-                                &map.ranges[..report.completed.len()
+                                &map.ranges[..report.completed_count
                                     + usize::from(report.failure.is_some())],
                                 *caller,
                                 part + received,
@@ -4706,7 +4715,7 @@ impl NfsClient {
     }
 
     /// GETATTR the requested FATTR4 attributes of `fh`; returns the raw XDR
-    /// attribute list in request order.
+    /// attribute list in ascending attribute-number order, as defined by XDR.
     pub fn getattr(&mut self, fh: &NfsFh, attrs: &[u32]) -> RpcResult<Vec<u8>> {
         self.getattr_with_bitmap(fh, attrs).map(|(_, bytes)| bytes)
     }
@@ -4882,14 +4891,13 @@ impl NfsClient {
             let ent = unsafe { &*e };
             let name_len = ent.name.utf8string_len as usize;
             let name = if name_len == 0 {
-                Vec::new()
+                &[][..]
             } else {
                 // SAFETY: the live decoded entry owns name_len initialized name bytes; the
                 // zero-length case was handled separately.
                 unsafe {
                     std::slice::from_raw_parts(ent.name.utf8string_val as *const u8, name_len)
                 }
-                .to_vec()
             };
             if name.is_empty() || name.contains(&b'/') || name.contains(&0) {
                 return Err(RpcError::transport_with_kind(
@@ -4913,7 +4921,7 @@ impl NfsClient {
                     .to_vec()
                 };
                 out.push(DirEntry {
-                    name,
+                    name: name.to_vec(),
                     cookie: ent.cookie,
                     attrmask: ent.attrs.attrmask,
                     attrs,
@@ -5651,6 +5659,48 @@ mod tests {
                 .unwrap_err()
                 .is_transport()
         );
+    }
+
+    #[test]
+    fn readdir_filtered_names_preserve_raw_cookie_and_verifier() {
+        for dot_only in [false, true] {
+            let mut names = [
+                b".".to_vec(),
+                if dot_only { b"..".to_vec() } else { vec![0xff] },
+                b"..".to_vec(),
+            ];
+            // SAFETY: zero is valid for generated C scalar fields and nullable pointers.
+            let mut entries: [nfsv41_sys::entry4; 3] = unsafe { std::mem::zeroed() };
+            let base = entries.as_mut_ptr();
+            for (index, (entry, name)) in entries.iter_mut().zip(&mut names).enumerate() {
+                entry.cookie = [41, 42, 99][index];
+                entry.name.utf8string_len = name.len() as _;
+                entry.name.utf8string_val = name.as_mut_ptr().cast();
+                entry.nextentry = if index == 2 {
+                    std::ptr::null_mut()
+                } else {
+                    // SAFETY: index+1 is inside the live, fixed-size entries array.
+                    unsafe { base.add(index + 1) }
+                };
+            }
+            // SAFETY: zero is valid for this generated C response's fields.
+            let mut reply: nfsv41_sys::READDIR4resok = unsafe { std::mem::zeroed() };
+            reply.reply.entries = base;
+            reply.cookieverf = [3; 8];
+            for eof in [false, true] {
+                reply.reply.eof = i32::from(eof);
+                let (visible, next) = super::NfsClient::collect_readdir(&reply).unwrap();
+                if dot_only {
+                    assert!(visible.is_empty());
+                } else {
+                    assert_eq!(visible.len(), 1);
+                    assert_eq!(visible[0].name, [0xff]);
+                    assert_eq!(visible[0].cookie, 42);
+                }
+                assert_eq!(next.value, if eof { 0 } else { 99 });
+                assert_eq!(next.verifier, [3; 8]);
+            }
+        }
     }
 
     #[test]

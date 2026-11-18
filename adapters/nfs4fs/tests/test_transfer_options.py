@@ -324,3 +324,38 @@ def test_traversal_controls_keep_vector_transfer_path(
         assert not walks
     assert len(vectors) == 1
     assert len(vectors[0]) == 2
+
+
+@pytest.mark.parametrize("value", [3, [1, 2, 3], "text"])
+@pytest.mark.parametrize("bulk", [False, True])
+@pytest.mark.parametrize("mode", ["overwrite", "create"])
+@pytest.mark.parametrize("transactional", [False, True])
+def test_pipe_rejects_nonbuffer_payloads_before_any_mutation(
+    dummy_fs, value, bulk, mode, transactional
+):
+    from contextlib import nullcontext
+
+    paths = ["/invalid-payload", "/healthy-payload"]
+    if mode == "overwrite":
+        dummy_fs.pipe({path: b"original" for path in paths})
+    context = dummy_fs.transaction if transactional else nullcontext()
+    with context as transaction:
+        with pytest.raises(TypeError):
+            if bulk:
+                dummy_fs.pipe({paths[1]: b"replacement", paths[0]: value}, mode=mode)
+            else:
+                dummy_fs.pipe_file(paths[0], value, mode=mode)
+        if transactional:
+            assert not transaction.files
+    for path in paths:
+        if mode == "overwrite":
+            assert dummy_fs.cat_file(path) == b"original"
+        else:
+            assert not dummy_fs.exists(path)
+    assert not dummy_fs._client._fds
+
+
+@pytest.mark.parametrize("factory", [bytes, bytearray, memoryview])
+def test_pipe_preserves_supported_buffer_payloads(dummy_fs, factory):
+    dummy_fs.pipe({"/buffer": factory(b"payload")})
+    assert dummy_fs.cat_file("/buffer") == b"payload"

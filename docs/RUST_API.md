@@ -49,7 +49,7 @@ from the legacy backend operation types at the core crate root.
 
 `Vfsi` owns options-aware native vector execution. `VfsiExt` is blanket implemented
 for every `Vfsi` and supplies composed workflows and conventional scalar conveniences (`open`, `attrs`,
-`read_dir`, etc.). Generic applications need an
+`read_dir`, etc.). Generic applications need a
 `Vfsi` bound and a `VfsiExt` import; they do not implement extensions separately.
 
 Concrete clients do not duplicate these helpers as inherent methods. Native
@@ -179,7 +179,8 @@ to visit pages for several directory operands, with
 `ListDirOptions::with_recursive(true)` for bounded recursive trees. Use the
 `VfsiExt::read_dirs_with_options` collector only when retained listings are
 needed. `DirectoryListing` carries paths and already-fetched entry metadata.
-`vcopy` and `vremove` perform ordered batches without promising transactionality.
+`vcopy` and `vremove` retain input-positioned outcomes without imposing execution
+order or promising transactionality.
 
 ### Object IDs, open instances, and mount routes
 

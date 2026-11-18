@@ -22,7 +22,6 @@ pub(super) fn remap_listing_error(
 }
 
 fn open_adb_path(
-    _index: usize,
     mut open: impl FnMut(
         crate::client::OpenCreate,
     ) -> vfsi_core::RpcResult<(NfsFh, nfsv41_sys::stateid4)>,
@@ -30,7 +29,15 @@ fn open_adb_path(
     match open(crate::client::OpenCreate::NoCreate) {
         Ok(opened) => Ok(opened),
         Err(error) if error.status == nfsstat4_NFS4ERR_NOENT => {
-            open(crate::client::OpenCreate::Guarded).map_err(vfsi_core::internal::errors::from_rpc)
+            match open(crate::client::OpenCreate::Guarded) {
+                Err(error)
+                    if error.status == nfsstat4_NFS4ERR_EXIST && error.transport_kind.is_none() =>
+                {
+                    open(crate::client::OpenCreate::NoCreate)
+                }
+                result => result,
+            }
+            .map_err(vfsi_core::internal::errors::from_rpc)
         }
         Err(error) => Err(vfsi_core::internal::errors::from_rpc(error)),
     }
@@ -222,7 +229,6 @@ impl VectorBackend for NfsVecFs {
                 state.cookie.value,
                 next_cookie.value,
                 &mut state.seen_cookies,
-                None,
             )?;
             state.cookie = next_cookie;
             state.buffered = page.into();
@@ -317,9 +323,6 @@ impl VectorBackend for NfsVecFs {
                 .readdir(&fh, cookie, &ids)
                 .map_err(vfsi_core::internal::errors::from_rpc)?;
             for entry in &page {
-                if max_entries != 0 && count >= max_entries {
-                    return Ok(());
-                }
                 let path = dir.join(path_from_bytes(&entry.name));
                 let mut attrs = VfAttrs {
                     file: FileOperand::from_os_path(&path),
@@ -332,12 +335,15 @@ impl VectorBackend for NfsVecFs {
                     return Ok(());
                 }
                 count += 1;
+                if max_entries != 0 && count == max_entries {
+                    return Ok(());
+                }
             }
             let next = next_cookie;
             if next.value == 0 {
                 return Ok(());
             }
-            validate_readdir_progress(cookie.value, next.value, &mut seen_cookies, None)?;
+            validate_readdir_progress(cookie.value, next.value, &mut seen_cookies)?;
             cookie = next;
         }
     }
@@ -406,13 +412,6 @@ impl VectorBackend for NfsVecFs {
                 )
             }
             .map_err(|error| remap_listing_error(error, &level_owners))?;
-            if results.len() != level.len() {
-                return Err(IndexedError::unattributed(
-                    vfsi_core::internal::errors::invalid_reply(
-                        "READDIR returned the wrong number of directory pages",
-                    ),
-                ));
-            }
             // Emit each bounded READDIR page before fetching a continuation.
             // Retaining every page until EOF used memory proportional to the
             // entire listing even when the caller requested an early stop.
@@ -423,9 +422,6 @@ impl VectorBackend for NfsVecFs {
                     let dir = &level[idx].1;
                     let owner = level[idx].2;
                     for e in entries {
-                        if max_entries != 0 && counted >= max_entries {
-                            return Ok(false);
-                        }
                         let path = dir.join(path_from_bytes(&e.name));
                         let mut a = VfAttrs {
                             file: FileOperand::from_os_path(&path),
@@ -443,6 +439,9 @@ impl VectorBackend for NfsVecFs {
                             return Ok(false);
                         }
                         counted += 1;
+                        if max_entries != 0 && counted == max_entries {
+                            return Ok(false);
+                        }
                     }
                     Ok(true)
                 };
@@ -455,7 +454,7 @@ impl VectorBackend for NfsVecFs {
                     return Ok(());
                 }
                 let mut seen_cookies = std::collections::HashSet::new();
-                validate_readdir_progress(0, cookie.value, &mut seen_cookies, Some(level[idx].2))
+                validate_readdir_progress(0, cookie.value, &mut seen_cookies)
                     .map_err(|cause| IndexedError::at(level[idx].2, cause))?;
                 if cookie.value != 0 {
                     pending.push((idx, level[idx].0.clone(), cookie, seen_cookies));
@@ -476,13 +475,6 @@ impl VectorBackend for NfsVecFs {
                     )
                 }
                 .map_err(|error| remap_listing_error(error, &pending_owners))?;
-                if cont.len() != pending.len() {
-                    return Err(IndexedError::unattributed(
-                        vfsi_core::internal::errors::invalid_reply(
-                            "READDIR continuation returned the wrong number of pages",
-                        ),
-                    ));
-                }
                 let mut next_pending = Vec::new();
                 for ((idx, fh, previous_cookie, mut seen_cookies), (entries, cookie)) in
                     pending.into_iter().zip(cont)
@@ -491,7 +483,6 @@ impl VectorBackend for NfsVecFs {
                         previous_cookie.value,
                         cookie.value,
                         &mut seen_cookies,
-                        Some(level[idx].2),
                     )
                     .map_err(|cause| IndexedError::at(level[idx].2, cause))?;
                     if !emit_page(idx, entries)? {
@@ -549,7 +540,7 @@ impl VectorBackend for NfsVecFs {
                 &mut budget,
                 &mut root_attrs,
             )?;
-            validate_readdir_progress(cookie.value, next_cookie.value, &mut seen_cookies, None)?;
+            validate_readdir_progress(cookie.value, next_cookie.value, &mut seen_cookies)?;
             cookie = next_cookie;
             if cookie.value == 0 {
                 break;
@@ -609,7 +600,7 @@ impl VectorBackend for NfsVecFs {
                     &mut level_attrs[index],
                 )?;
                 let mut seen_cookies = std::collections::HashSet::new();
-                validate_readdir_progress(0, result.cookie.value, &mut seen_cookies, None)?;
+                validate_readdir_progress(0, result.cookie.value, &mut seen_cookies)?;
                 if result.cookie.value != 0 {
                     pending.push((index, result.fh.clone(), result.cookie, seen_cookies));
                 }
@@ -636,7 +627,6 @@ impl VectorBackend for NfsVecFs {
                         previous_cookie.value,
                         cookie.value,
                         &mut seen_cookies,
-                        None,
                     )?;
                     append_bounded_walk_page(
                         root,
@@ -1275,15 +1265,15 @@ impl VectorBackend for NfsVecFs {
     fn vwrite_adb_impl(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
         self.ensure_writable(patterns.len())?;
         let mut counts = Vec::with_capacity(patterns.len());
-        for (i, p) in patterns.iter().enumerate() {
-            let layout = vfsi_core::internal::adb_layout(p, i)?;
+        for p in patterns {
+            let layout = vfsi_core::internal::adb_layout(p)?;
             let full = self.server_path(&p.path);
             let (dir, name) = match split_path_bytes(path_bytes(&full)) {
                 Ok(x) => x,
                 Err(_) => return Err(std::io::Error::from_raw_os_error((ERR_NOENT) as i32)),
             };
             let dirfh = self.resolve_path(&path_from_bytes(dir), true)?;
-            let (fh, sid) = open_adb_path(i, |create| {
+            let (fh, sid) = open_adb_path(|create| {
                 self.nfs
                     .open_path(&dirfh, name, OPEN4_SHARE_ACCESS_WRITE, create)
             })?;
@@ -1294,7 +1284,6 @@ impl VectorBackend for NfsVecFs {
                     let adbn = block_number.to_be_bytes();
                     if let Err(error) = super::io::write_all_at(
                         &mut self.nfs,
-                        i,
                         offset,
                         &adbn,
                         |nfs, offset, data| {
@@ -1311,7 +1300,6 @@ impl VectorBackend for NfsVecFs {
                     && !p.adb_pattern_data.is_empty()
                     && let Err(error) = super::io::write_all_at(
                         &mut self.nfs,
-                        i,
                         offset,
                         &p.adb_pattern_data,
                         |nfs, offset, data| {
@@ -1326,7 +1314,7 @@ impl VectorBackend for NfsVecFs {
                 }
                 written += 1;
             }
-            let _ = self.nfs.close_path(&fh, &sid);
+            let _ = self.nfs.close_temporary_path(&fh, &sid);
             if let Some(e) = failed {
                 return Err(e);
             }
@@ -1353,10 +1341,138 @@ mod adb_path_tests {
     }
 
     #[test]
+    fn adb_creation_race_reopens_once_and_preserves_terminal_errors() {
+        use crate::client::OpenCreate;
+        for terminal in [None, Some(nfsstat4_NFS4ERR_ACCESS)] {
+            let mut calls = Vec::new();
+            let result = open_adb_path(|create| {
+                calls.push(create);
+                let status = match calls.len() {
+                    1 => Some(nfsstat4_NFS4ERR_NOENT),
+                    2 => Some(nfsstat4_NFS4ERR_EXIST),
+                    3 => terminal,
+                    _ => panic!("ADB create retry must be bounded"),
+                };
+                status.map_or_else(
+                    || Ok(opened()),
+                    |status| Err(vfsi_core::RpcError::op(0, status)),
+                )
+            });
+            assert_eq!(
+                calls,
+                [
+                    OpenCreate::NoCreate,
+                    OpenCreate::Guarded,
+                    OpenCreate::NoCreate
+                ]
+            );
+            match terminal {
+                None => assert_eq!(result.unwrap().0, opened().0),
+                Some(code) => assert_eq!(crate::test_native_code(&result.unwrap_err()), code),
+            }
+        }
+    }
+
+    #[test]
+    fn adb_does_not_retry_terminal_or_uncertain_creates() {
+        for phase in ["denied", "uncached", "lost"] {
+            let mut calls = Vec::new();
+            let error = open_adb_path(|create| {
+                calls.push(create);
+                Err(if calls.len() == 1 {
+                    vfsi_core::RpcError::op(0, nfsstat4_NFS4ERR_NOENT)
+                } else {
+                    match phase {
+                        "denied" => vfsi_core::RpcError::op(0, nfsstat4_NFS4ERR_ACCESS),
+                        "uncached" => {
+                            vfsi_core::RpcError::op(0, nfsstat4_NFS4ERR_RETRY_UNCACHED_REP)
+                        }
+                        _ => vfsi_core::RpcError::transport("lost CREATE reply"),
+                    }
+                })
+            })
+            .unwrap_err();
+            assert_eq!(
+                calls,
+                [
+                    crate::client::OpenCreate::NoCreate,
+                    crate::client::OpenCreate::Guarded
+                ]
+            );
+            if phase == "lost" {
+                assert!(vfsi_core::transport_kind(&error).is_some());
+            } else {
+                assert_eq!(
+                    crate::test_native_code(&error),
+                    if phase == "denied" {
+                        nfsstat4_NFS4ERR_ACCESS
+                    } else {
+                        nfsstat4_NFS4ERR_RETRY_UNCACHED_REP
+                    }
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[test]
+    fn live_adb_retains_temporary_close_owners_after_success_and_write_failure() {
+        use std::sync::Arc;
+        use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+        let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+            assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+            return;
+        };
+        let minor = std::env::var("VFSI_NFS_MINOR")
+            .unwrap_or_else(|_| "1".into())
+            .parse()
+            .unwrap();
+        for write_fails in [false, true] {
+            let mut fs = NfsVecFs::connect_minor(&server, minor).unwrap();
+            let path = PathBuf::from(format!(
+                "/adb-close-owner-{}-{write_fails}",
+                std::process::id()
+            ));
+            let fault = Arc::new(FaultScript::one(
+                OpenFaultPoint::BeforePathClose,
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            ));
+            fs.set_fault_injector(fault.clone());
+            if write_fails {
+                fs.nfs.inject_resource_rejection_once(b"write");
+            }
+            let result =
+                fs.vwrite_adb_impl(&[Adb::blocknum_only(path.to_str().unwrap(), 0, 8, 1, 0, 17)]);
+            let pending = fs.nfs.deferred_path_close_count();
+            let confirmed = fs.nfs.confirmed_path_closes();
+            let size = fs.stat_impl(&path).unwrap().size;
+            fs.unlink_impl(&path).unwrap();
+            fs.nfs.shutdown().unwrap();
+            assert!(fault.is_consumed());
+            assert_eq!(
+                pending, 1,
+                "exact temporary owner must survive failed CLOSE"
+            );
+            assert_eq!(fs.nfs.deferred_path_close_count(), 0);
+            assert_eq!(fs.nfs.confirmed_path_closes(), confirmed + 1);
+            if write_fails {
+                assert_eq!(
+                    crate::test_native_code(&result.unwrap_err()),
+                    nfsstat4_NFS4ERR_RESOURCE
+                );
+                assert_eq!(size, 0);
+            } else {
+                assert_eq!(result.unwrap(), [1]);
+                assert_eq!(size, 8);
+            }
+        }
+    }
+
+    #[test]
     fn adb_reuses_existing_path_and_only_creates_after_noent() {
         let expected = opened();
         let mut calls = Vec::new();
-        let actual = open_adb_path(5, |create| {
+        let actual = open_adb_path(|create| {
             calls.push(create);
             assert_eq!(create, crate::client::OpenCreate::NoCreate);
             Ok(expected.clone())
@@ -1367,7 +1483,7 @@ mod adb_path_tests {
 
         let expected = opened();
         let mut calls = Vec::new();
-        let actual = open_adb_path(7, |create| {
+        let actual = open_adb_path(|create| {
             calls.push(create);
             match create {
                 crate::client::OpenCreate::NoCreate => {

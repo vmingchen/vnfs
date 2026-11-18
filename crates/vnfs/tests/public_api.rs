@@ -2,18 +2,30 @@
     test,
     allow(clippy::undocumented_unsafe_blocks, unsafe_op_in_unsafe_fn)
 )]
-//! Compile-time coverage for the application-facing NFS API and the explicit
-//! low-level backend namespace. No live server is needed.
+//! Coverage for the portable application API and enabled backend namespaces.
+//! No live server is needed.
 
+#[cfg(all(feature = "auto", target_os = "linux"))]
 use std::io::Read;
-use vnfs::files::{OpenFlags, OpenOp, ReadOptions, Vfsi, VfsiExt};
+#[cfg(all(feature = "auto", target_os = "linux"))]
+use vnfs::files::Vfsi;
+#[cfg(any(feature = "nfs", all(feature = "posix", unix)))]
+use vnfs::files::VfsiExt;
+use vnfs::files::{OpenFlags, OpenOp, ReadOptions};
+#[cfg(feature = "nfs")]
 use vnfs::nfs::{Nfs, NfsAuth, NfsBuilder};
 
 #[test]
 fn application_surface_is_small_and_typed() {
-    let _: NfsBuilder = Nfs::builder("server.example.com")
-        .root("/export")
-        .auth(NfsAuth::AuthSys);
+    #[cfg(feature = "nfs")]
+    {
+        let _: NfsBuilder = Nfs::builder("server.example.com")
+            .root("/export")
+            .auth(NfsAuth::AuthSys);
+        let _: Option<vnfs::nfs::NfsClient> = None;
+        let _: Option<vnfs::nfs::NfsFile> = None;
+        let _: Option<vfsi_nfs::client::NfsFh> = None;
+    }
     let _ = OpenOp::new("/file", OpenFlags::READ);
     assert_eq!(ReadOptions::new().max_total_bytes(), None);
     assert_eq!(
@@ -22,10 +34,7 @@ fn application_surface_is_small_and_typed() {
             .max_total_bytes(),
         std::num::NonZeroUsize::new(42)
     );
-    let _: Option<vnfs::nfs::NfsClient> = None;
-    let _: Option<vnfs::nfs::NfsFile> = None;
     let _: Option<vnfs::Result<()>> = None;
-    let _: Option<vfsi_nfs::client::NfsFh> = None;
 }
 
 #[cfg(all(feature = "auto", target_os = "linux"))]
@@ -89,10 +98,13 @@ fn fs_obj_id_is_available_from_the_application_metadata_module() {
 
 #[test]
 fn application_requests_results_and_errors_are_root_types() {
-    fn request(file: &vnfs::nfs::NfsFile) -> vnfs::files::ReadOp<'_, vnfs::nfs::NfsFile> {
-        vnfs::files::ReadOp::range(file, 0, 1)
+    #[cfg(feature = "nfs")]
+    {
+        fn request(file: &vnfs::nfs::NfsFile) -> vnfs::files::ReadOp<'_, vnfs::nfs::NfsFile> {
+            vnfs::files::ReadOp::range(file, 0, 1)
+        }
+        let _ = request;
     }
-    let _ = request;
     let result = vnfs::files::ReadOutput::owned(0, vec![1], false);
     assert_eq!(result.data(), Some([1].as_slice()));
     let into = vnfs::files::ReadOutput::buffered(7, 1, true);
@@ -105,12 +117,16 @@ fn application_requests_results_and_errors_are_root_types() {
     );
     let selected = vnfs::error::IndexedError::at(2, error);
     assert_eq!(selected.index(), Some(2));
-    assert!(vnfs::nfs::NfsVersion::try_from(Some(3)).is_err());
-    let _ = Nfs::builder("server")
-        .version(vnfs::nfs::NfsVersion::V4_1)
-        .limits(vnfs::files::ResourceLimits::default());
+    #[cfg(feature = "nfs")]
+    {
+        assert!(vnfs::nfs::NfsVersion::try_from(Some(3)).is_err());
+        let _ = Nfs::builder("server")
+            .version(vnfs::nfs::NfsVersion::V4_1)
+            .limits(vnfs::files::ResourceLimits::default());
+    }
 }
 
+#[cfg(feature = "nfs")]
 #[test]
 fn application_traversal_and_mutation_do_not_require_backend_imports() {
     fn app(client: &vnfs::nfs::NfsClient) -> vnfs::Result<()> {
@@ -375,7 +391,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     std::fs::remove_dir(&root).unwrap();
 }
 
-#[cfg(all(feature = "auto", target_os = "linux"))]
+#[cfg(all(feature = "posix", unix))]
 fn tempfile_root() -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!(
         "vnfs-public-api-{}-{}",
@@ -519,6 +535,7 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
     std::fs::remove_dir(root).unwrap();
 }
 
+#[cfg(all(feature = "posix", unix))]
 #[test]
 fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
     use vnfs::directory::{Attributes, ListDirOptions};
@@ -631,17 +648,20 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
 
 #[test]
 fn portable_traits_and_options_are_reexports_not_parallel_contracts() {
-    fn accepts_vnfs<C: vnfs::files::Vfsi>(_: &C) {}
-    fn accepts_core<C: vfsi_core::Vfsi>(fs: &C) {
-        accepts_vnfs(fs);
+    #[cfg(all(feature = "posix", unix))]
+    {
+        fn accepts_vnfs<C: vnfs::files::Vfsi>(_: &C) {}
+        fn accepts_core<C: vfsi_core::Vfsi>(fs: &C) {
+            accepts_vnfs(fs);
+        }
+        fn accepts_core_extension<C: vfsi_core::VfsiExt>(_: &C) {}
+        fn accepts_vnfs_extension<C: vnfs::files::VfsiExt>(fs: &C) {
+            accepts_core_extension(fs);
+        }
+        // Prove bounds in both directions without opening a connection.
+        let _ = accepts_core::<vfsi_sync::FsClient<vfsi_local::LocalBackend>>;
+        let _ = accepts_vnfs_extension::<vfsi_sync::FsClient<vfsi_local::LocalBackend>>;
     }
-    fn accepts_core_extension<C: vfsi_core::VfsiExt>(_: &C) {}
-    fn accepts_vnfs_extension<C: vnfs::files::VfsiExt>(fs: &C) {
-        accepts_core_extension(fs);
-    }
-    // Prove bounds in both directions without opening a connection.
-    let _ = accepts_core::<vfsi_sync::FsClient<vfsi_local::LocalBackend>>;
-    let _ = accepts_vnfs_extension::<vfsi_sync::FsClient<vfsi_local::LocalBackend>>;
     let core: vfsi_core::api::ReadOptions = vnfs::files::ReadOptions::new();
     let _: vnfs::files::ReadOptions = core;
     let core: vfsi_core::api::ListDirOptions = vnfs::directory::ListDirOptions::new();
@@ -720,6 +740,7 @@ fn vector_links_modes_and_capabilities_work_generically_on_local_and_auto() {
     );
 }
 
+#[cfg(all(feature = "auto", target_os = "linux"))]
 #[path = "support/statfs.rs"]
 mod statfs_support;
 
@@ -954,15 +975,18 @@ fn policy_builders_preserve_zero_budgets_and_bound_recovery() {
     assert_eq!(remove.batch_size(), None);
     assert_eq!(remove.retries(), 0);
     assert!(remove.continue_on_error());
-    let recovery = vnfs::nfs::NfsRecoveryPolicy::new()
-        .with_reconnect_attempts(std::num::NonZeroUsize::new(1).expect("nonzero tuning value"))
-        .with_initial_backoff(std::time::Duration::MAX)
-        .with_max_backoff(std::time::Duration::ZERO)
-        .with_max_elapsed(std::time::Duration::ZERO);
-    assert_eq!(recovery.reconnect_attempts(), 1);
-    assert_eq!(recovery.initial_backoff(), std::time::Duration::MAX);
-    assert_eq!(recovery.max_backoff(), std::time::Duration::ZERO);
-    assert_eq!(recovery.max_elapsed(), std::time::Duration::ZERO);
+    #[cfg(feature = "nfs")]
+    {
+        let recovery = vnfs::nfs::NfsRecoveryPolicy::new()
+            .with_reconnect_attempts(std::num::NonZeroUsize::new(1).expect("nonzero tuning value"))
+            .with_initial_backoff(std::time::Duration::MAX)
+            .with_max_backoff(std::time::Duration::ZERO)
+            .with_max_elapsed(std::time::Duration::ZERO);
+        assert_eq!(recovery.reconnect_attempts(), 1);
+        assert_eq!(recovery.initial_backoff(), std::time::Duration::MAX);
+        assert_eq!(recovery.max_backoff(), std::time::Duration::ZERO);
+        assert_eq!(recovery.max_elapsed(), std::time::Duration::ZERO);
+    }
 }
 
 #[cfg(all(feature = "auto", target_os = "linux"))]
@@ -1253,6 +1277,7 @@ fn local_constructors_preserve_missing_and_non_directory_root_errors() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(all(feature = "posix", unix))]
 #[path = "support/write_results.rs"]
 mod write_results_support;
 
@@ -1276,16 +1301,18 @@ fn public_mounted_write_outcomes_preserve_siblings() {
     write_results_support::check(&fs, &other, "/writes", vfsi_core::FailureState::Failed);
 }
 
+#[cfg(all(feature = "posix", unix))]
 #[path = "support/removal_results.rs"]
 mod removal_results;
 
+#[cfg(all(feature = "posix", unix))]
 #[test]
 fn public_removal_results_preserve_independent_roots() {
     let root = tempfile_root();
     let fs = vnfs::posix::Posix::new(&root).unwrap();
     fs.create_dir("/local_removal").unwrap();
     removal_results::check(&fs, "/local_removal");
-    #[cfg(feature = "auto")]
+    #[cfg(all(feature = "auto", target_os = "linux"))]
     {
         let auto = vnfs::mounted::Auto::new(&root).unwrap();
         auto.create_dir("/auto_removal").unwrap();
@@ -1294,13 +1321,14 @@ fn public_removal_results_preserve_independent_roots() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(all(feature = "posix", unix))]
 #[test]
 fn public_directory_outcomes_preserve_siblings_and_cursor_identity() {
     let root = tempfile_root();
     let fs = vnfs::posix::Posix::new(&root).unwrap();
     let other = vnfs::posix::Posix::new(&root).unwrap();
     vfsi_sync::test_support::public_directory_results(&fs, &other, "/local_pages", true);
-    #[cfg(feature = "auto")]
+    #[cfg(all(feature = "auto", target_os = "linux"))]
     {
         let fs = vnfs::mounted::Auto::new(&root).unwrap();
         let other = vnfs::mounted::Auto::new(&root).unwrap();
@@ -1309,12 +1337,13 @@ fn public_directory_outcomes_preserve_siblings_and_cursor_identity() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(all(feature = "posix", unix))]
 #[test]
 fn public_stream_outcomes_preserve_siblings_and_delivery_progress() {
     let root = tempfile_root();
     let fs = vnfs::posix::Posix::new(&root).unwrap();
     vfsi_sync::test_support::public_stream_results(&fs, "/local_streams");
-    #[cfg(feature = "auto")]
+    #[cfg(all(feature = "auto", target_os = "linux"))]
     {
         let fs = vnfs::mounted::Auto::new(&root).unwrap();
         vfsi_sync::test_support::public_stream_results(&fs, "/mounted_streams");
@@ -1322,6 +1351,7 @@ fn public_stream_outcomes_preserve_siblings_and_delivery_progress() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(all(feature = "posix", unix))]
 fn test_native_code(error: &std::io::Error) -> u32 {
     match vfsi_core::native_status(error) {
         Some(

@@ -1591,8 +1591,9 @@ fn optional_operation_capabilities_match_local_and_routed_dispatch() {
     assert!(!caps.contains(Capabilities::DIRECTORY_HANDLES));
     assert!(!caps.contains(Capabilities::ANCHORED_REMOVAL));
     #[cfg(target_os = "linux")]
+    assert!(caps.contains(Capabilities::RENAME_NOREPLACE | Capabilities::RENAME_EXCHANGE));
+    #[cfg(all(feature = "auto", target_os = "linux"))]
     {
-        assert!(caps.contains(Capabilities::RENAME_NOREPLACE | Capabilities::RENAME_EXCHANGE));
         let routed = vnfs::mounted::Auto::new(root.path()).unwrap();
         assert!(
             !routed

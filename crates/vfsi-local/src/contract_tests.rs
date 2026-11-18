@@ -525,6 +525,83 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn constructor_allows_known_files_without_directory_read_permission() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = TempRoot::new("search-only-root");
+        std::fs::create_dir(&root.0).unwrap();
+        std::fs::set_permissions(&root.0, std::fs::Permissions::from_mode(0o300)).unwrap();
+        // Restore permissions before inspecting any result, including setup failures.
+        let result = (|| -> std::io::Result<_> {
+            let mut backend = LocalBackend::new(root.0.clone(), ())?;
+            let file = FileOperand::from_path("/known");
+            backend
+                .vwrite_impl(&borrow_writes(&[WriteOp::at(
+                    file.clone(),
+                    0,
+                    b"known data".to_vec(),
+                )
+                .with_creation()]))?
+                .remove(0)
+                .map_err(OpError::into_cause)?;
+            let read = backend
+                .vread_impl(&[ReadOp::new(file, VfOffset::At(0), 32)])?
+                .remove(0)
+                .map_err(OpError::into_cause)?;
+            let stats = backend
+                .vstatfs_impl(&[FileOperand::from_path("/")])?
+                .remove(0)
+                .map_err(OpError::into_cause)?;
+            let listing = backend.listdir_impl(Path::new("/"), AttrMask::MODE, 0, false);
+            Ok((read.data, stats, listing))
+        })();
+        std::fs::set_permissions(&root.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (data, _stats, listing) = result.unwrap();
+        assert_eq!(data, b"known data");
+        // Root bypasses DAC; ordinary test users must still lack enumeration rights.
+        // SAFETY: geteuid has no arguments or preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            assert_eq!(
+                listing.unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+        }
+    }
+
+    #[test]
+    fn followed_symlink_cycles_report_eloop_without_breaking_nofollow_operations() {
+        use std::os::unix::fs::symlink;
+        let (root, mut backend) = fs("symlink-cycle-errors");
+        symlink("self", root.0.join("self")).unwrap();
+        symlink("second", root.0.join("first")).unwrap();
+        symlink("first", root.0.join("second")).unwrap();
+        for path in ["/self", "/first", "/second"] {
+            let path = Path::new(path);
+            let stat_error = backend.stat_impl(path).unwrap_err();
+            assert_eq!(stat_error.raw_os_error(), Some(libc::ELOOP));
+            let open_error = backend.open_raw_impl(path, libc::O_RDONLY, 0).unwrap_err();
+            assert_eq!(open_error.raw_os_error(), Some(libc::ELOOP));
+            let read_error = backend
+                .read_raw_impl(&FileOperand::from_os_path(path), 0, 1)
+                .unwrap_err();
+            assert_eq!(read_error.raw_os_error(), Some(libc::ELOOP));
+            assert_eq!(backend.lstat_impl(path).unwrap().ftype, VfType::Symlink);
+            assert!(
+                !backend
+                    .vreadlink_impl(&[path])
+                    .unwrap()
+                    .remove(0)
+                    .unwrap()
+                    .is_empty()
+            );
+            let create_error = backend
+                .open_raw_impl(path, libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY, 0o600)
+                .unwrap_err();
+            assert_eq!(create_error.raw_os_error(), Some(libc::EEXIST));
+        }
+    }
+
     #[test]
     fn constructor_rejects_fifo_roots_without_waiting_for_a_writer() {
         use std::os::unix::ffi::OsStrExt;
@@ -1170,6 +1247,30 @@ mod tests {
             assert_eq!(test_native_code(&(error)), libc::EOVERFLOW as u32);
             assert!(!fs.exists_impl(Path::new("/overflow")).unwrap());
         }
+    }
+
+    #[test]
+    fn adb_native_offset_preflight_checks_last_written_field_before_open() {
+        let (root, mut backend) = fs("adb-native-offset");
+        let max = i64::MAX as u64;
+        let mut pattern = Adb::blocknum_only("/pattern", max, 2, 1, 0, 0);
+        pattern.adb_reloff_blocknum = None;
+        pattern.adb_reloff_pattern = Some(0);
+        pattern.adb_pattern_data = vec![1];
+        for request in [
+            Adb::blocknum_only("/single", max, 2, 1, 0, 0),
+            Adb::blocknum_only("/last", max - 16, 16, 2, 0, 0),
+            pattern.clone(),
+        ] {
+            let path = root.0.join(request.path.strip_prefix("/").unwrap());
+            let result = backend.vwrite_adb_impl(&[request]);
+            assert!(result.is_err());
+            assert!(!path.exists());
+        }
+        pattern.adb_offset = max + 1;
+        pattern.adb_pattern_data.clear();
+        assert_eq!(backend.vwrite_adb_impl(&[pattern]).unwrap(), [1]);
+        assert_eq!(std::fs::read(root.0.join("pattern")).unwrap(), b"");
     }
 
     // ------------------------------------------------------------------
@@ -2852,6 +2953,11 @@ mod tests {
             "an empty directory must not be reported copied over a regular file"
         );
         assert_eq!(std::fs::read(root.0.join("file")).unwrap(), b"keep");
+        let error = backend
+            .copy_tree_impl(Path::new("/file"), Path::new("/new"), false, false)
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
+        assert!(!root.0.join("new").exists());
         for target in ["/source", "/source/inside"] {
             assert!(
                 backend
@@ -4532,7 +4638,7 @@ mod tests {
         let (root, mut backend) = fs("write-signed-offset-preflight");
         let existing = FileOperand::from_path("/existing");
         let missing = FileOperand::from_path("/missing");
-        for offset in [i64::MAX as u64 + 1, u64::MAX - 1] {
+        for offset in [i64::MAX as u64, i64::MAX as u64 + 1, u64::MAX - 1] {
             std::fs::write(root.0.join("existing"), b"preserved").unwrap();
             let writes = [
                 WriteOp::at(&existing, offset, b"x".as_slice()).with_truncate(),
@@ -4754,6 +4860,33 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+    #[test]
+    fn impossible_copy_offset_leaves_missing_destinations_absent() {
+        let (root, mut backend) = fs("copy-offset-preflight");
+        std::fs::write(root.0.join("source"), b"abc").unwrap();
+        let impossible = i64::MAX as u64 + 1;
+        let pairs = [
+            ExtentPair::new("/source", 0, "/invalid", impossible, Some(1)),
+            ExtentPair::new("/source", 0, "/empty", impossible, Some(0)),
+            ExtentPair::new("/source", impossible, "/invalid-source", 0, None),
+            ExtentPair::new("/source", 1, "/valid", 1, Some(u64::MAX)),
+            ExtentPair::new("/source", impossible, "/zero", 0, Some(0)),
+        ];
+        let outcomes = backend.vcopy_data_impl(&pairs).unwrap();
+        for (outcome, file) in outcomes[..3]
+            .iter()
+            .zip(["invalid", "empty", "invalid-source"])
+        {
+            assert_eq!(
+                outcome.as_ref().unwrap_err().cause().kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+            assert!(!root.0.join(file).exists());
+        }
+        assert!(outcomes[3].is_ok() && outcomes[4].is_ok());
+        assert_eq!(std::fs::read(root.0.join("zero")).unwrap(), b"");
+        assert_eq!(std::fs::read(root.0.join("valid")).unwrap(), b"\0bc");
     }
     #[test]
     fn finite_forward_alias_copy_stops_at_original_source_eof() {

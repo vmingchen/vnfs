@@ -1927,7 +1927,9 @@ fn compound_stats_record(args: &COMPOUND4args, encoded_bytes: Option<u64>) {
             }
             let _ = write!(buf, "{}", op);
         }
-        eprintln!("[dump] compound ops={}: {}", ops, buf);
+        use std::io::Write;
+        // A diagnostic sink must not replace the result of a completed RPC.
+        let _ = writeln!(std::io::stderr().lock(), "[dump] compound ops={ops}: {buf}");
     }
     if let Some(bytes) = encoded_bytes {
         COMPOUND_BYTES.fetch_add(bytes, Ordering::Relaxed);
@@ -1936,6 +1938,43 @@ fn compound_stats_record(args: &COMPOUND4args, encoded_bytes: Option<u64>) {
             stats.set((count, ops, previous + bytes, max_ops));
         });
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn failed_compound_dump_still_records_request_stats() {
+    const CHILD: &str = "VFSI_DUMP_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let full_device = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "compound::failed_compound_dump_still_records_request_stats",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("VNFS_DUMP", "1")
+            .stderr(std::process::Stdio::from(full_device))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "compound dump child failed: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return;
+    }
+    let mut compound = Compound::new();
+    for _ in 0..101 {
+        compound.putrootfh();
+    }
+    compound.args.argarray.argarray_len = compound.ops.len() as u_int;
+    compound.args.argarray.argarray_val = compound.ops.as_mut_ptr();
+    compound_stats_record(&compound.args, Some(424));
+    assert_eq!(thread_compound_stats(), (1, 101, 424, 101));
 }
 
 /// Aggregate compound statistics, resetting the counters.

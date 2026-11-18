@@ -214,7 +214,8 @@ pub unsafe extern "C" fn vfsi_preadv_ex(
 /// progress never grants replay permission. Never fall back after dispatch.
 /// # Safety
 /// Same pointer, lifetime and non-aliasing contract as the legacy vector API,
-/// with count writable vfsi_io_result outputs. Read buffers may be uninitialized.
+/// with count writable vfsi_io_result outputs. Each nonempty write payload
+/// must contain initialized bytes for the full call.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_pwritev_ex(
     fs: *mut vfsi_fs,
@@ -356,7 +357,6 @@ pub unsafe extern "C" fn vfsi_pwritev_ex(
                     results[index] = success(index, value.offset, false);
                 }
                 Err(error) => {
-                    let offset: Option<u64> = None;
                     if let Some(progress) = error.progress() {
                         let valid_state = error.state() != FailureState::NotAttempted;
                         match progress {
@@ -378,10 +378,6 @@ pub unsafe extern "C" fn vfsi_pwritev_ex(
                         }
                     }
                     results[index] = failed(index, error);
-                    if let Some(actual) = offset {
-                        results[index].offset = actual;
-                        results[index].offset_known = 1;
-                    }
                 }
             }
         }

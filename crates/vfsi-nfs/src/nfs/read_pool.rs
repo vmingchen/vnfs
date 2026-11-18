@@ -5,7 +5,6 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use vfsi_core::VfResult;
 use vfsi_sync::{FsClient, OpenFile, StreamCompletion, VfsiExt};
@@ -169,17 +168,17 @@ impl NfsReadPool {
         options: NfsReadPoolOptions,
     ) -> VfResult<Self> {
         let (worker_count, in_flight) = options.effective()?;
+        // The contiguous in-flight window is assigned round-robin. Each worker
+        // receives at most this many reads, with control messages sent between windows.
+        let queue_capacity = in_flight.div_ceil(worker_count);
         let (event_tx, events) = mpsc::channel();
-        let pool_id = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
+        let pool_id = crate::session::next_client_token();
         let mut commands = Vec::with_capacity(worker_count);
         let mut threads = Vec::with_capacity(worker_count);
         for worker in 0..worker_count {
-            let (command_tx, command_rx) = mpsc::sync_channel(in_flight);
+            let (command_tx, command_rx) = mpsc::sync_channel(queue_capacity);
             commands.push(command_tx);
-            let worker_builder = unique_worker_builder(builder.clone(), pool_id, worker);
+            let worker_builder = builder.pool_member(pool_id, worker);
             let worker_events = event_tx.clone();
             let run_events = worker_events.clone();
             let thread = spawn_worker_thread(worker, worker_events, move || {
@@ -390,7 +389,7 @@ impl NfsReadPool {
                     .checked_mul(chunk_size as u64)
                     .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
                 let length = (size - offset).min(chunk_size as u64) as usize;
-                let worker = (next_job as usize) % self.effective_workers;
+                let worker = (next_job % self.effective_workers as u64) as usize;
                 if self.commands[worker]
                     .send(WorkerCommand::Read {
                         stream_id,
@@ -484,7 +483,6 @@ impl NfsReadPool {
                             }
                         }
                         Err(error) => {
-                            let _index = usize::try_from(index).unwrap_or(usize::MAX);
                             primary_error = Some(vfsi_core::internal::errors::with_context(
                                 error,
                                 "read_stream_pipelined",
@@ -708,20 +706,6 @@ impl Drop for NfsReadPool {
             let _ = thread.join();
         }
     }
-}
-
-fn unique_worker_builder(
-    mut builder: NfsClientBuilder,
-    pool_id: u128,
-    worker: usize,
-) -> NfsClientBuilder {
-    if let Some(owner) = &mut builder.options.client_owner {
-        let suffix = format!("-read-pool-{}-{pool_id:x}-{worker}", std::process::id());
-        let keep = 1024usize.saturating_sub(suffix.len());
-        owner.truncate(keep);
-        owner.extend_from_slice(suffix.as_bytes());
-    }
-    builder
 }
 
 fn spawn_worker_thread(

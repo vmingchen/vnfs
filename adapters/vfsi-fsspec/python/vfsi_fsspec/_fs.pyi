@@ -2,12 +2,25 @@
 
 import datetime
 from os import PathLike
-from typing import Any, BinaryIO, Callable, Iterator, Mapping, Optional, Sequence, Union
+from typing import (
+    Any,
+    BinaryIO,
+    Callable,
+    Iterator,
+    Optional,
+    Sequence,
+    TypeVar,
+    Union,
+)
 
 from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
 
 Path = Union[str, PathLike[str]]
 BytesLike = Union[bytes, bytearray, memoryview]
+_PathT = TypeVar("_PathT", bound=Path)
+_StartT = TypeVar("_StartT", bound=Optional[int])
+_EndT = TypeVar("_EndT", bound=Optional[int])
+_BytesT = TypeVar("_BytesT", bound=BytesLike)
 
 class VfsiFile(AbstractBufferedFile):
     fs: VfsiFileSystem
@@ -33,13 +46,16 @@ class VfsiFile(AbstractBufferedFile):
     def writable(self) -> bool: ...
     def seekable(self) -> bool: ...
     def readinto(self, b: Any) -> int: ...
-    def read(self, size: int = -1) -> bytes: ...
+    def read(self, size: Optional[int] = -1) -> bytes: ...
     def readline(self, size: Optional[int] = -1) -> bytes: ...
+    def readuntil(
+        self, char: BytesLike = b"\n", blocks: Optional[int] = None
+    ) -> bytes: ...
     def write(self, data: BytesLike) -> int: ...
     def seek(self, offset: int, whence: int = 0) -> int: ...
     def tell(self) -> int: ...
     def truncate(self, size: Optional[int] = None) -> int: ...
-    def flush(self) -> None: ...
+    def flush(self, force: bool = False) -> None: ...
     def close(self) -> None: ...
 
 class VfsiFileSystem(AbstractFileSystem):
@@ -151,9 +167,9 @@ class VfsiFileSystem(AbstractFileSystem):
     ) -> bytes: ...
     def cat_ranges(
         self,
-        paths: Sequence[Path],
-        starts: Union[int, Sequence[int]],
-        ends: Union[Optional[int], Sequence[Optional[int]]],
+        paths: list[_PathT],
+        starts: Union[Optional[int], list[_StartT]],
+        ends: Union[Optional[int], list[_EndT]],
         max_gap: Optional[int] = None,
         on_error: str = "return",
         callback: Any = ...,
@@ -161,7 +177,7 @@ class VfsiFileSystem(AbstractFileSystem):
     ) -> list[Union[bytes, BaseException]]: ...
     def pipe(
         self,
-        path: Union[Path, Mapping[Path, BytesLike]],
+        path: Union[Path, dict[_PathT, _BytesT]],
         value: Optional[BytesLike] = None,
         callback: Any = ...,
         **kwargs: Any,

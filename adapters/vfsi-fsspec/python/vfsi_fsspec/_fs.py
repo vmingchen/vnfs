@@ -627,6 +627,20 @@ class _ResilientClient:
         return call
 
 
+_FORK_POOLS = weakref.WeakSet()
+
+
+def _reset_pool_locks_after_fork():
+    for pool in _FORK_POOLS:
+        pool._reset_locks_after_fork()
+
+
+if hasattr(os, "register_at_fork"):
+    # The interpreter retains registered hooks for its lifetime. Keep one
+    # hook and weak ownership so retired filesystems leave no callbacks.
+    os.register_at_fork(after_in_child=_reset_pool_locks_after_fork)
+
+
 class _ClientPool:
     """Bounded pool of independent native sessions with virtual descriptors.
 
@@ -694,14 +708,7 @@ class _ClientPool:
         self._pid = os.getpid()
         self._cwd = "/"
         if hasattr(os, "register_at_fork"):
-            pool_ref = weakref.ref(self)
-
-            def reset_pool_locks():
-                pool = pool_ref()
-                if pool is not None:
-                    pool._reset_locks_after_fork()
-
-            os.register_at_fork(after_in_child=reset_pool_locks)
+            _FORK_POOLS.add(self)
 
     def _reset_locks_after_fork(self):
         """Discard locks that may be owned by threads absent in the child."""
@@ -800,11 +807,13 @@ class _ClientPool:
                     )
                 except BaseException as error:
                     self._discard_confirmed_closes(error, [token for token, _ in live])
+                    if not isinstance(error, Exception):
+                        raise
                     if _is_transport_error(error):
                         if self._auto_reconnect and _can_reconnect(error):
                             try:
                                 self._reconnect_client(owner)
-                            except BaseException:
+                            except Exception:
                                 pass
                 else:
                     self._discard_tokens([token for token, _ in live])
@@ -1750,6 +1759,8 @@ class VfsiFile(AbstractBufferedFile):
     def _read_until(self, char, blocks, size):
         if size == 0:
             return self.read(0)
+        if not isinstance(char, bytes):
+            char = bytes(memoryview(char))
         if not char:
             raise ValueError("delimiter must not be empty")
         block_size = self.blocksize if blocks is None else operator.index(blocks)
@@ -2136,6 +2147,9 @@ class _BufferGroup:
                             file._fail_staging(error)
                             raise
 
+    def _file_index(self, file):
+        return next(i for i, member in enumerate(self.files) if member is file)
+
     def _rebase_file_error(self, error, files):
         position = getattr(error, "index", None)
         if (
@@ -2144,8 +2158,7 @@ class _BufferGroup:
             and 0 <= position < len(files)
         ):
             file = files[position]
-            index = next(i for i, member in enumerate(self.files) if member is file)
-            _oserror(error, file.path, index=index)
+            _oserror(error, file.path, index=self._file_index(file))
 
     def _read_vector(self, method, files, offsets, lengths):
         fds = [file._raw._ensure_open() for file in files]
@@ -2202,6 +2215,32 @@ class _BufferGroup:
             file._raw._fd = fd
             file._raw._fd_generation = self.fs._client.generation
 
+    @staticmethod
+    def _prepend_read_prefix(error, prefix, offset):
+        error.read_prefix = bytes(prefix) + getattr(error, "read_prefix", b"")
+        error.read_offset = offset
+        if not hasattr(error, "read_eof"):
+            error.read_eof = False
+        if getattr(error, "failure_state", None) == "not_attempted":
+            error.failure_state = "failed"
+
+    def _read_error_matches_file(self, error, file):
+        index = getattr(error, "index", None)
+        if index is not None and (
+            type(index) is not int or index != self._file_index(file)
+        ):
+            return False
+        filename = error.filename
+        if filename is None:
+            return True
+        if filename not in (file.path, self.fs._native_path(file.path)):
+            return False
+        return index is not None or not any(
+            member is not file
+            and filename in (member.path, self.fs._native_path(member.path))
+            for member in self.files
+        )
+
     def _pread_many(self, files, offsets, lengths, *, required=None):
         data, errors = self._pread_many_once(files, offsets, lengths)
         # Speculation gets one wave. Complete only required cache fills;
@@ -2216,15 +2255,26 @@ class _BufferGroup:
         }
         pending = list(partial)
         while pending:
-            more, failures = self._pread_many_once(
-                [files[index] for index in pending],
-                [offsets[index] + len(partial[index]) for index in pending],
-                [lengths[index] - len(partial[index]) for index in pending],
-            )
+            try:
+                more, failures = self._pread_many_once(
+                    [files[index] for index in pending],
+                    [offsets[index] + len(partial[index]) for index in pending],
+                    [lengths[index] - len(partial[index]) for index in pending],
+                )
+            except OSError as error:
+                # A grouped reopen can fail on a different file. Only attach
+                # progress when the exception can describe this continuation.
+                if len(pending) == 1:
+                    index = pending[0]
+                    if self._read_error_matches_file(error, files[index]):
+                        self._prepend_read_prefix(error, partial[index], offsets[index])
+                raise
             remaining = []
             for position, index in enumerate(pending):
                 if position in failures:
-                    errors[index] = failures[position]
+                    error = _oserror(failures[position], files[index].path)
+                    self._prepend_read_prefix(error, partial[index], offsets[index])
+                    errors[index] = error
                     data[index] = None
                 elif more[position]:
                     partial[index].extend(more[position])
@@ -2287,12 +2337,11 @@ class _BufferGroup:
                 for index, result in zip(retry, resumed):
                     prefix = prefixes[index]
                     if isinstance(result, BaseException):
+                        if getattr(result, "failure_state", None) == "not_attempted":
+                            # A rejected suffix did not replace the first read failure.
+                            continue
                         if prefix:
-                            result.read_prefix = prefix + getattr(
-                                result, "read_prefix", b""
-                            )
-                            result.read_offset = offsets[index]
-                            result.read_eof = False
+                            self._prepend_read_prefix(result, prefix, offsets[index])
                     else:
                         result = prefix + result
                     outcomes[index] = result
@@ -2384,11 +2433,7 @@ class _BufferGroup:
                         raise _oserror(
                             errors[index],
                             current.path,
-                            index=next(
-                                i
-                                for i, file in enumerate(self.files)
-                                if file is current
-                            ),
+                            index=self._file_index(current),
                         )
                     continue
                 value = value or b""
@@ -2449,11 +2494,7 @@ class _BufferGroup:
                         raise _oserror(
                             errors[index],
                             current.path,
-                            index=next(
-                                i
-                                for i, file in enumerate(self.files)
-                                if file is current
-                            ),
+                            index=self._file_index(current),
                         )
                     continue
                 value = value or b""
@@ -2865,7 +2906,7 @@ class _DeferredWriteFile:
                     _write_fully(remote, chunk)
             if permissions is not None:
                 self.fs._client.chmod(self.fs._native_path(self.temp_path), permissions)
-        except BaseException:
+        except BaseException as primary:
             try:
                 self._run_scalar(self.fs.rm, self.temp_path)
             except FileNotFoundError:
@@ -2873,6 +2914,8 @@ class _DeferredWriteFile:
             except OSError:
                 # Retain ownership so transaction/manual discard can retry.
                 pass
+            except BaseException as cleanup:
+                raise primary from cleanup
             else:
                 self._stage_owned = False
             raise
@@ -3206,7 +3249,7 @@ class VfsiFileSystem(AbstractFileSystem):
             self.auth,
             self.service_principal,
         )
-        disable_native_recovery = backend == "nfs" and not self.auto_reconnect
+        disable_native_recovery = backend in ("nfs", "smb") and not self.auto_reconnect
         if _mount_config is not None or disable_native_recovery:
             factory_args += (_mount_config,)
         if disable_native_recovery:
@@ -3214,9 +3257,10 @@ class VfsiFileSystem(AbstractFileSystem):
                 "auto_reconnect"
                 not in inspect.signature(native_module.NfsClient).parameters
             ):
+                adapter = "nfs4fs" if backend == "nfs" else "vsmb"
                 raise ImportError(
                     "auto_reconnect=False requires a native adapter with recovery "
-                    "control; upgrade nfs4fs alongside vfsi-fsspec"
+                    f"control; upgrade {adapter} alongside vfsi-fsspec"
                 )
             factory_args += (False,)
         try:
@@ -4199,11 +4243,15 @@ class VfsiFileSystem(AbstractFileSystem):
         except (FileNotFoundError, NotADirectoryError):
             return False
 
-    def isdir(self, path):
+    def _directory_info(self, path):
         try:
-            return self.info(path)["type"] == "directory"
+            info = self.info(path)
         except (FileNotFoundError, NotADirectoryError):
-            return False
+            return None
+        return info if info["type"] == "directory" else None
+
+    def isdir(self, path):
+        return self._directory_info(path) is not None
 
     def size(self, path):
         return self.info(path).get("size")
@@ -4662,7 +4710,9 @@ class VfsiFileSystem(AbstractFileSystem):
         _validate_write_mode(mode)
         with self._cache_mutation(paths, namespace=True):
             native = [self._native_path(p) for p in paths]
-            datas = [v if isinstance(v, bytes) else bytes(v) for v in values]
+            datas = [
+                v if isinstance(v, bytes) else bytes(memoryview(v)) for v in values
+            ]
             is_bulk = callback_pairs is not None
             if callback is not None:
                 callback.set_size(len(paths) if is_bulk else len(datas[0]))
@@ -4920,7 +4970,14 @@ class VfsiFileSystem(AbstractFileSystem):
             try:
                 file = self.open(path, native_mode, _defer_cache=True, **kwargs)
             except Exception as error:
-                _rebase_error(error, [input_index], [path])
+                if (
+                    isinstance(error, OSError)
+                    and getattr(error, "index", None) is None
+                    and not _is_transport_error(error)
+                ):
+                    _oserror(error, path, index=input_index)
+                else:
+                    _rebase_error(error, [input_index], [path])
                 raise
             # Configurable cache factories are application code, like codecs.
             if isinstance(file, VfsiFile):
@@ -4942,6 +4999,7 @@ class VfsiFileSystem(AbstractFileSystem):
         *,
         outfile=None,
         input_index=None,
+        source_size=None,
         **open_kwargs,
     ):
         from fsspec.implementations.local import LocalFileSystem
@@ -4955,7 +5013,9 @@ class VfsiFileSystem(AbstractFileSystem):
                     internal, "rb", input_index, **open_kwargs
                 )
             stack.push(partial(_close_reader_on_exit, remote))
-            callback.set_size(getattr(remote, "size", None))
+            if source_size is None:
+                source_size = getattr(remote, "size", None)
+            callback.set_size(source_size)
             if outfile is None:
                 local = LocalFileSystem(auto_mkdir=True)
                 local.makedirs(local._parent(lpath), exist_ok=True)
@@ -5107,22 +5167,15 @@ class VfsiFileSystem(AbstractFileSystem):
             [size for _, _, size, _ in pairs], self.batch_size, read_batch_bytes
         ):
             if len(batch) == 1 and pairs[batch[0]][2] > read_batch_bytes:
-                remote_path, local_path, size, _ = pairs[batch[0]]
+                remote_path, local_path, size, public_index = pairs[batch[0]]
                 with callback.branched(remote_path, local_path) as child:
-                    child.set_size(size)
-                    local.makedirs(local._parent(local_path), exist_ok=True)
-                    # Validate and own the source before truncating a local
-                    # destination; failed remote OPEN must preserve old data.
-                    with ExitStack() as stack:
-                        remote = self.open(remote_path, "rb", cache_type="none")
-                        stack.push(partial(_close_reader_on_exit, remote))
-                        with open(local_path, "wb") as out:
-                            self._copy_remote_to_fileobj(
-                                remote_path,
-                                out,
-                                on_progress=child.relative_update,
-                                source=remote,
-                            )
+                    self._download_file_streamed(
+                        self._checked_strip_protocol(remote_path),
+                        local_path,
+                        child,
+                        input_index=public_index,
+                        source_size=size,
+                    )
                 callback.relative_update()
                 continue
             selected = [pairs[i] for i in batch]
@@ -6505,53 +6558,37 @@ class VfsiFileSystem(AbstractFileSystem):
             for directory in by_dir
             if depth_limit is None or _depth(directory) <= depth_limit
         }
-        if topdown:
-            pending = [internal]
-            while pending:
-                directory = pending.pop()
-                if directory not in visible:
-                    continue
-                dirs, files = by_dir[directory]
-                yielded_dirs = dirs if detail else list(dirs)
-                yielded_files = files if detail else list(files)
-                yield directory, yielded_dirs, yielded_files
-                names = yielded_dirs.keys() if detail else yielded_dirs
-                children = [
-                    posixpath.join(directory, name)
-                    for name in names
-                    if posixpath.join(directory, name) in visible
-                ]
-                pending.extend(reversed(children))
-        else:
-            order = []
-            pending = [(internal, False)]
-            while pending:
-                directory, visited = pending.pop()
-                if directory not in visible:
-                    continue
-                if visited:
-                    order.append(directory)
-                    continue
-                pending.append((directory, True))
-                children = [
-                    self._checked_strip_protocol(info["name"])
-                    for info in by_dir.get(directory, ({}, {}))[0].values()
-                    if self._checked_strip_protocol(info["name"]) in visible
-                ]
-                pending.extend((child, False) for child in reversed(children))
-            for directory in order:
-                dirs, files = by_dir[directory]
-                if not detail:
-                    dirs = list(dirs)
-                    files = list(files)
-                yield directory, dirs, files
+        order = []
+        pending = [(internal, False)]
+        while pending:
+            directory, visited = pending.pop()
+            if directory not in visible:
+                continue
+            if visited:
+                order.append(directory)
+                continue
+            pending.append((directory, True))
+            children = [
+                self._checked_strip_protocol(info["name"])
+                for info in by_dir.get(directory, ({}, {}))[0].values()
+                if self._checked_strip_protocol(info["name"]) in visible
+            ]
+            pending.extend((child, False) for child in reversed(children))
+        for directory in order:
+            dirs, files = by_dir[directory]
+            if not detail:
+                dirs = list(dirs)
+                files = list(files)
+            yield directory, dirs, files
 
     def find(self, path, maxdepth=None, withdirs=False, detail=False, **kwargs):
         internal = self._checked_strip_protocol(path)
         root_depth = _depth(internal)
         out = {}
-        if withdirs and internal != "" and self.isdir(internal):
-            out[internal] = self.info(internal)
+        if withdirs and internal != "":
+            info = self._directory_info(internal)
+            if info is not None:
+                out[internal] = info
         for _, dirs, files in self.walk(
             internal, maxdepth=maxdepth, detail=True, **kwargs
         ):
@@ -6575,9 +6612,10 @@ class VfsiFileSystem(AbstractFileSystem):
         root_depth = _depth(internal)
         max_entry_depth = None if maxdepth is None else root_depth + maxdepth
         sizes = {}
-        if withdirs and self.isdir(internal):
-            info = self.info(internal)
-            sizes[info["name"]] = info.get("size") or 0
+        if withdirs:
+            info = self._directory_info(internal)
+            if info is not None:
+                sizes[info["name"]] = info.get("size") or 0
         for _, dirs, files in self.walk(
             internal, maxdepth=maxdepth, detail=True, **kwargs
         ):

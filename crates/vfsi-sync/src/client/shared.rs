@@ -75,7 +75,9 @@ impl<F: HandleBackend> SharedBackend<F> {
         let mut guard = self.lock_without_cleanup()?;
         // Ordinary I/O must not lose its result to an unrelated cleanup error.
         // Retain failures; drain_cleanup is the explicit reporting boundary.
-        let _ = guard.drain_cleanup();
+        if self.has_pending.load(Ordering::Acquire) {
+            let _ = guard.drain_cleanup();
+        }
         Ok(guard)
     }
 

@@ -10,7 +10,6 @@ pub(super) fn validate_readdir_progress(
     requested_cookie: u64,
     next_cookie: u64,
     seen_cookies: &mut HashSet<u64>,
-    _index: Option<usize>,
 ) -> VfRes {
     if next_cookie != 0 && (next_cookie == requested_cookie || !seen_cookies.insert(next_cookie)) {
         Err(vfsi_core::internal::errors::transport(
@@ -99,7 +98,7 @@ fn remove_status_is_retryable(status: u32) -> bool {
     )
 }
 
-/// Exponential backoff for REMOVE retries (10 ms, 20 ms, ...).
+/// Exponential backoff for REMOVE retries (20 ms, 40 ms, ...; capped at 640 ms).
 fn remove_backoff(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(10u64 << attempt.min(6))
 }
@@ -332,13 +331,12 @@ impl NfsVecFs {
         recursive: bool,
         out: &mut Vec<VfAttrs>,
     ) -> VfRes {
-        let reached_limit = |out: &Vec<VfAttrs>| max_count != 0 && out.len() >= max_count;
+        if max_count != 0 && out.len() >= max_count {
+            return Ok(());
+        }
         let ids = request_mask_to_attr_list(&masks);
         let mut pending = vec![dir.to_path_buf()];
         while let Some(current) = pending.pop() {
-            if reached_limit(out) {
-                break;
-            }
             // A directory argument may itself be a symlink to a directory.
             let dirfh = self.resolve_path(&self.server_path(&current), true)?;
             let mut children = Vec::new();
@@ -353,9 +351,6 @@ impl NfsVecFs {
                     break;
                 }
                 for entry in &entries {
-                    if reached_limit(out) {
-                        return Ok(());
-                    }
                     let path = current.join(path_from_bytes(&entry.name));
                     let mut attrs = VfAttrs {
                         file: FileOperand::from_os_path(&path),
@@ -368,13 +363,11 @@ impl NfsVecFs {
                         children.push(path);
                     }
                     out.push(attrs);
+                    if max_count != 0 && out.len() == max_count {
+                        return Ok(());
+                    }
                 }
-                validate_readdir_progress(
-                    cookie.value,
-                    next_cookie.value,
-                    &mut seen_cookies,
-                    None,
-                )?;
+                validate_readdir_progress(cookie.value, next_cookie.value, &mut seen_cookies)?;
                 cookie = next_cookie;
                 if cookie.value == 0 {
                     break;
@@ -681,12 +674,13 @@ impl NfsVecFs {
             }
             return Ok(());
         }
-        validate_readdir_progress(cookie.value, next_cookie.value, &mut seen_cookies, None)
-            .map_err(|cause| {
+        validate_readdir_progress(cookie.value, next_cookie.value, &mut seen_cookies).map_err(
+            |cause| {
                 note_read_error(roots, dir.root, cause, options)
                     .err()
                     .unwrap_or(RemoveStop::Root)
-            })?;
+            },
+        )?;
 
         let mut file_names = Vec::new();
         let mut dir_names = Vec::new();
@@ -1233,7 +1227,7 @@ impl NfsVecFs {
         for (&index, result) in child_indices.iter().zip(child_pages) {
             states[index] = Some(result.and_then(|page| {
                 let mut seen_cookies = std::collections::HashSet::new();
-                validate_readdir_progress(0, page.cookie.value, &mut seen_cookies, None)
+                validate_readdir_progress(0, page.cookie.value, &mut seen_cookies)
                     .map_err(|cause| OpError::unknown(cause, None))?;
                 Ok(NfsDirectoryCursor {
                     fh: page.fh,
@@ -1298,7 +1292,6 @@ impl NfsVecFs {
                         state.cookie.value,
                         cookie.value,
                         &mut state.seen_cookies,
-                        None,
                     )
                     .map_err(|cause| OpError::unknown(cause, None))?;
                     state.cookie = cookie;

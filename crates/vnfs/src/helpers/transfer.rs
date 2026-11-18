@@ -1070,12 +1070,34 @@ fn same_file(
         && source.fs_obj_id() == destination.fs_obj_id()
 }
 fn prepare_replace(fs: &impl Vfsi, tasks: &[Task]) -> Result<()> {
+    let paths: Vec<_> = tasks
+        .iter()
+        .filter(|task| !task.fresh_destination)
+        .map(|task| &task.destination)
+        .collect();
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let outcomes = fs
+        .vgetattrs(
+            &paths,
+            AttrsOptions::new()
+                .with_fields(Attributes::stat())
+                .with_follow_final_symlink(false),
+        )
+        .map_err(IndexedError::unattributed)?;
+    if outcomes.len() != paths.len() {
+        return Err(contract(
+            "transfer: invalid replacement metadata outcome count",
+        ));
+    }
     let mut existing = Vec::new();
-    for task in tasks {
-        if task.fresh_destination {
-            continue;
-        }
-        match fs.symlink_attrs(&task.destination) {
+    for (task, outcome) in tasks
+        .iter()
+        .filter(|task| !task.fresh_destination)
+        .zip(outcomes)
+    {
+        match outcome {
             Ok(meta)
                 if !meta.is_file()
                     || same_file(fs, &task.source, &task.metadata, &task.destination, &meta) =>
@@ -1083,8 +1105,13 @@ fn prepare_replace(fs: &impl Vfsi, tasks: &[Task]) -> Result<()> {
                 return Err(invalid(task.root, &task.destination));
             }
             Ok(_) => existing.push(task),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(mapped(IndexedError::at(0, e), std::slice::from_ref(task))),
+            Err(error) if error.cause().kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(mapped(
+                    IndexedError::at(0, error.into_cause()),
+                    std::slice::from_ref(task),
+                ));
+            }
         }
     }
     if !existing.is_empty() {

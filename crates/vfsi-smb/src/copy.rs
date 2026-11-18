@@ -209,10 +209,6 @@ impl SmbVecFs {
         Ok(identities[0] == identities[1])
     }
 
-    pub(super) fn copy_client_side(&mut self, pair: &ExtentPair) -> VfResult<()> {
-        self.copy_extent_with_strategy(pair, false)
-    }
-
     pub(super) fn copy_extent_with_strategy(
         &mut self,
         pair: &ExtentPair,
@@ -222,6 +218,13 @@ impl SmbVecFs {
         let destination = self.local_path_string(&pair.dst_path)?;
         let _ = self.drain_deferred_closes();
         let (src_id, src_size) = self.raw_open(&source, libc::O_RDONLY)?;
+        let available = src_size.saturating_sub(pair.src_offset);
+        let length = pair.length.unwrap_or(available).min(available);
+        // Validate the effective range before creating the destination.
+        if let Err(error) = checked_offset(pair.dst_offset, length, 0) {
+            let _ = self.copy_close_handle(src_id, false);
+            return Err(error);
+        }
         // COPYCHUNK requires read and write access on the destination, as did
         // the SDK path helper. Client-only copies retain write-only access.
         let access = if server { libc::O_RDWR } else { libc::O_WRONLY };
@@ -232,11 +235,7 @@ impl SmbVecFs {
                 return Err(error);
             }
         };
-        let available = src_size.saturating_sub(pair.src_offset);
-        let length = pair.length.unwrap_or(available).min(available);
         let result = (|| {
-            checked_offset(pair.src_offset, length, 0)?;
-            checked_offset(pair.dst_offset, length, 0)?;
             if pair.dst_offset > pair.src_offset
                 && pair.dst_offset - pair.src_offset < length
                 && self.copy_handles_alias([src_id, dst_id])?

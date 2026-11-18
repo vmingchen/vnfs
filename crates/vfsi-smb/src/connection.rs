@@ -228,11 +228,15 @@ impl SmbVecFs {
 
     pub(super) fn file_path(&self, file: &FileOperand) -> VfResult<PathBuf> {
         match file {
-            FileOperand::Fd(fd) => self
-                .open_files
-                .get(fd)
-                .map(|open| open.path.clone())
-                .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32)),
+            // A retained handle has no namespace path. Handle operations use
+            // live_file to address the original object.
+            FileOperand::Fd(fd) => Err(std::io::Error::from_raw_os_error(
+                if self.open_files.contains_key(fd) {
+                    libc::EINVAL
+                } else {
+                    ERR_EBADF as i32
+                },
+            )),
             FileOperand::Saved => Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
             _ => self.vf_path(file),
         }

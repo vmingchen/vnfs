@@ -118,7 +118,6 @@ impl HandleBackend for SmbVecFs {
         let open = SmbOpen {
             file_id,
             tree: self.tree.clone(),
-            path,
             cur_offset: if flags & libc::O_APPEND != 0 { size } else { 0 },
             append: flags & libc::O_APPEND != 0,
             readable: access_mode != libc::O_WRONLY,

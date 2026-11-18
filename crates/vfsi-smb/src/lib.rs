@@ -131,7 +131,6 @@ fn checked_offset(base: u64, delta: u64, _index: usize) -> VfResult<u64> {
 struct SmbOpen {
     file_id: FileId,
     tree: Arc<ShareSession>,
-    path: PathBuf,
     cur_offset: u64,
     append: bool,
     readable: bool,

@@ -140,11 +140,14 @@ def _filter_readonly_generations(cache_fs):
         cache_fs.storage[:-1], cache_fs._metadata.cached_files[:-1]
     ):
         rejected = invalidated.get(os.path.realpath(storage), {})
-        for path, detail in list(records.items()):
-            if detail.get(_CACHE_FORMAT_KEY) == _INVALID_CACHE_FORMAT or rejected.get(
-                path
-            ) == _generation(detail):
-                del records[path]
+        stale = [
+            path
+            for path, detail in records.items()
+            if detail.get(_CACHE_FORMAT_KEY) == _INVALID_CACHE_FORMAT
+            or rejected.get(path) == _generation(detail)
+        ]
+        for path in stale:
+            del records[path]
 
 
 def _publish_generations(cache_fs, records, previous):

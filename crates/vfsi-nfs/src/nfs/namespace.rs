@@ -309,9 +309,7 @@ impl NfsVecFs {
         let mut hops = 0usize;
         loop {
             if hops > 40 {
-                return Err(std::io::Error::from_raw_os_error(
-                    (nfsstat4_NFS4ERR_IO) as i32,
-                )); // symlink loop
+                return Err(std::io::Error::from_raw_os_error(libc::ELOOP));
             }
             match self.nfs.resolve(&path) {
                 Ok(fh) => {
@@ -322,9 +320,9 @@ impl NfsVecFs {
                         .nfs
                         .getattr(&fh, &[FATTR4_TYPE])
                         .map_err(vfsi_core::internal::errors::from_rpc)?;
-                    let is_symlink = type_is_symlink(&attrs)?;
-                    let ftype = u32::from_be_bytes(attrs[0..4].try_into().unwrap());
-                    if !is_symlink {
+                    let ftype = crate::client::decode_type_attribute(&attrs)
+                        .map_err(vfsi_core::internal::errors::from_rpc)?;
+                    if ftype != nfs_ftype4_NF4LNK {
                         return Ok((fh, ftype));
                     }
                     let target = self
@@ -457,9 +455,7 @@ impl NfsVecFs {
                 return Ok(path_from_bytes(&current));
             }
             if hops >= 40 {
-                return Err(std::io::Error::from_raw_os_error(
-                    (nfsstat4_NFS4ERR_IO) as i32,
-                )); // symlink loop
+                return Err(std::io::Error::from_raw_os_error(libc::ELOOP));
             }
             let target = self.readlink_raw_impl(&abs_path)?;
             current = self.resolve_target(&current, &target);

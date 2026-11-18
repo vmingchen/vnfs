@@ -24,6 +24,11 @@ def fingerprint(tree):
     for parent, dirs, files in os.walk(tree):
         dirs.sort()
         files.sort()
+        # os.walk does not visit directory symlinks with followlinks disabled.
+        for name in dirs:
+            path = Path(parent) / name
+            if path.is_symlink():
+                raise ValueError('unexpected fixture object: ' + str(path))
         for path in [Path(parent), *(Path(parent) / name for name in files)]:
             st = path.lstat()
             if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):

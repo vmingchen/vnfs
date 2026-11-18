@@ -338,3 +338,27 @@ def test_cached_walk_allows_pruning_at_the_depth_limit(tmp_path):
         assert visited == ["/", "/one"]
     finally:
         fs.close()
+
+
+@pytest.mark.parametrize("operation", ["find", "du"])
+def test_withdirs_reuses_the_root_metadata(dummy_fs, monkeypatch, operation):
+    dummy_fs.mkdir("/root")
+    dummy_fs.pipe_file("/root/entry", b"abc")
+    expected = getattr(dummy_fs, operation)(
+        "/root", withdirs=True, **({"total": False} if operation == "du" else {})
+    )
+    original = dummy_fs.info
+    calls = []
+
+    def record_info(path, **kwargs):
+        calls.append(path)
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(dummy_fs, "info", record_info)
+    assert (
+        getattr(dummy_fs, operation)(
+            "/root", withdirs=True, **({"total": False} if operation == "du" else {})
+        )
+        == expected
+    )
+    assert calls.count("/root") == 1

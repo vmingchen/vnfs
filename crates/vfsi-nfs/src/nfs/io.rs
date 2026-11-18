@@ -58,7 +58,6 @@ fn retry_path_write<'a>(
 
 pub(super) fn write_all_at<C>(
     client: &mut C,
-    _index: usize,
     offset: u64,
     data: &[u8],
     mut write: impl FnMut(&mut C, u64, &[u8]) -> VfResult<usize>,
@@ -94,6 +93,20 @@ fn independent_read_prefix(reads: &[ReadOp]) -> usize {
             read.offset == VfOffset::Cur && read.file.fd().is_some_and(|fd| !cursors.insert(fd))
         })
         .unwrap_or(reads.len())
+}
+
+fn read_can_reconnect(request: &ReadOp, error: &OpError) -> bool {
+    match error.progress() {
+        Some(IoProgress::Read(prefix)) => {
+            // Reconnect reopens retained descriptors by handle. Resolving a
+            // pathname again could select a different object for its suffix.
+            !prefix.eof()
+                && prefix.bytes_read() < request.length
+                && (prefix.bytes_read() == 0 || request.file.is_fd())
+        }
+        Some(_) => false,
+        None => true,
+    }
 }
 
 struct DescriptorReadPlan {
@@ -189,11 +202,7 @@ impl NfsVecFs {
             return Ok(output);
         }
         type SavedPrefix = (FailureState, Option<vfsi_core::api::ReadOutput>);
-        let retryable = |index: usize, error: &OpError| match error.progress() {
-            Some(IoProgress::Read(read)) => !read.eof() && read.bytes_read() < reads[index].length,
-            Some(_) => false,
-            None => true,
-        };
+        let retryable = |index: usize, error: &OpError| read_can_reconnect(&reads[index], error);
         let mut saved: Vec<Option<SavedPrefix>> = Vec::new();
         let result = if self.recovery_in_progress {
             self.read_unrecovered(reads)
@@ -926,11 +935,7 @@ impl NfsVecFs {
         // Saved progress is only metadata: confirmed bytes stay in the caller's
         // destination while recovery borrows disjoint remaining suffixes.
         type Prefix = (FailureState, u64, usize, bool);
-        let retryable = |index: usize, error: &OpError| match error.progress() {
-            Some(IoProgress::Read(read)) => !read.eof() && read.bytes_read() < reads[index].length,
-            Some(_) => false,
-            None => true,
-        };
+        let retryable = |index: usize, error: &OpError| read_can_reconnect(&reads[index], error);
         let mut saved: Vec<Option<Prefix>> = Vec::new();
         let outcomes = if self.recovery_in_progress {
             self.read_into_unrecovered(reads, buffers)
@@ -1763,7 +1768,7 @@ impl NfsVecFs {
                 paths.push(self.visible_path(&path));
                 path_indices.push(index);
                 flags.push(
-                    libc::O_RDWR
+                    libc::O_WRONLY
                         | if write.creates() { libc::O_CREAT } else { 0 }
                         | if write.truncates() { libc::O_TRUNC } else { 0 },
                 );
@@ -2013,7 +2018,7 @@ mod path_write_tests {
     #[test]
     fn path_write_retries_short_counts_and_rejects_zero_progress() {
         let mut calls = Vec::new();
-        write_all_at(&mut calls, 0, 10, b"abcdefg", |calls, offset, suffix| {
+        write_all_at(&mut calls, 10, b"abcdefg", |calls, offset, suffix| {
             let count = suffix.len().min(3);
             calls.push((offset, suffix.to_vec()));
             Ok(count)
@@ -2029,7 +2034,7 @@ mod path_write_tests {
         );
 
         let mut attempts = 0;
-        let error = write_all_at(&mut attempts, 0, 0, b"x", |attempts, _, _| {
+        let error = write_all_at(&mut attempts, 0, b"x", |attempts, _, _| {
             *attempts += 1;
             Ok(0)
         })
@@ -2310,6 +2315,85 @@ mod descriptor_outcome_tests {
 
     #[cfg(feature = "test-faults")]
     #[test]
+    fn live_path_read_does_not_reconnect_after_confirmed_bytes() {
+        use std::sync::Arc;
+        use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+        let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+            assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+            return;
+        };
+        let minor = std::env::var("VFSI_NFS_MINOR")
+            .unwrap_or_else(|_| "1".into())
+            .parse()
+            .unwrap();
+        for owned in [false, true] {
+            let mut fs = NfsVecFs::connect_minor(&server, minor).unwrap();
+            fs.set_merged_mode("full");
+            fs.set_auto_reconnect(true);
+            let path = format!("/no-path-resume-{}-{owned}", std::process::id());
+            let file = fs
+                .open_raw_impl(
+                    Path::new(&path),
+                    libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                    0o666,
+                )
+                .unwrap();
+            assert_eq!(fs.write_raw_impl(&file, 0, b"abcdefgh").unwrap(), 8);
+            fs.close_impl(&file).unwrap();
+
+            let script = Arc::new(FaultScript::one(
+                OpenFaultPoint::BeforeReadRepair { index: 0 },
+                vfsi_core::internal::errors::transport(
+                    vfsi_core::TransportKind::Other,
+                    "injected path read repair disconnect",
+                ),
+            ));
+            fs.set_fault_injector(script.clone());
+            fs.nfs.test_short_merged_read_once(2);
+            let reads = [
+                ReadOp::from_path(&path, VfOffset::At(0), 4),
+                ReadOp::from_path(&path, VfOffset::At(4), 4),
+            ];
+            let mut storage = [[99; 4]; 2];
+            let result = if owned {
+                let mut results = fs.read_results(&reads).unwrap().into_iter();
+                let result = results.next().unwrap().map(|_| ());
+                assert_eq!(results.next().unwrap().unwrap().data, b"efgh");
+                result
+            } else {
+                let mut buffers = storage.each_mut().map(|buffer| buffer.as_mut_slice());
+                let mut results = fs
+                    .read_into_results(&reads, &mut buffers)
+                    .unwrap()
+                    .into_iter();
+                let result = results.next().unwrap().map(|_| ());
+                assert_eq!(results.next().unwrap().unwrap().bytes_read, 4);
+                result
+            };
+            fs.unlink_impl(Path::new(&path)).unwrap();
+            assert!(script.is_consumed());
+            let error = result.expect_err("a positive pathname prefix must not be resumed");
+            assert_eq!(
+                vfsi_core::transport_kind(error.cause()),
+                Some(vfsi_core::TransportKind::Other)
+            );
+            let Some(IoProgress::Read(prefix)) = error.progress() else {
+                panic!("missing confirmed read prefix");
+            };
+            assert_eq!(prefix.offset(), 0);
+            assert_eq!(prefix.bytes_read(), 2);
+            assert!(!prefix.eof());
+            if owned {
+                assert_eq!(prefix.data().unwrap(), b"ab");
+            } else {
+                assert!(prefix.is_buffered());
+                assert_eq!(storage, [[b'a', b'b', 99, 99], *b"efgh"]);
+            }
+        }
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[test]
     fn live_descriptor_outcomes_retain_siblings_and_short_repair_prefix() {
         use std::sync::Arc;
         use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
@@ -2569,6 +2653,83 @@ mod phased_write_tests {
     use super::*;
     use std::sync::Arc;
     use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+
+    #[test]
+    fn live_path_writes_require_only_write_access_in_every_mode() {
+        let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+            assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+            return;
+        };
+        let minor = std::env::var("VFSI_NFS_MINOR")
+            .unwrap_or_else(|_| "1".into())
+            .parse()
+            .unwrap();
+        for mode in ["off", "openwrite", "full"] {
+            let mut fs = NfsVecFs::connect_minor(&server, minor).unwrap();
+            fs.set_merged_mode(mode);
+            let directory =
+                PathBuf::from(format!("/write-only-paths-{}-{mode}", std::process::id()));
+            fs.ensure_dir_impl(&directory, 0o700).unwrap();
+            let paths: Vec<_> = ["at", "append", "truncate", "create"]
+                .iter()
+                .map(|name| directory.join(name))
+                .collect();
+            let observed = (|| -> VfResult<_> {
+                for path in &paths[..3] {
+                    let file = fs.open_raw_impl(
+                        path,
+                        libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY,
+                        0o200,
+                    )?;
+                    fs.write_raw_impl(&file, 0, b"old")?;
+                    fs.close_impl(&file)?;
+                }
+                let denied = match fs.open_raw_impl(&paths[0], libc::O_RDONLY, 0) {
+                    Err(error) => Some(error.kind()),
+                    Ok(file) => {
+                        fs.close_impl(&file)?;
+                        None
+                    }
+                };
+                // Reopening WRITE-only is the control for the path-vector failure.
+                let file = fs.open_raw_impl(&paths[0], libc::O_WRONLY, 0)?;
+                fs.write_raw_impl(&file, 0, b"old")?;
+                fs.close_impl(&file)?;
+                let files: Vec<_> = paths
+                    .iter()
+                    .map(|path| FileOperand::from_os_path(path))
+                    .collect();
+                let writes = [
+                    WriteOp::at(&files[0], 0, b"NEW".as_slice()),
+                    WriteOp::new(&files[1], VfOffset::End, b"X".as_slice()),
+                    WriteOp::at(&files[2], 0, b"Z".as_slice()).with_truncate(),
+                    WriteOp::at(&files[3], 0, b"fresh".as_slice()).with_creation(),
+                ];
+                let outcomes = fs.write_results(&writes)?;
+                let mut contents = Vec::new();
+                for (path, file) in paths.iter().zip(&files) {
+                    fs.vsetattrs_raw_impl(&[VfAttrs {
+                        file: file.clone(),
+                        masks: AttrMask::MODE,
+                        mode: 0o600,
+                        ..Default::default()
+                    }])?
+                    .remove(0)
+                    .map_err(OpError::into_cause)?;
+                    contents.push(fs.read_raw_impl(&FileOperand::from_os_path(path), 0, 32)?);
+                }
+                Ok((denied, outcomes, contents))
+            })();
+            fs.remove_impl(&directory, true).unwrap();
+            fs.shutdown().unwrap();
+            let (denied, outcomes, contents) = observed.unwrap();
+            assert_eq!(denied, Some(std::io::ErrorKind::PermissionDenied));
+            for outcome in outcomes {
+                assert!(outcome.is_ok(), "mode={mode}: {outcome:?}");
+            }
+            assert_eq!(contents, [b"NEW".as_slice(), b"oldX", b"Z", b"fresh"]);
+        }
+    }
 
     #[test]
     fn live_full_data_failure_retains_exact_owner_after_unlink() {

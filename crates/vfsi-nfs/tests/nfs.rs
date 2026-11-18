@@ -9,7 +9,6 @@ use vfsi_sync::*;
 
 use vfsi_core::RpcError;
 #[cfg(feature = "test-faults")]
-#[cfg(feature = "test-faults")]
 use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
 use vfsi_nfs::NfsVecFs;
 #[cfg(feature = "test-faults")]

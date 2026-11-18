@@ -349,9 +349,15 @@ impl LocalBackend {
             vfsi_core::internal::errors::with_context(error, "connect", &root)
         };
         let root_canon = std::fs::canonicalize(&root).map_err(root_error)?;
+        // The root is a resolution anchor, not an enumeration descriptor.
+        // O_PATH preserves access to known children in search-only directories.
+        #[cfg(target_os = "linux")]
+        let root_flags = libc::O_DIRECTORY | libc::O_PATH;
+        #[cfg(not(target_os = "linux"))]
+        let root_flags = libc::O_DIRECTORY;
         let root_dir = OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_DIRECTORY)
+            .custom_flags(root_flags)
             .open(&root_canon)
             .map_err(root_error)?;
         Ok(LocalBackend {
@@ -396,13 +402,7 @@ impl LocalBackend {
     /// Map a (possibly cwd-relative) path onto the real filesystem.
     /// The result is lexically normalized and cannot escape `root` via `..`.
     fn resolve(&self, path: &Path) -> PathBuf {
-        let suffix = if path.is_absolute() {
-            path.strip_prefix("/").unwrap_or(path).to_path_buf()
-        } else {
-            self.cwd.join(path)
-        };
-        self.root
-            .join(OsStr::from_bytes(&normalize_bytes(path_bytes(&suffix))))
+        self.root.join(self.abs_path(path))
     }
 
     /// Resolve `p` (already mapped under the root) to a real path that is
@@ -648,7 +648,7 @@ impl LocalBackend {
 
     fn real_path_depth(&self, p: &Path, depth: usize) -> VfResult<AnchoredPath> {
         if depth > 40 {
-            return Err(std::io::Error::from_raw_os_error((ERR_ACCES) as i32)); // symlink loop / too deep
+            return Err(std::io::Error::from_raw_os_error(libc::ELOOP));
         }
         // Resolve the final symlink manually so absolute targets retain the
         // backend's chroot-relative semantics. The parent is held open while
@@ -1702,13 +1702,12 @@ impl LocalBackend {
                 // before CREATE/TRUNCATE can mutate the target.
                 match op.offset() {
                     VfOffset::At(offset) => {
-                        checked_offset(offset, op.data().len() as u64, 0)
+                        let end = checked_offset(offset, op.data().len() as u64, 0)
                             .map_err(OpError::not_attempted)?;
-                        // FileExt requires a signed native offset. Reject it
-                        // before OPEN can create or truncate the path. Empty
-                        // writes perform no positional syscall.
+                        // A nonempty write must fit in a signed native file size
+                        // before OPEN creates or truncates the path.
                         if !op.data().is_empty() {
-                            i64::try_from(offset)
+                            i64::try_from(end)
                                 .map_err(|_| OpError::not_attempted(Self::overflow(0)))?;
                         }
                     }
@@ -1899,20 +1898,16 @@ impl LocalBackend {
         recursive: bool,
         out: &mut Vec<VfAttrs>,
     ) -> VfRes {
-        let reached_limit = |out: &Vec<VfAttrs>| max_count != 0 && out.len() >= max_count;
+        if max_count != 0 && out.len() >= max_count {
+            return Ok(());
+        }
         let mut pending = vec![dir.to_path_buf()];
         while let Some(current) = pending.pop() {
-            if reached_limit(out) {
-                break;
-            }
             let p = self.open_directory_no_follow_final(&self.resolve(&current))?;
             let rd = std::fs::read_dir(&p)?;
             let mut children = Vec::new();
             for entry in rd {
                 let entry = entry?;
-                if reached_limit(out) {
-                    break;
-                }
                 let name = entry.file_name();
                 let path = current.join(&name);
                 let attrs = self.directory_entry_attrs(&p, &path, &name, masks)?;
@@ -1920,6 +1915,9 @@ impl LocalBackend {
                     children.push(path);
                 }
                 out.push(attrs);
+                if max_count != 0 && out.len() == max_count {
+                    return Ok(());
+                }
             }
             for child in children.into_iter().rev() {
                 pending.push(child);
@@ -1935,6 +1933,13 @@ impl LocalBackend {
         src_options.read(true);
         Self::protect_create_open(&sp, &mut src_options);
         let src = src_options.open(&sp)?;
+        if i64::try_from(p.dst_offset).is_err()
+            || (p.length != Some(0) && i64::try_from(p.src_offset).is_err())
+        {
+            // FileExt and set_len use signed offsets. A zero-count copy
+            // never reads the source, but still sets the destination length.
+            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+        }
         let mut dst_options = OpenOptions::new();
         dst_options.write(true).create(true).truncate(false);
         Self::protect_create_open(&dp, &mut dst_options);
@@ -2113,12 +2118,16 @@ impl HandleBackend for LocalBackend {
     }
 
     fn abs_path(&self, path: &Path) -> PathBuf {
-        let root_rel = if path.is_absolute() {
-            path.strip_prefix("/").unwrap_or(path).to_path_buf()
+        let joined;
+        let root_relative = if path.is_absolute() {
+            path.strip_prefix("/").unwrap_or(path)
+        } else if self.cwd.as_os_str().is_empty() {
+            path
         } else {
-            self.cwd.join(path)
+            joined = self.cwd.join(path);
+            &joined
         };
-        OsString::from_vec(normalize_bytes(path_bytes(&root_rel))).into()
+        OsString::from_vec(normalize_bytes(path_bytes(root_relative))).into()
     }
 
     fn open_path_impl(
@@ -2634,10 +2643,12 @@ impl VectorBackend for LocalBackend {
     ) -> VfRes {
         let p = self.open_directory_no_follow_final(&self.resolve(dir))?;
         let entries = std::fs::read_dir(&p)?;
-        for (count, entry) in entries.enumerate() {
-            if max_entries != 0 && count >= max_entries {
-                return Ok(());
-            }
+        let limit = if max_entries == 0 {
+            usize::MAX
+        } else {
+            max_entries
+        };
+        for entry in entries.take(limit) {
             let entry = entry?;
             let name = entry.file_name();
             let path = dir.join(&name);
@@ -2918,15 +2929,26 @@ impl VectorBackend for LocalBackend {
 
     fn vwrite_adb_impl(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
         let mut counts = Vec::with_capacity(patterns.len());
-        for (i, p) in patterns.iter().enumerate() {
-            let layout = vfsi_core::internal::adb_layout(p, i)?;
+        for p in patterns {
+            let mut layout = vfsi_core::internal::adb_layout(p)?;
+            let last = layout.next_back();
+            if let Some((_, number, pattern)) = last {
+                // The layout already checked unsigned arithmetic. The final
+                // nonempty fields also bound every earlier signed file offset.
+                let fields = [(number, 8), (pattern, p.adb_pattern_data.len() as u64)];
+                if fields.into_iter().any(|(offset, len)| {
+                    len != 0 && offset.is_some_and(|offset| i64::try_from(offset + len).is_err())
+                }) {
+                    return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                }
+            }
             let path = self.real_path(&self.resolve(&p.path))?;
             let mut options = OpenOptions::new();
             options.write(true).create(true).truncate(false);
             Self::protect_create_open(&path, &mut options);
             let file = options.open(&path)?;
             let mut written = 0usize;
-            for (block_number, number_offset, pattern_offset) in layout {
+            for (block_number, number_offset, pattern_offset) in layout.chain(last) {
                 if let Some(offset) = number_offset {
                     let adbn = block_number.to_be_bytes();
                     file.write_all_at(&adbn, offset)?;
