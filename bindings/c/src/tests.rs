@@ -50,6 +50,48 @@ fn c_scalar_and_vector_opens_honor_directory_and_nofollow_flags() {
     unsafe { vfsi_free(fs) };
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn free_releases_handle_when_stats_cannot_be_written() {
+    const CHILD: &str = "VFSI_FREE_STATS_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let stderr = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::free_releases_handle_when_stats_cannot_be_written",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("VNFS_STATS", "1")
+            .stderr(std::process::Stdio::from(stderr))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "statistics cleanup child failed: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return;
+    }
+    // Only the child sees the synthetic counter and the failing stderr sink.
+    vfsi_nfs::compound::COMPOUND_COUNT.store(1, Ordering::Relaxed);
+    let root = tempfile::tempdir().unwrap();
+    let fs = make_fs(
+        Box::new(vfsi_posix::backend(root.path()).unwrap()),
+        PathBuf::from("/"),
+        PathBuf::from("/"),
+    );
+    // SAFETY: this is the live handle returned by make_fs above.
+    let owner = std::sync::Arc::downgrade(&unsafe { &*fs }.cursor_owner);
+    // SAFETY: the fixture owns this handle and passes it for destruction once.
+    unsafe { vfsi_free(fs) };
+    assert!(owner.upgrade().is_none(), "vfsi_free retained the handle");
+}
+
 #[test]
 fn c_boolean_fields_accept_only_zero_and_one() {
     assert_eq!(parse_c_bool(0), Some(false));

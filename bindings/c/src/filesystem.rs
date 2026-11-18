@@ -512,31 +512,37 @@ pub unsafe extern "C" fn vfsi_smb_open_mount(
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_free(fs: *mut vfsi_fs) {
     ffi_guard!((), {
-        if !fs.is_null() {
-            if std::env::var("VNFS_STATS").as_deref() == Ok("1") {
-                let (n, ops, bytes, max) = vfsi_nfs::compound::compound_stats();
-                if n > 0 {
-                    eprintln!(
-                        "[vfsi] compounds={} avg_ops={:.2} max_ops={} avg_bytes={:.0} total_bytes={}",
-                        n,
-                        ops as f64 / n as f64,
-                        max,
-                        bytes as f64 / n as f64,
-                        bytes
-                    );
-                }
-                let (calls, us) = vfsi_nfs::compound::rpc_stats();
-                if calls > 0 {
-                    eprintln!(
-                        "[vfsi] rpc_calls={} avg_rpc_ms={:.2} total_rpc_ms={:.1}",
-                        calls,
-                        us as f64 / calls as f64 / 1000.0,
-                        us as f64 / 1000.0
-                    );
-                }
+        if fs.is_null() {
+            return;
+        }
+        // SAFETY: owns an object previously created by this crate. Take
+        // ownership before diagnostics so unwinding also releases the handle.
+        let _fs = unsafe { Box::from_raw(fs) };
+        if std::env::var("VNFS_STATS").as_deref() == Ok("1") {
+            use std::io::Write;
+            let mut diagnostics = std::io::stderr().lock();
+            let (n, ops, bytes, max) = vfsi_nfs::compound::compound_stats();
+            if n > 0 {
+                let _ = writeln!(
+                    diagnostics,
+                    "[vfsi] compounds={} avg_ops={:.2} max_ops={} avg_bytes={:.0} total_bytes={}",
+                    n,
+                    ops as f64 / n as f64,
+                    max,
+                    bytes as f64 / n as f64,
+                    bytes
+                );
             }
-            // SAFETY: frees an object previously created by this crate.
-            unsafe { drop(Box::from_raw(fs)) };
+            let (calls, us) = vfsi_nfs::compound::rpc_stats();
+            if calls > 0 {
+                let _ = writeln!(
+                    diagnostics,
+                    "[vfsi] rpc_calls={} avg_rpc_ms={:.2} total_rpc_ms={:.1}",
+                    calls,
+                    us as f64 / calls as f64 / 1000.0,
+                    us as f64 / 1000.0
+                );
+            }
         }
     })
 }
