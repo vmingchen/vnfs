@@ -332,13 +332,12 @@ impl NfsVecFs {
         recursive: bool,
         out: &mut Vec<VfAttrs>,
     ) -> VfRes {
-        let reached_limit = |out: &Vec<VfAttrs>| max_count != 0 && out.len() >= max_count;
+        if max_count != 0 && out.len() >= max_count {
+            return Ok(());
+        }
         let ids = request_mask_to_attr_list(&masks);
         let mut pending = vec![dir.to_path_buf()];
         while let Some(current) = pending.pop() {
-            if reached_limit(out) {
-                break;
-            }
             // A directory argument may itself be a symlink to a directory.
             let dirfh = self.resolve_path(&self.server_path(&current), true)?;
             let mut children = Vec::new();
@@ -353,9 +352,6 @@ impl NfsVecFs {
                     break;
                 }
                 for entry in &entries {
-                    if reached_limit(out) {
-                        return Ok(());
-                    }
                     let path = current.join(path_from_bytes(&entry.name));
                     let mut attrs = VfAttrs {
                         file: FileOperand::from_os_path(&path),
@@ -368,6 +364,9 @@ impl NfsVecFs {
                         children.push(path);
                     }
                     out.push(attrs);
+                    if max_count != 0 && out.len() == max_count {
+                        return Ok(());
+                    }
                 }
                 validate_readdir_progress(
                     cookie.value,

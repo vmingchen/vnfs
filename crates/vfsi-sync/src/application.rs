@@ -492,11 +492,13 @@ pub fn visit_directory_pages<P: AsRef<Path>, C: Into<ListDirControl>>(
                         continue;
                     }
                 };
+                if let Some(cause) = page_error {
+                    directory_error(&mut completed[index], true, OpError::failed(cause, None));
+                }
                 if decision == ListDirControl::Stop {
                     return Ok(completed);
                 }
-                if let Some(cause) = page_error {
-                    directory_error(&mut completed[index], true, OpError::failed(cause, None));
+                if completed[index].is_err() {
                     continue;
                 }
                 if let ListDirControl::Prune(paths) = decision {
@@ -851,14 +853,18 @@ mod traversal_tests {
 
     #[test]
     fn recursive_visit_drops_fallback_snapshot_on_stop_error_and_limit() {
-        for outcome in 0..4 {
+        for outcome in 0..5 {
             let live = Arc::new(AtomicUsize::new(0));
             let peak = Arc::new(AtomicUsize::new(0));
             let options = ListDirOptions::new()
                 .with_recursive(true)
                 .with_max_entries(if outcome == 2 { 2 } else { 1000 })
                 // Root (5 bytes) and two entry paths (13 bytes each) fit.
-                .with_max_path_bytes(if outcome == 3 { 31 } else { 1_000_000 });
+                .with_max_path_bytes(if matches!(outcome, 3 | 4) {
+                    31
+                } else {
+                    1_000_000
+                });
             let mut fetch = snapshot_pages(Arc::clone(&live), peak);
             let mut callbacks = 0;
             let mut live_budget_page = false;
@@ -881,7 +887,9 @@ mod traversal_tests {
                                 max_entries,
                                 follow_symlinks,
                             )?;
-                            if outcome == 3 && pages[0].as_ref().unwrap().0.entries.len() == 2 {
+                            if matches!(outcome, 3 | 4)
+                                && pages[0].as_ref().unwrap().0.entries.len() == 2
+                            {
                                 assert!(pages[0].as_ref().unwrap().1.is_some());
                                 live_budget_page = true;
                             }
@@ -899,6 +907,7 @@ mod traversal_tests {
                             callbacks += 1;
                             match outcome {
                                 0 => Ok(std::ops::ControlFlow::Break(())),
+                                4 if callbacks == 2 => Ok(std::ops::ControlFlow::Break(())),
                                 1 => Err(std::io::Error::from_raw_os_error(libc::EIO)),
                                 _ => Ok(std::ops::ControlFlow::Continue(())),
                             }
@@ -923,7 +932,7 @@ mod traversal_tests {
                         vfsi_core::internal::errors::path(error.cause()),
                         Some(Path::new("/tree/entry-2"))
                     );
-                    if outcome == 3 {
+                    if matches!(outcome, 3 | 4) {
                         assert!(live_budget_page);
                     }
                 }

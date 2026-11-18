@@ -2803,6 +2803,51 @@ fn live_directory_visit_continuation_reuses_resolved_nfs_handle() {
     })
     .unwrap();
     let raw_compounds = crate::compound::thread_compound_stats().0;
+    // Derive each limit from its own first page so this checks exact wire-page
+    // boundaries even if scalar and vector requests use different page sizes.
+    let path = Path::new(&dir);
+    let ids = request_mask_to_attr_list(&mask);
+    let fh = raw.resolve_path(&raw.server_path(path), true).unwrap();
+    let (scalar_page, scalar_cookie) = raw.nfs.readdir(&fh, DirCookie::default(), &ids).unwrap();
+    let (vector_page, vector_cookie) = raw
+        .nfs
+        .readdir_pages(&[(fh, DirCookie::default())], &ids)
+        .unwrap()
+        .pop()
+        .unwrap()
+        .unwrap();
+    assert!(!scalar_page.is_empty() && scalar_cookie.value != 0);
+    assert!(!vector_page.is_empty() && vector_cookie.value != 0);
+    let mut rpc_counts = Vec::new();
+    for honor_limit in [false, true] {
+        let mut scalar_count = 0;
+        let scalar_limit = if honor_limit { scalar_page.len() } else { 0 };
+        let _ = crate::compound::thread_compound_stats();
+        raw.visit_dir_impl(path, mask, scalar_limit, &mut |_| {
+            scalar_count += 1;
+            honor_limit || scalar_count < scalar_page.len()
+        })
+        .unwrap();
+        let scalar_calls = crate::compound::thread_compound_stats().0;
+        assert_eq!(scalar_count, scalar_page.len());
+
+        let mut vector_count = 0;
+        let vector_limit = if honor_limit { vector_page.len() } else { 0 };
+        raw.vlistdirs_impl(&[path], mask, vector_limit, false, &mut |_, _| {
+            vector_count += 1;
+            honor_limit || vector_count < vector_page.len()
+        })
+        .unwrap();
+        let vector_calls = crate::compound::thread_compound_stats().0;
+        assert_eq!(vector_count, vector_page.len());
+
+        rpc_counts.push((scalar_calls, vector_calls));
+    }
+    let limited = raw
+        .listdir_impl(path, mask, scalar_page.len(), false)
+        .unwrap();
+    let collection_calls = crate::compound::thread_compound_stats().0;
+    assert_eq!(limited.len(), scalar_page.len());
 
     let mut backend = NfsVecFs::connect_minor(&host, minor).unwrap();
     backend.nfs.max_response_bytes = 4 * 1024;
@@ -2835,4 +2880,12 @@ fn live_directory_visit_continuation_reuses_resolved_nfs_handle() {
         .map(|_| ())
     }
     .unwrap();
+    assert_eq!(
+        rpc_counts[1], rpc_counts[0],
+        "exact limits must stop like cancellation"
+    );
+    assert_eq!(
+        collection_calls, rpc_counts[0].0,
+        "collecting must stop at the same limit"
+    );
 }

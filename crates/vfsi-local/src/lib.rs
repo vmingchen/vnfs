@@ -2644,10 +2644,12 @@ impl VectorBackend for LocalBackend {
     ) -> VfRes {
         let p = self.open_directory_no_follow_final(&self.resolve(dir))?;
         let entries = std::fs::read_dir(&p)?;
-        for (count, entry) in entries.enumerate() {
-            if max_entries != 0 && count >= max_entries {
-                return Ok(());
-            }
+        let limit = if max_entries == 0 {
+            usize::MAX
+        } else {
+            max_entries
+        };
+        for entry in entries.take(limit) {
             let entry = entry?;
             let name = entry.file_name();
             let path = dir.join(&name);

@@ -324,9 +324,6 @@ impl VectorBackend for NfsVecFs {
                 .readdir(&fh, cookie, &ids)
                 .map_err(vfsi_core::internal::errors::from_rpc)?;
             for entry in &page {
-                if max_entries != 0 && count >= max_entries {
-                    return Ok(());
-                }
                 let path = dir.join(path_from_bytes(&entry.name));
                 let mut attrs = VfAttrs {
                     file: FileOperand::from_os_path(&path),
@@ -339,6 +336,9 @@ impl VectorBackend for NfsVecFs {
                     return Ok(());
                 }
                 count += 1;
+                if max_entries != 0 && count == max_entries {
+                    return Ok(());
+                }
             }
             let next = next_cookie;
             if next.value == 0 {
@@ -413,13 +413,6 @@ impl VectorBackend for NfsVecFs {
                 )
             }
             .map_err(|error| remap_listing_error(error, &level_owners))?;
-            if results.len() != level.len() {
-                return Err(IndexedError::unattributed(
-                    vfsi_core::internal::errors::invalid_reply(
-                        "READDIR returned the wrong number of directory pages",
-                    ),
-                ));
-            }
             // Emit each bounded READDIR page before fetching a continuation.
             // Retaining every page until EOF used memory proportional to the
             // entire listing even when the caller requested an early stop.
@@ -430,9 +423,6 @@ impl VectorBackend for NfsVecFs {
                     let dir = &level[idx].1;
                     let owner = level[idx].2;
                     for e in entries {
-                        if max_entries != 0 && counted >= max_entries {
-                            return Ok(false);
-                        }
                         let path = dir.join(path_from_bytes(&e.name));
                         let mut a = VfAttrs {
                             file: FileOperand::from_os_path(&path),
@@ -450,6 +440,9 @@ impl VectorBackend for NfsVecFs {
                             return Ok(false);
                         }
                         counted += 1;
+                        if max_entries != 0 && counted == max_entries {
+                            return Ok(false);
+                        }
                     }
                     Ok(true)
                 };
@@ -483,13 +476,6 @@ impl VectorBackend for NfsVecFs {
                     )
                 }
                 .map_err(|error| remap_listing_error(error, &pending_owners))?;
-                if cont.len() != pending.len() {
-                    return Err(IndexedError::unattributed(
-                        vfsi_core::internal::errors::invalid_reply(
-                            "READDIR continuation returned the wrong number of pages",
-                        ),
-                    ));
-                }
                 let mut next_pending = Vec::new();
                 for ((idx, fh, previous_cookie, mut seen_cookies), (entries, cookie)) in
                     pending.into_iter().zip(cont)
