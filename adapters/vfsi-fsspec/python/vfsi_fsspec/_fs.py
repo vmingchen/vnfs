@@ -2147,6 +2147,9 @@ class _BufferGroup:
                             file._fail_staging(error)
                             raise
 
+    def _file_index(self, file):
+        return next(i for i, member in enumerate(self.files) if member is file)
+
     def _rebase_file_error(self, error, files):
         position = getattr(error, "index", None)
         if (
@@ -2155,8 +2158,7 @@ class _BufferGroup:
             and 0 <= position < len(files)
         ):
             file = files[position]
-            index = next(i for i, member in enumerate(self.files) if member is file)
-            _oserror(error, file.path, index=index)
+            _oserror(error, file.path, index=self._file_index(file))
 
     def _read_vector(self, method, files, offsets, lengths):
         fds = [file._raw._ensure_open() for file in files]
@@ -2222,6 +2224,23 @@ class _BufferGroup:
         if getattr(error, "failure_state", None) == "not_attempted":
             error.failure_state = "failed"
 
+    def _read_error_matches_file(self, error, file):
+        index = getattr(error, "index", None)
+        if index is not None and (
+            type(index) is not int or index != self._file_index(file)
+        ):
+            return False
+        filename = error.filename
+        if filename is None:
+            return True
+        if filename not in (file.path, self.fs._native_path(file.path)):
+            return False
+        return index is not None or not any(
+            member is not file
+            and filename in (member.path, self.fs._native_path(member.path))
+            for member in self.files
+        )
+
     def _pread_many(self, files, offsets, lengths, *, required=None):
         data, errors = self._pread_many_once(files, offsets, lengths)
         # Speculation gets one wave. Complete only required cache fills;
@@ -2236,11 +2255,20 @@ class _BufferGroup:
         }
         pending = list(partial)
         while pending:
-            more, failures = self._pread_many_once(
-                [files[index] for index in pending],
-                [offsets[index] + len(partial[index]) for index in pending],
-                [lengths[index] - len(partial[index]) for index in pending],
-            )
+            try:
+                more, failures = self._pread_many_once(
+                    [files[index] for index in pending],
+                    [offsets[index] + len(partial[index]) for index in pending],
+                    [lengths[index] - len(partial[index]) for index in pending],
+                )
+            except OSError as error:
+                # A grouped reopen can fail on a different file. Only attach
+                # progress when the exception can describe this continuation.
+                if len(pending) == 1:
+                    index = pending[0]
+                    if self._read_error_matches_file(error, files[index]):
+                        self._prepend_read_prefix(error, partial[index], offsets[index])
+                raise
             remaining = []
             for position, index in enumerate(pending):
                 if position in failures:
@@ -2405,11 +2433,7 @@ class _BufferGroup:
                         raise _oserror(
                             errors[index],
                             current.path,
-                            index=next(
-                                i
-                                for i, file in enumerate(self.files)
-                                if file is current
-                            ),
+                            index=self._file_index(current),
                         )
                     continue
                 value = value or b""
@@ -2470,11 +2494,7 @@ class _BufferGroup:
                         raise _oserror(
                             errors[index],
                             current.path,
-                            index=next(
-                                i
-                                for i, file in enumerate(self.files)
-                                if file is current
-                            ),
+                            index=self._file_index(current),
                         )
                     continue
                 value = value or b""

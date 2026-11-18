@@ -95,6 +95,54 @@ def test_group_read_keeps_confirmed_prefix_on_suffix_error(
         assert calls == [([0, 0], [4, 4]), ([1], [3])]
 
 
+@pytest.mark.parametrize(
+    ("attributed", "sibling_path"),
+    [(None, "/b"), (0, "/b"), (1, "/b"), (None, "/a"), (0, "/a"), (None, "/scope/a")],
+)
+def test_group_read_keeps_prefix_on_attributable_call_failure(
+    dummy_fs, monkeypatch, attributed, sibling_path
+):
+    fs = dummy_fs
+    paths = ["/a", sibling_path]
+    if sibling_path == "/scope/a":
+        monkeypatch.setattr(fs, "_root", "scope")
+        fs.mkdir("/scope", create_parents=True)
+    fs.pipe(dict.fromkeys(paths, b"abcd"))
+    with opened(fs, paths, "rb") as files:
+        group = files[0]._buffer_group
+        error = OSError(errno.EIO, "continuation rejected")
+        error.failure_state = "not_attempted"
+        if attributed is not None:
+            error.index = attributed
+            error.filename = paths[attributed]
+        elif sibling_path != "/b":
+            error.filename = sibling_path
+        calls = []
+
+        def pread_many_once(inputs, offsets, lengths):
+            calls.append((list(offsets), list(lengths)))
+            if len(calls) == 1:
+                return [b"a", b"abcd"], {}
+            raise error
+
+        monkeypatch.setattr(group, "_pread_many_once", pread_many_once)
+        with pytest.raises(OSError) as caught:
+            files[0].read()
+        assert caught.value is error
+        assert getattr(error, "index", None) == attributed
+        if attributed == 1 or (sibling_path != "/b" and attributed is None):
+            assert error.failure_state == "not_attempted"
+            assert not hasattr(error, "read_prefix")
+        else:
+            assert error.failure_state == "failed"
+            assert (error.read_prefix, error.read_offset, error.read_eof) == (
+                b"a",
+                0,
+                False,
+            )
+        assert calls == [([0, 0], [4, 4]), ([1], [3])]
+
+
 def test_group_read_keeps_prefix_with_legacy_errno_outcome(dummy_fs, monkeypatch):
     fs = dummy_fs
     fs.pipe_file("/a", b"abcd")
