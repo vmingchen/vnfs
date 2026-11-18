@@ -320,9 +320,7 @@ impl NfsClientBuilder {
             minor_version: filesystem.minorversion(),
         });
         // Construction has not installed the backend behind a client lock.
-        for callback in HandleBackend::take_notifications(&mut filesystem) {
-            callback();
-        }
+        filesystem.deliver_queued_notifications();
         Ok(filesystem)
     }
 
@@ -349,7 +347,7 @@ pub enum NfsEvent {
 /// Observer hook which does not impose a logging or metrics framework.
 /// Owned clients deliver events after releasing their backend lock, allowing
 /// reentrant client operations. Callbacks run synchronously and should be short.
-/// Owned-client delivery isolates callback panics from filesystem results.
+/// Built-in delivery isolates callback panics from filesystem results.
 /// Store weak client references to avoid an observer/client ownership cycle.
 /// Direct backend users must drain `HandleBackend::take_notifications` outside locks.
 pub trait NfsObserver: Send + Sync + 'static {

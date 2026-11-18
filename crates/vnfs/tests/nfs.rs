@@ -341,6 +341,76 @@ fn builder_observer_receives_lifecycle_events() {
 }
 
 #[test]
+fn lifecycle_observer_panics_do_not_interrupt_connect_or_shutdown() {
+    use std::sync::{Arc, Mutex};
+
+    struct Observer {
+        panic_on_connect: bool,
+        events: Mutex<Vec<&'static str>>,
+    }
+
+    impl NfsObserver for Observer {
+        fn on_event(&self, event: &NfsEvent) {
+            let name = match event {
+                NfsEvent::Connected { .. } => "connected",
+                NfsEvent::ReconnectStarted => "reconnect-started",
+                NfsEvent::ReconnectSucceeded => "reconnect-succeeded",
+                NfsEvent::Shutdown { result: Ok(()) } => "shutdown",
+                _ => "other",
+            };
+            self.events.lock().unwrap().push(name);
+            if self.panic_on_connect || name != "connected" {
+                panic!("observer panicked on {name}");
+            }
+        }
+    }
+
+    let minor = std::env::var("VNFS_TEST_MINOR")
+        .ok()
+        .map(|minor| minor.parse().unwrap());
+    let mut observations = Vec::new();
+    for panic_on_connect in [false, true] {
+        let observer = Arc::new(Observer {
+            panic_on_connect,
+            events: Mutex::new(Vec::new()),
+        });
+        let scenario = std::panic::catch_unwind(|| {
+            if panic_on_connect {
+                let _fs = Nfs::builder(test_host())
+                    .version(vnfs::nfs::NfsVersion::try_from(minor).unwrap())
+                    .observer(observer.clone())
+                    .connect()
+                    .unwrap();
+            } else {
+                let mut fs = NfsVecFs::builder(test_host())
+                    .minor_version(minor)
+                    .observer(observer.clone())
+                    .connect()
+                    .unwrap();
+                fs.reconnect().unwrap();
+                fs.shutdown().unwrap();
+            }
+        });
+        observations.push((scenario.is_ok(), observer.events.lock().unwrap().clone()));
+    }
+    assert_eq!(
+        observations,
+        [
+            (
+                true,
+                vec![
+                    "connected",
+                    "reconnect-started",
+                    "reconnect-succeeded",
+                    "shutdown"
+                ],
+            ),
+            (true, vec!["connected"]),
+        ]
+    );
+}
+
+#[test]
 fn telemetry_is_client_scoped_counts_payloads_and_survives_reconnect() {
     use vnfs::files::WriteOp;
     use vnfs::nfs::Telemetry;

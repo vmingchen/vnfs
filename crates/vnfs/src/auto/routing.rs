@@ -286,7 +286,10 @@ impl Auto {
         } else {
             connection
         };
-        cache.insert(spec.id, connection.clone());
+        let retired = cache.insert(spec.id, connection.clone());
+        drop(cache);
+        // Session teardown can perform RPCs. Release the route cache first.
+        drop(retired);
         Some(connection)
     }
 

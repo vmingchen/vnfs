@@ -14,18 +14,15 @@ impl NfsVecFs {
     /// Close all descriptors and explicitly tear down NFS session state.
     /// `Drop` remains a best-effort fallback when this result is not needed.
     pub fn shutdown(mut self) -> VfResult<()> {
-        for callback in HandleBackend::take_notifications(&mut self) {
-            callback();
-        }
-        let observer = self.observer.clone();
+        self.deliver_queued_notifications();
         let close_result = self.close_open_descriptors();
         let shutdown_result = self
             .nfs
             .shutdown()
             .map_err(vfsi_core::internal::errors::from_rpc);
         let mut result = close_result.and(shutdown_result);
-        if let Some(observer) = observer {
-            observer.on_event(&NfsEvent::Shutdown {
+        if let Some(observer) = &self.observer {
+            let event = NfsEvent::Shutdown {
                 result: match &mut result {
                     Ok(()) => Ok(()),
                     Err(error) => {
@@ -33,9 +30,19 @@ impl NfsVecFs {
                         Err(vfsi_core::internal::errors::from_shared(&source))
                     }
                 },
-            });
+            };
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                observer.on_event(&event);
+            }));
         }
         result
+    }
+
+    // These delivery sites own the backend outright and hold no client lock.
+    pub(super) fn deliver_queued_notifications(&mut self) {
+        for callback in HandleBackend::take_notifications(self) {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
+        }
     }
 
     fn close_open_descriptors(&mut self) -> VfResult<()> {
