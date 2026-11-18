@@ -51,6 +51,14 @@ name = "uring_bench"
 required-features = ["uring", "posix"]
 
 [[test]]
+name = "nfs"
+required-features = ["nfs"]
+
+[[test]]
+name = "nfs_recovery"
+required-features = ["nfs"]
+
+[[test]]
 name = "posix_backend"
 required-features = ["posix"]
 

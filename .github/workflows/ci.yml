@@ -247,14 +247,14 @@ jobs:
         run: |
           cargo check -p vfsi-nfs --no-default-features
           cargo check -p vfsi-nfs --all-features
-          cargo check -p vnfs --no-default-features --features nfs
+          cargo check -p vnfs --tests --no-default-features --features nfs
           cargo check -p vnfs --no-default-features --features nfs,rpcsec-gss
           cargo check -p vfsi-smb --no-default-features
           cargo check -p vfsi-smb --all-features
-          cargo check -p vnfs --lib --no-default-features
-          cargo check -p vnfs --lib --no-default-features --features posix
+          cargo check -p vnfs --tests --no-default-features
+          cargo check -p vnfs --tests --no-default-features --features posix
+          cargo check -p vnfs --tests --no-default-features --features uring
           cargo test -p vnfs --no-default-features --features posix --test posix
-          cargo check -p vnfs --lib --no-default-features --features nfs
       - name: Verify the documented Rust 1.88 MSRV
         run: |
           rustup toolchain install 1.88.0 --profile minimal

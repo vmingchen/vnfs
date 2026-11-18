@@ -1,7 +1,5 @@
 //! Private read dispatch projections and their regression tests.
 #[cfg(test)]
-use crate::ReadOp;
-#[cfg(test)]
 use vfsi_core::api::internal::OwnedReadResult;
 pub(crate) use vfsi_core::api::internal::consume_ops;
 #[cfg(any(test, all(feature = "auto", target_os = "linux")))]
@@ -9,7 +7,6 @@ pub(crate) use vfsi_core::api::internal::{ReadRequest, read_batch};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::VfsiExt;
     use vfsi_core::{FailureState, OpError};
     fn failure<T>(mut outcomes: Vec<vfsi_core::OpResult<T>>) -> OpError {
         assert_eq!(outcomes.len(), 1);
@@ -18,6 +15,7 @@ mod tests {
     #[cfg(all(feature = "auto", target_os = "linux"))]
     #[test]
     fn consuming_dispatch_rejects_bad_reply_shapes_and_does_not_replay() {
+        use crate::{ReadOp, VfsiExt};
         for count in [0, 2] {
             let error = failure(
                 consume_ops::<crate::PosixFile, (), ()>(
