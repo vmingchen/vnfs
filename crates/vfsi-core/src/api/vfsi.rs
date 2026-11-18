@@ -176,8 +176,9 @@ pub trait Vfsi {
     type Dir: DirHandle + 'static;
 
     /// Open genuine directory handles in input order without following final
-    /// symlinks. Path-only backends report unsupported. Successful owned handles
-    /// remain available across sibling failures. Empty vectors perform no I/O.
+    /// symlinks. Path-only backends report unsupported for valid directories and
+    /// may report path validation errors for other inputs. Successful owned
+    /// handles remain available across sibling failures. Empty vectors perform no I/O.
     /// Use VfsiExt::open_dirs for strict collection with sibling cleanup.
     fn vopen_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> crate::VecResult<Self::Dir> {
         if paths.is_empty() {
