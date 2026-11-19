@@ -135,9 +135,10 @@ def test_grouped_lazy_reader_can_open_after_writer(dummy_fs, cache_type, existin
     assert not fs._client._fds
 
 
-@pytest.mark.parametrize("mode", ["ab", "ab+"])
+@pytest.mark.parametrize("cache_type", ["mmap", "all"])
+@pytest.mark.parametrize("mode", ["wb", "ab", "ab+", "xb"])
 @pytest.mark.parametrize("symlink", [False, True])
-def test_grouped_mmap_reader_can_follow_missing_append_target(dummy_fs, mode, symlink):
+def test_grouped_reader_can_follow_missing_target(dummy_fs, cache_type, mode, symlink):
     fs = dummy_fs
     reader = "/target"
     if symlink:
@@ -145,7 +146,7 @@ def test_grouped_mmap_reader_can_follow_missing_append_target(dummy_fs, mode, sy
         reader = "/alias"
     files = fs.open_many(
         [OpenFile(fs, "/target", mode=mode), OpenFile(fs, reader, mode="rb")],
-        cache_type="mmap",
+        cache_type=cache_type,
     )
     try:
         assert files[1].read(1) == b""

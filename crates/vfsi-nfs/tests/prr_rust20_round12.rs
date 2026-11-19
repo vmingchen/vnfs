@@ -297,6 +297,57 @@ fn unrelated_failure_does_not_block_a_successful_copy_chain() {
     assert_eq!(data.unwrap(), b"new");
 }
 
+#[cfg(feature = "test-faults")]
+#[test]
+fn only_a_full_replacement_repairs_a_failed_copy_dependency() {
+    use std::sync::Arc;
+    use vfsi_core::{
+        FailureState,
+        internal::faults::{FaultScript, OpenFaultPoint},
+    };
+
+    for offset in [0, 1] {
+        let Some((mut fs, root)) = connect("replace-failed-producer") else {
+            return;
+        };
+        let a = format!("{root}/a");
+        let b = format!("{root}/b");
+        let c = format!("{root}/c");
+        let d = format!("{root}/d");
+        put(&mut fs, &a, b"older");
+        put(&mut fs, &c, b"new");
+        let fault = Arc::new(FaultScript::one(
+            OpenFaultPoint::BeforeSetattrCompound { first: 0 },
+            std::io::Error::from_raw_os_error(libc::EIO),
+        ));
+        fs.set_fault_injector(fault.clone());
+        let pairs = [
+            ExtentPair::new(&a, 0, &b, 0, None),
+            ExtentPair::new(&c, 0, &b, offset, None),
+            ExtentPair::new(&b, 0, &d, 0, None),
+        ];
+        let outcomes = fs.vcopy_impl(&pairs, CopyOptions::default()).unwrap();
+        let data = fs.read_raw_impl(&FileOperand::from_path(&d), 0, 100);
+        cleanup(&mut fs, &root);
+        assert!(fault.is_consumed());
+        assert_eq!(
+            outcomes[0].as_ref().unwrap_err().state(),
+            FailureState::Failed
+        );
+        assert!(outcomes[1].is_ok(), "{:?}", outcomes[1]);
+        if offset == 0 {
+            assert!(outcomes[2].is_ok(), "{:?}", outcomes[2]);
+            assert_eq!(data.unwrap(), b"new");
+        } else {
+            assert_eq!(
+                outcomes[2].as_ref().unwrap_err().state(),
+                FailureState::NotAttempted
+            );
+            assert_eq!(data.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        }
+    }
+}
+
 #[test]
 fn unrelated_symlink_loop_does_not_block_a_successful_copy_chain() {
     let Some((mut fs, root)) = connect("unrelated-symlink-loop") else {
@@ -323,6 +374,43 @@ fn unrelated_symlink_loop_does_not_block_a_successful_copy_chain() {
     assert_eq!(
         vfsi_core::native_status(outcomes[0].as_ref().unwrap_err().cause()),
         Some(vfsi_core::StatusCode::Errno(libc::ELOOP as u32))
+    );
+    assert!(outcomes[1].is_ok(), "{:?}", outcomes[1]);
+    assert!(outcomes[2].is_ok(), "{:?}", outcomes[2]);
+    assert_eq!(data.unwrap(), b"input");
+}
+
+#[test]
+fn inaccessible_destination_does_not_block_a_successful_copy_chain() {
+    let Some((mut fs, root)) = connect("inaccessible-destination") else {
+        return;
+    };
+    let source = format!("{root}/source");
+    let locked = format!("{root}/locked");
+    let rejected = format!("{locked}/child");
+    let intermediate = format!("{root}/intermediate");
+    let destination = format!("{root}/destination");
+    put(&mut fs, &source, b"input");
+    fs.ensure_dir_impl(Path::new(&locked), 0o600).unwrap();
+
+    let outcomes = fs
+        .vcopy_impl(
+            &[
+                ExtentPair::new(&source, 0, &rejected, 0, None),
+                ExtentPair::new(&source, 0, &intermediate, 0, None),
+                ExtentPair::new(&intermediate, 0, &destination, 0, None),
+            ],
+            CopyOptions::default(),
+        )
+        .unwrap();
+    let data = fs.read_raw_impl(&FileOperand::from_path(&destination), 0, 100);
+    let removed = fs.remove_paths_impl(&[Path::new(&locked)], false).unwrap();
+    removed.into_iter().next().unwrap().unwrap();
+    cleanup(&mut fs, &root);
+
+    assert_eq!(
+        outcomes[0].as_ref().unwrap_err().cause().kind(),
+        std::io::ErrorKind::PermissionDenied
     );
     assert!(outcomes[1].is_ok(), "{:?}", outcomes[1]);
     assert!(outcomes[2].is_ok(), "{:?}", outcomes[2]);

@@ -918,6 +918,23 @@ fn live_dangling_symlink_keeps_kernel_routing() {
     let off_mount = fixture.path().join("off-mount");
     std::os::unix::fs::symlink(local.path().join("missing"), &off_mount).unwrap();
     assert!(!host_client.mounted_copy_path_on(&off_mount, true, &mount_table, &source.route));
+    let source_link = fixture.path().join("preserved-link");
+    let existing = host_client
+        .vcopy(&[(&source_link, &off_mount)], preserve_link)
+        .unwrap()
+        .remove(0)
+        .unwrap_err();
+    assert_eq!(existing.cause().kind(), io::ErrorKind::AlreadyExists);
+    let cross_mount = host_client
+        .vcopy(&[(&fixture.path().join("file"), &off_mount)], preserve_link)
+        .unwrap()
+        .remove(0)
+        .unwrap_err();
+    assert_eq!(cross_mount.cause().kind(), io::ErrorKind::Unsupported);
+    assert_eq!(
+        fs::read_link(&off_mount).unwrap(),
+        local.path().join("missing")
+    );
     let off_mount_ancestor = fixture.path().join("off-mount-ancestor");
     std::os::unix::fs::symlink(local.path(), &off_mount_ancestor).unwrap();
     let outside = off_mount_ancestor.join("missing");

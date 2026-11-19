@@ -5718,7 +5718,7 @@ class VfsiFileSystem(AbstractFileSystem):
         """Open a group of ``OpenFile`` objects using native vectors.
 
         Eager reads and mmap backing files are prepared before opening writers.
-        Missing mmap paths can open with an earlier writer that may create
+        Missing reader paths can open with an earlier writer that may create
         them. An empty file needs no backing map.
         An explicit mmap location can back one buffered reader.
         """
@@ -5853,11 +5853,11 @@ class VfsiFileSystem(AbstractFileSystem):
                             emptied_paths.add(path)
                     elif mode == "rb":
                         size = discovered_sizes[index]
-                        if mmap_readers and size in (None, 0):
-                            if path in emptied_paths:
-                                continue
-                            if earlier_creator:
-                                possible_creations.append(index)
+                        empty_mmap = mmap_readers and size in (None, 0)
+                        if empty_mmap and path in emptied_paths:
+                            continue
+                        if earlier_creator and (eager_readers or empty_mmap):
+                            possible_creations.append(index)
                         readers.append(index)
 
                 if possible_creations:

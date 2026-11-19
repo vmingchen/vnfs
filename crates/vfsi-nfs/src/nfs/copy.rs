@@ -325,22 +325,50 @@ impl NfsVecFs {
         if retry_from < pairs.len() {
             use vfsi_core::FailureState;
             let mut failed = Vec::new();
-            let record_failure = |index, slot: &mut Option<OpResult<()>>, failed: &mut Vec<_>| {
-                let error = slot.as_mut()?.as_mut().err()?;
-                match error.state() {
-                    FailureState::Unknown => {
-                        Some(vfsi_core::internal::errors::share_op_cause(error))
+            let mut replacements = std::collections::HashMap::new();
+            let record_copy =
+                |fs: &Self,
+                 index: usize,
+                 slot: &mut Option<OpResult<()>>,
+                 destination: Option<&FileOperand>,
+                 failed: &mut Vec<_>,
+                 replacements: &mut std::collections::HashMap<NfsFh, usize>| {
+                    match slot.as_mut()? {
+                        Ok(()) => {
+                            // Only a copy from destination offset zero replaces
+                            // the full contents, including any failed older prefix.
+                            if pairs[index].dst_offset == 0
+                                && let Some(fd) = destination.and_then(FileOperand::fd)
+                            {
+                                replacements.insert(fs.open_files[&fd].fh.clone(), index);
+                            }
+                            None
+                        }
+                        Err(error) => match error.state() {
+                            FailureState::Unknown => {
+                                Some(vfsi_core::internal::errors::share_op_cause(error))
+                            }
+                            FailureState::Failed => {
+                                failed.push((
+                                    index,
+                                    vfsi_core::internal::errors::share_op_cause(error),
+                                ));
+                                None
+                            }
+                            FailureState::NotAttempted => None,
+                        },
                     }
-                    FailureState::Failed => {
-                        failed.push((index, vfsi_core::internal::errors::share_op_cause(error)));
-                        None
-                    }
-                    FailureState::NotAttempted => None,
-                }
-            };
-            let mut uncertain = active[..prefix]
-                .iter()
-                .find_map(|&index| record_failure(index, &mut output[index], &mut failed));
+                };
+            let mut uncertain = active[..prefix].iter().find_map(|&index| {
+                record_copy(
+                    self,
+                    index,
+                    &mut output[index],
+                    dst[index].as_ref(),
+                    &mut failed,
+                    &mut replacements,
+                )
+            });
             for index in retry_from..pairs.len() {
                 let retry_source = output[index]
                     .as_ref()
@@ -371,25 +399,20 @@ impl NfsVecFs {
                 let blocker = blocker.or_else(|| {
                     let source_fd = src[index].as_ref()?.fd()?;
                     let source = self.open_files[&source_fd].fh.clone();
+                    let replacement = replacements.get(&source).copied();
                     failed.iter().find_map(|&(failed_index, ref cause)| {
+                        if replacement.is_some_and(|index| index > failed_index) {
+                            return None;
+                        }
                         let affected = match dst[failed_index].as_ref().and_then(FileOperand::fd) {
                             Some(fd) => self.open_files[&fd].fh == source,
-                            // An OPEN can create a file before local handle
-                            // registration fails. Resolve that destination
-                            // only when a previously missing source appeared.
+                            // OPEN may create a file before registration
+                            // fails. A matching filehandle proves dependency;
+                            // a failed lookup does not identify the source.
                             None if retry_source => {
                                 let path = self.server_path(&pairs[failed_index].dst_path);
-                                match self.resolve_path(&path, true) {
-                                    Ok(destination) => destination == source,
-                                    Err(error) => {
-                                        error.raw_os_error() != Some(libc::ELOOP)
-                                            && !matches!(
-                                                error.kind(),
-                                                std::io::ErrorKind::NotFound
-                                                    | std::io::ErrorKind::NotADirectory
-                                            )
-                                    }
-                                }
+                                self.resolve_path(&path, true)
+                                    .is_ok_and(|destination| destination == source)
                             }
                             None => false,
                         };
@@ -402,7 +425,14 @@ impl NfsVecFs {
                     )));
                 } else if src[index].is_some() {
                     self.copy_admitted_extents(pairs, &src, &mut dst, &[index], &mut output);
-                    uncertain = record_failure(index, &mut output[index], &mut failed);
+                    uncertain = record_copy(
+                        self,
+                        index,
+                        &mut output[index],
+                        dst[index].as_ref(),
+                        &mut failed,
+                        &mut replacements,
+                    );
                 }
             }
         }

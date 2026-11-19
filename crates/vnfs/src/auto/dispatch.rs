@@ -737,7 +737,14 @@ impl Auto {
             // spelling still addresses the same eligible backend.
             let mounted_pair = match (&source.route, &target.route) {
                 (other @ Route::Nfs(_), Route::Posix) => {
-                    self.mounted_copy_path_on(to, true, &mounts, other)
+                    // Preserving a source symlink creates a directory entry
+                    // and never follows the destination's final symlink.
+                    let follow_target = options.follow_source_symlinks()
+                        || !self
+                            .mounted
+                            .symlink_attrs(from)
+                            .is_ok_and(|attrs| attrs.is_symlink());
+                    self.mounted_copy_path_on(to, follow_target, &mounts, other)
                 }
                 (Route::Posix, other @ Route::Nfs(_)) => self.mounted_copy_path_on(
                     from,
