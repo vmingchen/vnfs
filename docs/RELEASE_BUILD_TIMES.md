@@ -1,5 +1,41 @@
 # Release build-time baseline
 
+## 2026-11-18 pinned reads, recovery, and copy routing
+
+All nine Rust/C crates and four Python distributions came from `ae478b5c8543b637171be5ecba9f9499a86736f2`
+after [canonical CI](https://github.com/vmingchen/vnfs/actions/runs/44450704889)
+and the [four-port/ABI gate](https://github.com/vmingchen/vnfs/actions/runs/44450705043)
+passed at that revision. C ABI remains v3.
+
+Rust timings cover locked Cargo publication with warm caches, including package
+verification, upload, and registry visibility. Archive digest and source
+verification are separate.
+
+| Crate | Publish command |
+|---|---:|
+| vfsi-core 0.5.0 | 6s |
+| vfsi-sync 0.5.0 | 5s |
+| vfsi-local 0.5.0 | 4s |
+| vfsi-posix 0.5.0 | 4s |
+| vfsi-uring 0.5.0 | 5s |
+| vfsi-nfs 0.5.0 | 12s |
+| vfsi-smb 0.5.0 | 11s |
+| vnfs 0.0.39 | 8s |
+| vfsi-c 0.3.23 | 21s |
+
+Python workflow wall times include queueing, wheel builds, installed-wheel
+checks, and publication. The nfs4fs workflow also covers live NFS with Kerberos.
+
+| Python release | Complete workflow wall time |
+|---|---:|
+| [vfsi-fsspec 0.1.17](https://github.com/vmingchen/vnfs/actions/runs/44453085136) | 185s |
+| [vsmb 0.1.12](https://github.com/vmingchen/vnfs/actions/runs/44453085428) | 334s |
+| [nfs4fs 0.3.18](https://github.com/vmingchen/vnfs/actions/runs/44453618665) | 1768s |
+| [vsmbfs 0.1.11](https://github.com/vmingchen/vnfs/actions/runs/44453773506) | 246s |
+
+The release record on the VM contains run logs, verified archive digests, and
+test timings at `/home/ubuntu/Documents/vfsi-artifacts/release-2026-11-18.5BFsp5`.
+
 ## 2026-11-15 buffered I/O and corrected Rust version cohorts
 
 The Rust/C cohort uses clean source bdc0313c01d958493453edd2bf54e916c3517248; Python
