@@ -298,12 +298,10 @@ fn directory_error(
 }
 
 fn traversal_symlink_policy(policy: ListDirOptions, depth: usize) -> DirectorySymlinkPolicy {
-    if depth != 0 || !policy.allow_symlink_components() {
-        DirectorySymlinkPolicy::NoFollow
-    } else if policy.recursive() {
-        DirectorySymlinkPolicy::FollowParents
+    if depth == 0 {
+        policy.into()
     } else {
-        DirectorySymlinkPolicy::Follow
+        DirectorySymlinkPolicy::NoFollow
     }
 }
 
@@ -350,7 +348,9 @@ pub fn visit_directory_pages<P: AsRef<Path>, C: Into<ListDirControl>>(
             break;
         };
         let owner = front.0;
-        if policy.recursive() && front.2 == 0 {
+        let validate_final = policy.recursive()
+            || (policy.allow_symlink_components() && !policy.allow_final_symlink());
+        if validate_final && front.2 == 0 {
             if let Err(error) = validate_root(&front.1) {
                 let attempted = error.state() != FailureState::NotAttempted;
                 directory_error(&mut completed[owner], started[owner], error);

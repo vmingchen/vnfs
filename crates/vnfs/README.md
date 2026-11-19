@@ -53,11 +53,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Both reads can share **one COMPOUND round trip** when negotiated limits permit,
-without remote OPEN/CLOSE phases. Writes use batched OPEN, complete WRITE, and
-CLOSE phases—not one RPC. Larger batches split automatically; successful
-results retain input order. Paths are relative to the configured remote root,
-which is not a security sandbox.
+The two whole-file reads share batched OPEN, READ, and CLOSE compounds.
+Retained handles keep each read on the same file through EOF. Writes also
+batch OPEN, WRITE, and CLOSE. Larger batches split at server limits, and
+successful results retain input order. Paths are relative to the configured
+remote root, which is not a security sandbox.
 
 ## Small-file benchmark
 

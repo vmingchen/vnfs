@@ -28,7 +28,8 @@ struct VisitFlags {
     entries_unlimited: bool,
     bytes_unlimited: bool,
     no_follow: bool,
-    #[bits(3)]
+    no_follow_final: bool,
+    #[bits(2)]
     _reserved: u8,
 }
 
@@ -136,6 +137,15 @@ impl ListDirOptions {
     }
     pub const fn allow_symlink_components(self) -> bool {
         !self.flags.no_follow()
+    }
+    pub(crate) const fn without_following_final_symlink(mut self) -> Self {
+        self.flags.set_no_follow_final(true);
+        self
+    }
+    /// Whether opening a directory page may follow its final symlink.
+    #[doc(hidden)]
+    pub const fn allow_final_symlink(self) -> bool {
+        self.allow_symlink_components() && !self.flags.no_follow_final()
     }
     pub fn fields(self) -> Attributes {
         self.fields.unwrap_or_else(Attributes::stat) | Attributes::MODE

@@ -1622,7 +1622,7 @@ impl super::Auto {
                     states,
                     size,
                     probe,
-                    options.allow_symlink_components(),
+                    options,
                 )
             },
         )

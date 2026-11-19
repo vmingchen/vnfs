@@ -302,7 +302,7 @@ impl<F: VectorBackend + 'static> FsClient<F> {
                     states,
                     size,
                     probe,
-                    options.allow_symlink_components(),
+                    options,
                 )
             },
         )

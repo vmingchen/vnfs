@@ -630,10 +630,10 @@ fn rust_native_client_workflow_on_nfs() {
         client.read_files(&paths).unwrap(),
         vec![b"first".to_vec(), b"second".to_vec()]
     );
-    assert_eq!(
-        vfsi_nfs::compound::thread_compound_stats().0,
-        1,
-        "small path-based whole-file reads should share one compound"
+    let compounds = vfsi_nfs::compound::thread_compound_stats().0;
+    assert!(
+        (1..=3).contains(&compounds),
+        "small whole-file reads should share batched OPEN, READ, and CLOSE, got {compounds}"
     );
 
     for follow in [true, false] {

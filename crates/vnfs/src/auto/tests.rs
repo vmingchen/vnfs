@@ -902,15 +902,6 @@ fn live_dangling_symlink_keeps_kernel_routing() {
         Path::new("destination")
     );
 
-    // Known descendants remain usable when the client root is search-only.
-    use std::os::unix::fs::PermissionsExt;
-    let permissions = fs::metadata(fixture.path()).unwrap().permissions();
-    fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o111)).unwrap();
-    let copy = client.vcopy(&[("file", "alias/search-only")], Default::default());
-    fs::set_permissions(fixture.path(), permissions).unwrap();
-    copy.unwrap().remove(0).unwrap();
-    assert_eq!(fs::read(real.join("search-only")).unwrap(), b"payload");
-
     let host_client = Auto::new("/").unwrap();
     let mount_table = read_mounts(false);
     let source = host_client.resolve(&fixture.path().join("file"), &mount_table);

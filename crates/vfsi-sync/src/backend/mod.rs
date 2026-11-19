@@ -53,6 +53,18 @@ pub enum DirectorySymlinkPolicy {
     NoFollow,
 }
 
+impl From<vfsi_core::api::ListDirOptions> for DirectorySymlinkPolicy {
+    fn from(options: vfsi_core::api::ListDirOptions) -> Self {
+        if !options.allow_symlink_components() {
+            Self::NoFollow
+        } else if options.recursive() || !options.allow_final_symlink() {
+            Self::FollowParents
+        } else {
+            Self::Follow
+        }
+    }
+}
+
 impl From<bool> for DirectorySymlinkPolicy {
     fn from(follow: bool) -> Self {
         if follow { Self::Follow } else { Self::NoFollow }

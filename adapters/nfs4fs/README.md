@@ -57,9 +57,9 @@ with fsspec.open(
 
 The `pipe()` call gives both writes to VFSI at once. For these two small files,
 it encodes both independent write chains in one NFSv4 COMPOUND and completes
-them in one network round trip. The following `cat()` also preserves the batch;
-it currently uses one compound for bounded size discovery and one for the
-reads.
+them in one network round trip when negotiated limits permit. The following
+`cat()` batches size discovery, then uses batched OPEN, READ, and CLOSE to
+retain each file's identity through EOF.
 
 
 ### Append and concurrent writers

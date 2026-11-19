@@ -161,9 +161,9 @@ I/O runs through `Vfsi` vectors. Use `fs.std_io(&file)` for an explicit
 type is private; use `Seek::stream_position` to query the cursor. Prepare
 vector requests without issuing I/O using
 `ReadOp::range(&file, offset, length)`, `ReadOp::into(&file, offset, &mut buffer)`,
-and `WriteOp::at(&file, offset, data)`. `read_files` performs bounded
-path-based vector reads without remote OPEN/CLOSE phases; `write_files` batches
-OPEN, WRITE, and CLOSE phases across files. `read_files` inherits a 16 MiB
+and `WriteOp::at(&file, offset, data)`. `read_files` retains opened file
+identities through EOF and batches OPEN, READ, and CLOSE across paths.
+`write_files` batches OPEN, WRITE, and CLOSE. `read_files` inherits a 16 MiB
 aggregate allocation limit by default. `close_files` consumes a group of
 handles and uses the vector backend rather than serializing one close per
 dropped handle.

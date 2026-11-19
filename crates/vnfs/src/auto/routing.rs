@@ -494,3 +494,20 @@ pub(super) fn parse_mount(line: &[u8]) -> Option<MountSpec> {
         minor: info.minor,
     })
 }
+
+#[cfg(test)]
+#[test]
+fn rooted_copy_probe_works_from_a_search_only_root() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("real")).unwrap();
+    symlink("real", root.path().join("alias")).unwrap();
+    let client = Auto::new(root.path()).unwrap();
+    let mount = path_mount_id(root.path()).unwrap();
+    let permissions = fs::metadata(root.path()).unwrap().permissions();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o111)).unwrap();
+    let observed = client.rooted_copy_mount_id(Path::new("alias/missing"), true);
+    fs::set_permissions(root.path(), permissions).unwrap();
+    assert_eq!(observed, Some(mount));
+}

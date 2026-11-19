@@ -1071,7 +1071,8 @@ pub trait VfsiExt: Vfsi {
                         // parent; path-only fallback must reject swapped symlinks.
                         .with_allow_symlink_components(
                             depth == 0 && options.allow_symlink_components(),
-                        ),
+                        )
+                        .without_following_final_symlink(),
                 ),
             )?;
             for entry in &entries {

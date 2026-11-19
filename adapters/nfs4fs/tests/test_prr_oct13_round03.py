@@ -6,7 +6,7 @@ import pytest
 from fsspec.core import OpenFile
 
 
-@pytest.mark.parametrize("failure", ["encoding", "missing"])
+@pytest.mark.parametrize("failure", ["wrapper", "missing"])
 @pytest.mark.parametrize("close_fails", [False, True])
 @pytest.mark.parametrize("reader_first", [False, True])
 def test_transactional_wrapper_failure_preserves_setup_error_and_cleanup(
@@ -15,8 +15,8 @@ def test_transactional_wrapper_failure_preserves_setup_error_and_cleanup(
     dummy_fs.pipe_file("/input", b"input data")
     dummy_fs.pipe_file("/bad", b"bad data")
     bad = (
-        OpenFile(dummy_fs, "/bad", "rt", encoding="prr-invalid-codec")
-        if failure == "encoding"
+        OpenFile(dummy_fs, "/bad", "rt", encoding="utf-8")
+        if failure == "wrapper"
         else OpenFile(dummy_fs, "/missing", "rb")
     )
     reader = OpenFile(dummy_fs, "/input", "rb")
@@ -26,7 +26,7 @@ def test_transactional_wrapper_failure_preserves_setup_error_and_cleanup(
     transaction = dummy_fs.start_transaction()
     original_close = dummy_fs._client.close
     attempted = []
-    expected_tokens = int(not reader_first) + int(failure == "encoding")
+    expected_tokens = int(not reader_first) + int(failure == "wrapper")
 
     def close(fd):
         attempted.append(fd)
@@ -34,14 +34,19 @@ def test_transactional_wrapper_failure_preserves_setup_error_and_cleanup(
             raise cleanup
         return original_close(fd)
 
+    def fail_wrapper(*args, **kwargs):
+        raise LookupError("injected wrapper failure")
+
     try:
         with monkeypatch.context() as patch:
             patch.setattr(dummy_fs._client, "close", close)
-            expected = LookupError if failure == "encoding" else FileNotFoundError
+            if failure == "wrapper":
+                patch.setattr("fsspec.core.PickleableTextIOWrapper", fail_wrapper)
+            expected = LookupError if failure == "wrapper" else FileNotFoundError
             with pytest.raises(expected) as error:
                 dummy_fs.open_many(entries)
-            if failure == "encoding":
-                assert "prr-invalid-codec" in str(error.value)
+            if failure == "wrapper":
+                assert "injected wrapper failure" in str(error.value)
             else:
                 assert "/missing" in str(error.value)
             assert len(set(attempted)) == expected_tokens
