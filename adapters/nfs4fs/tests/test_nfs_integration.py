@@ -107,21 +107,18 @@ def test_round_trip_bounds(nfs_fs):
     # Twenty files need >100 wire operations (five per file plus path/SEQUENCE),
     # so the managed server cannot execute them in one wave. Its adaptive
     # backoff may use three successful waves plus a pre-mutation limit rejection.
-    _, pipe_count = _measured(
-        fs, lambda: fs.pipe({p: f"data-{i}".encode() for i, p in enumerate(paths)})
-    )
+    payloads = {path: f"data-{i}".encode() for i, path in enumerate(paths)}
+    _, pipe_count = _measured(fs, lambda: fs.pipe(payloads))
     assert pipe_count <= 4, pipe_count
     # A warmed adaptive window still batches independently of file count.
-    _, warm_pipe_count = _measured(
-        fs, lambda: fs.pipe({p: f"data-{i}".encode() for i, p in enumerate(paths)})
-    )
+    _, warm_pipe_count = _measured(fs, lambda: fs.pipe(payloads))
     assert warm_pipe_count <= 3, warm_pipe_count
 
-    # cat: one metadata compound to enforce the aggregate byte cap, followed
-    # by at most two identity-retaining merged READ waves.
+    # cat: one size-discovery compound, followed by batched OPEN, READ,
+    # and CLOSE. The handles pin each object's identity through EOF.
     out, cat_count = _measured(fs, lambda: fs.cat(paths))
-    assert len(out) == n
-    assert cat_count <= 3, cat_count
+    assert out == {fs._strip_protocol(path): data for path, data in payloads.items()}
+    assert cat_count <= 4, cat_count
 
     # cat_ranges: at most two merged READ waves, without a stat.
     _, ranges_count = _measured(fs, lambda: fs.cat_ranges(paths, [0] * n, [6] * n))

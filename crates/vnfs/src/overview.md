@@ -34,11 +34,11 @@ assert_eq!(results[1].as_ref().unwrap().data(), Some(b"world".as_slice()));
 # fn main() {}
 ```
 
-Both files share vector phases instead of a scalar loop. `write_files` performs
-OPEN, complete WRITE, and CLOSE phases; it is **not one RPC or a transaction**.
-Small path-based reads can share a single compound when negotiated limits
-permit. Larger batches are split automatically, and successful results retain
-input order. See [the runnable examples](files/index.html) for complete workflows.
+Both whole-file reads share batched OPEN, READ, and CLOSE phases. Retained
+handles keep each read on the same file through EOF. `write_files` batches
+OPEN, complete WRITE, and CLOSE. Larger batches split at server limits, and
+successful results retain input order. See [the runnable examples](files/index.html)
+for complete workflows.
 
 Paths are relative to the configured remote namespace: `/file-1` above names
 `/export/application/file-1`, not a host-local file. This root is not a security
