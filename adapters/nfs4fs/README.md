@@ -11,9 +11,9 @@ for workloads with many small files.
 python -m pip install nfs4fs
 ```
 
-Published wheels use CPython's stable ABI and support standard CPython 3.9 and
-newer on Linux x86-64 and AArch64. A separate CPython 3.14 free-threaded wheel
-is built and tested on x86-64.
+Published wheels support standard CPython 3.9 and newer on Linux x86-64 and
+AArch64 with glibc 2.28 or newer. A separate wheel supports free-threaded
+CPython 3.14 on Linux x86-64 with the same glibc minimum.
 
 A source build additionally requires Rust, CMake, a C compiler, Clang,
 `pkg-config`, Kerberos/GSS development headers, and userspace-RCU development
@@ -21,13 +21,12 @@ headers. Source and editable builds compile the pinned ntirpc source packaged
 in `libntirpc-sys` into a position-independent static archive. A system
 libntirpc is not required at build or runtime.
 
-Release wheels are self-contained. They statically include the pinned ntirpc
-source revision, and `auditwheel` copies its
-Kerberos (`libgssapi_krb5`/`libkrb5`) and userspace-RCU (`liburcu`)
-dependencies into the wheel's `.libs/` directory, rewriting RPATH so the
-package imports without system native dependencies. CI verifies those bundled
-libraries and rejects any wheel that dynamically links or bundles a second
-libntirpc.
+Release wheels statically include the pinned ntirpc source revision.
+`auditwheel` copies the Kerberos libraries into `nfs4fs.libs/` and rewrites
+RPATH so the package can locate them. It also bundles userspace RCU there when
+the build links to it dynamically. CI checks that the wheel includes the
+declared Kerberos GSS and userspace-RCU shared libraries and rejects any wheel
+that dynamically links or bundles a second libntirpc.
 
 The package installs `fsspec.specs` entry points for both `nfs4` and `vfsi`, so
 normal use does not require `import nfs4fs` before calling `fsspec`.

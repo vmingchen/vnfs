@@ -127,6 +127,39 @@ def test_reconnected_scalar_reader_does_not_switch_to_replacement_file(fs):
         reader.close()
 
 
+@pytest.mark.parametrize("cache_type", ["none", "readahead"])
+def test_scalar_reader_whole_file_retry_stays_pinned(fs, cache_type):
+    fs.pipe_file("/data", b"original")
+    with fs.open("/data", "rb", cache_type=cache_type) as reader:
+        fs._client.reconnect()
+        fs.mv("/data", "/old")
+        fs.pipe_file("/data", b"replacement")
+
+        with pytest.raises(OSError) as error:
+            reader.read()
+        assert error.value.errno == errno.ESTALE
+        assert reader.tell() == 0
+
+        with pytest.raises(OSError) as error:
+            reader.read()
+        assert error.value.errno == errno.ESTALE
+        assert reader.tell() == 0
+
+        fs.rm("/data")
+        fs.mv("/old", "/data")
+        assert reader.read() == b"original"
+
+
+def test_closed_scalar_reader_size_does_not_open_descriptor(fs):
+    fs.pipe_file("/data", b"before")
+    reader = fs.open("/data", "rb", cache_type="none")
+    reader.close()
+    fs.pipe_file("/data", b"new size")
+
+    assert reader.size == len(b"new size")
+    assert not fs._client._fds
+
+
 def test_scalar_reader_rechecks_identity_after_reopen_fstat_fails(fs, monkeypatch):
     fs.pipe_file("/data", b"original-payload")
     reader = fs.open("/data", "rb", cache_type="none")
@@ -176,6 +209,82 @@ def _replace_path_after_reconnect_trigger(fs):
 
     client._native = FailOnceProxy()
     fs.info("/data")
+
+
+@pytest.mark.parametrize("trigger", ["retired", "read-error", "deferred"])
+@pytest.mark.parametrize("batch_size", [1, 8])
+def test_group_recovery_keeps_healthy_reader_when_sibling_was_replaced(
+    fs, monkeypatch, trigger, batch_size
+):
+    fs.batch_size = batch_size
+    fs.pipe({"/healthy": b"healthy", "/replaced": b"original"})
+    files = fs.open_many(
+        [OpenFile(fs, path, mode="rb") for path in ["/healthy", "/replaced"]],
+        block_size=2,
+    )
+    try:
+        fs.mv("/replaced", "/old")
+        fs.pipe_file("/replaced", b"replacement")
+        if trigger == "retired":
+            fs._client.reconnect()
+        elif trigger == "deferred":
+            ensure_ready = fs._client.ensure_ready
+            recovered = False
+
+            def reconnect_when_checked():
+                nonlocal recovered
+                if not recovered:
+                    recovered = True
+                    fs._client.reconnect()
+                ensure_ready()
+
+            monkeypatch.setattr(fs._client, "ensure_ready", reconnect_when_checked)
+        else:
+            preadv = fs._client.preadv
+            attempts = 0
+
+            def fail_once(*args):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise ConnectionError("injected vector read failure")
+                return preadv(*args)
+
+            monkeypatch.setattr(fs._client, "preadv", fail_once)
+
+        assert files[0].read(2) == b"he"
+        with pytest.raises(OSError) as error:
+            files[1].read(2)
+        assert error.value.errno == errno.ESTALE
+        assert error.value.filename == "/replaced"
+        assert files[0].read() == b"althy"
+    finally:
+        fs.commit_many(files)
+    assert not fs._client._fds
+
+
+def test_uncached_read_error_keeps_cursor_at_call_start(fs, monkeypatch):
+    fs.pipe_file("/source", b"abcdef")
+    with fs.open("/source", "rb", cache_type="none") as reader:
+        reader.seek(1)
+        pread = fs._client.pread
+        offsets = []
+
+        def fail_second(fd, length, offset):
+            offsets.append(offset)
+            if len(offsets) == 1:
+                length = 2
+            elif len(offsets) == 2:
+                raise OSError(errno.EIO, "injected read failure")
+            return pread(fd, length, offset)
+
+        monkeypatch.setattr(fs._client, "pread", fail_second)
+        with pytest.raises(OSError, match="injected read failure"):
+            reader.read(4)
+        assert offsets == [1, 3]
+        assert reader.tell() == 1
+        assert reader.read(4) == b"bcde"
+        assert reader.tell() == 5
 
 
 def test_reconnected_group_reader_rejects_replacement_file(fs):
@@ -609,24 +718,18 @@ def test_reader_recovery_rejects_same_fileid_in_different_filesystem(
         if reader_kind == "scalar":
             assert reader.read(1) == b"a"
             fs._client.reconnect()
-            fstat = fs._client.fstat
+        fstat = fs._client.fstat
 
-            def different_fs(fd):
-                attrs = dict(fstat(fd))
-                attrs["fs_id"] += 1
-                return attrs
+        def different_fs(fd):
+            attrs = dict(fstat(fd))
+            attrs["fs_id"] += 1
+            return attrs
 
-            monkeypatch.setattr(fs._client, "fstat", different_fs)
-        else:
-            fstat_many = fs._client.fstat_many
-
-            def different_fs(fds):
-                attrs = [dict(attr) for attr in fstat_many(fds)]
-                for attr in attrs:
-                    attr["fs_id"] += 1
-                return attrs
-
-            monkeypatch.setattr(fs._client, "fstat_many", different_fs)
+        monkeypatch.setattr(fs._client, "fstat", different_fs)
+        if reader_kind == "group":
+            monkeypatch.setattr(
+                fs._client, "fstat_many", lambda fds: [different_fs(fd) for fd in fds]
+            )
 
             def failed_read(*args, **kwargs):
                 raise ConnectionError("injected grouped read transport failure")

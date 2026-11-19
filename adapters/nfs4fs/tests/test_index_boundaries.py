@@ -170,28 +170,42 @@ def test_group_restore_rebases_active_reader_positions(
         monkeypatch.setattr(fs._client, "open_many", open_many)
         if phase == "open":
             (tmp_path / "root" / "c").unlink()
-            expected = FileNotFoundError
+            expected = OSError
             failure = None
         else:
             failure = PermissionError(errno.EACCES, "restored handle metadata denied")
-            failure.index = 1
+            failure.index = 0
             failure.status_domain = "nfs"
             failure.status_code = 13
             expected = PermissionError
+            original_fstat = fs._client.fstat
+            original_fstat_many = fs._client.fstat_many
+            scalar_calls = []
 
-            def fstat(fds):
-                assert len(fds) == 2
-                raise failure
+            def fstat_many(fds):
+                if len(fds) == 2:
+                    raise failure
+                return original_fstat_many(fds)
 
-            monkeypatch.setattr(fs._client, "fstat_many", fstat)
+            def fstat(fd):
+                scalar_calls.append(fd)
+                if len(scalar_calls) == 1:
+                    raise failure
+                return original_fstat(fd)
+
+            monkeypatch.setattr(fs._client, "fstat_many", fstat_many)
+            monkeypatch.setattr(fs._client, "fstat", fstat)
         with pytest.raises(expected) as raised:
             files[2].read(1)
         assert raised.value.index == 2
-        if failure is not None:
+        assert raised.value.filename == "/c"
+        if failure is None:
+            assert raised.value.errno == errno.ESTALE
+        else:
             assert raised.value is failure
             assert (failure.status_domain, failure.status_code) == ("nfs", 13)
-        assert opens == [["/b", "/c"]]
-        assert not fs._client._fds
+        assert opens == [["/c", "/b"]]
+        assert files[1].read(1) == b"b"
     finally:
         fs.commit_many(files)
 

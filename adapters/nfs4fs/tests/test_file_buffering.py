@@ -338,6 +338,31 @@ def test_group_read_to_eof_after_speculative_prefix(dummy_fs):
         assert files[1].read() == contents["/tail-reader"][2:]
 
 
+@pytest.mark.parametrize("grouped", [False, True])
+def test_force_flushed_writer_refuses_more_bytes_and_closes(dummy_fs, grouped):
+    fs = dummy_fs
+    fs.write_buffering = True
+    fs.block_size = 16
+    if grouped:
+        files = fs.open_many([OpenFile(fs, "/target", mode="wb")])
+        file = files[0]
+    else:
+        file = fs.open("/target", "wb")
+    try:
+        file.write(b"kept")
+        file.flush(force=True)
+        with pytest.raises(ValueError, match="force-flushed"):
+            file.write(b"extra")
+        with pytest.raises(ValueError, match="force-flushed"):
+            file.truncate(0)
+    finally:
+        file.close()
+        if grouped:
+            fs.commit_many(files)
+    assert fs.cat_file("/target") == b"kept"
+    assert not fs._client._fds
+
+
 def test_direct_write_buffer_flushes_explicitly(tmp_path):
     with fsspec.filesystem(
         "nfs4",

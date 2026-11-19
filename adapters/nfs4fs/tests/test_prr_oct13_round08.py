@@ -4,6 +4,7 @@ import errno
 import weakref
 
 import pytest
+from fsspec.core import OpenFile
 from vfsi_fsspec import _fs
 
 BAD_OPTIONS = [
@@ -24,6 +25,40 @@ def test_scalar_wrapper_failure_closes_native_handle(dummy_fs, options, mode):
     assert error.value is not None  # Retain the full failed setup traceback.
     assert not dummy_fs._client._fds
     assert dummy_fs.cat_file("/source") == b"original"
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("options", BAD_OPTIONS[:2])
+def test_invalid_text_options_fail_before_truncation_or_mkdir(
+    dummy_fs, grouped, options
+):
+    fs = dummy_fs
+    fs.auto_mkdir = True
+    fs.pipe_file("/target", b"original")
+    for path in ["/target", "/new-parent/target"]:
+        with pytest.raises((LookupError, ValueError)):
+            if grouped:
+                fs.open_many([OpenFile(fs, path, mode="wt", **options)])
+            else:
+                fs.open(path, "wt", **options)
+    assert fs.cat_file("/target") == b"original"
+    assert not fs.exists("/new-parent")
+    assert not fs._client._fds
+
+
+@pytest.mark.parametrize("options", BAD_OPTIONS[:2])
+def test_invalid_text_reader_does_not_truncate_a_grouped_writer(dummy_fs, options):
+    fs = dummy_fs
+    fs.pipe({"/reader": b"readable", "/writer": b"original"})
+    with pytest.raises((LookupError, ValueError)):
+        fs.open_many(
+            [
+                OpenFile(fs, "/writer", mode="wb"),
+                OpenFile(fs, "/reader", mode="rt", **options),
+            ]
+        )
+    assert fs.cat_file("/writer") == b"original"
+    assert not fs._client._fds
 
 
 @pytest.mark.parametrize("options", BAD_OPTIONS)
@@ -89,10 +124,14 @@ def test_failed_transaction_wrapper_discards_spool(dummy_fs, monkeypatch):
         references.append(weakref.ref(spool))
         return spool
 
+    def fail_wrapper(*args, **kwargs):
+        raise LookupError("injected wrapper failure after open")
+
     monkeypatch.setattr(_fs.tempfile, "SpooledTemporaryFile", capture)
+    monkeypatch.setattr(_fs, "_TextIOWrapper", fail_wrapper)
     with dummy_fs.transaction as transaction:
         with pytest.raises(LookupError) as error:
-            dummy_fs.open("/target", "wt", encoding="prr-invalid-codec")
+            dummy_fs.open("/target", "wt", encoding="utf-8")
         assert error.value is not None
         assert references[0]() is None or references[0]().closed
         assert not transaction.files
@@ -145,11 +184,15 @@ def test_failed_transaction_setup_preserves_error_if_discard_fails(
         discard(file)
         raise cleanup
 
+    def fail_wrapper(*args, **kwargs):
+        raise LookupError("injected wrapper failure after open")
+
     with dummy_fs.transaction as transaction:
         with monkeypatch.context() as patch:
             patch.setattr(_fs._DeferredWriteFile, "discard", fail_after_discard)
+            patch.setattr(_fs, "_TextIOWrapper", fail_wrapper)
             with pytest.raises(LookupError) as error:
-                dummy_fs.open("/target", "wt", encoding="prr-invalid-codec")
+                dummy_fs.open("/target", "wt", encoding="utf-8")
             assert error.value.__cause__ is cleanup
             assert not transaction.files
     assert dummy_fs.cat_file("/target") == b"original"

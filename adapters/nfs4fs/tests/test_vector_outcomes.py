@@ -38,7 +38,7 @@ def test_group_reads_retry_only_failed_suffixes(dummy_fs, monkeypatch, recovery_
                 return [b"abcd", first_error]
             return [b"fgh"]
 
-        def recover():
+        def recover(*args, **kwargs):
             if recovery_fails:
                 raise ConnectionError("reconnect failed")
 
@@ -52,6 +52,56 @@ def test_group_reads_retry_only_failed_suffixes(dummy_fs, monkeypatch, recovery_
         else:
             assert data == [b"abcd", b"efgh"] and not errors
             assert calls == [([0, 0], [4, 4]), ([1], [3])]
+
+
+def test_group_recovery_fallback_keeps_native_prefix(dummy_fs, monkeypatch):
+    fs = dummy_fs
+    fs.pipe({"/a": b"abcd", "/b": b"efgh"})
+    with opened(fs, ["/a", "/b"], "rb") as files:
+        fs.mv("/b", "/old")
+        fs.pipe_file("/b", b"replacement")
+        fs._client.reconnect()
+        preadv = fs._client.preadv
+        calls = []
+
+        def read(fds, offsets, lengths):
+            calls.append((list(offsets), list(lengths)))
+            if len(calls) == 1:
+                return [failure(b"a")]
+            return preadv(fds, offsets, lengths)
+
+        monkeypatch.setattr(fs._client, "preadv", read)
+        assert files[0].read() == b"abcd"
+        assert calls == [([0], [4]), ([1], [3])]
+        with pytest.raises(OSError) as error:
+            files[1].read()
+        assert error.value.errno == errno.ESTALE
+    assert not fs._client._fds
+
+
+def test_rejected_singleton_suffix_keeps_original_read_error(dummy_fs, monkeypatch):
+    fs = dummy_fs
+    fs.pipe({"/a": b"abcd", "/b": b"efgh"})
+    with opened(fs, ["/a", "/b"], "rb") as files:
+        first_error = failure(b"a")
+        calls = []
+
+        def read(fds, offsets, lengths):
+            calls.append((list(offsets), list(lengths)))
+            if len(calls) == 1:
+                fs.mv("/b", "/old")
+                fs.pipe_file("/b", b"replacement")
+                return [first_error, failure(b"e")]
+            raise PermissionError(errno.EACCES, "suffix rejected before dispatch")
+
+        monkeypatch.setattr(fs._client, "preadv", read)
+        with pytest.raises(OSError) as error:
+            files[0].read()
+        assert error.value is first_error
+        assert error.value.read_prefix == b"a"
+        assert error.value.index == 0
+        assert calls == [([0, 0], [4, 4]), ([1], [3])]
+    assert not fs._client._fds
 
 
 @pytest.mark.parametrize("first_failed", [False, True])
@@ -78,7 +128,9 @@ def test_group_read_keeps_confirmed_prefix_on_suffix_error(
             return [suffix_error]
 
         monkeypatch.setattr(fs._client, "preadv", preadv)
-        monkeypatch.setattr(files[0]._buffer_group, "_reopen_readers", lambda: None)
+        monkeypatch.setattr(
+            files[0]._buffer_group, "_reopen_readers", lambda *args, **kwargs: None
+        )
         with pytest.raises(OSError) as caught:
             files[0].read()
         error = caught.value
@@ -169,7 +221,9 @@ def test_complete_failed_prefix_is_not_reported_as_success(dummy_fs, monkeypatch
         error = failure(b"abcd", eof=eof)
         monkeypatch.setattr(fs._client, "preadv", lambda *args: [error])
         monkeypatch.setattr(
-            group, "_reopen_readers", lambda: pytest.fail("must not replay")
+            group,
+            "_reopen_readers",
+            lambda *args, **kwargs: pytest.fail("must not replay"),
         )
         data, errors = group._pread_many_once(files, [0], [4])
         assert data == [None] and errors == {0: error}

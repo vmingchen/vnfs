@@ -3,6 +3,7 @@
 import errno
 
 import pytest
+from fsspec.core import OpenFile
 from vfsi_fsspec import _fs
 
 
@@ -18,6 +19,61 @@ def test_invalid_cache_options_fail_before_native_mutation(dummy_fs, mode):
         assert not dummy_fs.exists("/target")
     else:
         assert dummy_fs.cat_file("/target") == b"original"
+
+
+def test_invalid_group_cache_options_fail_before_truncation_or_mkdir(dummy_fs):
+    fs = dummy_fs
+    fs.auto_mkdir = True
+    fs.pipe_file("/target", b"original")
+    with pytest.raises(TypeError):
+        fs.open_many(
+            [OpenFile(fs, path, mode="wb") for path in ["/target", "/new-parent/file"]],
+            cache_options=1,
+        )
+    assert fs.cat_file("/target") == b"original"
+    assert not fs.exists("/new-parent")
+    assert not fs._client._fds
+
+
+@pytest.mark.parametrize(
+    "options,error",
+    [
+        ({"cache_type": "unknown"}, ValueError),
+        ({"block_size": "bad"}, ValueError),
+        ({"cache_type": "readahead", "cache_options": {"typo": True}}, TypeError),
+        ({"cache_type": "blockcache", "cache_options": {"maxblocks": "8"}}, TypeError),
+    ],
+)
+def test_invalid_group_reader_options_do_not_truncate_writer(dummy_fs, options, error):
+    fs = dummy_fs
+    fs.pipe({"/reader": b"readable", "/writer": b"original"})
+    with pytest.raises(error):
+        fs.open_many(
+            [OpenFile(fs, "/writer", mode="wb"), OpenFile(fs, "/reader", mode="rb")],
+            write_buffering=True,
+            **options,
+        )
+    assert fs.cat_file("/writer") == b"original"
+    assert not fs._client._fds
+
+
+def test_missing_required_cache_option_does_not_truncate_writer(dummy_fs, monkeypatch):
+    fs = dummy_fs
+    fs.pipe({"/reader": b"readable", "/writer": b"original"})
+
+    class RequiredOptionCache(_fs.caches["readahead"]):
+        def __init__(self, blocksize, fetcher, size, *, token):
+            self.token = token
+            super().__init__(blocksize, fetcher, size)
+
+    monkeypatch.setitem(_fs.caches, "required-option", RequiredOptionCache)
+    with pytest.raises(TypeError, match="token"):
+        fs.open_many(
+            [OpenFile(fs, "/writer", mode="wb"), OpenFile(fs, "/reader", mode="rb")],
+            cache_type="required-option",
+        )
+    assert fs.cat_file("/writer") == b"original"
+    assert not fs._client._fds
 
 
 @pytest.mark.parametrize("mode", ["wb", "ab", "xb"])
@@ -87,8 +143,6 @@ def test_successful_constructor_retains_owner_until_close(dummy_fs, buffered):
 def test_group_constructor_failure_closes_every_remaining_token(
     dummy_fs, monkeypatch, mode, failure_index
 ):
-    from fsspec.core import OpenFile
-
     for path in ["/a", "/b", "/c"]:
         dummy_fs.pipe_file(path, b"original")
     original_init = _fs.AbstractBufferedFile.__init__

@@ -22,7 +22,7 @@ from glob import has_magic
 from itertools import groupby
 from urllib.parse import unquote, urlsplit
 
-from fsspec.caching import caches
+from fsspec.caching import BlockCache, caches
 from fsspec.callbacks import DEFAULT_CALLBACK, Callback
 from fsspec.compression import compr
 from fsspec.core import PickleableTextIOWrapper, get_compression
@@ -495,9 +495,16 @@ class _OwnedStream(io.IOBase):
         return io.IOBase.readlines(self, hint)
 
 
+def _validate_text_options(options):
+    # Use the same stdlib validation as the actual wrapper, without opening
+    # a file that a write mode could create or truncate.
+    with io.TextIOWrapper(io.BytesIO(), **options):
+        pass
+
+
 def _open_with_wrappers(fs, opener, path, mode="rb", compression=None, **kwargs):
     """Construct text/codecs with one owner and shared failure cleanup."""
-    _normalize_mode(mode)
+    base_mode = _normalize_mode(mode)
     text = "b" not in mode
     text_kwargs = {
         key: kwargs.pop(key)
@@ -506,6 +513,8 @@ def _open_with_wrappers(fs, opener, path, mode="rb", compression=None, **kwargs)
     }
     binary_mode = mode.replace("t", "") + "b" if text else mode
     codec = get_compression(path, compression) if compression is not None else None
+    if text_kwargs and base_mode != "r":
+        _validate_text_options(text_kwargs)
     file = None
     try:
         with ExitStack() as stack:
@@ -1146,6 +1155,11 @@ class _RawVfsiFile(io.RawIOBase):
             "x+": "xb+",
         }[self._base_mode]
 
+    @property
+    def _uses_descriptor(self):
+        # A pinned reader still needs its descriptor after a failed reopen.
+        return self._fd is not None or self._identity_required
+
     def _ensure_open(self):
         if self._broken:
             raise ConnectionError("write handle is unusable after a transport failure")
@@ -1158,9 +1172,9 @@ class _RawVfsiFile(io.RawIOBase):
                 raise ConnectionError(
                     "write handle is unusable after its native session reconnects"
                 )
+        if self._fd is None:
             if self._identity_required and self._identity is None:
                 raise _stale_handle_error(self.path)
-        if self._fd is None:
             try:
                 fd = self.fs._client.open(
                     self.fs._native_path(self.path), self._native_mode()
@@ -1232,7 +1246,7 @@ class _RawVfsiFile(io.RawIOBase):
     def _size(self):
         # Uncached/update handles must observe growth and truncation, including
         # changes through another descriptor. Cached readers keep their own size.
-        if self._fd is not None:
+        if not self.closed and self._uses_descriptor:
             return self.fs._client.fstat(self._ensure_open())["size"]
         return self.fs.size(self.path)
 
@@ -1278,7 +1292,7 @@ class _RawVfsiFile(io.RawIOBase):
         if size is not None:
             size = operator.index(size)
         if size is None or size < 0:
-            if self._fd is None and self._pos == 0:
+            if not self._uses_descriptor and self._pos == 0:
                 # Whole-file read: one batched read, no size stat, no OPEN.
                 data, errors = self.fs._client.read_all_many(
                     [self.fs._native_path(self.path)],
@@ -1297,14 +1311,19 @@ class _RawVfsiFile(io.RawIOBase):
         self.fs._check_read_allocation(size, self.path)
         chunks = []
         remaining = size
+        position = self._pos
         while remaining > 0:
-            chunk = self._pread(min(remaining, self._MAX_READ))
+            chunk = self._pread_at(position, min(remaining, self._MAX_READ))
             if not chunk:
                 break
             chunks.append(chunk)
-            self._pos += len(chunk)
+            position += len(chunk)
             remaining -= len(chunk)
-        return b"".join(chunks)
+        # An exception from a later chunk leaves the cursor at the start of
+        # the call, since no bytes were returned to the application.
+        data = b"".join(chunks)
+        self._pos = position
+        return data
 
     def write(self, data):
         if self.closed:
@@ -1721,7 +1740,7 @@ class VfsiFile(AbstractBufferedFile):
         ):
             if self._buffer_group is not None and self.fs.vectorized_buffering:
                 data = self._buffer_group.read_all(self)
-            elif self._raw._fd is not None:
+            elif self._raw._uses_descriptor:
                 # A scalar open pins a native descriptor. A path-based
                 # read_all_many could switch to a replacement inode after a
                 # rename, even on a handle that was already read once.
@@ -1821,6 +1840,8 @@ class VfsiFile(AbstractBufferedFile):
             raise TypeError("a bytes-like object is required, not 'str'")
         if self._write_failed:
             self._raise_write_failure()
+        if self.forced:
+            raise ValueError("This file has been force-flushed, can only close")
         if self._buffer_group is None:
             written = self.buffer.write(data)
             self.loc += written
@@ -1881,6 +1902,8 @@ class VfsiFile(AbstractBufferedFile):
         if not self._using_buffer:
             return self._raw.truncate(size)
         if self._buffered_write:
+            if self.forced:
+                raise ValueError("This file has been force-flushed, can only close")
             self.flush()
             if size is None:
                 size = self.tell()
@@ -1976,7 +1999,7 @@ class VfsiFile(AbstractBufferedFile):
             group.request_close(self)
             self._closed = True
             return
-        if self._buffered_write:
+        if self._buffered_write and not self.forced:
             try:
                 self.flush(force=True)
             except BaseException as error:
@@ -2160,33 +2183,97 @@ class _BufferGroup:
             file = files[position]
             _oserror(error, file.path, index=self._file_index(file))
 
-    def _read_vector(self, method, files, offsets, lengths):
-        fds = [file._raw._ensure_open() for file in files]
-        try:
-            return getattr(self.fs._client, method)(fds, offsets, lengths)
-        except Exception as error:
-            self._rebase_file_error(error, files)
-            raise
+    @staticmethod
+    def _split_read_outcomes(outcomes):
+        data = []
+        errors = {}
+        for index, result in enumerate(outcomes):
+            if isinstance(result, BaseException):
+                errors[index] = result
+                data.append(None)
+            else:
+                data.append(result)
+        return data, errors
 
-    def _reopen_readers(self):
+    def _read_independently(self, method, files, offsets, lengths):
+        # Keep speculative failures local to their own input. For modern
+        # adapters, a single-item vector preserves native read progress and
+        # leaves suffix recovery to the same coordinator as a batched read.
+        client = self.fs._client
+        outcomes = []
+        for file, offset, length in zip(files, offsets, lengths):
+            try:
+                if method == "preadv":
+                    fd = file._raw._ensure_open()
+                    values = client.preadv([fd], [offset], [length])
+                else:
+                    outcomes.append(file._raw._pread_at(offset, length))
+                    continue
+            except OSError as error:
+                if method == "preadv":
+                    # Setup or outer vector rejection did not execute READ.
+                    error.failure_state = "not_attempted"
+                outcomes.append(error)
+                continue
+            if len(values) != 1:
+                raise OSError(errno.EIO, "invalid positioned-read outcome count")
+            outcomes.append(values[0])
+        return outcomes
+
+    def _read_vector(self, method, files, offsets, lengths, *, reconnect=False):
+        client = self.fs._client
+        try:
+            # Fork recovery can invalidate the whole pool. Do it before
+            # deciding which files still have live descriptors.
+            client.ensure_ready()
+            if reconnect or (
+                self.fs.auto_reconnect
+                and any(not client.descriptor_valid(file._raw._fd) for file in files)
+            ):
+                self._reopen_readers(files, reconnect=reconnect)
+            fds = [file._raw._ensure_open() for file in files]
+            one_session = (
+                self.fs.connection_pool_size == 1
+                or len({client._resolve(fd)[0] for fd in fds}) <= 1
+            )
+        except OSError as error:
+            if _is_transport_error(error):
+                raise
+        else:
+            if one_session:
+                try:
+                    return getattr(client, method)(fds, offsets, lengths)
+                except Exception as error:
+                    self._rebase_file_error(error, files)
+                    raise
+        # Setup can fail for a single file, or previous scalar recovery may
+        # have distributed pinned handles among native sessions.
+        outcomes = self._read_independently(method, files, offsets, lengths)
+        if method == "preadv":
+            return outcomes
+        return self._split_read_outcomes(outcomes)
+
+    def _reopen_readers(self, files, *, reconnect=False):
+        client = self.fs._client
         active = [
             file
-            for file in self.files
+            for file in files
             if not file.closed and file.readable() and not file._raw.writable()
         ]
+        if reconnect:
+            owners = set()
+            for file in active:
+                fd = file._raw._fd
+                if client.descriptor_valid(fd):
+                    owner, _, _ = client._resolve(fd)
+                    if owner not in owners:
+                        client.reconnect_descriptor(fd)
+                        owners.add(owner)
+        # Keep healthy descriptors on unaffected pool members and never
+        # overwrite a live token with a replacement handle.
+        active = [file for file in active if not client.descriptor_valid(file._raw._fd)]
         if not active:
             return
-        descriptor = next(
-            (
-                file._raw._fd
-                for file in active
-                if file._raw._fd is not None
-                and self.fs._client.descriptor_valid(file._raw._fd)
-            ),
-            None,
-        )
-        if descriptor is not None:
-            self.fs._client.reconnect_descriptor(descriptor)
         try:
             fds = self.fs._client.open_many(
                 [self.fs._native_path(file.path) for file in active],
@@ -2287,11 +2374,6 @@ class _BufferGroup:
         return data, errors
 
     def _pread_many_once(self, files, offsets, lengths):
-        if self.fs.auto_reconnect and any(
-            file._raw._fd is None or not self.fs._client.descriptor_valid(file._raw._fd)
-            for file in files
-        ):
-            self._reopen_readers()
         if getattr(self.fs._client, "_native_has_vector_outcomes", False):
             try:
                 outcomes = self._read_vector("preadv", files, offsets, lengths)
@@ -2300,8 +2382,9 @@ class _BufferGroup:
                 # here cannot replay an already-delivered successful sibling.
                 if not self.fs.auto_reconnect or not _can_reconnect(error):
                     raise
-                self._reopen_readers()
-                outcomes = self._read_vector("preadv", files, offsets, lengths)
+                outcomes = self._read_vector(
+                    "preadv", files, offsets, lengths, reconnect=True
+                )
             if len(outcomes) != len(files):
                 raise OSError(errno.EIO, "invalid positioned-read outcome count")
             retry = [
@@ -2320,12 +2403,12 @@ class _BufferGroup:
                     for index in retry
                 }
                 try:
-                    self._reopen_readers()
                     resumed = self._read_vector(
                         "preadv",
                         [files[index] for index in retry],
                         [offsets[index] + len(prefixes[index]) for index in retry],
                         [lengths[index] - len(prefixes[index]) for index in retry],
+                        reconnect=True,
                     )
                 except OSError:
                     # Reconnect cannot erase successful siblings or replace the
@@ -2345,24 +2428,15 @@ class _BufferGroup:
                     else:
                         result = prefix + result
                     outcomes[index] = result
-            return (
-                [
-                    None if isinstance(result, BaseException) else result
-                    for result in outcomes
-                ],
-                {
-                    index: result
-                    for index, result in enumerate(outcomes)
-                    if isinstance(result, BaseException)
-                },
-            )
+            return self._split_read_outcomes(outcomes)
         try:
             return self._read_vector("pread_many", files, offsets, lengths)
         except OSError as error:
             if not self.fs.auto_reconnect or not _can_reconnect(error):
                 raise
-            self._reopen_readers()
-            return self._read_vector("pread_many", files, offsets, lengths)
+            return self._read_vector(
+                "pread_many", files, offsets, lengths, reconnect=True
+            )
 
     def fetch(self, current, start, end):
         if end <= start:
@@ -5435,6 +5509,46 @@ class VfsiFileSystem(AbstractFileSystem):
 
     # -- open / file objects ----------------------------------------------
 
+    def _file_options(self, block_size, cache_type, cache_options, *, reading):
+        if block_size is None:
+            block_size = self.block_size
+        elif block_size == "default":
+            block_size = VfsiFile.DEFAULT_BLOCK_SIZE
+        if isinstance(block_size, bool):
+            raise ValueError("block_size must be a positive integer")
+        try:
+            block_size = operator.index(block_size)
+        except TypeError:
+            raise ValueError("block_size must be a positive integer") from None
+        if block_size == 0:
+            block_size = VfsiFile.DEFAULT_BLOCK_SIZE
+        if block_size < 0:
+            raise ValueError("block_size must be a positive integer")
+        if cache_type is None:
+            cache_type = self.cache_type
+        if reading and cache_type not in caches:
+            raise ValueError(f"unknown cache_type: {cache_type!r}")
+        options = dict(
+            (self.cache_options if cache_options is None else cache_options) or {}
+        )
+        if reading and cache_type not in (None, "none"):
+            factory = _Nfs4MMapCache if cache_type == "mmap" else caches[cache_type]
+            maxblocks = options.get("maxblocks")
+            if (
+                factory is BlockCache
+                and maxblocks is not None
+                and not isinstance(maxblocks, int)
+            ):
+                raise TypeError("blockcache maxblocks must be an integer or None")
+            try:
+                signature = inspect.signature(factory)
+            except (TypeError, ValueError):
+                # Some custom or extension cache factories expose no signature.
+                pass
+            else:
+                signature.bind(block_size, None, 0, **options)
+        return block_size, cache_type, options
+
     def _open(
         self,
         path,
@@ -5455,6 +5569,9 @@ class VfsiFileSystem(AbstractFileSystem):
         if not autocommit and any(c in mode for c in "wax"):
             # fsspec transactions: defer the write until commit()/discard().
             return _DeferredWriteFile(self, internal, mode)
+        block_size, cache_type, cache_options = self._file_options(
+            block_size, cache_type, cache_options, reading=base_mode == "r"
+        )
         if self.auto_mkdir and any(c in mode for c in "wax"):
             parent = self._parent(path)
             if parent not in ("", "/"):
@@ -5480,11 +5597,9 @@ class VfsiFileSystem(AbstractFileSystem):
                 internal,
                 mode,
                 fd=fd,
-                block_size=self.block_size if block_size is None else block_size,
-                cache_type=self.cache_type if cache_type is None else cache_type,
-                cache_options=(
-                    self.cache_options if cache_options is None else cache_options
-                ),
+                block_size=block_size,
+                cache_type=cache_type,
+                cache_options=cache_options,
                 write_buffering=(
                     self.write_buffering
                     if write_buffering is None
@@ -5516,11 +5631,21 @@ class VfsiFileSystem(AbstractFileSystem):
         """Open a list of ``OpenFile`` objects in one openv batch."""
         paths = [self._checked_strip_protocol(f.path) for f in open_files]
         modes = [_normalize_mode(f.mode) + "b" for f in open_files]
-        effective_block_size = self.block_size if block_size is None else block_size
-        effective_cache_type = self.cache_type if cache_type is None else cache_type
-        effective_cache_options = (
-            self.cache_options if cache_options is None else cache_options
+        effective_block_size, effective_cache_type, effective_cache_options = (
+            self._file_options(
+                block_size, cache_type, cache_options, reading="rb" in modes
+            )
         )
+        if any(mode[0] in "wax" for mode in modes):
+            for open_file in open_files:
+                if "b" not in open_file.mode:
+                    _validate_text_options(
+                        {
+                            "encoding": open_file.encoding,
+                            "errors": open_file.errors,
+                            "newline": open_file.newline,
+                        }
+                    )
         effective_write_buffering = (
             self.write_buffering if write_buffering is None else bool(write_buffering)
         )

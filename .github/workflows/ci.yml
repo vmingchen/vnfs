@@ -823,7 +823,11 @@ jobs:
             tests/test_fsspec_abstract.py \
             tests/test_callbacks.py::test_callback_smoke_on_network_backends \
             tests/test_listing_cache.py::test_listing_cache_smoke_on_network_backends \
-            tests/test_file_buffering.py::test_file_buffering_smoke_on_network_backends
+            tests/test_file_buffering.py::test_file_buffering_smoke_on_network_backends \
+            tests/test_review_findings.py::test_scalar_reader_whole_file_retry_stays_pinned \
+            tests/test_review_findings.py::test_closed_scalar_reader_size_does_not_open_descriptor \
+            tests/test_review_findings.py::test_group_recovery_keeps_healthy_reader_when_sibling_was_replaced \
+            tests/test_review_findings.py::test_uncached_read_error_keeps_cursor_at_call_start
       - name: Smoke-test nfs4fs benchmark drivers
         run: |
           sudo mkdir -p /mnt/vnfs-ci-bench
@@ -987,7 +991,11 @@ jobs:
             tests/test_fsspec_abstract.py \
             tests/test_callbacks.py::test_callback_smoke_on_network_backends \
             tests/test_listing_cache.py::test_listing_cache_smoke_on_network_backends \
-            tests/test_file_buffering.py::test_file_buffering_smoke_on_network_backends
+            tests/test_file_buffering.py::test_file_buffering_smoke_on_network_backends \
+            tests/test_review_findings.py::test_scalar_reader_whole_file_retry_stays_pinned \
+            tests/test_review_findings.py::test_closed_scalar_reader_size_does_not_open_descriptor \
+            tests/test_review_findings.py::test_group_recovery_keeps_healthy_reader_when_sibling_was_replaced \
+            tests/test_review_findings.py::test_uncached_read_error_keeps_cursor_at_call_start
       - name: Show patched NFS-Ganesha log after failure
         if: failure()
         run: |

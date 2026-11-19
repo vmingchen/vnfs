@@ -16,16 +16,14 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-# Library-name stems that must be present in the wheel's bundled libraries.
-# auditwheel may mangle the filename,
-# so match on a substring rather than an exact name.
-REQUIRED = ("libgssapi_krb5",)
+# auditwheel can rename the library while retaining its stem.
+GSS_LIBRARY = "libgssapi_krb5"
 
 
-def dynamic_dependencies(wheel):
+def dynamic_dependencies(archive):
     """Inspect ELF dependency tags, not symbol names or archive substrings."""
     dependencies = set()
-    with zipfile.ZipFile(wheel) as archive, tempfile.TemporaryDirectory() as temp:
+    with tempfile.TemporaryDirectory() as temp:
         for index, name in enumerate(archive.namelist()):
             basename = name.rsplit("/", 1)[-1]
             if not (basename.endswith(".so") or ".so." in basename):
@@ -45,32 +43,39 @@ def dynamic_dependencies(wheel):
     return dependencies
 
 
-def bundled_libraries(wheel):
-    with zipfile.ZipFile(wheel) as archive:
-        return [
-            name
-            for name in archive.namelist()
-            if ".libs/" in name and not name.endswith("/")
-        ]
-
-
 def check(wheel):
-    bundled = bundled_libraries(wheel)
-    basenames = [name.rsplit("/", 1)[-1] for name in bundled]
-    print(f"{wheel}: {len(bundled)} bundled libraries")
+    with zipfile.ZipFile(wheel) as archive:
+        names = archive.namelist()
+        if not any(re.fullmatch(r"nfs4fs/_native(?:\.[^/]+)?\.so", name) for name in names):
+            print(f"ERROR: {wheel} does not contain the nfs4fs native extension", file=sys.stderr)
+            return False
+        # auditwheel adds nfs4fs.libs itself to the ELF search path.
+        basenames = {
+            name.split("/", 1)[1]
+            for name in names
+            if name.startswith("nfs4fs.libs/")
+            and name.count("/") == 1
+            and not name.endswith("/")
+        }
+        dependencies = dynamic_dependencies(archive)
+    print(f"{wheel}: {len(basenames)} bundled libraries")
     for name in sorted(basenames):
         print(f"  {name}")
-    dependencies = dynamic_dependencies(wheel)
-    # Static ntirpc builds can eliminate their unused RCU dependency. Require
-    # RCU only when an ELF object actually needs it; importing on a build host
-    # alone does not prove a dynamically needed library was bundled.
-    missing = [stem for stem in REQUIRED if not any(stem in name for name in basenames)]
-    missing.extend(
-        sorted(name for name in dependencies if name.startswith("liburcu") and name not in basenames)
+    # Match the exact ELF dependency name after auditwheel rewriting. A
+    # bundled file with the same library stem may have a different SONAME.
+    # Static builds can eliminate RCU, so require it only when referenced.
+    missing = {
+        name
+        for name in dependencies
+        if name.startswith((GSS_LIBRARY, "liburcu")) and name not in basenames
+    }
+    if not any(name.startswith(GSS_LIBRARY) for name in basenames | missing):
+        missing.add(f"{GSS_LIBRARY}*")
+    for name in sorted(missing):
+        print(f"ERROR: {wheel} does not bundle {name}", file=sys.stderr)
+    unexpected = any(
+        ".libs/" in name and "libntirpc" in name.rsplit("/", 1)[-1] for name in names
     )
-    for stem in missing:
-        print(f"ERROR: {wheel} does not bundle {stem}*", file=sys.stderr)
-    unexpected = any("libntirpc" in name for name in basenames)
     if unexpected:
         print(f"ERROR: {wheel} bundles a second libntirpc", file=sys.stderr)
     dynamic_ntirpc = any("libntirpc" in name for name in dependencies)
