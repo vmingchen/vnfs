@@ -1037,6 +1037,111 @@ fn sync_test_backend() -> Option<SmbVecFs> {
     )
 }
 
+#[test]
+fn live_failed_share_reattachment_keeps_the_client_disconnected() {
+    let Some(mut fs) = sync_test_backend() else {
+        return;
+    };
+    let reachable = fs.tree.clone();
+    let mut missing = (**reachable).clone();
+    missing.share_name = format!("vfsi-missing-{}", std::process::id());
+    fs.tree = Arc::new(ShareSession::new(missing, fs.client.connection().clone()));
+    fs.client.connection().mark_dead();
+    let before = fs.client.connection().generation();
+    let error = fs.client_stat("").unwrap_err();
+    assert_eq!(
+        vfsi_core::native_status(&error),
+        Some(vfsi_core::StatusCode::Smb(NtStatus::BAD_NETWORK_NAME.0))
+    );
+    assert!(fs.client.connection().generation() > before);
+    assert!(fs.client.is_disconnected());
+    assert!(!fs.tree.is_current());
+
+    // Restore the configured share name while keeping the previous Tree's
+    // stale identity. A fresh, safe metadata lookup must establish a new tree.
+    fs.tree = reachable;
+    assert!(fs.client_stat("").unwrap().is_directory);
+    assert!(fs.tree.is_current());
+    fs.shutdown().unwrap();
+}
+
+#[test]
+fn live_implicit_read_open_reattaches_a_disconnected_share() {
+    let Some(mut fs) = sync_test_backend() else {
+        return;
+    };
+    let path = PathBuf::from(format!("/vfsi-stream-reconnect-{}", std::process::id()));
+    let file = fs
+        .open_raw_impl(&path, libc::O_CREAT | libc::O_TRUNC | libc::O_RDWR, 0o666)
+        .unwrap();
+    fs.write_raw_impl(&file, 0, b"original").unwrap();
+    fs.close_impl(&file).unwrap();
+    fs.client.connection().mark_dead();
+
+    let request = OpenOp::for_positioned_io(&path, OpenFlags::READ);
+    let files: Vec<_> = fs
+        .vopen_impl(&[request.clone(), request])
+        .unwrap()
+        .into_iter()
+        .map(Result::unwrap)
+        .collect();
+    assert!(fs.tree.is_current());
+    let reads = [
+        ReadOp::at(files[0].clone(), 0, 4),
+        ReadOp::at(FileOperand::from_fd(i32::MAX), 0, 4),
+        ReadOp::at(FileOperand::from_fd(i32::MAX), u64::MAX, 4),
+        ReadOp::at(files[1].clone(), 4, 4),
+    ];
+    let results = fs.read_results(&reads).unwrap();
+    let first = results[0].as_ref().unwrap();
+    assert_eq!(first.data, b"orig");
+    assert!(!first.eof);
+    let invalid = results[1].as_ref().unwrap_err();
+    assert_eq!(invalid.state(), vfsi_core::FailureState::NotAttempted);
+    assert_eq!(invalid.cause().raw_os_error(), Some(libc::EBADF));
+    let overflow = results[2].as_ref().unwrap_err();
+    assert_eq!(overflow.state(), vfsi_core::FailureState::NotAttempted);
+    assert_eq!(overflow.cause().raw_os_error(), Some(libc::EOVERFLOW));
+    let last = results[3].as_ref().unwrap();
+    assert_eq!(last.data, b"inal");
+    assert!(last.eof, "an exact final chunk still reports EOF");
+
+    let reads: Vec<_> = (0..65)
+        .map(|index| ReadOp::at(files[index % 2].clone(), index as u64, 1))
+        .collect();
+    let results = fs.read_results(&reads).unwrap();
+    assert_eq!(results.len(), reads.len());
+    for (index, result) in results.into_iter().enumerate() {
+        let read = result.unwrap();
+        assert_eq!(read.offset, index as u64);
+        assert_eq!(
+            read.data.as_slice(),
+            b"original".get(index..index + 1).unwrap_or(&[])
+        );
+    }
+    let closed = fs.vclose_owned_impl(files).unwrap();
+    assert_eq!(closed.len(), 2);
+    assert!(closed.into_iter().all(|result| result.is_ok()));
+    assert!(fs.open_files.is_empty());
+    let payload = vec![0x5a; 1024 * 1024 + 17];
+    let file = fs
+        .open_raw_impl(&path, libc::O_WRONLY | libc::O_TRUNC, 0)
+        .unwrap();
+    assert_eq!(
+        fs.write_raw_impl(&file, 0, &payload).unwrap(),
+        payload.len()
+    );
+    fs.close_impl(&file).unwrap();
+    let whole = fs
+        .vread_all_impl(&[FileOperand::from_os_path(&path)])
+        .unwrap();
+    assert_eq!(whole[0].as_ref().unwrap(), &payload);
+    assert!(fs.open_files.is_empty());
+
+    fs.unlink_impl(&path).unwrap();
+    fs.shutdown().unwrap();
+}
+
 fn sync_test_files(fs: &mut SmbVecFs, name: &str) -> (PathBuf, Vec<FileOperand>) {
     let path = PathBuf::from(format!("/vfsi-sync-{}-{name}", std::process::id()));
     let first = fs

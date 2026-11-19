@@ -1368,7 +1368,16 @@ fn read_pool_streams_ordered_ranges_and_recovers_after_cancellation() {
     let expected: Vec<u8> = (0usize..(3 * 1024 * 1024 + 173))
         .map(|index| (index.wrapping_mul(31) % 251) as u8)
         .collect();
-    let client = Nfs::connect(test_host()).expect("connect NFS client");
+    let version = vnfs::nfs::NfsVersion::try_from(
+        std::env::var("VNFS_TEST_MINOR")
+            .ok()
+            .map(|value| value.parse().unwrap()),
+    )
+    .unwrap();
+    let client = Nfs::builder(test_host())
+        .version(version)
+        .connect()
+        .expect("connect NFS client");
     client.write(&path, &expected).expect("write fixture");
 
     let options = NfsReadPoolOptions::new()
@@ -1377,6 +1386,7 @@ fn read_pool_streams_ordered_ranges_and_recovers_after_cancellation() {
         .with_max_in_flight(std::num::NonZeroUsize::new(5).expect("nonzero tuning value"))
         .with_max_buffered_bytes(5 * 64 * 1024);
     let mut pool = Nfs::builder(test_host())
+        .version(version)
         .connect_read_pool(options)
         .expect("connect read pool");
 
@@ -3828,9 +3838,8 @@ fn large_writev_readv_roundtrip() {
 
 #[test]
 fn read_allv_is_no_stat_whole_file_read() {
-    // read_allv reads every file to EOF without a size fetch; a 2 MiB file
-    // round-trips in one compound (chunked READ ops), and the compound
-    // counter proves no stat compound was issued.
+    // Whole-file reads discover EOF from READ replies. One batched OPEN
+    // and CLOSE keep the original handles pinned through those replies.
     let dir = setup_dir("read_all");
     let mut c = client();
     let mut files = Vec::new();
@@ -3867,13 +3876,12 @@ fn read_allv_is_no_stat_whole_file_read() {
     for (i, (_, data)) in files.iter().enumerate() {
         assert_eq!(&out[i], data);
     }
-    // The whole batch fits one compound (4 x ~2 MiB requested, chunked into
-    // per-op READs and byte-budgeted) — and no separate stat round trip.
+    // The fixture needs up to three response-bounded READ waves. One OPEN
+    // and one CLOSE vector bound the handle lifecycle within five calls.
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
     assert!(
-        compounds <= 4,
-        "read_allv(4 x 2 MiB) must be a few compounds, got {}",
-        compounds
+        compounds <= 5,
+        "read_allv(4 x 2 MiB) should use at most five compounds, got {compounds}"
     );
 }
 

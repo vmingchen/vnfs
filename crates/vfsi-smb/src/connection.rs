@@ -120,6 +120,45 @@ impl SmbVecFs {
         })
     }
 
+    pub(super) fn can_recover_path_read(&self, error: &SmbError) -> bool {
+        self.client.config().auto_reconnect
+            && self.client.connection().can_reconnect()
+            && matches!(
+                error,
+                SmbError::Disconnected
+                    | SmbError::ServerUnresponsive { .. }
+                    | SmbError::HandleInvalidated { .. }
+            )
+    }
+
+    pub(super) fn reconnect_share(&mut self) -> VfRes {
+        let tree = self
+            .runtime
+            .block_on(async {
+                if self.client.is_disconnected() {
+                    self.client.reconnect().await?;
+                }
+                self.client.connect_share(&self.tree.share_name).await
+            })
+            .map_err(|error| smb_error(error, 0))
+            .and_then(|tree| {
+                check_share_routing(tree.is_dfs || tree.dfs_origin.is_some(), &tree.share_name)?;
+                Ok(tree)
+            });
+        match tree {
+            Ok(tree) => {
+                self.tree = Arc::new(ShareSession::new(tree, self.client.connection().clone()));
+                Ok(())
+            }
+            Err(error) => {
+                // A revived transport without a usable tree must not accept
+                // requests carrying IDs from the old session.
+                self.client.connection().mark_dead();
+                Err(error)
+            }
+        }
+    }
+
     /// Close every open handle and disconnect the share, reporting failures.
     ///
     /// `Drop` performs the same cleanup on a best-effort basis when callers do

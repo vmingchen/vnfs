@@ -1,41 +1,57 @@
 use super::*;
 
+pub(super) async fn query_size_on(
+    connection: &Connection,
+    tree_id: TreeId,
+    file_id: FileId,
+) -> OpResult<u64> {
+    use smb2::msg::query_info::{InfoType, QueryInfoRequest, QueryInfoResponse};
+    let request = QueryInfoRequest {
+        info_type: InfoType::File,
+        file_info_class: 5,
+        output_buffer_length: 24,
+        additional_information: 0,
+        flags: 0,
+        file_id,
+        input_buffer: Vec::new(),
+    };
+    let frame = connection
+        .execute(Command::QueryInfo, &request, Some(tree_id))
+        .await
+        .map_err(|error| {
+            let unsent = matches!(error, SmbError::CreditStarvation { .. });
+            let cause = smb_error(error, 0);
+            if unsent {
+                OpError::not_attempted(cause)
+            } else {
+                read_wire_error(cause, 0, None)
+            }
+        })?;
+    let decoded = (|| {
+        require_status(&frame, Command::QueryInfo, 0)?;
+        let response = QueryInfoResponse::unpack(&mut ReadCursor::new(&frame.body))
+            .map_err(|error| smb_error(error, 0))?;
+        let size = response.output_buffer.get(8..16).ok_or_else(|| {
+            vfsi_core::internal::errors::invalid_reply("short SMB FileStandardInformation response")
+        })?;
+        Ok(u64::from_le_bytes(
+            size.try_into().expect("size field length"),
+        ))
+    })();
+    decoded.map_err(|cause| read_wire_error(cause, 0, None))
+}
+
 impl SmbVecFs {
     pub(super) fn query_size(&mut self, file_id: FileId) -> VfResult<u64> {
         #[cfg(feature = "test-faults")]
         self.inject_open_fault(OpenFaultPoint::BeforeSizeQuery)?;
-        use smb2::msg::query_info::{InfoType, QueryInfoRequest, QueryInfoResponse};
-        let request = QueryInfoRequest {
-            info_type: InfoType::File,
-            file_info_class: 5,
-            output_buffer_length: 24,
-            additional_information: 0,
-            flags: 0,
-            file_id,
-            input_buffer: Vec::new(),
-        };
-        let tree_id = self.tree.tree_id;
-        let frame = self
-            .runtime
-            .block_on(self.client.connection_mut().execute(
-                Command::QueryInfo,
-                &request,
-                Some(tree_id),
+        self.runtime
+            .block_on(query_size_on(
+                self.client.connection(),
+                self.tree.tree_id,
+                file_id,
             ))
-            .map_err(|e| smb_error(e, 0))?;
-        require_status(&frame, Command::QueryInfo, 0)?;
-        let response = QueryInfoResponse::unpack(&mut ReadCursor::new(&frame.body))
-            .map_err(|e| smb_error(e, 0))?;
-        if response.output_buffer.len() < 16 {
-            return Err(vfsi_core::internal::errors::invalid_reply(
-                "short SMB FileStandardInformation response",
-            ));
-        }
-        Ok(u64::from_le_bytes(
-            response.output_buffer[8..16]
-                .try_into()
-                .expect("length checked"),
-        ))
+            .map_err(OpError::into_cause)
     }
 
     /// Query the retained object, never its possibly stale saved pathname.
@@ -200,11 +216,15 @@ impl SmbVecFs {
     }
 
     pub(super) fn client_stat(&mut self, path: &str) -> VfResult<smb2::client::FileInfo> {
-        let tree = Arc::make_mut(&mut self.tree);
-        let info = self
-            .runtime
-            .block_on(self.client.stat(tree.sdk_tree_mut(), path));
-        tree.refresh_connection(self.client.connection().clone());
+        let mut connection = self.client.connection().clone();
+        let info = match self.runtime.block_on(self.tree.stat(&mut connection, path)) {
+            Err(error) if self.can_recover_path_read(&error) => {
+                self.reconnect_share()?;
+                let mut connection = self.client.connection().clone();
+                self.runtime.block_on(self.tree.stat(&mut connection, path))
+            }
+            result => result,
+        };
         self.follow_stat_link(path, info.map_err(|error| smb_error(error, 0))?)
     }
 

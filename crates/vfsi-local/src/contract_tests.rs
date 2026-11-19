@@ -655,6 +655,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     struct PathReadExecutor {
+        batch_size: Option<std::num::NonZeroUsize>,
         calls: std::sync::Arc<std::sync::Mutex<Vec<Vec<std::sync::Weak<std::fs::File>>>>>,
         replace: Option<PathBuf>,
         fail_after: Option<usize>,
@@ -687,7 +688,7 @@ mod tests {
             results
         }
         fn path_read_batch_size(&self) -> Option<std::num::NonZeroUsize> {
-            std::num::NonZeroUsize::new(2)
+            self.batch_size
         }
         fn read(
             &mut self,
@@ -732,6 +733,53 @@ mod tests {
     }
 
     #[test]
+    fn positional_whole_path_reads_keep_regular_siblings_of_fifos() {
+        use std::os::unix::ffi::OsStrExt;
+
+        if vfsi_sync::test_support::supervise_with_deadline(
+            "contract_tests::tests::positional_whole_path_reads_keep_regular_siblings_of_fifos",
+        ) {
+            return;
+        }
+        let (root, standard) = fs("read-fifo");
+        let fifo = std::ffi::CString::new(root.0.join("pipe").as_os_str().as_bytes()).unwrap();
+        // SAFETY: fifo contains the NUL-terminated path of this test's pipe.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        std::fs::write(root.0.join("regular"), b"readable").unwrap();
+        let executor = PathReadExecutor {
+            batch_size: std::num::NonZeroUsize::new(2),
+            calls: Default::default(),
+            replace: None,
+            fail_after: None,
+            max_read: usize::MAX,
+            owned_pointer: None,
+        };
+        let retained = LocalBackend::new(root.0.clone(), executor).unwrap();
+        for mut backend in [standard, retained] {
+            let paths = ["/pipe", "/regular"].map(FileOperand::from_path);
+            let outcomes = backend
+                .vread_all_with_options_impl(&paths, ReadAllOptions::default())
+                .unwrap();
+            let error = outcomes[0].as_ref().unwrap_err();
+            assert_eq!(test_native_code(error.cause()), libc::ESPIPE as u32);
+            assert_eq!(outcomes[1].as_ref().unwrap(), b"readable");
+            assert!(backend.open_files.is_empty());
+
+            let writes = backend
+                .vwrite_impl(&[
+                    WriteOp::at(&paths[0], 0, b"x".as_slice()),
+                    WriteOp::at(&paths[1], 0, b"changed!".as_slice()),
+                ])
+                .unwrap();
+            let error = writes[0].as_ref().unwrap_err();
+            assert_eq!(test_native_code(error.cause()), libc::ENXIO as u32);
+            assert_eq!(writes[1].as_ref().unwrap().bytes_written, 8);
+            assert_eq!(std::fs::read(root.0.join("regular")).unwrap(), b"changed!");
+            std::fs::write(root.0.join("regular"), b"readable").unwrap();
+        }
+    }
+
+    #[test]
     fn whole_path_reads_use_bounded_pinned_cohorts_and_always_close_temporary_handles() {
         for scenario in [
             "success",
@@ -757,6 +805,7 @@ mod tests {
             let mut fs = LocalBackend::new(
                 root.0.clone(),
                 PathReadExecutor {
+                    batch_size: std::num::NonZeroUsize::new(2),
                     calls: std::sync::Arc::clone(&calls),
                     replace: (scenario == "replace").then(|| root.0.join("a")),
                     fail_after: match scenario {
@@ -854,6 +903,212 @@ mod tests {
     }
 
     #[test]
+    fn serial_and_batched_whole_reads_pin_paths_with_borrowed_descriptors() {
+        for batch_size in [None, std::num::NonZeroUsize::new(2)] {
+            let root = TempRoot::new("mixed-whole-read-replacement");
+            std::fs::create_dir(&root.0).unwrap();
+            let path = root.0.join("a");
+            std::fs::write(&path, b"original").unwrap();
+            std::fs::write(root.0.join("b"), b"borrowed").unwrap();
+            let mut backend = LocalBackend::new(
+                root.0.clone(),
+                PathReadExecutor {
+                    batch_size,
+                    calls: Default::default(),
+                    replace: Some(path.clone()),
+                    fail_after: None,
+                    max_read: 2,
+                    owned_pointer: None,
+                },
+            )
+            .unwrap();
+            let borrowed = backend
+                .open_raw_impl(Path::new("/b"), libc::O_RDONLY, 0)
+                .unwrap();
+            let unused = FileOperand::from_fd(backend.next_fd + 1);
+            let outcomes = backend
+                .vread_all_with_options_impl(
+                    &[FileOperand::from_path("/a"), unused, borrowed.clone()],
+                    ReadAllOptions::default(),
+                )
+                .unwrap();
+
+            assert_eq!(outcomes[0].as_ref().unwrap(), b"original");
+            assert_eq!(std::fs::read(path).unwrap(), b"replacement");
+            let error = outcomes[1].as_ref().unwrap_err();
+            assert_eq!(error.state(), FailureState::NotAttempted);
+            assert_eq!(test_native_code(error.cause()), libc::EBADF as u32);
+            assert_eq!(outcomes[2].as_ref().unwrap(), b"borrowed");
+            assert_eq!(backend.open_files.len(), 1);
+            backend.close_impl(&borrowed).unwrap();
+        }
+    }
+
+    #[test]
+    fn native_stream_pins_its_path_and_closes_on_cancellation() {
+        let root = TempRoot::new("native-stream-replacement");
+        std::fs::create_dir(&root.0).unwrap();
+        let path = root.0.join("a");
+        std::fs::write(&path, b"original").unwrap();
+        let mut backend = LocalBackend::new(
+            root.0.clone(),
+            PathReadExecutor {
+                batch_size: None,
+                calls: Default::default(),
+                replace: Some(path.clone()),
+                fail_after: None,
+                max_read: 2,
+                owned_pointer: None,
+            },
+        )
+        .unwrap();
+        let mut data = Vec::new();
+        backend
+            .vstream_impl(
+                &[
+                    FileOperand::from_path("/a"),
+                    FileOperand::from_path("/missing"),
+                ],
+                2,
+                4,
+                &mut |index, offset, bytes, eof| {
+                    assert_eq!((index, offset), (0, data.len() as u64));
+                    assert!(!eof);
+                    data.extend_from_slice(bytes);
+                    data.len() < 6
+                },
+            )
+            .unwrap();
+        assert_eq!(data, b"origin");
+        assert_eq!(std::fs::read(path).unwrap(), b"replacement");
+        assert!(backend.open_files.is_empty());
+    }
+
+    #[test]
+    fn native_stream_admits_only_the_current_wave_and_closes_on_unwind() {
+        let root = TempRoot::new("native-stream-first-wave");
+        std::fs::create_dir(&root.0).unwrap();
+        std::fs::write(root.0.join("a"), b"content").unwrap();
+        let mut backend = LocalBackend::new(
+            root.0.clone(),
+            PathReadExecutor {
+                batch_size: std::num::NonZeroUsize::new(2),
+                calls: Default::default(),
+                replace: None,
+                fail_after: None,
+                max_read: 2,
+                owned_pointer: None,
+            },
+        )
+        .unwrap();
+
+        let mut called = false;
+        backend
+            .vstream_impl(
+                &[
+                    FileOperand::from_path("/a"),
+                    FileOperand::from_path("/missing"),
+                ],
+                2,
+                2,
+                &mut |index, _, data, _| {
+                    assert_eq!(index, 0);
+                    assert_eq!(data, b"co");
+                    called = true;
+                    false
+                },
+            )
+            .unwrap();
+        assert!(called);
+        assert!(backend.open_files.is_empty());
+
+        let write_only = backend
+            .open_raw_impl(Path::new("/a"), libc::O_WRONLY, 0)
+            .unwrap();
+        let error = backend
+            .vstream_impl(
+                &[write_only.clone(), FileOperand::from_path("/missing")],
+                2,
+                4,
+                &mut |_, _, _, _| panic!("failed wave must not deliver callbacks"),
+            )
+            .unwrap_err();
+        assert_eq!(error.index(), Some(0));
+        assert_eq!(test_native_code(error.cause()), libc::EBADF as u32);
+        assert_eq!(backend.open_files.len(), 1);
+        backend.close_impl(&write_only).unwrap();
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ =
+                backend.vstream_impl(&[FileOperand::from_path("/a")], 2, 4, &mut |_, _, _, _| {
+                    panic!("application callback")
+                });
+        }));
+        assert!(panic.is_err());
+        assert!(backend.open_files.is_empty());
+    }
+
+    #[test]
+    fn native_stream_bounds_open_paths_and_preserves_borrowed_handles() {
+        for contents in [b"".as_slice(), b"x"] {
+            let root = TempRoot::new("native-stream-eof-release");
+            std::fs::create_dir(&root.0).unwrap();
+            std::fs::write(root.0.join("file"), contents).unwrap();
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut backend = LocalBackend::new(
+                root.0.clone(),
+                PathReadExecutor {
+                    batch_size: std::num::NonZeroUsize::new(4),
+                    calls: calls.clone(),
+                    replace: None,
+                    fail_after: None,
+                    max_read: usize::MAX,
+                    owned_pointer: None,
+                },
+            )
+            .unwrap();
+            let borrowed = backend
+                .open_raw_impl(Path::new("/file"), libc::O_RDONLY, 0)
+                .unwrap();
+            let files = [
+                FileOperand::from_path("/file"),
+                borrowed.clone(),
+                FileOperand::from_path("/file"),
+                FileOperand::from_path("/file"),
+            ];
+            let mut completed = 0;
+            let mut next_offset = 0;
+            let mut event = 0;
+            backend
+                .vstream_impl(&files, 1, 1, &mut |index, offset, bytes, eof| {
+                    assert_eq!((index, offset), (completed, next_offset));
+                    let calls = calls.lock().unwrap();
+                    assert_eq!(calls.len(), event + 1);
+                    assert_eq!(calls[event].len(), 1);
+                    assert_eq!(
+                        calls[event][0].strong_count(),
+                        usize::from(index == 1 || !eof)
+                    );
+                    event += 1;
+                    if eof {
+                        assert!(bytes.is_empty());
+                        assert_eq!(next_offset, contents.len() as u64);
+                        completed += 1;
+                        next_offset = 0;
+                    } else {
+                        assert_eq!(bytes, contents);
+                        next_offset += bytes.len() as u64;
+                    }
+                    true
+                })
+                .unwrap();
+            assert_eq!(completed, files.len());
+            assert_eq!(backend.open_files.len(), 1);
+            backend.close_impl(&borrowed).unwrap();
+        }
+    }
+
+    #[test]
     fn whole_collection_reuses_full_chunks_without_retaining_oversized_buffers() {
         use std::sync::{
             Arc, Mutex,
@@ -869,6 +1124,7 @@ mod tests {
             let mut fs = LocalBackend::new(
                 root.0.clone(),
                 PathReadExecutor {
+                    batch_size: std::num::NonZeroUsize::new(2),
                     calls: Arc::new(Mutex::new(Vec::new())),
                     replace: None,
                     fail_after: None,
@@ -1829,7 +2085,7 @@ mod tests {
 
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
-        LocalBackend::protect_create_open(&anchored, &mut options);
+        LocalBackend::set_positioned_write_flags(&anchored, &mut options);
         options.open(&anchored).unwrap();
 
         assert!(root.0.join("moved/new").exists());
@@ -1846,7 +2102,7 @@ mod tests {
         std::fs::write(outside.0.join("outside-entry"), b"out").unwrap();
 
         let anchored = backend
-            .open_directory_no_follow_final(&root.0.join("inside"))
+            .open_listing_directory(&root.0.join("inside"), false)
             .unwrap();
         std::fs::rename(root.0.join("inside"), root.0.join("moved")).unwrap();
         std::os::unix::fs::symlink(&outside.0, root.0.join("inside")).unwrap();
@@ -1858,7 +2114,7 @@ mod tests {
         assert_eq!(names, [std::ffi::OsString::from("internal-entry")]);
         assert!(
             backend
-                .open_directory_no_follow_final(&root.0.join("inside"))
+                .open_listing_directory(&root.0.join("inside"), false)
                 .is_err(),
             "a symlink in the final directory component must be rejected"
         );
@@ -1944,7 +2200,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside.0, root.0.join("inside")).unwrap();
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
-        LocalBackend::protect_create_open(&anchored, &mut options);
+        LocalBackend::set_positioned_write_flags(&anchored, &mut options);
         options.open(&anchored).unwrap();
 
         assert!(root.0.join("moved/new").exists());
@@ -4697,6 +4953,38 @@ mod tests {
             std::fs::read(root.0.join("existing")).unwrap(),
             b"preserved!"
         );
+    }
+
+    #[test]
+    fn append_reports_the_writing_descriptors_end() {
+        use std::io::{Seek as _, Write as _};
+
+        let (root, mut backend) = fs("concurrent-append-position");
+        let path = root.0.join("log");
+        std::fs::write(&path, b"start").unwrap();
+        let mut other = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let append = backend
+            .open_raw_impl(Path::new("/log"), libc::O_WRONLY | libc::O_APPEND, 0)
+            .unwrap();
+        let first = backend
+            .writev_one(WriteOp::new(&append, VfOffset::Cur, b"1".as_slice()))
+            .unwrap();
+        other.write_all(b"other").unwrap();
+        let end = (&*backend.open_files[&append.fd().unwrap()].file)
+            .stream_position()
+            .unwrap();
+        assert_eq!(end, 6);
+        assert_eq!(first.offset + first.bytes_written as u64, end);
+
+        let second = backend
+            .writev_one(WriteOp::at(&append, 0, b"2".as_slice()))
+            .unwrap();
+        assert_eq!(second.offset, 11);
+        assert_eq!(backend.seek_raw_impl(&append, 0, SeekFrom::Cur).unwrap(), 6);
+        assert_eq!(std::fs::read(path).unwrap(), b"start1other2");
     }
 
     #[cfg(target_os = "linux")]

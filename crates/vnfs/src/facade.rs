@@ -132,7 +132,7 @@ macro_rules! owned_client {
                 cursors: Vec<Option<vfsi_sync::DirPageCursor>>,
                 page_size: usize,
                 max_entries: usize,
-                follow_symlinks: bool,
+                symlinks: impl Into<vfsi_sync::backend::DirectorySymlinkPolicy>,
             ) -> vfsi_core::VecResult<vfsi_sync::DirectoryPage> {
                 self.inner.read_dir_pages_with_fields(
                     paths,
@@ -140,7 +140,7 @@ macro_rules! owned_client {
                     cursors,
                     page_size,
                     max_entries,
-                    follow_symlinks,
+                    symlinks,
                 )
             }
             /// Copy whole files with independent per-input outcomes.

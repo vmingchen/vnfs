@@ -37,30 +37,10 @@ impl DirectoryReader {
                 Some(fs.tree.tree_id),
             )) {
                 Ok(frame) => break (connection, session, frame),
-                Err(error)
-                    if !retried
-                        && fs.client.config().auto_reconnect
-                        && connection.can_reconnect()
-                        && matches!(
-                            error,
-                            SmbError::Disconnected
-                                | SmbError::ServerUnresponsive { .. }
-                                | SmbError::HandleInvalidated { .. }
-                        ) =>
-                {
-                    // Nothing has been enumerated yet, and FILE_OPEN does not
-                    // mutate the namespace. Restore the tree as well as the
-                    // transport; its old id belongs to the dead session.
-                    let tree = fs.runtime.block_on(async {
-                        fs.client.reconnect().await?;
-                        fs.client.connect_share(&fs.tree.share_name).await
-                    });
-                    let tree = tree.map_err(|error| smb_error(error, 0))?;
-                    check_share_routing(
-                        tree.is_dfs || tree.dfs_origin.is_some(),
-                        &tree.share_name,
-                    )?;
-                    fs.tree = Arc::new(ShareSession::new(tree, fs.client.connection().clone()));
+                Err(error) if !retried && fs.can_recover_path_read(&error) => {
+                    // FILE_OPEN has not mutated the namespace, and no
+                    // enumeration has started.
+                    fs.reconnect_share()?;
                     retried = true;
                 }
                 Err(error) => return Err(smb_error(error, 0)),
@@ -205,25 +185,18 @@ impl DirectoryReader {
                 .execute(Command::QueryDirectory, &request, Some(self.tree.tree_id))
                 .await
                 .map_err(|error| smb_error(error, 0))?;
-            require_command(&frame, Command::QueryDirectory, 0)?;
-            if frame.header.status == NtStatus::NO_MORE_FILES {
-                // Keep the handle for final-page metadata probes. The caller
-                // closes it after projection (or Drop closes it on failure).
-                return Ok(None);
+            match directory_query_reply(&frame, self.restart, self.class)? {
+                DirectoryQueryReply::Exhausted => {
+                    // Keep the handle for final-page metadata probes. The caller
+                    // closes it after projection (or Drop closes it on failure).
+                    return Ok(None);
+                }
+                DirectoryQueryReply::RetryWithoutFileIds => {
+                    self.class = FileInformationClass::FileBothDirectoryInformation;
+                    continue;
+                }
+                DirectoryQueryReply::Data => {}
             }
-            if self.restart
-                && self.class == FileInformationClass::FileIdBothDirectoryInformation
-                && matches!(
-                    frame.header.status,
-                    NtStatus::INVALID_INFO_CLASS
-                        | NtStatus::NOT_SUPPORTED
-                        | NtStatus::INVALID_PARAMETER
-                )
-            {
-                self.class = FileInformationClass::FileBothDirectoryInformation;
-                continue;
-            }
-            require_status(&frame, Command::QueryDirectory, 0)?;
             let response = QueryDirectoryResponse::unpack(&mut ReadCursor::new(&frame.body))
                 .map_err(|error| smb_error(error, 0))?;
             let raw = parse_entries(self.class, &response.output_buffer)
@@ -275,6 +248,35 @@ impl Drop for DirectoryReader {
     }
 }
 
+enum DirectoryQueryReply {
+    Exhausted,
+    RetryWithoutFileIds,
+    Data,
+}
+
+fn directory_query_reply(
+    frame: &smb2::client::Frame,
+    first_query: bool,
+    class: FileInformationClass,
+) -> VfResult<DirectoryQueryReply> {
+    require_command(frame, Command::QueryDirectory, 0)?;
+    match frame.header.status {
+        NtStatus::NO_MORE_FILES => Ok(DirectoryQueryReply::Exhausted),
+        // MS-FSA §2.1.5.6.3 reports no wildcard matches on the first
+        // QUERY_DIRECTORY this way, after CREATE has already opened the directory.
+        NtStatus::NO_SUCH_FILE if first_query => Ok(DirectoryQueryReply::Exhausted),
+        NtStatus::INVALID_INFO_CLASS | NtStatus::NOT_SUPPORTED | NtStatus::INVALID_PARAMETER
+            if first_query && class == FileInformationClass::FileIdBothDirectoryInformation =>
+        {
+            Ok(DirectoryQueryReply::RetryWithoutFileIds)
+        }
+        _ => {
+            require_status(frame, Command::QueryDirectory, 0)?;
+            Ok(DirectoryQueryReply::Data)
+        }
+    }
+}
+
 fn directory_name(bytes: &[u8]) -> VfResult<PathBuf> {
     let invalid =
         || vfsi_core::internal::errors::invalid_reply("invalid SMB normalized directory name");
@@ -310,6 +312,33 @@ fn directory_name(bytes: &[u8]) -> VfResult<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_such_file_is_eof_only_for_the_first_directory_query() {
+        let mut frame = smb2::client::Frame {
+            header: smb2::msg::header::Header::new_request(Command::QueryDirectory),
+            body: Vec::new(),
+            raw: Vec::new(),
+        };
+        let class = FileInformationClass::FileBothDirectoryInformation;
+        frame.header.status = NtStatus::NO_SUCH_FILE;
+        assert!(matches!(
+            directory_query_reply(&frame, true, class),
+            Ok(DirectoryQueryReply::Exhausted)
+        ));
+        let error = directory_query_reply(&frame, false, class).err().unwrap();
+        assert_eq!(
+            vfsi_core::native_status(&error),
+            Some(vfsi_core::StatusCode::Smb(NtStatus::NO_SUCH_FILE.0))
+        );
+        frame.header.command = Command::Create;
+        let error = directory_query_reply(&frame, true, class).err().unwrap();
+        assert_eq!(
+            vfsi_core::transport_kind(&error),
+            Some(vfsi_core::TransportKind::InvalidReply)
+        );
+    }
+
     /// Runs in SMB CI with a required live fixture. Tear down only this
     /// client's real transport; no server restart or timing-based proxy needed.
     #[test]

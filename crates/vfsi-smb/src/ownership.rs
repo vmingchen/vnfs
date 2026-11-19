@@ -42,15 +42,6 @@ impl ShareSession {
         }
     }
 
-    pub(super) fn sdk_tree_mut(&mut self) -> &mut Tree {
-        &mut self.tree
-    }
-
-    pub(super) fn refresh_connection(&mut self, connection: Connection) {
-        self.epoch = (connection.generation(), connection.session_id());
-        self.connection = connection;
-    }
-
     pub(super) fn same_tree(&self, other: &Self) -> bool {
         self.epoch == other.epoch && self.tree.tree_id == other.tree.tree_id
     }

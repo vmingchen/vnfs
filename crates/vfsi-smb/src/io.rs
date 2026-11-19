@@ -1,6 +1,36 @@
 use super::*;
 use vfsi_core::{FailureState, IoProgress, OpError, OpResult};
 
+pub(super) async fn read_chunk_on(
+    connection: &Connection,
+    tree_id: TreeId,
+    file_id: FileId,
+    offset: u64,
+    length: u32,
+) -> VfResult<Vec<u8>> {
+    let request = ReadRequest {
+        padding: 0x50,
+        flags: 0,
+        length,
+        offset,
+        file_id,
+        minimum_count: 0,
+        channel: SMB2_CHANNEL_NONE,
+        remaining_bytes: 0,
+        read_channel_info: Vec::new(),
+    };
+    let frame = connection
+        .execute_with_credits(
+            Command::Read,
+            &request,
+            Some(tree_id),
+            CreditCharge(credit_charge(length as usize)),
+        )
+        .await
+        .map_err(|error| smb_error(error, 0))?;
+    decode_read_response(&frame, length as usize, 0)
+}
+
 impl SmbVecFs {
     pub(super) fn raw_read(
         &mut self,
@@ -32,7 +62,7 @@ impl SmbVecFs {
         let mut data = if single_chunk {
             Vec::new()
         } else {
-            Vec::with_capacity(length)
+            vfsi_core::internal::reserve_read_buffer(length).map_err(OpError::not_attempted)?
         };
         let mut position = offset;
         #[cfg(feature = "test-faults")]
@@ -57,29 +87,13 @@ impl SmbVecFs {
                 chunk_index += 1;
             }
             let chunk = (length - data.len()).min(max_read).min(u32::MAX as usize) as u32;
-            let request = ReadRequest {
-                padding: 0x50,
-                flags: 0,
-                length: chunk,
-                offset: position,
+            let result = self.runtime.block_on(read_chunk_on(
+                self.client.connection(),
+                tree_id,
                 file_id,
-                minimum_count: 0,
-                channel: SMB2_CHANNEL_NONE,
-                remaining_bytes: 0,
-                read_channel_info: Vec::new(),
-            };
-            let result = (|| -> VfResult<Vec<u8>> {
-                let frame = self
-                    .runtime
-                    .block_on(self.client.connection_mut().execute_with_credits(
-                        Command::Read,
-                        &request,
-                        Some(tree_id),
-                        CreditCharge(credit_charge(chunk as usize)),
-                    ))
-                    .map_err(|error| smb_error(error, 0))?;
-                decode_read_response(&frame, chunk as usize, 0)
-            })();
+                position,
+                chunk,
+            ));
             let response = match result {
                 Ok(response) => response,
                 Err(cause) => {

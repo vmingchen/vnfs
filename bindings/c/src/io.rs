@@ -438,9 +438,151 @@ fn callback_file_operand(fs: &vfsi_fs, path: &CStr) -> Result<FileOperand, std::
     vpath_for(fs, path).map(|path| FileOperand::from_os_path(&path))
 }
 
+struct CallbackStreamFiles<'a> {
+    fs: &'a vfsi_fs,
+    opened: Vec<Option<FileOperand>>,
+    close_error: Option<vfsi_core::IndexedError>,
+}
+
+impl CallbackStreamFiles<'_> {
+    fn read(
+        &mut self,
+        indices: &[usize],
+        reads: &mut [ReadOp],
+    ) -> Result<Vec<vfsi_sync::ReadOutput>, vfsi_core::IndexedError> {
+        use vfsi_core::{internal::collect_vec_result, IndexedError};
+        use vfsi_sync::{OpenFlags, OpenOp};
+
+        let fs = self.fs;
+        let mut backend = lock_or_io(&fs.fs).map_err(IndexedError::unattributed)?;
+        let pending: Vec<_> = indices
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|&(_, index)| self.opened[index].is_none())
+            .collect();
+        let mut failure = None;
+        if !pending.is_empty() {
+            let requests: Vec<_> = pending
+                .iter()
+                .map(|&(slot, _)| {
+                    let path = reads[slot].file.path().expect("stream path input");
+                    OpenOp::for_positioned_io(path, OpenFlags::READ)
+                })
+                .collect();
+            let outcomes = backend
+                .vopen_impl(&requests)
+                .map_err(IndexedError::unattributed)?;
+            let mut owners: std::collections::HashSet<_> = self
+                .opened
+                .iter()
+                .flatten()
+                .filter_map(FileOperand::fd)
+                .collect();
+            if outcomes.len() > pending.len() {
+                for file in outcomes.into_iter().filter_map(Result::ok) {
+                    if file.fd().is_some_and(|fd| fd >= 0 && owners.insert(fd)) {
+                        let _ = backend.close_impl(&file);
+                    }
+                }
+                return Err(IndexedError::unattributed(invalid_backend_reply(
+                    "too many stream OPEN outcomes",
+                )));
+            }
+            let outcomes = vfsi_core::internal::vec_result_slots(Ok(outcomes), pending.len());
+            for ((slot, index), result) in pending.into_iter().zip(outcomes) {
+                match result {
+                    Ok(file) if file.fd().is_some_and(|fd| fd >= 0 && owners.insert(fd)) => {
+                        self.opened[index] = Some(file);
+                    }
+                    Ok(_) => {
+                        failure.get_or_insert_with(|| {
+                            (slot, invalid_backend_reply("invalid stream OPEN handle"))
+                        });
+                    }
+                    Err(error) => {
+                        failure.get_or_insert_with(|| (slot, error.into_cause()));
+                    }
+                }
+            }
+        }
+        // Earlier READ errors take precedence over a later input's OPEN error.
+        let attempted = failure.as_ref().map_or(reads.len(), |(slot, _)| *slot);
+        let reads = &mut reads[..attempted];
+        for (&index, read) in indices.iter().zip(reads.iter_mut()) {
+            read.file = self.opened[index].clone().expect("admitted stream handle");
+        }
+        let values = if reads.is_empty() {
+            Vec::new()
+        } else {
+            collect_vec_result(backend.vread_impl(reads), reads.len())?
+        };
+        if let Some((slot, cause)) = failure {
+            return Err(IndexedError::at(slot, cause));
+        }
+        // EOF handles are finished even when an earlier callback stops
+        // delivery. Release this wave before the next one admits new files.
+        let mut finished: Vec<_> = indices
+            .iter()
+            .zip(&values)
+            .filter_map(|(&index, result)| result.eof.then_some(index))
+            .collect();
+        finished.sort_unstable();
+        self.close_files(backend.as_mut(), finished.into_iter());
+        Ok(values)
+    }
+
+    fn close_files(
+        &mut self,
+        backend: &mut dyn BindingBackend,
+        indices: impl Iterator<Item = usize>,
+    ) {
+        let (indices, files): (Vec<_>, Vec<_>) = indices
+            .filter_map(|index| self.opened[index].take().map(|file| (index, file)))
+            .unzip();
+        if files.is_empty() {
+            return;
+        }
+        if let Err(error) =
+            vfsi_core::internal::collect_vec_result(backend.vclose_owned_impl(files), indices.len())
+        {
+            self.record_close_error(error.map_index(|index| indices[index]));
+        }
+    }
+
+    fn record_close_error(&mut self, error: vfsi_core::IndexedError) {
+        if self
+            .close_error
+            .as_ref()
+            .is_none_or(|earlier| error.index() < earlier.index())
+        {
+            self.close_error = Some(error);
+        }
+    }
+
+    fn close(&mut self) -> Result<(), vfsi_core::IndexedError> {
+        let fs = self.fs;
+        if self.opened.iter().any(Option::is_some) {
+            match lock_or_io(&fs.fs) {
+                Ok(mut backend) => self.close_files(backend.as_mut(), 0..self.opened.len()),
+                Err(cause) => self.record_close_error(vfsi_core::IndexedError::unattributed(cause)),
+            }
+        }
+        self.close_error.take().map_or(Ok(()), Err)
+    }
+}
+
+impl Drop for CallbackStreamFiles<'_> {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
+}
+
 /// Stream several paths in bounded vectorized chunks. Returning `false` from
 /// `cb` cancels successfully. Callbacks provide backpressure between bounded
-/// read waves and run outside the backend lock; they may query this filesystem.
+/// read waves and run outside the backend lock. They may query this filesystem.
+/// Each file is held open across its read waves. The stream processes bounded
+/// groups in input order and may interleave paths within a group.
 /// The handle and input arrays must remain live and unchanged during callbacks.
 /// On success, `index` counts files whose EOF was delivered to the callback,
 /// including an EOF callback that cancels the stream.
@@ -494,37 +636,52 @@ pub unsafe extern "C" fn vfsi_read_streamv(
             cpaths.push(cpath);
             files.push(file);
         }
+        const MAX_OPEN_FILES: usize = 32;
+        // Bound retained handles by the number of requests in one read wave.
+        let cohort_size = MAX_OPEN_FILES.min(memory_limit.div_ceil(chunk_size));
         let mut completed = 0;
-        let result = vfsi_sync::backend::helpers::stream_read_chunks(
-            &files,
-            |_| chunk_size,
-            memory_limit,
-            |reads| {
-                let mut backend =
-                    lock_or_io(&fs.fs).map_err(vfsi_core::IndexedError::unattributed)?;
-                vfsi_sync::internal::collect_vec_result(backend.vread_impl(reads), reads.len())
-            },
-            |index, result| {
-                completed += usize::from(result.eof);
-                // SAFETY: callback borrows this owned result only during the
-                // invocation; the backend read wave has already released its lock.
-                unsafe {
-                    cb(
-                        cpaths[index].as_ptr(),
-                        index,
-                        result.offset,
-                        result.data.as_ptr(),
-                        result.data.len(),
-                        result.eof,
-                        userdata,
-                    )
-                }
-            },
-        );
-        match result {
-            Ok(()) => vfsi_result::success(completed),
-            Err(error) => vfsi_result::from_indexed(error),
+        for (cohort, files) in files.chunks(cohort_size).enumerate() {
+            let base = cohort * cohort_size;
+            let mut handles = CallbackStreamFiles {
+                fs,
+                opened: (0..files.len()).map(|_| None).collect(),
+                close_error: None,
+            };
+            let mut stopped = false;
+            let result = vfsi_sync::backend::helpers::stream_read_chunks_indexed(
+                files,
+                |_| chunk_size,
+                memory_limit,
+                |indices, reads| handles.read(indices, reads),
+                |index, result| {
+                    let index = base + index;
+                    completed += usize::from(result.eof);
+                    // SAFETY: callback borrows this owned result only during the
+                    // invocation. The read wave has released the backend lock.
+                    let more = unsafe {
+                        cb(
+                            cpaths[index].as_ptr(),
+                            index,
+                            result.offset,
+                            result.data.as_ptr(),
+                            result.data.len(),
+                            result.eof,
+                            userdata,
+                        )
+                    };
+                    stopped = !more;
+                    more
+                },
+            );
+            let close = handles.close();
+            if stopped && result.is_ok() {
+                break;
+            }
+            if let Err(error) = result.and(close) {
+                return vfsi_result::from_indexed(error.map_index(|index| base + index));
+            }
         }
+        vfsi_result::success(completed)
     })
 }
 

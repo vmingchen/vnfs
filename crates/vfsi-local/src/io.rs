@@ -40,7 +40,7 @@ pub struct Write<'a> {
 /// can opt into bounded retained-handle cohorts.
 pub trait DescriptorIo: Send {
     /// Opt into bounded, retained-handle cohorts for whole-file path reads.
-    /// None preserves serial path syscalls. The bound includes temporary open
+    /// None uses one retained path at a time. The bound includes temporary open
     /// descriptors, not just submitted I/O; output and wave byte limits still apply.
     fn path_read_batch_size(&self) -> Option<std::num::NonZeroUsize> {
         None
@@ -164,6 +164,46 @@ pub(super) fn write_complete(
         }
     }
     Ok(completed)
+}
+
+pub(super) fn confirmed_write_bytes(result: &OpResult<usize>) -> usize {
+    match result {
+        Ok(count) => *count,
+        Err(error) => match error.progress() {
+            Some(IoProgress::Write { bytes_written }) => *bytes_written,
+            _ => 0,
+        },
+    }
+}
+
+/// Complete a nonempty append on a regular file opened with O_APPEND.
+pub(super) fn append_complete(mut file: &File, data: &[u8]) -> (Option<u64>, OpResult<usize>) {
+    use std::io::{Seek as _, Write as _};
+
+    debug_assert!(!data.is_empty());
+    // write updates this open description's cursor to the actual append end.
+    // Another writer's description may extend the file without moving it.
+    let result = write_complete(0, data, |data, _| file.write(data));
+    let confirmed = confirmed_write_bytes(&result);
+    if confirmed == 0 {
+        return (None, result);
+    }
+    let offset = file.stream_position().and_then(|end| {
+        end.checked_sub(confirmed as u64)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
+    });
+    match offset {
+        Ok(offset) => (Some(offset), result),
+        Err(cause) => (
+            None,
+            result.and_then(|bytes_written| {
+                Err(OpError::failed(
+                    cause,
+                    Some(IoProgress::Write { bytes_written }),
+                ))
+            }),
+        ),
+    }
 }
 
 /// Execute independent complete positional writes in syscall order.

@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
 
-use vfsi_core::VfResult;
-use vfsi_sync::{FsClient, OpenFile, StreamCompletion, VfsiExt};
+use vfsi_core::{AttrMask, FsObjId, VfResult, api::AttrsOptions};
+use vfsi_sync::{FsClient, OpenFile, OpenFlags, OpenOp, StreamCompletion, VfsiExt};
 
 use super::{NfsClientBuilder, NfsVecFs};
 
@@ -107,6 +107,11 @@ enum WorkerCommand {
     Shutdown,
 }
 
+struct StreamFile {
+    identity: Option<FsObjId>,
+    size: Option<u64>,
+}
+
 enum WorkerEvent {
     Ready {
         worker: usize,
@@ -115,7 +120,7 @@ enum WorkerEvent {
     Started {
         stream_id: u64,
         worker: usize,
-        result: VfResult<Option<u64>>,
+        result: VfResult<StreamFile>,
     },
     Chunk {
         stream_id: u64,
@@ -136,10 +141,10 @@ enum WorkerEvent {
 
 /// Reusable bounded pool that pipelines positional reads over separate NFS sessions.
 ///
-/// The pool owns one persistent connection per worker. A stream is not a
-/// snapshot: concurrent modifications can be observed differently by its
-/// independent range requests. Use it for stable large files or add
-/// application-level versioning.
+/// The pool owns one persistent connection per worker. Before fetching ranges,
+/// it verifies that the workers opened the same server object. It uses one
+/// worker when a server omits object identity. Concurrent in-place changes
+/// may still be observed by independent range reads.
 pub struct NfsReadPool {
     commands: Vec<SyncSender<WorkerCommand>>,
     events: Receiver<WorkerEvent>,
@@ -292,6 +297,8 @@ impl NfsReadPool {
         let mut started = 0;
         let mut started_workers = vec![false; self.effective_workers];
         let mut file_size = None;
+        let mut identity = None;
+        let mut all_identities = true;
         while started < active_workers.len() {
             match self.events.recv() {
                 Ok(WorkerEvent::Started {
@@ -306,15 +313,31 @@ impl NfsReadPool {
                     started += 1;
                     started_workers[worker] = true;
                     match result {
-                        Ok(Some(size)) if worker == 0 => file_size = Some(size),
-                        Ok(None) if worker != 0 => {}
-                        Ok(_) => {
-                            primary_error.get_or_insert_with(|| {
-                                vfsi_core::internal::errors::transport(
-                                    vfsi_core::TransportKind::Other,
-                                    "invalid read worker file-size response",
-                                )
-                            });
+                        Ok(file) => {
+                            match (worker, file.size) {
+                                (0, Some(size)) => file_size = Some(size),
+                                (1.., None) => {}
+                                _ => {
+                                    primary_error.get_or_insert_with(|| {
+                                        vfsi_core::internal::errors::invalid_reply(
+                                            "invalid read worker file-size response",
+                                        )
+                                    });
+                                }
+                            }
+                            if let Some(opened) = file.identity {
+                                if *identity.get_or_insert(opened) != opened {
+                                    primary_error.get_or_insert_with(|| {
+                                        vfsi_core::internal::errors::with_context(
+                                            std::io::Error::from_raw_os_error(libc::ESTALE),
+                                            "read_stream_pipelined",
+                                            &path,
+                                        )
+                                    });
+                                }
+                            } else {
+                                all_identities = false;
+                            }
                         }
                         Err(error) => {
                             primary_error.get_or_insert(vfsi_core::internal::errors::with_context(
@@ -366,6 +389,11 @@ impl NfsReadPool {
                 "read worker omitted file size",
             ));
         }
+        let (workers, in_flight) = if all_identities || self.effective_workers == 1 {
+            (self.effective_workers, self.effective_in_flight)
+        } else {
+            (1, 1)
+        };
         let size = file_size.unwrap_or(0);
         let chunk_size = self.options.chunk_size;
         let total_ranges = if size == 0 {
@@ -383,13 +411,13 @@ impl NfsReadPool {
 
         while primary_error.is_none() && !cancelled && next_delivery < total_ranges {
             while next_job < total_ranges
-                && next_job.saturating_sub(next_delivery) < self.effective_in_flight as u64
+                && next_job.saturating_sub(next_delivery) < in_flight as u64
             {
                 let offset = next_job
                     .checked_mul(chunk_size as u64)
                     .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
                 let length = (size - offset).min(chunk_size as u64) as usize;
-                let worker = (next_job % self.effective_workers as u64) as usize;
+                let worker = (next_job % workers as u64) as usize;
                 if self.commands[worker]
                     .send(WorkerCommand::Read {
                         stream_id,
@@ -602,18 +630,15 @@ impl NfsReadPool {
         if let Some(error) = callback_error {
             return Err(error);
         }
+        if cancelled {
+            return Ok(StreamCompletion::Stopped {
+                next_offset: next_delivery.saturating_mul(chunk_size as u64).min(size),
+            });
+        }
         if let Some(error) = primary_error {
             return Err(error);
         }
-        close_error.map(|()| {
-            if cancelled {
-                StreamCompletion::Stopped {
-                    next_offset: next_delivery.saturating_mul(chunk_size as u64).min(size),
-                }
-            } else {
-                StreamCompletion::Complete
-            }
-        })
+        close_error.map(|()| StreamCompletion::Complete)
     }
 
     fn finish_stream(&mut self, stream_id: u64, active_workers: &[usize]) -> VfResult<()> {
@@ -757,25 +782,33 @@ fn worker_main(
                     if active.is_some() {
                         return Err(std::io::Error::from_raw_os_error(libc::EBUSY));
                     }
-                    let (file, size) = open_stream_file(
-                        || client.open(&path),
+                    let (file, started) = open_stream_file(
+                        || client.open_with(OpenOp::for_positioned_io(&path, OpenFlags::READ)),
                         |file| {
+                            let mut fields = AttrMask::identity();
                             if worker == 0 {
-                                client
-                                    .attrs(vfsi_core::Target::file(file))?
-                                    .len()
-                                    .map(Some)
-                                    .ok_or_else(|| {
-                                        std::io::Error::from(std::io::ErrorKind::Unsupported)
-                                    })
-                            } else {
-                                Ok(None)
+                                fields |= AttrMask::SIZE;
                             }
+                            let attrs = client.attrs_with_options(
+                                vfsi_core::Target::file(file),
+                                AttrsOptions::new().with_fields(fields),
+                            )?;
+                            let size = if worker == 0 {
+                                Some(attrs.len().ok_or_else(|| {
+                                    std::io::Error::from(std::io::ErrorKind::Unsupported)
+                                })?)
+                            } else {
+                                None
+                            };
+                            Ok(StreamFile {
+                                identity: attrs.fs_obj_id(),
+                                size,
+                            })
                         },
                         |file| file.close(),
                     )?;
                     active = Some((stream_id, file));
-                    Ok(size)
+                    Ok(started)
                 })();
                 let _ = events.send(WorkerEvent::Started {
                     stream_id,
@@ -833,14 +866,14 @@ fn worker_main(
     }
 }
 
-fn open_stream_file<T>(
+fn open_stream_file<T, M>(
     open: impl FnOnce() -> VfResult<T>,
-    size: impl FnOnce(&T) -> VfResult<Option<u64>>,
+    measure: impl FnOnce(&T) -> VfResult<M>,
     close: impl FnOnce(T) -> VfResult<()>,
-) -> VfResult<(T, Option<u64>)> {
+) -> VfResult<(T, M)> {
     let file = open()?;
-    match size(&file) {
-        Ok(size) => Ok((file, size)),
+    match measure(&file) {
+        Ok(metadata) => Ok((file, metadata)),
         Err(error) => {
             let _ = close(file);
             Err(error)
@@ -854,7 +887,7 @@ fn read_range(
     offset: u64,
     length: usize,
 ) -> VfResult<Vec<u8>> {
-    let mut data = vec![0; length];
+    let mut data = vfsi_core::internal::zeroed_read_buffer(length)?;
     let mut filled = 0;
     while filled < length {
         let current_offset = offset
@@ -890,15 +923,20 @@ mod tests {
     use std::sync::mpsc;
 
     #[test]
-    fn callback_error_survives_later_prefetch_and_close_failures() {
+    fn callback_outcome_survives_later_prefetch_and_close_failures() {
         use super::{NfsReadPool, WorkerCommand};
-        for failed_prefetch in [false, true] {
+        for (failed_prefetch, stopped) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
             let (commands, requests) = mpsc::sync_channel(8);
             let (send, events) = mpsc::channel();
             send.send(WorkerEvent::Started {
                 stream_id: 1,
                 worker: 0,
-                result: Ok(Some(2)),
+                result: Ok(super::StreamFile {
+                    identity: None,
+                    size: Some(2),
+                }),
             })
             .unwrap();
             for index in 0..2 {
@@ -938,27 +976,37 @@ mod tests {
             let mut calls = 0;
             let cause = std::sync::Arc::new(std::io::Error::from_raw_os_error(libc::EACCES));
             let original = std::sync::Arc::clone(&cause);
-            let error = pool
-                .read_stream("/file", |offset, bytes| {
-                    calls += 1;
-                    assert_eq!((offset, bytes), (0, b"x".as_slice()));
+            let outcome = pool.read_stream("/file", |offset, bytes| {
+                calls += 1;
+                assert_eq!((offset, bytes), (0, b"x".as_slice()));
+                if stopped {
+                    Ok(std::ops::ControlFlow::Break(()))
+                } else {
                     Err(std::io::Error::new(
                         std::io::ErrorKind::PermissionDenied,
                         original.clone(),
                     ))
-                })
-                .unwrap_err();
+                }
+            });
             assert_eq!(calls, 1, "no callback for the drained prefetch");
-            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
-            let retained = error
-                .get_ref()
-                .unwrap()
-                .downcast_ref::<std::sync::Arc<std::io::Error>>()
-                .unwrap();
-            assert!(
-                std::sync::Arc::ptr_eq(retained, &cause),
-                "original cause retained"
-            );
+            if stopped {
+                assert_eq!(
+                    outcome.unwrap(),
+                    super::StreamCompletion::Stopped { next_offset: 1 }
+                );
+            } else {
+                let error = outcome.unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+                let retained = error
+                    .get_ref()
+                    .unwrap()
+                    .downcast_ref::<std::sync::Arc<std::io::Error>>()
+                    .unwrap();
+                assert!(
+                    std::sync::Arc::ptr_eq(retained, &cause),
+                    "original cause retained"
+                );
+            }
             let requests: Vec<_> = requests.try_iter().collect();
             assert!(
                 matches!(
@@ -976,6 +1024,106 @@ mod tests {
                 pool.events.try_recv().is_err(),
                 "all submitted work drained"
             );
+        }
+    }
+
+    #[test]
+    fn worker_identity_mismatch_stops_before_reads_and_missing_identity_uses_one_worker() {
+        use super::{FsObjId, NfsReadPool, StreamCompletion, StreamFile, WorkerCommand};
+
+        for mismatch in [true, false] {
+            let (first_command, first_requests) = mpsc::sync_channel(8);
+            let (second_command, second_requests) = mpsc::sync_channel(8);
+            let (send, events) = mpsc::channel();
+            for (worker, file) in [
+                (
+                    1,
+                    StreamFile {
+                        identity: mismatch.then(|| FsObjId::new(1, 2)),
+                        size: None,
+                    },
+                ),
+                (
+                    0,
+                    StreamFile {
+                        identity: Some(FsObjId::new(1, 1)),
+                        size: Some(2),
+                    },
+                ),
+            ] {
+                send.send(WorkerEvent::Started {
+                    stream_id: 1,
+                    worker,
+                    result: Ok(file),
+                })
+                .unwrap();
+            }
+            if !mismatch {
+                for index in 0..2 {
+                    send.send(WorkerEvent::Chunk {
+                        stream_id: 1,
+                        worker: 0,
+                        index,
+                        offset: index,
+                        result: Ok(vec![b'x']),
+                    })
+                    .unwrap();
+                }
+            }
+            for worker in 0..2 {
+                send.send(WorkerEvent::Finished {
+                    stream_id: 1,
+                    worker,
+                    result: Ok(()),
+                })
+                .unwrap();
+            }
+            let mut pool = NfsReadPool {
+                commands: vec![first_command, second_command],
+                events,
+                threads: Vec::new(),
+                options: NfsReadPoolOptions::new()
+                    .with_chunk_size(std::num::NonZeroUsize::new(1).unwrap())
+                    .with_max_buffered_bytes(2),
+                effective_workers: 2,
+                effective_in_flight: 2,
+                worker_alive: vec![true; 2],
+                next_stream_id: 1,
+            };
+            let mut data = Vec::new();
+            let result = pool.read_stream("/file", |_, bytes| {
+                data.extend_from_slice(bytes);
+                Ok(std::ops::ControlFlow::Continue(()))
+            });
+            let first: Vec<_> = first_requests.try_iter().collect();
+            let second: Vec<_> = second_requests.try_iter().collect();
+            assert!(matches!(
+                second.as_slice(),
+                [WorkerCommand::Start { .. }, WorkerCommand::Finish { .. }]
+            ));
+            if mismatch {
+                assert_eq!(
+                    crate::test_native_code(&result.unwrap_err()),
+                    libc::ESTALE as u32
+                );
+                assert!(data.is_empty());
+                assert!(matches!(
+                    first.as_slice(),
+                    [WorkerCommand::Start { .. }, WorkerCommand::Finish { .. }]
+                ));
+            } else {
+                assert_eq!(result.unwrap(), StreamCompletion::Complete);
+                assert_eq!(data, b"xx");
+                assert!(matches!(
+                    first.as_slice(),
+                    [
+                        WorkerCommand::Start { .. },
+                        WorkerCommand::Read { index: 0, .. },
+                        WorkerCommand::Read { index: 1, .. },
+                        WorkerCommand::Finish { .. }
+                    ]
+                ));
+            }
         }
     }
 
@@ -1033,7 +1181,7 @@ mod tests {
         let closed = Cell::new(false);
         let error = open_stream_file(
             || Ok::<_, std::io::Error>(42),
-            |_| Err(std::io::Error::from_raw_os_error(libc::EIO)),
+            |_| Err::<(), _>(std::io::Error::from_raw_os_error(libc::EIO)),
             |file| {
                 assert_eq!(file, 42);
                 closed.set(true);

@@ -70,6 +70,86 @@ fn page_delivery_is_bounded_reentrant_and_reports_empty_directory_cancellation()
 }
 
 #[test]
+fn shallow_pages_honor_input_symlink_policy_and_pin_the_followed_directory() {
+    use std::num::NonZeroUsize;
+
+    let root = tempfile::tempdir().unwrap();
+    let fs = Posix::new(root.path()).unwrap();
+    fs.create_dir_all("/base/target").unwrap();
+    for name in ["a", "b", "c"] {
+        fs.write(format!("/base/target/{name}"), b"data").unwrap();
+    }
+    fs.create_dir("/replacement").unwrap();
+    fs.write("/replacement/other", b"changed").unwrap();
+    fs.symlink("/base/target", "/final").unwrap();
+    fs.symlink("base", "/ancestor").unwrap();
+    let linked = ["/final", "/ancestor/target"];
+    for path in linked {
+        let mut names = fs
+            .read_dir(path)
+            .unwrap()
+            .into_iter()
+            .map(|entry| {
+                assert_eq!(entry.path().parent(), Some(Path::new(path)));
+                entry.file_name().unwrap().to_os_string()
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, ["a", "b", "c"]);
+    }
+    // A recursive root may follow ancestors, but its final entry must
+    // itself be a directory. The shallow operation above may follow both.
+    let recursive = ListDirOptions::new().with_recursive(true);
+    let roots = fs
+        .vlistdirs(&["/ancestor/target", "/final"], recursive, |index, page| {
+            assert_eq!(index, 0);
+            assert_eq!(page.path, Path::new("/ancestor/target"));
+            Ok(ControlFlow::Continue(()))
+        })
+        .unwrap();
+    assert_eq!(roots[0].as_ref().unwrap(), &TraversalCompletion::Complete);
+    assert!(roots[1].is_err());
+
+    let nofollow = ListDirOptions::new().with_allow_symlink_components(false);
+    let size = NonZeroUsize::new(1).unwrap();
+    let outcomes = fs
+        .vlistdir_pages(&linked, vec![None, None], nofollow, size)
+        .unwrap();
+    assert!(outcomes.iter().all(Result::is_err));
+
+    let follow = ListDirOptions::new().with_fields(vnfs::directory::Attributes::SIZE);
+    let mut entries = Vec::new();
+    let mut next = None;
+    loop {
+        let page = fs
+            .dir_pages_all(&["/final"], vec![next], follow, size)
+            .unwrap()
+            .remove(0);
+        if entries.is_empty() {
+            fs.rename("/base/target", "/saved").unwrap();
+            fs.create_dir("/base/target").unwrap();
+            for name in ["a", "b", "c"] {
+                fs.write(format!("/base/target/{name}"), b"replacement")
+                    .unwrap();
+            }
+            fs.remove_file("/final").unwrap();
+            fs.symlink("/replacement", "/final").unwrap();
+        }
+        entries.extend(page.listing.entries.into_iter().map(|entry| {
+            assert_eq!(entry.path().parent(), Some(Path::new("/final")));
+            assert_eq!(entry.attrs().len(), Some(4));
+            entry.file_name().unwrap().to_os_string()
+        }));
+        next = page.continuation;
+        if next.is_none() {
+            break;
+        }
+    }
+    entries.sort();
+    assert_eq!(entries, ["a", "b", "c"]);
+}
+
+#[test]
 fn recursive_roots_and_entries_never_allow_symlink_components() {
     let root = tempfile::tempdir().unwrap();
     let fs = Posix::new(root.path()).unwrap();

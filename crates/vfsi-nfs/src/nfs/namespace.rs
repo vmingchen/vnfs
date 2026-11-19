@@ -273,11 +273,13 @@ impl NfsVecFs {
     pub(super) fn resolve_directory_path(
         &mut self,
         dir: &Path,
-        follow_symlinks: bool,
+        symlinks: impl Into<vfsi_sync::backend::DirectorySymlinkPolicy>,
     ) -> VfResult<NfsFh> {
+        use vfsi_sync::backend::DirectorySymlinkPolicy;
+        let symlinks = symlinks.into();
         let path = self.server_path(dir);
-        if follow_symlinks {
-            self.resolve_path(&path, true)
+        if symlinks != DirectorySymlinkPolicy::NoFollow {
+            self.resolve_path(&path, symlinks == DirectorySymlinkPolicy::Follow)
         } else {
             self.nfs
                 .resolve(&normalize_bytes(path_bytes(&path)))

@@ -525,7 +525,12 @@ pub trait VfsiExt: Vfsi {
     fn write(&self, path: impl AsRef<Path>, data: &[u8]) -> Result<()> {
         // Scalar open preserves backend-specific final-symlink resolution.
         // Always attempt close, but retain the write error if both fail.
-        let file = self.create(path)?;
+        let file = self.open_with(OpenOp::for_positioned_io(
+            path.as_ref(),
+            crate::api::OpenFlags::WRITE
+                | crate::api::OpenFlags::CREATE
+                | crate::api::OpenFlags::TRUNCATE,
+        ))?;
         let result = self
             .write_batch(
                 &[crate::api::WriteOp::at(&file, 0, data)],
@@ -574,7 +579,7 @@ pub trait VfsiExt: Vfsi {
         let requests: Vec<_> = entries
             .iter()
             .map(|(path, _)| {
-                OpenOp::new(
+                OpenOp::for_positioned_io(
                     path.as_ref(),
                     crate::api::OpenFlags::WRITE
                         | crate::api::OpenFlags::CREATE

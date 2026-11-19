@@ -5,9 +5,9 @@
 //! SMB related compounds. Large transfers use the server's negotiated I/O
 //! limits, and server-side copies use `FSCTL_SRV_COPYCHUNK` with an automatic
 //! read/write fallback.
-//! Independent small path operations in a vector call are multiplexed on the
-//! authenticated connection; stateful descriptor I/O and dependent mutations
-//! stay ordered.
+//! Independent small path operations and positional descriptor reads in a
+//! vector call are multiplexed. Cursor-based I/O and dependent mutations stay
+//! ordered.
 //!
 //! SMB paths are Unicode. A `Path` containing non-UTF-8 bytes is rejected with
 //! `EILSEQ`; characters which are illegal in SMB names are reversibly mapped

@@ -18,7 +18,7 @@ impl<F: VectorBackend> FsClient<F> {
         cursors: Vec<Option<crate::DirPageCursor>>,
         page_size: usize,
         max_entries: usize,
-        follow_symlinks: bool,
+        symlinks: impl Into<crate::backend::DirectorySymlinkPolicy>,
     ) -> vfsi_core::VecResult<crate::DirectoryPage> {
         use vfsi_core::OpError;
         if paths.len() != cursors.len() || page_size == 0 {
@@ -27,14 +27,15 @@ impl<F: VectorBackend> FsClient<F> {
         if paths.is_empty() {
             return Ok(Vec::new());
         }
+        let symlinks = symlinks.into();
         let pages = super::namespace::namespace_results(
-            self.lock()?.vlistdir_pages_impl(
+            self.lock()?.vlistdir_pages_with_policy_impl(
                 paths,
                 fields | AttrMask::MODE,
                 cursors,
                 page_size,
                 max_entries,
-                follow_symlinks,
+                symlinks,
             ),
             paths,
             "vlistdir_pages",

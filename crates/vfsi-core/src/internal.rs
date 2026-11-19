@@ -8,6 +8,22 @@ pub use crate::write::WriteRequest;
 
 use crate::VfResult;
 
+/// Reserve owned read storage without aborting if the caller's configured
+/// byte limit permits a request the allocator cannot satisfy.
+pub fn reserve_read_buffer(length: usize) -> VfResult<Vec<u8>> {
+    let mut data = Vec::new();
+    data.try_reserve_exact(length)
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::OutOfMemory))?;
+    Ok(data)
+}
+
+/// Allocate initialized storage for backends reading into a mutable slice.
+pub fn zeroed_read_buffer(length: usize) -> VfResult<Vec<u8>> {
+    let mut data = reserve_read_buffer(length)?;
+    data.resize(length, 0);
+    Ok(data)
+}
+
 /// Reject malformed open flags for the entire batch before routing or I/O.
 /// The native flag translator remains the single source of flag semantics.
 pub fn validate_open_requests(requests: &[crate::OpenOp]) -> VfResult<()> {
@@ -475,6 +491,88 @@ pub fn vec_result_slots<T>(
     }
 }
 
+/// Adapt a buffered descriptor batch to owned results. Failed allocations
+/// are isolated before dispatch, so they do not suppress valid sibling reads.
+pub fn read_with_owned_buffers(
+    reads: &[crate::ReadOp],
+    dispatch: impl FnOnce(&[crate::ReadOp], &mut [&mut [u8]]) -> crate::VecResult<crate::ReadIntoResult>,
+) -> crate::VecResult<crate::ReadOutput> {
+    use crate::{IoProgress, OpError, ReadOutput};
+    let mut storage = Vec::with_capacity(reads.len());
+    let mut admitted = Vec::new();
+    let mut rejected = Vec::new();
+    for (index, read) in reads.iter().enumerate() {
+        match zeroed_read_buffer(read.length) {
+            Ok(buffer) => {
+                if !rejected.is_empty() {
+                    admitted.push(read.clone());
+                }
+                storage.push(buffer);
+            }
+            Err(cause) => {
+                if rejected.is_empty() {
+                    admitted.extend_from_slice(&reads[..index]);
+                }
+                rejected.push((index, OpError::not_attempted(cause)));
+            }
+        }
+    }
+    let requests = if rejected.is_empty() {
+        reads
+    } else {
+        &admitted
+    };
+    let results = if requests.is_empty() {
+        Vec::new()
+    } else {
+        let mut buffers: Vec<_> = storage.iter_mut().map(Vec::as_mut_slice).collect();
+        match dispatch(requests, &mut buffers) {
+            Err(error) if rejected.is_empty() => return Err(error),
+            results => vec_result_slots(results, requests.len()),
+        }
+    };
+    let mut owned = results
+        .into_iter()
+        .zip(storage)
+        .map(|(result, mut data)| match result {
+            Ok(read) if read.bytes_read <= data.len() => {
+                data.truncate(read.bytes_read);
+                Ok(ReadOutput {
+                    file: read.file,
+                    offset: read.offset,
+                    data,
+                    eof: read.eof,
+                })
+            }
+            Ok(_) => Err(OpError::unknown(
+                errors::invalid_reply("read exceeds owned destination"),
+                None,
+            )),
+            Err(error) => {
+                let offset = match error.progress() {
+                    Some(IoProgress::Read(read)) => read.offset(),
+                    _ => 0,
+                };
+                Err(own_read_error(error, offset, data))
+            }
+        });
+    if rejected.is_empty() {
+        return Ok(owned.collect());
+    }
+    let mut rejected = rejected.into_iter().peekable();
+    Ok((0..reads.len())
+        .map(|index| {
+            if rejected
+                .peek()
+                .is_some_and(|(position, _)| *position == index)
+            {
+                return Err(rejected.next().expect("matching rejected read").1);
+            }
+            owned.next().expect("one outcome per admitted read")
+        })
+        .collect())
+}
+
 /// Move a borrowed destination's confirmed prefix into an owned error.
 pub fn own_read_error(error: crate::OpError, offset: u64, mut buffer: Vec<u8>) -> crate::OpError {
     use crate::{FailureState, IoProgress, OpError};
@@ -552,9 +650,9 @@ pub fn add_write_prefix(
 /// seams are not an application-facing replacement for std::io::Error.
 pub mod errors {
     pub use crate::error::standard::{
-        fanout, from_rpc, from_shared, from_status, invalid_reply, message, operation, path,
-        share_in_place, shared_source, suppress_interrupted, to_errno, transport, with_context,
-        with_message,
+        append_message, fanout, from_rpc, from_shared, from_status, invalid_reply, message,
+        operation, path, share_in_place, shared_source, suppress_interrupted, to_errno, transport,
+        with_context, with_message,
     };
     pub use crate::outcome::share_op_cause;
 }

@@ -12,8 +12,9 @@
 //! writes stay under that root. Paths are normalized lexically (`.` and `..`
 //! cannot escape the root), and path-based file operations resolve symlinks
 //! and refuse targets outside the root (`ERR_ACCES`). Operations that never
-//! follow symlinks (unlink, readlink, lstat, listing) operate on the
-//! normalized path itself.
+//! follow the final symlink (unlink, readlink, lstat) operate on the
+//! normalized path itself. Shallow paging follows input path symlinks when
+//! allowed, and always reports symlink entries without following them.
 //!
 //! On Linux, containment is enforced with `openat2(RESOLVE_IN_ROOT)` and
 //! held directory descriptors, closing symlink-swap races as well as lexical
@@ -169,6 +170,56 @@ impl std::ops::Deref for AnchoredPath {
     }
 }
 
+/// Open a Linux O_PATH handle within an already opened root directory.
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub fn open_rooted_path(root: &File, path: &Path, directory: bool) -> VfResult<File> {
+    #[repr(C)]
+    struct OpenHow {
+        flags: u64,
+        mode: u64,
+        resolve: u64,
+    }
+
+    const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+    const RESOLVE_IN_ROOT: u64 = 0x10;
+
+    let path = if path.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        path
+    };
+    let path = cstring_from_bytes(path_bytes(path))
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let flags = libc::O_PATH | libc::O_CLOEXEC | if directory { libc::O_DIRECTORY } else { 0 };
+    let how = OpenHow {
+        flags: flags as u64,
+        mode: 0,
+        resolve: RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
+    };
+    // SAFETY: root owns the borrowed descriptor, and the C string and OpenHow
+    // remain live for the synchronous openat2 call.
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            root.as_raw_fd(),
+            path.as_ptr(),
+            &how as *const OpenHow,
+            std::mem::size_of::<OpenHow>(),
+        ) as i32
+    };
+    if fd < 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(if error.raw_os_error() == Some(libc::EXDEV) {
+            std::io::Error::from_raw_os_error(libc::EACCES)
+        } else {
+            error
+        });
+    }
+    // SAFETY: openat2 returned a new descriptor and ownership is transferred once.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
 /// A local-filesystem [`VectorBackend`]. `"/"` is the `root` directory.
 pub struct LocalBackend {
     io: Box<dyn io::DescriptorIo>,
@@ -185,6 +236,67 @@ pub struct LocalBackend {
     directory_page_sizes: Vec<usize>,
     #[cfg(feature = "test-faults")]
     fault_injector: Option<Arc<dyn FaultInjector>>,
+}
+
+/// Pin temporary pathname handles through EOF and clean up unfinished reads.
+struct PinnedStreamReads<'a> {
+    backend: &'a mut LocalBackend,
+    live: Vec<bool>,
+    opened: Vec<Option<FileOperand>>,
+}
+
+impl PinnedStreamReads<'_> {
+    fn read(
+        &mut self,
+        indices: &[usize],
+        reads: &mut [ReadOp],
+    ) -> Result<Vec<ReadOutput>, vfsi_core::IndexedError> {
+        use vfsi_core::{IndexedError, internal::collect_vec_result};
+        for (slot, (&index, read)) in indices.iter().zip(reads.iter_mut()).enumerate() {
+            let prepared = if !self.live[index] {
+                Err(std::io::Error::from_raw_os_error(libc::EBADF))
+            } else if LocalBackend::is_path_read(&read.file) {
+                let opened = &mut self.opened[index];
+                if let Some(file) = opened {
+                    read.file = file.clone();
+                    Ok(())
+                } else {
+                    self.backend.pin_read_path(&read.file).map(|file| {
+                        read.file = file.clone();
+                        *opened = Some(file);
+                    })
+                }
+            } else {
+                Ok(())
+            };
+            if let Err(cause) = prepared {
+                // A previous slot may fail its READ. Keep first-error order
+                // while leaving the suffix of this strict operation untouched.
+                if slot != 0 {
+                    collect_vec_result(self.backend.vread_impl(&reads[..slot]), slot)?;
+                }
+                return Err(IndexedError::at(slot, cause));
+            }
+        }
+        let results = collect_vec_result(self.backend.vread_impl(reads), reads.len())?;
+        for (&index, result) in indices.iter().zip(&results) {
+            if result.eof
+                && let Some(file) = self.opened[index].take()
+            {
+                let _ = self.backend.close_impl(&file);
+            }
+        }
+        Ok(results)
+    }
+}
+
+impl Drop for PinnedStreamReads<'_> {
+    fn drop(&mut self) {
+        for file in self.opened.iter().flatten() {
+            // The registry is the sole owner of temporary descriptors.
+            let _ = self.backend.close_impl(file);
+        }
+    }
 }
 
 impl LocalBackend {
@@ -484,9 +596,57 @@ impl LocalBackend {
         })
     }
 
-    /// Open a directory while following parent symlinks within the root, but
-    /// atomically reject a symlink in the final component.
-    fn open_directory_no_follow_final(&self, p: &Path) -> VfResult<AnchoredPath> {
+    fn read_directory_page(
+        &mut self,
+        dir: &Path,
+        masks: AttrMask,
+        cursor: Option<DirPageCursor>,
+        page_size: usize,
+        symlinks: vfsi_sync::backend::DirectorySymlinkPolicy,
+    ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
+        #[cfg(test)]
+        self.directory_page_sizes.push(page_size);
+        if page_size == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+        }
+        let mut state = match cursor {
+            Some(cursor) => cursor.into_state::<LocalDirectoryCursor>()?,
+            None => {
+                use vfsi_sync::backend::DirectorySymlinkPolicy;
+                let p = match symlinks {
+                    DirectorySymlinkPolicy::Follow => {
+                        self.open_listing_directory(&self.resolve(dir), true)?
+                    }
+                    DirectorySymlinkPolicy::FollowParents => {
+                        self.open_listing_directory(&self.resolve(dir), false)?
+                    }
+                    DirectorySymlinkPolicy::NoFollow => self.strict_directory_path(dir)?,
+                };
+                let entries = std::fs::read_dir(&p)?;
+                LocalDirectoryCursor {
+                    entries,
+                    virtual_dir: dir.to_path_buf(),
+                    _anchor: p,
+                }
+            }
+        };
+        let mut page = Vec::with_capacity(page_size);
+        while page.len() < page_size {
+            let Some(entry) = state.entries.next() else {
+                return Ok((page, None));
+            };
+            let entry = entry?;
+            let name = entry.file_name();
+            let path = state.virtual_dir.join(&name);
+            let attrs = self.directory_entry_attrs(&state._anchor, &path, &name, masks)?;
+            page.push(attrs);
+        }
+        Ok((page, Some(DirPageCursor::new(state))))
+    }
+
+    /// Pin a directory for enumeration and entry metadata. Parents may
+    /// resolve within the root, with an explicit final-component policy.
+    fn open_listing_directory(&self, p: &Path, follow_final: bool) -> VfResult<AnchoredPath> {
         #[cfg(target_os = "linux")]
         let fd = {
             #[repr(C)]
@@ -505,9 +665,12 @@ impl LocalBackend {
             };
             let c_path = cstring_from_bytes(path_bytes(relative))
                 .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+            let mut flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
+            if !follow_final {
+                flags |= libc::O_NOFOLLOW;
+            }
             let how = OpenHow {
-                flags: (libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW)
-                    as u64,
+                flags: flags as u64,
                 mode: 0,
                 resolve: 0x10 | 0x02, // RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS
             };
@@ -525,6 +688,7 @@ impl LocalBackend {
             if fd < 0 {
                 let error = std::io::Error::last_os_error();
                 let error = if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR))
+                    && !follow_final
                     && self.no_follow_path(p).ok().is_some_and(|path| {
                         std::fs::symlink_metadata(path)
                             .is_ok_and(|metadata| metadata.file_type().is_symlink())
@@ -539,7 +703,15 @@ impl LocalBackend {
         };
         #[cfg(not(target_os = "linux"))]
         let fd = {
-            let parent_anchored = self.no_follow_path(p)?;
+            let parent_anchored = if follow_final {
+                let resolved = self.real_path(p)?;
+                if resolved.nofollow_on_open {
+                    return Err(std::io::Error::from_raw_os_error(libc::ENOENT));
+                }
+                self.no_follow_path(resolved.as_ref())?
+            } else {
+                self.no_follow_path(p)?
+            };
             let path = cstring_from_bytes(path_bytes(parent_anchored.as_ref()))
                 .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
             // SAFETY: the CString, live root descriptor and initialized syscall
@@ -581,56 +753,13 @@ impl LocalBackend {
 
     #[cfg(target_os = "linux")]
     fn no_follow_path_linux(&self, p: &Path) -> VfResult<AnchoredPath> {
-        #[repr(C)]
-        struct OpenHow {
-            flags: u64,
-            mode: u64,
-            resolve: u64,
-        }
-
-        const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
-        const RESOLVE_IN_ROOT: u64 = 0x10;
-
         let relative = p
             .strip_prefix(&self.root)
             .map_err(|_| std::io::Error::from_raw_os_error((ERR_ACCES) as i32))?;
         let parent = relative.parent().unwrap_or(Path::new(""));
-        let parent = if parent.as_os_str().is_empty() {
-            Path::new(".")
-        } else {
-            parent
-        };
         let name = relative.file_name();
-        let c_parent = cstring_from_bytes(path_bytes(parent))
-            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-        let how = OpenHow {
-            flags: (libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) as u64,
-            mode: 0,
-            resolve: RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
-        };
-        // SAFETY: the CString and repr(C) OpenHow remain live for synchronous openat2;
-        // root_dir owns the borrowed descriptor.
-        let fd = unsafe {
-            libc::syscall(
-                libc::SYS_openat2,
-                self.root_dir.as_raw_fd(),
-                c_parent.as_ptr(),
-                &how as *const OpenHow,
-                std::mem::size_of::<OpenHow>(),
-            ) as i32
-        };
-        if fd < 0 {
-            let error = std::io::Error::last_os_error();
-            let error = match error.raw_os_error() {
-                Some(libc::EXDEV) => std::io::Error::from_raw_os_error(libc::EACCES),
-                _ => error,
-            };
-            return Err(error);
-        }
-        // SAFETY: the preceding open succeeded and returned a new descriptor,
-        // transferred exactly once to this owning File.
-        let anchor = unsafe { File::from_raw_fd(fd) };
-        let mut path = PathBuf::from(format!("/proc/self/fd/{fd}"));
+        let anchor = open_rooted_path(&self.root_dir, parent, true)?;
+        let mut path = PathBuf::from(format!("/proc/self/fd/{}", anchor.as_raw_fd()));
         if let Some(name) = name {
             path.push(name);
         } else {
@@ -673,61 +802,19 @@ impl LocalBackend {
 
         #[cfg(target_os = "linux")]
         {
-            #[repr(C)]
-            struct OpenHow {
-                flags: u64,
-                mode: u64,
-                resolve: u64,
-            }
-            const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
-            const RESOLVE_IN_ROOT: u64 = 0x10;
-
             let relative = p
                 .strip_prefix(&self.root)
                 .map_err(|_| std::io::Error::from_raw_os_error((ERR_ACCES) as i32))?;
-            let relative = if relative.as_os_str().is_empty() {
-                Path::new(".")
-            } else {
-                relative
-            };
-            let c_path = cstring_from_bytes(path_bytes(relative))
-                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-            let how = OpenHow {
-                flags: (libc::O_PATH | libc::O_CLOEXEC) as u64,
-                mode: 0,
-                resolve: RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
-            };
-            // SAFETY: the CString and repr(C) OpenHow remain live for synchronous
-            // openat2; root_dir owns the borrowed descriptor.
-            let fd = unsafe {
-                libc::syscall(
-                    libc::SYS_openat2,
-                    self.root_dir.as_raw_fd(),
-                    c_path.as_ptr(),
-                    &how as *const OpenHow,
-                    std::mem::size_of::<OpenHow>(),
-                ) as i32
-            };
-            if fd >= 0 {
-                return Ok(AnchoredPath {
-                    path: PathBuf::from(format!("/proc/self/fd/{fd}")),
-                    // SAFETY: the preceding open succeeded and returned a new
-                    // descriptor, transferred exactly once to this owning File.
-                    anchor: Some(unsafe { File::from_raw_fd(fd) }),
+            match open_rooted_path(&self.root_dir, relative, false) {
+                Ok(anchor) => Ok(AnchoredPath {
+                    path: PathBuf::from(format!("/proc/self/fd/{}", anchor.as_raw_fd())),
+                    anchor: Some(anchor),
                     nofollow_on_open: false,
-                });
+                }),
+                // Keep the verified parent alive. Creation adds O_NOFOLLOW.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(no_follow),
+                Err(error) => Err(error),
             }
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::NotFound {
-                // `no_follow` keeps the verified parent alive. Callers that
-                // create the leaf add O_NOFOLLOW before opening it.
-                return Ok(no_follow);
-            }
-            let error = match error.raw_os_error() {
-                Some(libc::EXDEV) => std::io::Error::from_raw_os_error(libc::EACCES),
-                _ => error,
-            };
-            Err(error)
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -746,11 +833,13 @@ impl LocalBackend {
         }
     }
 
-    fn protect_create_open(path: &AnchoredPath, options: &mut OpenOptions) {
+    fn set_positioned_write_flags(path: &AnchoredPath, options: &mut OpenOptions) {
+        // A pathname used for positional writes cannot wait for a FIFO reader.
+        let mut flags = libc::O_NONBLOCK;
         if path.nofollow_on_open {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW);
+            flags |= libc::O_NOFOLLOW;
         }
+        options.custom_flags(flags);
     }
 
     /// Change permissions through a pinned object without following the leaf.
@@ -1239,9 +1328,57 @@ impl LocalBackend {
         Ok(())
     }
 
-    fn readv_one(&mut self, op: &ReadOp) -> VfResult<ReadOutput> {
-        let mut data = vec![0u8; op.length];
-        let result = self.readv_one_into(op, &mut data)?;
+    fn is_path_read(file: &FileOperand) -> bool {
+        matches!(
+            file,
+            FileOperand::Path { .. } | FileOperand::Cwd | FileOperand::CwdPath(_)
+        )
+    }
+
+    fn read_cohort_live_handles(&self, files: &[FileOperand]) -> Vec<bool> {
+        // Validate borrowed handles before any temporary OPEN can claim their numbers.
+        files
+            .iter()
+            .map(|file| file.fd().is_none_or(|fd| self.open_files.contains_key(&fd)))
+            .collect()
+    }
+
+    fn pin_read_path(&mut self, file: &FileOperand) -> VfResult<FileOperand> {
+        let path = self.vf_path(file)?;
+        self.open_path_impl(VfPathBase::Abs, &path, libc::O_RDONLY | libc::O_NONBLOCK, 0)
+    }
+
+    fn pin_read_cohort(
+        &mut self,
+        files: &[FileOperand],
+    ) -> Vec<vfsi_core::OpResult<(FileOperand, bool)>> {
+        use vfsi_core::OpError;
+        files
+            .iter()
+            .zip(self.read_cohort_live_handles(files))
+            .map(|(file, live)| {
+                if !live {
+                    return Err(OpError::not_attempted(std::io::Error::from_raw_os_error(
+                        libc::EBADF,
+                    )));
+                }
+                if !Self::is_path_read(file) {
+                    return Ok((file.clone(), false));
+                }
+                self.pin_read_path(file)
+                    .map(|file| (file, true))
+                    .map_err(|error| OpError::failed(error, None))
+            })
+            .collect()
+    }
+
+    fn readv_one(&mut self, op: &ReadOp) -> vfsi_core::OpResult<ReadOutput> {
+        use vfsi_core::OpError;
+        let mut data =
+            vfsi_core::internal::zeroed_read_buffer(op.length).map_err(OpError::not_attempted)?;
+        let result = self
+            .readv_one_into(op, &mut data)
+            .map_err(|error| OpError::failed(error, None))?;
         data.truncate(result.bytes_read);
         Ok(ReadOutput {
             file: result.file,
@@ -1293,8 +1430,13 @@ impl LocalBackend {
                 vec![0; reads.len()]
             };
             for (index, op) in reads.iter().enumerate() {
-                match Self::prepare_read(&self.open_files, op, index) {
-                    Ok((file, offset)) => {
+                let prepared =
+                    Self::prepare_read(&self.open_files, op, index).and_then(|(file, offset)| {
+                        let buffer = vfsi_core::internal::zeroed_read_buffer(op.length)?;
+                        Ok((file, offset, buffer))
+                    });
+                match prepared {
+                    Ok((file, offset, buffer)) => {
                         if !offsets.is_empty() {
                             offsets[index] = offset;
                         }
@@ -1304,7 +1446,7 @@ impl LocalBackend {
                         operations.push(io::OwnedRead {
                             file: Arc::clone(file),
                             offset,
-                            buffer: Vec::new(),
+                            buffer,
                         });
                     }
                     Err(error) => {
@@ -1317,10 +1459,6 @@ impl LocalBackend {
                 }
             }
             let sparse = !out.is_empty();
-            for (local, operation) in operations.iter_mut().enumerate() {
-                let index = if sparse { indices[local] } else { local };
-                operation.buffer = vec![0; reads[index].length];
-            }
             let count = operations.len();
             let results = if count == 0 {
                 Vec::new()
@@ -1372,41 +1510,15 @@ impl LocalBackend {
                 .collect());
         }
         if reads.iter().all(|op| op.file.is_fd()) {
-            let mut storage: Vec<_> = reads.iter().map(|op| vec![0; op.length]).collect();
-            let mut buffers: Vec<_> = storage.iter_mut().map(Vec::as_mut_slice).collect();
-            let results = self.read_into_results(reads, &mut buffers)?;
-            return Ok(results
-                .into_iter()
-                .zip(storage)
-                .map(|(result, mut data)| match result {
-                    Ok(result) => {
-                        data.truncate(result.bytes_read);
-                        Ok(ReadOutput {
-                            file: result.file,
-                            offset: result.offset,
-                            data,
-                            eof: result.eof,
-                        })
-                    }
-                    Err(error) => {
-                        let offset = error
-                            .progress()
-                            .and_then(|progress| match progress {
-                                vfsi_core::IoProgress::Read(read) => Some(read.offset()),
-                                _ => None,
-                            })
-                            .unwrap_or(0);
-                        Err(vfsi_core::internal::own_read_error(error, offset, data))
-                    }
-                })
-                .collect());
+            return vfsi_core::internal::read_with_owned_buffers(reads, |reads, buffers| {
+                self.read_into_results(reads, buffers)
+            });
         }
         Ok(reads
             .iter()
             .map(|op| {
                 self.preflight_mixed_read(op)?;
                 self.readv_one(op)
-                    .map_err(|error| OpError::failed(error, None))
             })
             .collect())
     }
@@ -1642,10 +1754,15 @@ impl LocalBackend {
             }
             FileOperand::Path { .. } | FileOperand::Cwd | FileOperand::CwdPath(_) => {
                 let p = self.real_path(&self.tcfile_path(&op.file)?)?;
-                let mut options = OpenOptions::new();
-                options.read(true);
-                Self::protect_create_open(&p, &mut options);
-                opened = options.open(&p)?;
+                // Implicit positional reads must never wait in OPEN for a
+                // FIFO writer. The positional syscall reports ESPIPE.
+                let flags = libc::O_NONBLOCK
+                    | if p.nofollow_on_open {
+                        libc::O_NOFOLLOW
+                    } else {
+                        0
+                    };
+                opened = Self::open_options(flags).open(&p)?;
                 let len = if op.offset == VfOffset::End {
                     opened.metadata()?.len()
                 } else {
@@ -1675,27 +1792,36 @@ impl LocalBackend {
     }
 
     fn writev_one(&mut self, op: WriteOp<&FileOperand, &[u8]>) -> vfsi_core::OpResult<WriteOutput> {
-        use vfsi_core::{FailureState, IoProgress, OpError};
+        use vfsi_core::{FailureState, OpError};
         let (off, descriptor, result) = match op.file() {
             FileOperand::Fd(fd) => {
                 let open = self.open_files.get(fd).ok_or_else(|| {
                     OpError::not_attempted(std::io::Error::from_raw_os_error((ERR_EBADF) as i32))
                 })?;
-                let len = if open.append || op.offset() == VfOffset::End {
-                    open.file.metadata().map_err(OpError::not_attempted)?.len()
+                let metadata = if open.append || op.offset() == VfOffset::End {
+                    Some(open.file.metadata().map_err(OpError::not_attempted)?)
                 } else {
-                    0
+                    None
                 };
-                let off = if open.append {
-                    len
+                if open.append
+                    && !op.data().is_empty()
+                    && metadata.as_ref().is_some_and(std::fs::Metadata::is_file)
+                {
+                    let (off, result) = io::append_complete(&open.file, op.data());
+                    (off, true, result)
                 } else {
-                    self.resolve_offset(op.file(), op.offset(), len)
-                        .map_err(OpError::not_attempted)?
-                };
-                let result = io::write_complete(off, op.data(), |data, offset| {
-                    open.file.write_at(data, offset)
-                });
-                (off, true, result)
+                    let len = metadata.map_or(0, |attrs| attrs.len());
+                    let off = if open.append {
+                        len
+                    } else {
+                        self.resolve_offset(op.file(), op.offset(), len)
+                            .map_err(OpError::not_attempted)?
+                    };
+                    let result = io::write_complete(off, op.data(), |data, offset| {
+                        open.file.write_at(data, offset)
+                    });
+                    (Some(off), true, result)
+                }
             }
             FileOperand::Path { .. } | FileOperand::Cwd | FileOperand::CwdPath(_) => {
                 // Validate positional arithmetic and reject cursor-only modes
@@ -1727,7 +1853,7 @@ impl LocalBackend {
                     .write(true)
                     .create(op.creates())
                     .truncate(op.truncates());
-                Self::protect_create_open(&path, &mut options);
+                Self::set_positioned_write_flags(&path, &mut options);
                 let file = options
                     .open(&path)
                     .map_err(|error| OpError::failed(error, None))?;
@@ -1751,7 +1877,7 @@ impl LocalBackend {
                                 OpError::failed(cause, progress)
                             }
                         });
-                (off, false, result)
+                (Some(off), false, result)
             }
             _ => {
                 return Err(OpError::not_attempted(std::io::Error::from(
@@ -1759,14 +1885,9 @@ impl LocalBackend {
                 )));
             }
         };
-        let confirmed = match &result {
-            Ok(count) => *count,
-            Err(error) => match error.progress() {
-                Some(IoProgress::Write { bytes_written }) => *bytes_written,
-                _ => 0,
-            },
-        };
-        if descriptor
+        let confirmed = io::confirmed_write_bytes(&result);
+        if let Some(off) = off
+            && descriptor
             && !matches!(op.offset(), VfOffset::At(_))
             && (result.is_ok() || confirmed != 0)
         {
@@ -1774,7 +1895,7 @@ impl LocalBackend {
         }
         result.map(|bytes_written| WriteOutput {
             file: op.file().clone(),
-            offset: off,
+            offset: off.expect("successful write has a known position"),
             bytes_written,
             stable: false,
         })
@@ -1903,7 +2024,7 @@ impl LocalBackend {
         }
         let mut pending = vec![dir.to_path_buf()];
         while let Some(current) = pending.pop() {
-            let p = self.open_directory_no_follow_final(&self.resolve(&current))?;
+            let p = self.open_listing_directory(&self.resolve(&current), false)?;
             let rd = std::fs::read_dir(&p)?;
             let mut children = Vec::new();
             for entry in rd {
@@ -2331,6 +2452,10 @@ impl HandleBackend for LocalBackend {
 }
 
 impl VectorBackend for LocalBackend {
+    fn positioned_io_open_flags(&self) -> i32 {
+        libc::O_NONBLOCK
+    }
+
     fn before_open_cleanup(&mut self, _index: usize, _file: &FileOperand) -> VfResult<()> {
         #[cfg(feature = "test-faults")]
         self.inject_open_fault(OpenFaultPoint::BeforeCleanup { index: _index })?;
@@ -2381,24 +2506,54 @@ impl VectorBackend for LocalBackend {
         memory_limit: usize,
         cb: &mut ReadStreamCallback<'_>,
     ) -> Result<(), vfsi_core::IndexedError> {
-        // A whole-file read must not give one sibling the entire stream
-        // budget. Share it across the live queue-sized cohort, without tiny
-        // probes, and let remaining files grow after short siblings reach EOF.
-        // chunk_size remains an upper bound; the helper enforces memory_limit.
         let batch = self.io.path_read_batch_size();
-        vfsi_sync::backend::helpers::vstream_impl_default(
-            self,
-            files,
-            |pending| match batch {
-                Some(batch) => {
-                    let siblings = pending.clamp(1, batch.get());
-                    chunk_size.min((memory_limit / siblings).max(4096))
-                }
-                None => chunk_size,
-            },
-            memory_limit,
-            cb,
-        )
+        let chunk = |pending: usize| match batch {
+            Some(batch) => {
+                let siblings = pending.clamp(1, batch.get());
+                chunk_size.min((memory_limit / siblings).max(4096))
+            }
+            None => chunk_size,
+        };
+        if !files.iter().any(Self::is_path_read) || chunk_size == 0 || memory_limit == 0 {
+            return vfsi_sync::backend::helpers::vstream_impl_default(
+                self,
+                files,
+                chunk,
+                memory_limit,
+                cb,
+            );
+        }
+
+        let batch_size = batch.unwrap_or(std::num::NonZeroUsize::MIN).get();
+        // The adaptive chunk plan can leave fewer requests per wave than
+        // the ring has slots. Keep the retained cohort within both limits.
+        let cohort_size = batch_size.min(memory_limit.div_ceil(chunk(batch_size)));
+        for (cohort, files) in files.chunks(cohort_size).enumerate() {
+            let base = cohort * cohort_size;
+            let live = self.read_cohort_live_handles(files);
+            let mut pinned = PinnedStreamReads {
+                backend: self,
+                live,
+                opened: (0..files.len()).map(|_| None).collect(),
+            };
+            let mut stopped = false;
+            vfsi_sync::backend::helpers::stream_read_chunks_indexed(
+                files,
+                chunk,
+                memory_limit,
+                |indices, reads| pinned.read(indices, reads),
+                |index, read| {
+                    let more = cb(base + index, read.offset, &read.data, read.eof);
+                    stopped = !more;
+                    more
+                },
+            )
+            .map_err(|error| error.map_index(|index| base + index))?;
+            if stopped {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn vread_all_with_options_impl(
@@ -2407,73 +2562,62 @@ impl VectorBackend for LocalBackend {
         options: ReadAllOptions,
     ) -> vfsi_core::VecResult<Vec<u8>> {
         use vfsi_core::{FailureState, IoProgress, OpError};
-        let batch_size = self.io.path_read_batch_size();
-        if batch_size.is_none()
-            || !files.iter().all(|file| {
-                matches!(
-                    file,
-                    FileOperand::Path { .. } | FileOperand::Cwd | FileOperand::CwdPath(_)
-                )
-            })
-        {
+        if !files.iter().any(Self::is_path_read) {
             return vfsi_sync::backend::helpers::vread_all_with_options_impl_default(
                 self, files, options,
             );
         }
         // Retain each path's identity through every chunk; an invalid sibling
         // does not prevent the rest of this bounded cohort from being opened.
-        let batch_size = batch_size.expect("configured path cohort");
+        let batch_size = self
+            .io
+            .path_read_batch_size()
+            .unwrap_or(std::num::NonZeroUsize::MIN);
         let mut output = Vec::with_capacity(files.len());
         let mut remaining = options.max_total_bytes();
-        for paths in files.chunks(batch_size.get()) {
-            let mut opened = Vec::with_capacity(paths.len());
-            let mut indices = Vec::with_capacity(paths.len());
-            let mut outcomes: Vec<_> = (0..paths.len()).map(|_| None).collect();
-            for (index, path) in paths.iter().enumerate() {
-                let path = match self.vf_path(path) {
-                    Ok(path) => path,
-                    Err(error) => {
-                        outcomes[index] = Some(Err(OpError::not_attempted(error)));
-                        continue;
+        for cohort in files.chunks(batch_size.get()) {
+            let mut submitted = Vec::with_capacity(cohort.len());
+            let mut indices = Vec::with_capacity(cohort.len());
+            let mut outcomes: Vec<_> = (0..cohort.len()).map(|_| None).collect();
+            for (index, input) in self.pin_read_cohort(cohort).into_iter().enumerate() {
+                match input {
+                    Ok((file, temporary)) => {
+                        submitted.push(file);
+                        indices.push((index, temporary));
                     }
-                };
-                match self.open_path_impl(VfPathBase::Abs, &path, libc::O_RDONLY, 0) {
-                    Ok(file) => {
-                        opened.push(file);
-                        indices.push(index);
-                    }
-                    Err(error) => outcomes[index] = Some(Err(OpError::failed(error, None))),
+                    Err(error) => outcomes[index] = Some(Err(error)),
                 }
             }
             let reads = vfsi_sync::backend::helpers::vread_all_owned_impl_default(
                 self,
-                &opened,
+                &submitted,
                 options.with_max_total_bytes(remaining),
                 batch_size,
             );
             let reads = match reads {
                 Ok(reads) => reads,
-                Err(error) => vfsi_core::internal::errors::fanout(error, opened.len())
-                    .map(|error| Err(OpError::failed(error, None)))
+                Err(error) => vfsi_core::internal::errors::fanout(error, submitted.len())
+                    .map(|error| Err(OpError::not_attempted(error)))
                     .collect(),
             };
             // Each successful OPEN keeps exactly one close owner, even when
             // another OPEN or READ failed. The local close removes its owner.
-            for ((file, index), result) in opened.iter().zip(indices).zip(reads) {
-                let result = match result {
-                    Err(error) if error.state() == FailureState::NotAttempted => {
-                        Err(OpError::failed(error.into_cause(), None))
+            for ((file, (index, temporary)), result) in submitted.iter().zip(indices).zip(reads) {
+                let result = if temporary {
+                    match (result, self.close_impl(file)) {
+                        (Err(error), _) if error.state() == FailureState::NotAttempted => {
+                            Err(OpError::failed(error.into_cause(), None))
+                        }
+                        (Ok(data), Err(error)) => Err(OpError::failed(
+                            error,
+                            Some(IoProgress::Read(vfsi_core::api::ReadOutput::owned(
+                                0, data, true,
+                            ))),
+                        )),
+                        (result, _) => result,
                     }
-                    result => result,
-                };
-                let result = match (result, self.close_impl(file)) {
-                    (Ok(data), Err(error)) => Err(OpError::failed(
-                        error,
-                        Some(IoProgress::Read(vfsi_core::api::ReadOutput::owned(
-                            0, data, true,
-                        ))),
-                    )),
-                    (result, _) => result,
+                } else {
+                    result
                 };
                 let bytes = match &result {
                     Ok(data) => data.len(),
@@ -2622,39 +2766,24 @@ impl VectorBackend for LocalBackend {
         _max_entries: usize,
         follow_symlinks: bool,
     ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
-        #[cfg(test)]
-        self.directory_page_sizes.push(page_size);
-        if page_size == 0 {
-            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
-        }
-        let mut state = match cursor {
-            Some(cursor) => cursor.into_state::<LocalDirectoryCursor>()?,
-            None => {
-                let p = if follow_symlinks {
-                    self.open_directory_no_follow_final(&self.resolve(dir))?
-                } else {
-                    self.strict_directory_path(dir)?
-                };
-                let entries = std::fs::read_dir(&p)?;
-                LocalDirectoryCursor {
-                    entries,
-                    virtual_dir: dir.to_path_buf(),
-                    _anchor: p,
-                }
-            }
-        };
-        let mut page = Vec::with_capacity(page_size);
-        while page.len() < page_size {
-            let Some(entry) = state.entries.next() else {
-                return Ok((page, None));
-            };
-            let entry = entry?;
-            let name = entry.file_name();
-            let path = state.virtual_dir.join(&name);
-            let attrs = self.directory_entry_attrs(&state._anchor, &path, &name, masks)?;
-            page.push(attrs);
-        }
-        Ok((page, Some(DirPageCursor::new(state))))
+        self.read_directory_page(dir, masks, cursor, page_size, follow_symlinks.into())
+    }
+
+    fn vlistdir_pages_with_policy_impl(
+        &mut self,
+        dirs: &[&Path],
+        masks: AttrMask,
+        cursors: Vec<Option<DirPageCursor>>,
+        page_size: usize,
+        _max_entries: usize,
+        symlinks: vfsi_sync::backend::DirectorySymlinkPolicy,
+    ) -> vfsi_core::VecResult<BackendDirectoryPage> {
+        vfsi_sync::backend::helpers::collect_directory_pages(
+            dirs,
+            cursors,
+            page_size,
+            |dir, cursor| self.read_directory_page(dir, masks, cursor, page_size, symlinks),
+        )
     }
 
     fn visit_dir_impl(
@@ -2664,7 +2793,7 @@ impl VectorBackend for LocalBackend {
         max_entries: usize,
         cb: &mut dyn FnMut(&VfAttrs) -> bool,
     ) -> VfRes {
-        let p = self.open_directory_no_follow_final(&self.resolve(dir))?;
+        let p = self.open_listing_directory(&self.resolve(dir), false)?;
         let entries = std::fs::read_dir(&p)?;
         let limit = if max_entries == 0 {
             usize::MAX
@@ -2968,7 +3097,7 @@ impl VectorBackend for LocalBackend {
             let path = self.real_path(&self.resolve(&p.path))?;
             let mut options = OpenOptions::new();
             options.write(true).create(true).truncate(false);
-            Self::protect_create_open(&path, &mut options);
+            Self::set_positioned_write_flags(&path, &mut options);
             let file = options.open(&path)?;
             let mut written = 0usize;
             for (block_number, number_offset, pattern_offset) in layout.chain(last) {

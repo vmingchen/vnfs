@@ -712,21 +712,49 @@ impl Auto {
         options: vfsi_core::api::CopyOptions,
     ) -> vfsi_core::VecResult<()> {
         let mounts = read_mounts(false);
-        let sources: Vec<_> = pairs
+        let mut sources: Vec<_> = pairs
             .iter()
-            .map(|(from, _)| self.resolve(from.as_ref(), &mounts))
+            .map(|(from, _)| {
+                if options.follow_source_symlinks() {
+                    self.resolve(from.as_ref(), &mounts)
+                } else {
+                    self.resolve_entry(from.as_ref(), &mounts)
+                }
+            })
             .collect();
-        let targets: Vec<_> = pairs
+        let mut targets: Vec<_> = pairs
             .iter()
             .map(|(_, to)| self.resolve(to.as_ref(), &mounts))
             .collect();
         let mut slots = (0..pairs.len()).map(|_| None).collect::<Vec<_>>();
-        for (index, (source, target)) in sources.iter().zip(&targets).enumerate() {
-            if !source.route.same_backend(&target.route) {
+        for (index, (source, target)) in sources.iter_mut().zip(&mut targets).enumerate() {
+            if source.route.same_backend(&target.route) {
+                continue;
+            }
+            let from = pairs[index].0.as_ref();
+            let to = pairs[index].1.as_ref();
+            // Keep both operands under kernel resolution when the mounted
+            // spelling still addresses the same eligible backend.
+            let mounted_pair = match (&source.route, &target.route) {
+                (other @ Route::Nfs(_), Route::Posix) => {
+                    self.mounted_copy_path_on(to, true, &mounts, other)
+                }
+                (Route::Posix, other @ Route::Nfs(_)) => self.mounted_copy_path_on(
+                    from,
+                    options.follow_source_symlinks(),
+                    &mounts,
+                    other,
+                ),
+                _ => false,
+            };
+            if mounted_pair {
+                *source = Resolved::posix(from);
+                *target = Resolved::posix(to);
+            } else {
                 slots[index] = Some(Err(vfsi_core::OpError::not_attempted(
                     std::io::Error::from(std::io::ErrorKind::Unsupported),
                 )
-                .with_context("vcopy", pairs[index].1.as_ref())));
+                .with_context("vcopy", to)));
             }
         }
         let mut start = 0;
@@ -788,9 +816,10 @@ impl Auto {
         cursors: Vec<Option<vfsi_sync::DirPageCursor>>,
         page_size: usize,
         max_entries: usize,
-        follow_symlinks: bool,
+        symlinks: impl Into<vfsi_sync::backend::DirectorySymlinkPolicy>,
     ) -> vfsi_core::VecResult<vfsi_sync::DirectoryPage> {
         use vfsi_core::OpError;
+        let symlinks = symlinks.into();
         if paths.len() != cursors.len() || page_size == 0 {
             return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
@@ -881,7 +910,7 @@ impl Auto {
                     cursors,
                     page_size,
                     max_entries,
-                    follow_symlinks,
+                    symlinks,
                 ),
                 Route::Nfs(connection) => connection.client.read_dir_pages_with_fields(
                     &batch,
@@ -889,7 +918,7 @@ impl Auto {
                     cursors,
                     page_size,
                     max_entries,
-                    follow_symlinks,
+                    symlinks,
                 ),
             };
             for (relative, result) in route_results(pages, end - start).into_iter().enumerate() {
@@ -911,15 +940,25 @@ impl Auto {
                         })
                         .and_then(|(mut listing, next, children)| {
                             let convert = |cause| OpError::unknown(cause, None);
-                            listing.path = paths[index].to_path_buf();
-                            if let Route::Nfs(connection) = &state.1 {
-                                for entry in &mut listing.entries {
-                                    *entry = DirEntry::new(
-                                        self.public_path(connection, entry.path())
-                                            .map_err(convert)?,
-                                        entry.attrs().clone(),
-                                    );
-                                }
+                            let public_root = paths[index];
+                            if listing.path != state.2 {
+                                return Err(convert(vfsi_core::internal::errors::invalid_reply(
+                                    "directory page returned the wrong backend root",
+                                )));
+                            }
+                            listing.path = public_root.to_path_buf();
+                            if matches!(&state.1, Route::Nfs(_)) {
+                                listing.entries = listing
+                                    .entries
+                                    .into_iter()
+                                    .map(|entry| {
+                                        let (backend_path, attrs) = entry.into_parts();
+                                        let path =
+                                            project_nfs_child(&state.2, public_root, &backend_path)
+                                                .map_err(convert)?;
+                                        Ok(DirEntry::new(path, attrs))
+                                    })
+                                    .collect::<Result<_, _>>()?;
                             }
                             let next = next.map(|cursor| {
                                 vfsi_sync::DirPageCursor::new(RoutedDirectoryCursor {
@@ -935,9 +974,10 @@ impl Auto {
                                 .map(|(backend_path, cursor)| {
                                     let public_path = match &state.1 {
                                         Route::Posix => backend_path.clone(),
-                                        Route::Nfs(connection) => self
-                                            .public_path(connection, &backend_path)
-                                            .map_err(convert)?,
+                                        Route::Nfs(_) => {
+                                            project_nfs_child(&state.2, public_root, &backend_path)
+                                                .map_err(convert)?
+                                        }
                                     };
                                     let seed = vfsi_sync::DirPageCursor::new(
                                         RoutedChildDirectoryCursor(RoutedDirectoryCursor {
@@ -1038,10 +1078,7 @@ impl Auto {
                 end += 1;
             }
             let batch: Vec<_> = (start..end)
-                .map(|index| {
-                    OpenOp::new(&resolved[index].path, requests[index].flags())
-                        .mode(requests[index].creation_mode())
-                })
+                .map(|index| requests[index].with_path(&resolved[index].path))
                 .collect();
             macro_rules! route {
                 ($client:expr, $variant:ident) => {
@@ -1531,6 +1568,20 @@ impl Auto {
             .map(|slot| slot.expect("all rename routes assigned"))
             .collect())
     }
+}
+
+pub(super) fn project_nfs_child(
+    backend_root: &Path,
+    public_root: &Path,
+    child: &Path,
+) -> VfResult<PathBuf> {
+    let name = child
+        .file_name()
+        .filter(|_| child.parent() == Some(backend_root))
+        .ok_or_else(|| {
+            vfsi_core::internal::errors::invalid_reply("invalid NFS directory page child path")
+        })?;
+    Ok(public_root.join(name))
 }
 
 fn cohort_end(resolved: &[Resolved], start: usize) -> usize {

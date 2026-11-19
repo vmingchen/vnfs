@@ -849,7 +849,7 @@ fn copy_batch(
     }
     let requests: Vec<_> = tasks
         .iter()
-        .map(|t| OpenOp::new(&t.source, OpenFlags::READ))
+        .map(|t| OpenOp::for_positioned_io(&t.source, OpenFlags::READ))
         .collect();
     let sources = fs.open_batch(&requests).map_err(|e| mapped(e, tasks))?;
     let mut destinations = Vec::new();

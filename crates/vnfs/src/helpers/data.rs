@@ -234,7 +234,7 @@ fn copy_to_writers_round_robin<P: AsRef<Path>, W: Write>(
         let base = cohort * capacity;
         let requests: Vec<_> = paths
             .iter()
-            .map(|path| OpenOp::new(path.as_ref(), OpenFlags::READ))
+            .map(|path| OpenOp::for_positioned_io(path.as_ref(), OpenFlags::READ))
             .collect();
         let mut files = source.open_batch(&requests).map_err(|error| {
             writer_stream_error(error, base, |i| (i < paths.len()).then_some(i))

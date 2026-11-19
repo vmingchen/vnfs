@@ -423,7 +423,7 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
                     } else {
                         vec![b'x'; size]
                     },
-                    eof: false,
+                    eof: size == 0 && self.malformed_reply != Some(MalformedReply::ReadNoProgress),
                 })
                 .collect())
         };
@@ -949,10 +949,11 @@ fn cancelled_stream_reports_only_delivered_file_completions() {
         calls: usize,
         stop_after: usize,
         completed: usize,
+        last_index: usize,
     }
     unsafe extern "C" fn callback(
         _: *const c_char,
-        _: usize,
+        index: usize,
         _: u64,
         _: *const u8,
         _: usize,
@@ -961,6 +962,7 @@ fn cancelled_stream_reports_only_delivered_file_completions() {
     ) -> bool {
         let seen = &mut *userdata.cast::<Seen>();
         seen.calls += 1;
+        seen.last_index = index;
         seen.completed += usize::from(eof);
         seen.calls < seen.stop_after
     }
@@ -969,7 +971,8 @@ fn cancelled_stream_reports_only_delivered_file_completions() {
         // A positive short local read is progress, not proven EOF.
         (b"a".as_slice(), 1, 0),
         (b"".as_slice(), 1, 1),
-        (b"a".as_slice(), 2, 0),
+        // A one-file cohort reaches the first EOF on the next callback.
+        (b"a".as_slice(), 2, 1),
         (b"a".as_slice(), 3, 1),
         (b"abcdef".as_slice(), usize::MAX, 2),
     ] {
@@ -986,6 +989,7 @@ fn cancelled_stream_reports_only_delivered_file_completions() {
             calls: 0,
             stop_after,
             completed: 0,
+            last_index: 0,
         };
         let result = unsafe {
             vfsi_read_streamv(
@@ -1006,13 +1010,216 @@ fn cancelled_stream_reports_only_delivered_file_completions() {
         }
         unsafe { vfsi_free(fs) };
     }
+
+    // Later bounded groups keep their original callback indices. Cancel after
+    // the first chunk of the data file, before the missing sibling enters a read wave.
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("empty"), b"").unwrap();
+    std::fs::write(root.path().join("data"), b"data").unwrap();
+    let fs = make_fs(
+        Box::new(vfsi_posix::backend(root.path()).unwrap()),
+        PathBuf::from("/"),
+        PathBuf::from("/"),
+    );
+    let mut paths = vec![c"/empty".as_ptr(); 32];
+    paths.extend([c"/data".as_ptr(), c"/missing".as_ptr()]);
+    let mut seen = Seen {
+        calls: 0,
+        stop_after: 33,
+        completed: 0,
+        last_index: 0,
+    };
+    let result = unsafe {
+        vfsi_read_streamv(
+            fs,
+            paths.as_ptr(),
+            paths.len(),
+            2,
+            2,
+            Some(callback),
+            (&mut seen as *mut Seen).cast(),
+        )
+    };
+    assert_eq!((result.category, result.index), (VFSI_ERROR_NONE, 32));
+    assert_eq!((seen.calls, seen.last_index), (33, 32));
+    unsafe { vfsi_free(fs) };
+
+    // STOP takes precedence over failed cleanup, even when EOF cleanup
+    // precedes the callback. A complete stream reports the cleanup index.
+    for (read_size, count, stop_after, delivered, close_error) in [
+        (1, 1, 1, 0, None),
+        (0, 1, 1, 1, None),
+        (0, 2, usize::MAX, 2, Some(1)),
+    ] {
+        let attempts: CloseAttempts = Default::default();
+        let fs = make_fs(
+            Box::new(ListingBackend {
+                calls: Default::default(),
+                entries_per_dir: 0,
+                emitted: 0,
+                missing: AttrMask::empty(),
+                missing_after: usize::MAX,
+                fail_call: None,
+                write_calls: None,
+                open_preflight_error: false,
+                read_size: Some(read_size),
+                open_result_count: Some(count),
+                read_result_count: None,
+                write_result_count: None,
+                close_attempts: Some(attempts.clone()),
+                close_failure_fd: Some(9_999 + count as i32),
+                malformed_reply: None,
+            }),
+            PathBuf::from("/"),
+            PathBuf::from("/"),
+        );
+        let mut seen = Seen {
+            calls: 0,
+            stop_after,
+            completed: 0,
+            last_index: 0,
+        };
+        let result = unsafe {
+            vfsi_read_streamv(
+                fs,
+                paths.as_ptr(),
+                count,
+                1,
+                count,
+                Some(callback),
+                (&mut seen as *mut Seen).cast(),
+            )
+        };
+        if let Some(index) = close_error {
+            assert_eq!((result.err_no, result.index), (libc::EIO as u32, index));
+        } else {
+            assert_eq!(
+                (result.category, result.index),
+                (VFSI_ERROR_NONE, delivered)
+            );
+        }
+        assert_eq!((seen.calls, seen.completed), (count, delivered));
+        let expected: Vec<_> = (10_000..10_000 + count as i32).collect();
+        assert_eq!(*attempts.lock().unwrap(), expected);
+        unsafe { vfsi_free(fs) };
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn stream_releases_eof_handles_before_admitting_more_files() {
+    const CHILD: &str = "VFSI_C_STREAM_DESCRIPTOR_LIMIT_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let test = std::thread::current().name().unwrap().to_owned();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    unsafe extern "C" fn callback(
+        _: *const c_char,
+        index: usize,
+        offset: u64,
+        _: *const u8,
+        len: usize,
+        eof: bool,
+        userdata: *mut c_void,
+    ) -> bool {
+        let events = &mut *userdata.cast::<Vec<(usize, u64, usize, bool)>>();
+        events.push((index, offset, len, eof));
+        true
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("empty"), b"").unwrap();
+    std::fs::write(root.path().join("byte"), b"x").unwrap();
+    let fs = make_fs(
+        Box::new(vfsi_posix::backend(root.path()).unwrap()),
+        PathBuf::from("/"),
+        PathBuf::from("/"),
+    );
+
+    let mut original = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    assert_eq!(
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut original) },
+        0
+    );
+    let limit = libc::rlimit {
+        rlim_cur: original.rlim_cur.min(64),
+        ..original
+    };
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+    let mut held = Vec::new();
+    loop {
+        match std::fs::File::open("/dev/null") {
+            Ok(file) => held.push(file),
+            Err(error) => {
+                assert_eq!(error.raw_os_error(), Some(libc::EMFILE));
+                break;
+            }
+        }
+    }
+    held.truncate(held.len().checked_sub(4).unwrap());
+
+    const FILES: usize = 40;
+    let outcomes = [(c"/empty", false), (c"/byte", true)].map(|(path, nonempty)| {
+        let paths = [path.as_ptr(); FILES];
+        let mut events: Vec<(usize, u64, usize, bool)> = Vec::new();
+        let result = unsafe {
+            vfsi_read_streamv(
+                fs,
+                paths.as_ptr(),
+                paths.len(),
+                1,
+                1,
+                Some(callback),
+                (&mut events as *mut Vec<_>).cast(),
+            )
+        };
+        (nonempty, result, events)
+    });
+    drop(held);
+    assert_eq!(
+        unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &original) },
+        0
+    );
+    unsafe { vfsi_free(fs) };
+    for (nonempty, result, events) in outcomes {
+        assert_eq!((result.category, result.index), (VFSI_ERROR_NONE, FILES));
+        let callbacks_per_file = 1 + usize::from(nonempty);
+        assert_eq!(events.len(), FILES * callbacks_per_file);
+        for (index, callbacks) in events.chunks_exact(callbacks_per_file).enumerate() {
+            if nonempty {
+                assert_eq!(callbacks[0], (index, 0, 1, false));
+            }
+            assert_eq!(
+                callbacks[callbacks_per_file - 1],
+                (index, u64::from(nonempty), 0, true)
+            );
+        }
+    }
 }
 
 #[test]
-fn stream_callbacks_can_query_same_filesystem_without_lock() {
+fn stream_callbacks_can_query_same_filesystem_and_replace_pathnames() {
     struct Seen {
         fs: *mut vfsi_fs,
         available: bool,
+        root: PathBuf,
+        replaced: bool,
         calls: usize,
         data: [Vec<u8>; 2],
         paths: [Vec<u8>; 2],
@@ -1048,6 +1255,15 @@ fn stream_callbacks_can_query_same_filesystem_without_lock() {
             seen.available = false;
             return false;
         }
+        if seen.calls == 1 {
+            let path = seen.root.join(std::ffi::OsStr::from_bytes(b"first-\xff"));
+            seen.replaced = std::fs::rename(&path, seen.root.join("old"))
+                .and_then(|()| std::fs::write(&path, b"new file"))
+                .is_ok();
+            if !seen.replaced {
+                return false;
+            }
+        }
         let Some(output) = seen.data.get_mut(index) else {
             seen.available = false;
             return false;
@@ -1074,6 +1290,8 @@ fn stream_callbacks_can_query_same_filesystem_without_lock() {
     let mut seen = Seen {
         fs,
         available: true,
+        root: root.path().to_path_buf(),
+        replaced: false,
         calls: 0,
         data: Default::default(),
         paths: Default::default(),
@@ -1092,6 +1310,7 @@ fn stream_callbacks_can_query_same_filesystem_without_lock() {
         )
     };
     assert!(seen.available, "stream callback ran under the backend lock");
+    assert!(seen.replaced);
     assert!(seen.calls > 2);
     assert_eq!(seen.paths, [b"/first-\xff".to_vec(), b"/second".to_vec()]);
     assert_eq!((result.category, result.index), (VFSI_ERROR_NONE, 2));

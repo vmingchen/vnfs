@@ -251,6 +251,10 @@ impl HandleBackend for NfsVecFs {
             .collect())
     }
 
+    fn vclose_owned_impl(&mut self, files: Vec<FileOperand>) -> vfsi_core::VecResult<()> {
+        self.close_temporary_descriptors(files)
+    }
+
     fn close_deferred(&mut self, file: &FileOperand) -> VfResult<()> {
         let fd = file
             .fd()

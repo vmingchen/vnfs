@@ -44,6 +44,21 @@ pub enum OpenObjectRef<'a> {
     Opaque(&'a [u8]),
 }
 
+/// Symlink resolution required when starting a native directory page.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirectorySymlinkPolicy {
+    Follow,
+    FollowParents,
+    NoFollow,
+}
+
+impl From<bool> for DirectorySymlinkPolicy {
+    fn from(follow: bool) -> Self {
+        if follow { Self::Follow } else { Self::NoFollow }
+    }
+}
+
 /// Minimum contract for owned handles and descriptor lifecycle.
 /// This includes handle-level metadata/statistics and synchronization vectors,
 /// but does not require namespace operations, enumeration or read/write vectors.
@@ -70,6 +85,19 @@ pub trait HandleBackend {
         } else {
             Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
+    }
+
+    /// Close temporary descriptors whose caller is relinquishing ownership.
+    /// Preserve backend cleanup ownership for every unconfirmed CLOSE.
+    #[doc(hidden)]
+    fn vclose_owned_impl(&mut self, files: Vec<FileOperand>) -> vfsi_core::VecResult<()> {
+        Ok(files
+            .iter()
+            .map(|file| {
+                self.close_impl(file)
+                    .map_err(|error| vfsi_core::OpError::failed(error, None))
+            })
+            .collect())
     }
 
     fn close_deferred(&mut self, file: &FileOperand) -> VfResult<()> {
@@ -283,6 +311,12 @@ pub trait VectorBackend: HandleBackend {
         crate::backend::helpers::vopen_typed_default(self, requests)
     }
 
+    /// Local backends may avoid blocking at OPEN for implicit positional I/O.
+    #[doc(hidden)]
+    fn positioned_io_open_flags(&self) -> i32 {
+        0
+    }
+
     // Path metadata and vector attribute engines.
     fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_core::VecResult<()> {
         if attrs.is_empty() {
@@ -403,6 +437,29 @@ pub trait VectorBackend: HandleBackend {
             page_size,
             max_entries,
             follow_symlinks,
+        )
+    }
+
+    /// Compatibility for backends with a legacy boolean hook. The recursive
+    /// caller still validates each root. Backends with an atomic final-entry
+    /// open may override this hook to enforce ancestor-only resolution.
+    #[doc(hidden)]
+    fn vlistdir_pages_with_policy_impl(
+        &mut self,
+        dirs: &[&Path],
+        masks: AttrMask,
+        cursors: Vec<Option<DirPageCursor>>,
+        page_size: usize,
+        max_entries: usize,
+        symlinks: DirectorySymlinkPolicy,
+    ) -> vfsi_core::VecResult<BackendDirectoryPage> {
+        self.vlistdir_pages_impl(
+            dirs,
+            masks,
+            cursors,
+            page_size,
+            max_entries,
+            symlinks != DirectorySymlinkPolicy::NoFollow,
         )
     }
 

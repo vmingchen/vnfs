@@ -15,14 +15,16 @@ import threading
 import uuid
 import weakref
 from collections import OrderedDict, deque
+from collections.abc import MutableMapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack, contextmanager
+from copy import copy
 from functools import partial
 from glob import has_magic
 from itertools import groupby
 from urllib.parse import unquote, urlsplit
 
-from fsspec.caching import BlockCache, caches
+from fsspec.caching import AllBytes, BlockCache, KnownPartsOfAFile, caches
 from fsspec.callbacks import DEFAULT_CALLBACK, Callback
 from fsspec.compression import compr
 from fsspec.core import PickleableTextIOWrapper, get_compression
@@ -768,6 +770,25 @@ class _ClientPool:
         with self._lock:
             self._deferred_close.update(token for token in tokens if token in self._fds)
 
+    def _close_setup_handles(self, tokens, batch_size):
+        with self._lock:
+            by_owner = {}
+            for token in dict.fromkeys(tokens):
+                mapping = self._fds.get(token)
+                if mapping is not None:
+                    by_owner.setdefault(mapping[0], []).append(token)
+
+        first_error = None
+        for owned in by_owner.values():
+            for start in range(0, len(owned), batch_size):
+                batch = owned[start : start + batch_size]
+                try:
+                    self.close_many(batch)
+                except BaseException as error:
+                    first_error = first_error or error
+                    self.defer_close_many(batch)
+        return first_error
+
     def _discard_tokens(self, tokens):
         with self._lock:
             for token in tokens:
@@ -1465,10 +1486,16 @@ class VfsiFile(AbstractBufferedFile):
         # Validate options before a creating/truncating native OPEN.
         self._closed = True
         self._buffer_group = None
+        self._base_mode = _normalize_mode(mode)
         self._cache_options = dict(cache_options or {})
+        if self._base_mode == "r" and caches.get(cache_type) is KnownPartsOfAFile:
+            data = self._cache_options.get("data")
+            if isinstance(data, MutableMapping):
+                # fsspec consumes this map while consolidating ranges. Each
+                # grouped file needs its own copy of the validated data.
+                self._cache_options["data"] = dict(data)
         self._raw = _RawVfsiFile(fs, path, mode, fd=fd, identity=identity)
         try:
-            self._base_mode = _normalize_mode(mode)
             if fd is not None and self._base_mode in ("a", "a+") and size is not None:
                 self._raw._pos = size
             self._buffered_read = self._base_mode == "r" and cache_type not in (
@@ -2195,13 +2222,28 @@ class _BufferGroup:
                 data.append(result)
         return data, errors
 
-    def _read_independently(self, method, files, offsets, lengths):
+    def _read_independently(
+        self, method, files, offsets, lengths, setup_errors, *, retry_setup=False
+    ):
         # Keep speculative failures local to their own input. For modern
         # adapters, a single-item vector preserves native read progress and
         # leaves suffix recovery to the same coordinator as a batched read.
         client = self.fs._client
         outcomes = []
         for file, offset, length in zip(files, offsets, lengths):
+            setup_error = setup_errors.get(id(file)) if setup_errors else None
+            if setup_error is not None and not (
+                retry_setup and _can_reconnect(setup_error)
+            ):
+                # This file never dispatched READ. Keep its setup diagnostic
+                # distinct from any other reader restored in the same call.
+                error = copy(setup_error)
+                error.__cause__ = setup_error
+                error.filename = file.path
+                error.index = self._file_index(file)
+                error.failure_state = "not_attempted"
+                outcomes.append(error)
+                continue
             try:
                 if method == "preadv":
                     fd = file._raw._ensure_open()
@@ -2209,7 +2251,7 @@ class _BufferGroup:
                 else:
                     outcomes.append(file._raw._pread_at(offset, length))
                     continue
-            except OSError as error:
+            except (OSError, NotImplementedError) as error:
                 if method == "preadv":
                     # Setup or outer vector rejection did not execute READ.
                     error.failure_state = "not_attempted"
@@ -2222,20 +2264,24 @@ class _BufferGroup:
 
     def _read_vector(self, method, files, offsets, lengths, *, reconnect=False):
         client = self.fs._client
+        # Fork recovery can invalidate the whole pool. It must succeed before
+        # any descriptor can be treated as healthy.
+        client.ensure_ready()
+        setup_errors = None
         try:
-            # Fork recovery can invalidate the whole pool. Do it before
-            # deciding which files still have live descriptors.
-            client.ensure_ready()
             if reconnect or (
                 self.fs.auto_reconnect
                 and any(not client.descriptor_valid(file._raw._fd) for file in files)
             ):
-                self._reopen_readers(files, reconnect=reconnect)
-            fds = [file._raw._ensure_open() for file in files]
-            one_session = (
-                self.fs.connection_pool_size == 1
-                or len({client._resolve(fd)[0] for fd in fds}) <= 1
-            )
+                setup_errors = self._reopen_readers(files, reconnect=reconnect)
+            if setup_errors is None:
+                fds = [file._raw._ensure_open() for file in files]
+                one_session = (
+                    self.fs.connection_pool_size == 1
+                    or len({client._resolve(fd)[0] for fd in fds}) <= 1
+                )
+            else:
+                one_session = False
         except OSError as error:
             if _is_transport_error(error):
                 raise
@@ -2248,7 +2294,16 @@ class _BufferGroup:
                     raise
         # Setup can fail for a single file, or previous scalar recovery may
         # have distributed pinned handles among native sessions.
-        outcomes = self._read_independently(method, files, offsets, lengths)
+        outcomes = self._read_independently(
+            method,
+            files,
+            offsets,
+            lengths,
+            setup_errors,
+            retry_setup=method == "pread_many"
+            and self.fs.auto_reconnect
+            and not reconnect,
+        )
         if method == "preadv":
             return outcomes
         return self._split_read_outcomes(outcomes)
@@ -2260,47 +2315,69 @@ class _BufferGroup:
             for file in files
             if not file.closed and file.readable() and not file._raw.writable()
         ]
+        errors = {}
         if reconnect:
-            owners = set()
+            owners = {}
             for file in active:
                 fd = file._raw._fd
                 if client.descriptor_valid(fd):
                     owner, _, _ = client._resolve(fd)
-                    if owner not in owners:
-                        client.reconnect_descriptor(fd)
-                        owners.add(owner)
-        # Keep healthy descriptors on unaffected pool members and never
-        # overwrite a live token with a replacement handle.
-        active = [file for file in active if not client.descriptor_valid(file._raw._fd)]
+                    owners.setdefault(owner, []).append(file)
+            for members in owners.values():
+                try:
+                    client.reconnect_descriptor(members[0]._raw._fd)
+                except OSError as error:
+                    errors.update((id(file), error) for file in members)
+        # Failed owners cannot supply this retry even if their old token is
+        # still registered. Leave other live tokens on their original owners.
+        active = [
+            file
+            for file in active
+            if id(file) not in errors and not client.descriptor_valid(file._raw._fd)
+        ]
         if not active:
-            return
+            return errors or None
+        fds = []
         try:
-            fds = self.fs._client.open_many(
+            fds = client.open_many(
                 [self.fs._native_path(file.path) for file in active],
                 ["rb"] * len(active),
             )
-        except Exception as error:
-            self._rebase_file_error(error, active)
-            raise
-        try:
-            try:
-                attrs = self.fs._client.fstat_many(fds)
-            except Exception as error:
-                self._rebase_file_error(error, active)
-                raise
+            if len(fds) != len(active):
+                raise OSError(errno.EIO, "invalid reopened descriptor count")
+            attrs = client.fstat_many(fds)
+            if len(attrs) != len(active):
+                raise OSError(errno.EIO, "invalid reopened metadata count")
             for file, attr in zip(active, attrs):
                 identity = _handle_identity(attr)
                 if file._raw._identity is None or identity != file._raw._identity:
                     raise _stale_handle_error(file.path)
-        except BaseException:
-            try:
-                self.fs._client.close_many(fds)
-            except BaseException:
-                self.fs._client.defer_close_many(fds)
-            raise
+        except BaseException as error:
+            index = getattr(error, "index", None)
+            self._rebase_file_error(error, active)
+            if fds:
+                try:
+                    client.close_many(fds)
+                except BaseException:
+                    client.defer_close_many(fds)
+            if not isinstance(error, (OSError, NotImplementedError)):
+                raise
+            if isinstance(error, NotImplementedError) or _is_transport_error(error):
+                # An attributed setup failure leaves other stale readers
+                # eligible for independent identity-checked reopen.
+                affected = (
+                    [active[index]]
+                    if type(index) is int and 0 <= index < len(active)
+                    else active
+                )
+                errors.update((id(file), error) for file in affected)
+            # A dict (including empty) requests independent fallback. None
+            # below denotes a successful restore with no per-file failures.
+            return errors
         for file, fd in zip(active, fds):
             file._raw._fd = fd
-            file._raw._fd_generation = self.fs._client.generation
+            file._raw._fd_generation = client.generation
+        return errors or None
 
     @staticmethod
     def _prepend_read_prefix(error, prefix, offset):
@@ -5540,6 +5617,16 @@ class VfsiFileSystem(AbstractFileSystem):
                 and not isinstance(maxblocks, int)
             ):
                 raise TypeError("blockcache maxblocks must be an integer or None")
+            data = options.get("data")
+            if factory is KnownPartsOfAFile and data is not None:
+                if not isinstance(data, MutableMapping) or any(
+                    not isinstance(bounds, tuple)
+                    or len(bounds) != 2
+                    or not all(isinstance(bound, int) for bound in bounds)
+                    or not isinstance(value, bytes)
+                    for bounds, value in data.items()
+                ):
+                    raise TypeError("parts cache data must map integer ranges to bytes")
             try:
                 signature = inspect.signature(factory)
             except (TypeError, ValueError):
@@ -5628,7 +5715,13 @@ class VfsiFileSystem(AbstractFileSystem):
         write_buffering=None,
         sizes=None,
     ):
-        """Open a list of ``OpenFile`` objects in one openv batch."""
+        """Open a group of ``OpenFile`` objects using native vectors.
+
+        Eager reads and mmap backing files are prepared before opening writers.
+        Missing mmap paths can open with an earlier writer that may create
+        them. An empty file needs no backing map.
+        An explicit mmap location can back one buffered reader.
+        """
         paths = [self._checked_strip_protocol(f.path) for f in open_files]
         modes = [_normalize_mode(f.mode) + "b" for f in open_files]
         effective_block_size, effective_cache_type, effective_cache_options = (
@@ -5636,6 +5729,12 @@ class VfsiFileSystem(AbstractFileSystem):
                 block_size, cache_type, cache_options, reading="rb" in modes
             )
         )
+        if (
+            effective_cache_type == "mmap"
+            and effective_cache_options.get("location") is not None
+            and modes.count("rb") > 1
+        ):
+            raise ValueError("an mmap cache location can back only one grouped reader")
         if any(mode[0] in "wax" for mode in modes):
             for open_file in open_files:
                 if "b" not in open_file.mode:
@@ -5655,98 +5754,180 @@ class VfsiFileSystem(AbstractFileSystem):
             discovered_sizes = list(sizes)
             if len(discovered_sizes) != len(paths):
                 raise ValueError("sizes must have one entry per open file")
+        eager_readers = (
+            "rb" in modes
+            and caches[effective_cache_type] is AllBytes
+            and effective_cache_options.get("data") is None
+        )
+        mmap_readers = effective_cache_type == "mmap"
+        if eager_readers:
+            for path, mode, size in zip(paths, modes, discovered_sizes):
+                if mode == "rb" and size is not None:
+                    self._check_read_allocation(size, path)
         if self._intrans and any(_normalize_mode(mode) != "r" for mode in modes):
             if any("+" in _normalize_mode(mode) for mode in modes):
                 raise NotImplementedError("transactional update modes are unsupported")
             # OpenFile already handles text/compression finalization and scalar
             # transaction enrollment. Reuse it instead of a second coordinator.
             return _enter_individually(open_files)
-        mutating_paths = [
-            path
-            for path, mode in zip(paths, modes)
-            if _normalize_mode(mode) in ("w", "w+", "a", "a+", "x", "x+")
+        mutating_indices = [
+            index for index, mode in enumerate(modes) if mode[0] in "wax"
         ]
-        if self.auto_mkdir and mutating_paths:
-            try:
-                self._ensure_file_parents(mutating_paths)
-            except Exception as error:
-                _rebase_error(
-                    error,
-                    [
-                        index
-                        for index, mode in enumerate(modes)
-                        if any(c in mode for c in "wax")
-                    ],
-                    mutating_paths,
-                )
-                raise
+        mutating_paths = [paths[index] for index in mutating_indices]
         fds = []
-        files = []
-        try:
-            with self._cache_mutation(mutating_paths, namespace=True):
-                fds = self._client.open_many(
-                    [self._native_path(p) for p in paths], modes
+        opened_files = {}
+
+        def group_fstat(indices, descriptors):
+            try:
+                attrs = self._client.fstat_many(descriptors)
+            except Exception as error:
+                _rebase_error(error, indices, [paths[index] for index in indices])
+                raise
+            if len(attrs) != len(indices):
+                raise OSError(errno.EIO, "native fstat returned the wrong result count")
+            return attrs
+
+        def open_group(indices, changed_paths):
+            selected_paths = [paths[index] for index in indices]
+            try:
+                with self._cache_mutation(changed_paths, namespace=True):
+                    opened = self._client.open_many(
+                        [self._native_path(path) for path in selected_paths],
+                        [modes[index] for index in indices],
+                    )
+                    fds.extend(opened)
+            except Exception as error:
+                _rebase_error(error, indices, selected_paths)
+                raise
+            if len(opened) != len(indices):
+                raise OSError(
+                    errno.EIO, "native open returned the wrong descriptor count"
                 )
-            identities = [None] * len(paths)
+
+            descriptors = dict(zip(indices, opened))
             metadata_indices = [
-                index
-                for index, mode in enumerate(modes)
-                if _normalize_mode(mode) in ("r", "a", "a+")
+                index for index in indices if modes[index] in ("rb", "ab", "a+b")
             ]
+            identities = {}
             if metadata_indices:
-                try:
-                    attrs = self._client.fstat_many(
-                        [fds[index] for index in metadata_indices]
-                    )
-                except Exception as error:
-                    _rebase_error(
-                        error,
-                        metadata_indices,
-                        [paths[index] for index in metadata_indices],
-                    )
-                    raise
+                attrs = group_fstat(
+                    metadata_indices, [descriptors[index] for index in metadata_indices]
+                )
                 for index, attr in zip(metadata_indices, attrs):
                     if attr["type"] == "directory":
                         raise IsADirectoryError(
                             errno.EISDIR, "Is a directory", paths[index]
                         )
                     identities[index] = _handle_identity(attr)
-                    # Append positions come from the opened handle, never a
-                    # caller-supplied size hint that may already be stale.
-                    if discovered_sizes[index] is None or _normalize_mode(
-                        modes[index]
-                    ) in ("a", "a+"):
+                    # Append positions come from the opened handle because
+                    # caller-supplied size hints may be stale.
+                    if discovered_sizes[index] is None or modes[index] in ("ab", "a+b"):
                         discovered_sizes[index] = attr["size"]
-            files = [
-                VfsiFile(
+            for index, fd in descriptors.items():
+                opened_files[index] = VfsiFile(
                     self,
-                    path,
-                    mode,
+                    paths[index],
+                    modes[index],
                     fd=fd,
                     block_size=effective_block_size,
                     cache_type=effective_cache_type,
                     cache_options=effective_cache_options,
                     write_buffering=effective_write_buffering,
-                    size=size,
+                    size=discovered_sizes[index],
                     defer_cache=True,
-                    identity=identity,
+                    identity=identities.get(index),
                 )
-                for path, mode, fd, size, identity in zip(
-                    paths, modes, fds, discovered_sizes, identities
+
+        try:
+            pending = range(len(paths))
+            mmap_discovered = []
+            if (eager_readers or mmap_readers) and mutating_paths:
+                readers = []
+                possible_creations = []
+                emptied_paths = set()
+                earlier_creator = False
+                for index, (path, mode) in enumerate(zip(paths, modes)):
+                    if mode[0] in "wax":
+                        earlier_creator = True
+                        if mode[0] in "wx":
+                            emptied_paths.add(path)
+                    elif mode == "rb":
+                        size = discovered_sizes[index]
+                        if mmap_readers and size in (None, 0):
+                            if path in emptied_paths:
+                                continue
+                            if earlier_creator:
+                                possible_creations.append(index)
+                        readers.append(index)
+
+                if possible_creations:
+                    lookup = [paths[index] for index in possible_creations]
+                    try:
+                        _, errors = self._client.stat_many(
+                            [self._native_path(path) for path in lookup]
+                        )
+                    except Exception as error:
+                        _rebase_error(error, possible_creations, lookup)
+                        raise
+                    # An earlier append or a writer reached through a dangling
+                    # link can create the empty file in the original batch.
+                    missing = {
+                        index
+                        for relative, index in enumerate(possible_creations)
+                        if relative in errors
+                        and _errno(errors[relative]) == errno.ENOENT
+                    }
+                    readers = [index for index in readers if index not in missing]
+
+                if readers:
+                    if mmap_readers:
+                        mmap_discovered = [
+                            index
+                            for index in readers
+                            if discovered_sizes[index] is None
+                        ]
+                    open_group(readers, [])
+                    try:
+                        _BufferGroup(self, [opened_files[index] for index in readers])
+                    except Exception as error:
+                        _rebase_error(
+                            error, readers, [paths[index] for index in readers]
+                        )
+                        raise
+                    pending = [index for index in pending if index not in opened_files]
+
+            if self.auto_mkdir and mutating_paths:
+                try:
+                    self._ensure_file_parents(mutating_paths)
+                except Exception as error:
+                    _rebase_error(error, mutating_indices, mutating_paths)
+                    raise
+            open_group(pending, mutating_paths)
+            if mmap_discovered and any(
+                modes[index][0] == "w" for index in mutating_indices
+            ):
+                # A differently named writer may have truncated the pinned
+                # inode. Shorten its logical cache without remapping or
+                # losing the earlier backing-file validation.
+                attrs = group_fstat(
+                    mmap_discovered,
+                    [opened_files[index]._fd for index in mmap_discovered],
                 )
-            ]
+                for index, attr in zip(mmap_discovered, attrs):
+                    file = opened_files[index]
+                    size = min(file.size, attr["size"])
+                    file.size = size
+                    file.cache.size = size
+            files = [opened_files[index] for index in range(len(paths))]
             _BufferGroup(self, files)
         except BaseException as setup_error:
-            cleanup_error = None
-            # A failing constructor can already have released its own token.
-            pending = [fd for fd in fds if self._client.descriptor_valid(fd)]
-            try:
-                if pending and not self._client.closed:
-                    self._client.close_many(pending)
-            except BaseException as error:
-                cleanup_error = error
-                self._client.defer_close_many(pending)
-            local_error = _finish_group_files(files)
+            # Constructors may release an original token. Cache setup may
+            # also replace one while recovering, before a later stage fails.
+            current = [file._fd for file in opened_files.values()]
+            cleanup_error = self._client._close_setup_handles(
+                fds + current, self.batch_size
+            )
+            local_error = _finish_group_files(opened_files.values())
             cleanup_error = cleanup_error or local_error
             if cleanup_error is not None:
                 raise setup_error from cleanup_error

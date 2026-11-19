@@ -107,6 +107,7 @@ pub struct OpenOp<'a> {
     path: std::borrow::Cow<'a, Path>,
     flags: OpenFlags,
     mode: u32,
+    positioned_io: bool,
 }
 
 impl<'a> OpenOp<'a> {
@@ -124,6 +125,7 @@ impl<'a> OpenOp<'a> {
             path: std::borrow::Cow::Owned(self.path.into_owned()),
             flags: self.flags,
             mode: self.mode,
+            positioned_io: self.positioned_io,
         }
     }
     pub const fn flags(&self) -> OpenFlags {
@@ -140,6 +142,29 @@ impl<'a> OpenOp<'a> {
             path: std::borrow::Cow::Borrowed(path.as_ref()),
             flags,
             mode: 0o666,
+            positioned_io: false,
+        }
+    }
+    /// Internal open used by helpers that issue only positional I/O.
+    #[doc(hidden)]
+    pub fn for_positioned_io(path: &'a Path, flags: OpenFlags) -> Self {
+        Self {
+            positioned_io: true,
+            ..Self::new(path, flags)
+        }
+    }
+    #[doc(hidden)]
+    pub const fn is_positioned_io(&self) -> bool {
+        self.positioned_io
+    }
+    /// Retarget a request during mounting without discarding its open policy.
+    #[doc(hidden)]
+    pub fn with_path<'b>(&self, path: &'b Path) -> OpenOp<'b> {
+        OpenOp {
+            path: std::borrow::Cow::Borrowed(path),
+            flags: self.flags,
+            mode: self.mode,
+            positioned_io: self.positioned_io,
         }
     }
     pub fn mode(mut self, mode: u32) -> Self {
@@ -429,8 +454,8 @@ pub struct ReadIntoResult {
 #[derive(Debug, Clone)]
 pub struct WriteOutput {
     pub file: FileOperand,
-    /// The resolved offset the write actually started at (never `Cur`/`End`
-    /// sentinels).
+    /// Resolved write offset. For append completion, adding the acknowledged
+    /// byte count gives the last reported end, including interleaved writes.
     pub offset: u64,
     pub bytes_written: usize,
     /// Whether the server committed the write to stable storage.

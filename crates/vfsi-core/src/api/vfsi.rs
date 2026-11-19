@@ -485,9 +485,10 @@ pub trait Vfsi {
     /// For sorting and enter/leave events, use VfsiExt::listdir with WalkOptions.
     /// Metadata is selected on directory pages, not through per-entry stat
     /// calls. Entry symlinks are never followed during recursive descent.
-    /// Descendants reopened by pathname reject symlinks in every component;
-    /// backends unable to guarantee this return Unsupported. Input roots retain
-    /// the supplied path-resolution policy.
+    /// Descendants reopened by pathname reject symlinks in every component.
+    /// Backends unable to guarantee this return Unsupported. Recursive roots
+    /// are validated as directories. Local and NFS also enforce final-component
+    /// no-follow at open while allowing ancestor symlinks when requested.
     /// Each page owns its entries; collection can transfer them without cloning.
     /// Traversal order is backend-defined; this does not provide a snapshot.
     ///

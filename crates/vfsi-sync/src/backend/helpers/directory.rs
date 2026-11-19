@@ -44,6 +44,20 @@ pub fn vlistdir_pages_impl_default<F: VectorBackend + ?Sized>(
     max_entries: usize,
     follow_symlinks: bool,
 ) -> vfsi_core::VecResult<BackendDirectoryPage> {
+    collect_directory_pages(dirs, cursors, page_size, |dir, cursor| {
+        backend.listdir_page_impl(dir, masks, cursor, page_size, max_entries, follow_symlinks)
+    })
+}
+
+pub fn collect_directory_pages(
+    dirs: &[&Path],
+    cursors: Vec<Option<DirPageCursor>>,
+    page_size: usize,
+    mut fetch: impl FnMut(
+        &Path,
+        Option<DirPageCursor>,
+    ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)>,
+) -> vfsi_core::VecResult<BackendDirectoryPage> {
     if dirs.len() != cursors.len() || page_size == 0 {
         return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
     }
@@ -58,8 +72,7 @@ pub fn vlistdir_pages_impl_default<F: VectorBackend + ?Sized>(
                     vfsi_core::internal::errors::from_shared(cause),
                 ));
             }
-            backend
-                .listdir_page_impl(dir, masks, cursor, page_size, max_entries, follow_symlinks)
+            fetch(dir, cursor)
                 .map(|(entries, next)| {
                     let children = (0..entries.len()).map(|_| None).collect();
                     (entries, next, children)

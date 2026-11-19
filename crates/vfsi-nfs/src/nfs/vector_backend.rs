@@ -44,6 +44,39 @@ fn open_adb_path(
 }
 
 impl VectorBackend for NfsVecFs {
+    fn vopen_impl(&mut self, requests: &[OpenOp]) -> vfsi_core::VecResult<FileOperand> {
+        use vfsi_sync::backend::helpers::vopen_typed_default;
+        if self.recovery_in_progress
+            || !self.auto_reconnect
+            || requests.is_empty()
+            || !requests
+                .iter()
+                .all(|request| request.is_positioned_io() && request.flags() == OpenFlags::READ)
+        {
+            return vopen_typed_default(self, requests);
+        }
+        // A poisoned session rejects this wave before OPEN. Reestablish it
+        // for implicit reads and retry only slots confirmed to be unsent.
+        self.vector_read_with_recovery(
+            |_, error| error.state() == vfsi_core::FailureState::NotAttempted,
+            |client, pending| {
+                client
+                    .nfs
+                    .ensure_usable()
+                    .map_err(vfsi_core::internal::errors::from_rpc)?;
+                if let Some(pending) = pending {
+                    let pending: Vec<_> = pending
+                        .iter()
+                        .map(|&index| requests[index].clone())
+                        .collect();
+                    vopen_typed_default(client, &pending)
+                } else {
+                    vopen_typed_default(client, requests)
+                }
+            },
+        )
+    }
+
     fn vopen_raw_impl(
         &mut self,
         paths: &[&Path],
@@ -270,17 +303,22 @@ impl VectorBackend for NfsVecFs {
         masks: AttrMask,
         cursors: Vec<Option<DirPageCursor>>,
         page_size: usize,
-        max_entries: usize,
+        _max_entries: usize,
         follow_symlinks: bool,
     ) -> vfsi_core::VecResult<vfsi_sync::BackendDirectoryPage> {
-        self.vlistdir_pages_nfs(
-            dirs,
-            masks,
-            cursors,
-            page_size,
-            max_entries,
-            follow_symlinks,
-        )
+        self.vlistdir_pages_nfs(dirs, masks, cursors, page_size, follow_symlinks.into())
+    }
+
+    fn vlistdir_pages_with_policy_impl(
+        &mut self,
+        dirs: &[&Path],
+        masks: AttrMask,
+        cursors: Vec<Option<DirPageCursor>>,
+        page_size: usize,
+        _max_entries: usize,
+        symlinks: vfsi_sync::backend::DirectorySymlinkPolicy,
+    ) -> vfsi_core::VecResult<vfsi_sync::BackendDirectoryPage> {
+        self.vlistdir_pages_nfs(dirs, masks, cursors, page_size, symlinks)
     }
 
     fn visit_dir_impl(
@@ -1077,14 +1115,13 @@ impl VectorBackend for NfsVecFs {
         let max_window = per * (compound_budget / per).max(1);
         // Recovery belongs to each read wave, never to the accumulated file
         // vector: completed chunks and successful siblings must not be replayed.
-        vfsi_sync::backend::helpers::read_all_vectors(
+        vfsi_sync::backend::helpers::read_all_pinned_paths(
             self,
             files,
             options,
             |pending, remaining| {
                 bounded_read_allv_batch(pending, remaining, compound_budget, max_window)
             },
-            false,
         )
     }
 

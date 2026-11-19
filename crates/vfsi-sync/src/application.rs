@@ -1,4 +1,5 @@
 //! Native execution of the portable VFSI contract.
+use crate::backend::DirectorySymlinkPolicy;
 use std::path::Path;
 use vfsi_core::api::*;
 use vfsi_core::internal::TraversalBudget;
@@ -103,7 +104,7 @@ pub fn stream_cohorts<F: Vfsi, P: AsRef<Path>>(
         let base = cohort * capacity;
         let requests: Vec<_> = paths
             .iter()
-            .map(|path| OpenOp::new(*path, OpenFlags::READ))
+            .map(|path| OpenOp::for_positioned_io(path, OpenFlags::READ))
             .collect();
         let opened = vec_result_slots(fs.vopen(&requests), paths.len());
         let mut files = Vec::with_capacity(opened.len());
@@ -170,7 +171,26 @@ pub fn stream_cohorts<F: Vfsi, P: AsRef<Path>>(
                 if !data.is_empty() {
                     match callback(index, offset, data) {
                         Err(cause) => {
-                            stream_error(&mut output[index], OpError::failed(cause, None), offset);
+                            let progress = (offset != 0).then_some(IoProgress::Stream {
+                                next_offset: offset,
+                            });
+                            output[index] = Err(match &output[index] {
+                                Err(read_error) => {
+                                    let cause = vfsi_core::internal::errors::append_message(
+                                        cause,
+                                        format!(
+                                            "callback rejected a prefix from a failed read ({})",
+                                            read_error.cause()
+                                        ),
+                                    );
+                                    if read_error.state() == vfsi_core::FailureState::Unknown {
+                                        OpError::unknown(cause, progress)
+                                    } else {
+                                        OpError::failed(cause, progress)
+                                    }
+                                }
+                                Ok(_) => OpError::failed(cause, progress),
+                            });
                             break;
                         }
                         Ok(decision) => {
@@ -277,6 +297,16 @@ fn directory_error(
     }
 }
 
+fn traversal_symlink_policy(policy: ListDirOptions, depth: usize) -> DirectorySymlinkPolicy {
+    if depth != 0 || !policy.allow_symlink_components() {
+        DirectorySymlinkPolicy::NoFollow
+    } else if policy.recursive() {
+        DirectorySymlinkPolicy::FollowParents
+    } else {
+        DirectorySymlinkPolicy::Follow
+    }
+}
+
 pub fn visit_directory_pages<P: AsRef<Path>, C: Into<ListDirControl>>(
     roots: &[P],
     policy: vfsi_core::api::ListDirOptions,
@@ -288,7 +318,7 @@ pub fn visit_directory_pages<P: AsRef<Path>, C: Into<ListDirControl>>(
         Vec<Option<crate::DirPageCursor>>,
         usize,
         usize,
-        bool,
+        DirectorySymlinkPolicy,
     ) -> vfsi_core::VecResult<crate::DirectoryPage>,
     mut callback: impl FnMut(usize, DirectoryListing) -> Result<C>,
 ) -> vfsi_core::VecResult<crate::TraversalCompletion> {
@@ -361,7 +391,7 @@ pub fn visit_directory_pages<P: AsRef<Path>, C: Into<ListDirControl>>(
         let cursors = cohort.iter_mut().map(|state| state.3.take()).collect();
         let paths: Vec<_> = cohort.iter().map(|state| state.1.as_path()).collect();
         let requested = budget.remaining_entries().saturating_add(1);
-        let follow = policy.allow_symlink_components() && cohort[0].2 == 0;
+        let follow = traversal_symlink_policy(policy, cohort[0].2);
         let pages = vec_result_slots(fetch(&paths, cursors, 1, requested, follow), cohort.len());
         let mut wave: Vec<_> = cohort
             .into_iter()
@@ -562,7 +592,7 @@ pub fn visit_directory_pages<P: AsRef<Path>, C: Into<ListDirControl>>(
                 .map(|state| state.0.1.as_path())
                 .collect();
             let requested = budget.remaining_entries().saturating_add(1);
-            let follow = policy.allow_symlink_components() && continuations[0].0.2 == 0;
+            let follow = traversal_symlink_policy(policy, continuations[0].0.2);
             let pages = vec_result_slots(
                 fetch(&paths, cursors, requested.min(128), requested, follow),
                 continuations.len(),
@@ -751,7 +781,7 @@ mod traversal_tests {
         Vec<Option<DirPageCursor>>,
         usize,
         usize,
-        bool,
+        DirectorySymlinkPolicy,
     ) -> vfsi_core::VecResult<crate::DirectoryPage> {
         move |paths, cursors, page_size, max_entries, _follow_symlinks| {
             let mut pages = Vec::with_capacity(paths.len());
@@ -978,7 +1008,12 @@ mod traversal_tests {
                     recursive
                 );
                 for (path, follow) in observed {
-                    assert_eq!(follow, allow && path == Path::new("/tree"));
+                    let expected = match (allow && path == Path::new("/tree"), recursive) {
+                        (true, true) => DirectorySymlinkPolicy::FollowParents,
+                        (true, false) => DirectorySymlinkPolicy::Follow,
+                        (false, _) => DirectorySymlinkPolicy::NoFollow,
+                    };
+                    assert_eq!(follow, expected);
                 }
             }
         }
@@ -1032,7 +1067,7 @@ mod admission_tests {
                             .zip(cursors)
                             .map(|(path, cursor)| {
                                 let (entries, next) = if *path == Path::new("/tree") {
-                                    assert!(follow);
+                                    assert_eq!(follow, DirectorySymlinkPolicy::FollowParents);
                                     if let Some(cursor) = cursor {
                                         cursor.into_state::<RootPage>()?;
                                         (vec![entry("/tree/prune"), entry("/tree/b")], None)
@@ -1044,7 +1079,7 @@ mod admission_tests {
                                         )
                                     }
                                 } else {
-                                    assert!(!follow);
+                                    assert_eq!(follow, DirectorySymlinkPolicy::NoFollow);
                                     assert_ne!(
                                         *path,
                                         Path::new("/tree/prune"),

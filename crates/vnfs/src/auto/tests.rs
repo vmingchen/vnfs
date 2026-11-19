@@ -721,6 +721,337 @@ fn strict_write_all_collection_retains_healthy_effects_around_local_rejection() 
 }
 
 #[test]
+fn nfs_child_projection_keeps_relative_root_and_checks_backend_parent() {
+    use super::dispatch::project_nfs_child;
+
+    let backend = Path::new("/remote/dir");
+    let relative = Path::new("dir");
+    let absolute = Path::new("/mount/dir");
+    let child = backend.join("child");
+    assert_eq!(
+        project_nfs_child(backend, relative, &child).unwrap(),
+        relative.join("child"),
+    );
+    assert_eq!(
+        project_nfs_child(backend, absolute, &child).unwrap(),
+        absolute.join("child"),
+    );
+    for path in [
+        "/remote/dir",
+        "/remote/other/child",
+        "/remote/dir/nested/child",
+    ] {
+        assert!(project_nfs_child(backend, relative, Path::new(path)).is_err());
+    }
+}
+
+#[test]
+#[ignore = "requires configured NFS mount fixtures"]
+fn live_dangling_symlink_keeps_kernel_routing() {
+    let mount = std::env::var("VFSI_AUTO_TEST_MOUNT").expect("NFS mount fixture");
+    let fixture = tempfile::tempdir_in(mount).unwrap();
+    let client = Auto::new(fixture.path()).unwrap();
+    require_live_direct_route(&client, Path::new("missing-target"));
+    std::os::unix::fs::symlink("missing-target", fixture.path().join("link")).unwrap();
+
+    for path in ["link", "link/", "link/."] {
+        assert_eq!(client.route_for(path), AutoRoute::Posix);
+    }
+    assert_eq!(
+        client.attrs("link").unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert_eq!(
+        client.symlink_attrs("link").unwrap().file_type(),
+        crate::FileType::Symlink
+    );
+    require_live_direct_route(&client, Path::new("missing-target"));
+
+    let preserve_link = crate::files::CopyOptions::new().with_follow_source_symlinks(false);
+    client
+        .vcopy(&[("link", "copied-link")], preserve_link)
+        .unwrap()
+        .remove(0)
+        .unwrap();
+    let mounted = client.resolve(Path::new("/"), &read_mounts(false));
+    let Route::Nfs(connection) = mounted.route else {
+        panic!("expected direct route for fixture");
+    };
+    // Use direct verification and cleanup for a name the kernel may have
+    // cached as absent before the direct copy.
+    let copy = mounted.path.join("copied-link");
+    let target = connection.client.read_link(&copy);
+    connection.client.remove_file(copy).unwrap();
+    assert_eq!(target.unwrap(), Path::new("missing-target"));
+    fs::write(fixture.path().join("file"), b"payload").unwrap();
+    require_live_direct_route(&client, Path::new("file"));
+    client
+        .vcopy(&[("file", "link")], Default::default())
+        .unwrap()
+        .remove(0)
+        .unwrap();
+    assert_eq!(
+        fs::read(fixture.path().join("missing-target")).unwrap(),
+        b"payload"
+    );
+
+    fs::write(fixture.path().join("file"), b"second!").unwrap();
+    for pair in [("file", "link"), ("link", "copied-target")] {
+        client
+            .vcopy(&[pair], Default::default())
+            .unwrap()
+            .remove(0)
+            .unwrap();
+    }
+    assert_eq!(
+        fs::read(fixture.path().join("missing-target")).unwrap(),
+        b"second!"
+    );
+    assert_eq!(
+        fs::read(fixture.path().join("copied-target")).unwrap(),
+        b"second!"
+    );
+    fs::write(fixture.path().join("file"), b"payload").unwrap();
+
+    // A host-existing absolute target can be missing beneath the client's
+    // root. Only the rooted destination is used.
+    let local = tempfile::tempdir().unwrap();
+    let host_target = local.path().canonicalize().unwrap().join("target");
+    fs::write(&host_target, b"host").unwrap();
+    let rooted_target = fixture.path().join(host_target.strip_prefix("/").unwrap());
+    fs::create_dir_all(rooted_target.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&host_target, fixture.path().join("rooted-link")).unwrap();
+    client
+        .vcopy(&[("file", "rooted-link")], Default::default())
+        .unwrap()
+        .remove(0)
+        .unwrap();
+    assert_eq!(fs::read(&rooted_target).unwrap(), b"payload");
+    assert_eq!(fs::read(&host_target).unwrap(), b"host");
+
+    fs::create_dir(fixture.path().join("subdir")).unwrap();
+    std::os::unix::fs::symlink("../relative-target", fixture.path().join("subdir/link")).unwrap();
+    let absolute_target = format!("/vnfs-auto-root-relative-{}", std::process::id());
+    let rooted_file = fixture.path().join(absolute_target.trim_start_matches('/'));
+    fs::write(&rooted_file, b"original").unwrap();
+    std::os::unix::fs::symlink(&absolute_target, fixture.path().join("absolute-link")).unwrap();
+    std::os::unix::fs::symlink("chain-tail", fixture.path().join("chain-head")).unwrap();
+    std::os::unix::fs::symlink("chain-target", fixture.path().join("chain-tail")).unwrap();
+    let parent_target = format!("vnfs-auto-parent-target-{}", std::process::id());
+    std::os::unix::fs::symlink(
+        Path::new("..").join(&parent_target),
+        fixture.path().join("root-parent-link"),
+    )
+    .unwrap();
+    for target in [
+        "subdir/link",
+        "absolute-link",
+        "chain-head",
+        "root-parent-link",
+    ] {
+        client
+            .vcopy(&[("file", target)], Default::default())
+            .unwrap()
+            .remove(0)
+            .unwrap();
+    }
+    assert_eq!(
+        fs::read(fixture.path().join("relative-target")).unwrap(),
+        b"payload"
+    );
+    assert_eq!(fs::read(rooted_file).unwrap(), b"payload");
+    assert_eq!(
+        fs::read(fixture.path().join("chain-target")).unwrap(),
+        b"payload"
+    );
+    assert_eq!(
+        fs::read(fixture.path().join(parent_target)).unwrap(),
+        b"payload"
+    );
+
+    let real = fixture.path().join("real");
+    fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink("real", fixture.path().join("alias")).unwrap();
+    std::os::unix::fs::symlink("/real", fixture.path().join("rooted-alias")).unwrap();
+    std::os::unix::fs::symlink("alias/chained", fixture.path().join("via-ancestor")).unwrap();
+    for (from, to) in [
+        ("file", "alias/destination"),
+        ("rooted-alias/destination", "from-ancestor"),
+        ("file", "via-ancestor"),
+    ] {
+        client
+            .vcopy(&[(from, to)], Default::default())
+            .unwrap()
+            .remove(0)
+            .unwrap();
+    }
+    assert_eq!(fs::read(real.join("destination")).unwrap(), b"payload");
+    assert_eq!(fs::read(real.join("chained")).unwrap(), b"payload");
+    assert_eq!(
+        fs::read(fixture.path().join("from-ancestor")).unwrap(),
+        b"payload"
+    );
+    std::os::unix::fs::symlink("destination", real.join("source-link")).unwrap();
+    client
+        .vcopy(&[("alias/source-link", "preserved-link")], preserve_link)
+        .unwrap()
+        .remove(0)
+        .unwrap();
+    assert_eq!(
+        fs::read_link(fixture.path().join("preserved-link")).unwrap(),
+        Path::new("destination")
+    );
+
+    // Known descendants remain usable when the client root is search-only.
+    use std::os::unix::fs::PermissionsExt;
+    let permissions = fs::metadata(fixture.path()).unwrap().permissions();
+    fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o111)).unwrap();
+    let copy = client.vcopy(&[("file", "alias/search-only")], Default::default());
+    fs::set_permissions(fixture.path(), permissions).unwrap();
+    copy.unwrap().remove(0).unwrap();
+    assert_eq!(fs::read(real.join("search-only")).unwrap(), b"payload");
+
+    let host_client = Auto::new("/").unwrap();
+    let mount_table = read_mounts(false);
+    let source = host_client.resolve(&fixture.path().join("file"), &mount_table);
+    assert!(matches!(&source.route, Route::Nfs(_)));
+    let off_mount = fixture.path().join("off-mount");
+    std::os::unix::fs::symlink(local.path().join("missing"), &off_mount).unwrap();
+    assert!(!host_client.mounted_copy_path_on(&off_mount, true, &mount_table, &source.route));
+    let off_mount_ancestor = fixture.path().join("off-mount-ancestor");
+    std::os::unix::fs::symlink(local.path(), &off_mount_ancestor).unwrap();
+    let outside = off_mount_ancestor.join("missing");
+    let origin = fixture.path().join("file");
+    let result = host_client
+        .vcopy(&[(&origin, &outside)], Default::default())
+        .unwrap()
+        .remove(0)
+        .unwrap_err();
+    assert_eq!(result.cause().kind(), io::ErrorKind::Unsupported);
+    assert!(!local.path().join("missing").exists());
+}
+
+#[test]
+#[ignore = "requires configured NFS mount fixtures"]
+fn live_relative_directory_pages_preserve_public_child_paths() {
+    let mount = std::env::var("VFSI_AUTO_TEST_MOUNT").expect("NFS mount fixture");
+    let fixture = tempfile::tempdir_in(mount).unwrap();
+    fs::create_dir_all(fixture.path().join("dir/subdir")).unwrap();
+    fs::write(fixture.path().join("dir/subdir/data"), b"data").unwrap();
+    fs::write(fixture.path().join("dir/file"), b"file").unwrap();
+    let client = Auto::new(fixture.path()).unwrap();
+    require_live_direct_route(&client, Path::new("dir"));
+    let mut entries: Vec<_> = client
+        .read_dir("dir")
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.into_parts().0)
+        .collect();
+    entries.sort();
+    assert_eq!(
+        entries,
+        [PathBuf::from("dir/file"), PathBuf::from("dir/subdir")]
+    );
+
+    let tree = client
+        .read_dirs_with_options(&["dir"], ListDirOptions::new().with_recursive(true))
+        .unwrap()
+        .remove(0);
+    assert!(tree.iter().any(|listing| {
+        listing.path == Path::new("dir/subdir")
+            && listing
+                .entries
+                .iter()
+                .any(|entry| entry.path() == Path::new("dir/subdir/data"))
+    }));
+}
+
+#[test]
+#[ignore = "requires configured NFS mount fixtures"]
+fn live_recursive_paging_follows_nfs_ancestors_only() {
+    let mount = std::env::var("VFSI_AUTO_TEST_MOUNT").expect("NFS mount fixture");
+    let fixture = tempfile::tempdir_in(mount).unwrap();
+    fs::create_dir(fixture.path().join("dir")).unwrap();
+    for name in ["first", "second"] {
+        fs::write(fixture.path().join("dir").join(name), b"data").unwrap();
+    }
+    std::os::unix::fs::symlink(".", fixture.path().join("alias")).unwrap();
+    std::os::unix::fs::symlink("dir", fixture.path().join("final")).unwrap();
+
+    let fs = Auto::new(fixture.path()).unwrap();
+    require_live_direct_route(&fs, Path::new("/"));
+    let root = fs.resolve(Path::new("/"), &read_mounts(false));
+    let Route::Nfs(connection) = root.route else {
+        panic!("expected direct route for fixture");
+    };
+    let paths = [root.path.join("alias/dir"), root.path.join("final")];
+    let recursive = ListDirOptions::new().with_recursive(true);
+    let mut visited = Vec::new();
+    let results = connection
+        .client
+        .vlistdirs(&paths, recursive, |index, page| {
+            assert_eq!(index, 0);
+            assert_eq!(page.path, paths[0]);
+            visited.extend(page.entries.into_iter().map(|entry| entry.into_parts().0));
+            Ok(std::ops::ControlFlow::Continue(()))
+        })
+        .unwrap();
+    assert!(results[0].is_ok(), "{:?}", results[0]);
+    visited.sort();
+    let expected = [paths[0].join("first"), paths[0].join("second")];
+    assert_eq!(visited, expected);
+    assert_eq!(
+        results[1].as_ref().unwrap_err().cause().kind(),
+        io::ErrorKind::NotADirectory
+    );
+
+    // Exercise the NFS open policy independently of traversal's metadata
+    // preflight and force a continuation for the permitted ancestor link.
+    let symlinks = vfsi_sync::backend::DirectorySymlinkPolicy::FollowParents;
+    let mut results = connection
+        .client
+        .read_dir_pages_with_fields(
+            &[paths[0].as_path(), paths[1].as_path()],
+            crate::Attributes::MODE,
+            vec![None, None],
+            1,
+            10,
+            symlinks,
+        )
+        .unwrap();
+    let rejected = results
+        .pop()
+        .unwrap()
+        .err()
+        .expect("final symlink must be rejected");
+    assert_eq!(rejected.cause().kind(), io::ErrorKind::NotADirectory);
+    let (mut page, next, _) = results.pop().unwrap().unwrap();
+    assert_eq!(page.entries.len(), 1);
+    let (second, _, _) = connection
+        .client
+        .read_dir_pages_with_fields(
+            &[paths[0].as_path()],
+            crate::Attributes::MODE,
+            vec![Some(next.expect("two entries require a second page"))],
+            1,
+            9,
+            symlinks,
+        )
+        .unwrap()
+        .remove(0)
+        .unwrap();
+    assert_eq!(second.entries.len(), 1);
+    page.entries.extend(second.entries);
+    let mut paged: Vec<_> = page
+        .entries
+        .into_iter()
+        .map(|entry| entry.into_parts().0)
+        .collect();
+    paged.sort();
+    assert_eq!(paged, expected);
+}
+
+#[test]
 #[ignore = "requires configured NFS mount fixtures"]
 fn live_nfs_mount_uses_direct_connection() {
     let mount = std::env::var("VFSI_AUTO_TEST_MOUNT")
@@ -1121,9 +1452,8 @@ fn live_auto_traversal_charges_public_path_bytes() {
         .iter()
         .flat_map(|listing| &listing.entries)
         .map(|entry| {
-            client
-                .public_path(connection, entry.path())
-                .unwrap()
+            // The fixture has no descendants under its root other than a/b.
+            root.join(entry.path().file_name().unwrap())
                 .as_os_str()
                 .len()
         })

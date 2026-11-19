@@ -78,16 +78,30 @@ jobs:
           MANYLINUX_ARCH: ${{ matrix.image-arch }}
           TEST_PYTHON: ${{ matrix.test-python }}
         run: |
+          engine_floor=$(python3 - <<'PYTHON'
+          import pathlib
+          import tomllib
+
+          project = tomllib.loads(pathlib.Path("adapters/nfs4fs/pyproject.toml").read_text())["project"]
+          [version_range] = [
+              dependency.removeprefix("vfsi-fsspec>=")
+              for dependency in project["dependencies"]
+              if dependency.startswith("vfsi-fsspec>=")
+          ]
+          print(version_range.split(",", 1)[0])
+          PYTHON
+          )
+          test -n "$engine_floor"
           docker run --rm --platform "$MANYLINUX_PLATFORM" \
-            -e TEST_PYTHON \
+            -e TEST_PYTHON -e "VFSI_FSSPEC_FLOOR=$engine_floor" \
             -v "$PWD:/io" \
             "quay.io/pypa/manylinux_2_28_${MANYLINUX_ARCH}" \
             /bin/bash -c '
               set -e
               py="/opt/python/${TEST_PYTHON}/bin/python"
-              # Resolve vfsi-fsspec from the published dependency floor, not
-              # the checkout; this detects incompatible release metadata.
-              "$py" -m pip install /io/adapters/nfs4fs/dist/*.whl
+              # Exercise the lowest supported engine from the package index.
+              "$py" -m pip install /io/adapters/nfs4fs/dist/*.whl \
+                "vfsi-fsspec==$VFSI_FSSPEC_FLOOR"
               "$py" -m pip check
               cd /tmp
               "$py" - <<"PY"

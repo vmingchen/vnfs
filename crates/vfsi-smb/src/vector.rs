@@ -31,6 +31,45 @@ impl SmbVecFs {
 }
 
 impl VectorBackend for SmbVecFs {
+    fn vopen_impl(&mut self, requests: &[OpenOp]) -> vfsi_core::VecResult<FileOperand> {
+        if !requests.is_empty()
+            && self.client.is_disconnected()
+            && self.can_recover_path_read(&SmbError::Disconnected)
+            && requests
+                .iter()
+                .all(|request| request.is_positioned_io() && request.flags() == OpenFlags::READ)
+        {
+            // Reattach before a new implicit read submits any CREATE.
+            self.reconnect_share()?;
+        }
+        vfsi_sync::backend::helpers::vopen_typed_default(self, requests)
+    }
+
+    fn vread_all_with_options_impl(
+        &mut self,
+        files: &[FileOperand],
+        options: ReadAllOptions,
+    ) -> vfsi_core::VecResult<Vec<u8>> {
+        let memory = options
+            .max_total_bytes()
+            .clamp(1, DEFAULT_READ_ALLV_MAX_TOTAL_BYTES);
+        let negotiated = self
+            .client
+            .params()
+            .map_or(65_536, |params| params.max_read_size as usize)
+            .max(1);
+        let chunk = memory.min(1024 * 1024).min(negotiated);
+        vfsi_sync::backend::helpers::read_all_pinned_paths(
+            self,
+            files,
+            options,
+            |pending, remaining| {
+                let count = pending.min((memory / chunk).max(1)).min(remaining.max(1));
+                (count, chunk.min((remaining / count).max(1)))
+            },
+        )
+    }
+
     fn vopen_raw_impl(
         &mut self,
         paths: &[&Path],
@@ -975,6 +1014,62 @@ impl VectorBackend for SmbVecFs {
 }
 
 impl SmbVecFs {
+    fn read_positional_descriptors(
+        &self,
+        reads: &[ReadOp],
+    ) -> Vec<vfsi_core::OpResult<ReadOutput>> {
+        use futures_util::{StreamExt, stream};
+        use vfsi_core::OpError;
+
+        let connection = self.client.connection();
+        let tree_id = self.tree.tree_id;
+        let charge = reads
+            .iter()
+            .map(|read| credit_charge(read.length))
+            .max()
+            .unwrap_or(1);
+        // Keep queued jobs and their per-request credit waits bounded, even
+        // when the caller supplies a large vector of small ranges.
+        let concurrency = usize::from(connection.credits() / charge).clamp(1, 32);
+        let jobs = reads.iter().enumerate().map(|(index, read)| {
+            let prepared = (|| {
+                let VfOffset::At(offset) = read.offset else {
+                    unreachable!("eligible positional read");
+                };
+                checked_offset(offset, read.length as u64, index)?;
+                let fd = read.file.fd().expect("eligible descriptor read");
+                let open = self.live_file(fd)?;
+                if !open.readable {
+                    return Err(std::io::Error::from_raw_os_error(libc::EBADF));
+                }
+                Ok((open.file_id, offset))
+            })();
+            async move {
+                let (file_id, offset) = prepared.map_err(OpError::not_attempted)?;
+                let size = crate::metadata::query_size_on(connection, tree_id, file_id).await?;
+                let data = crate::io::read_chunk_on(
+                    connection,
+                    tree_id,
+                    file_id,
+                    offset,
+                    read.length as u32,
+                )
+                .await
+                .map_err(|cause| read_wire_error(cause, offset, None))?;
+                let eof = (!data.is_empty() && offset + data.len() as u64 >= size)
+                    || data.len() < read.length;
+                Ok(ReadOutput {
+                    file: read.file.clone(),
+                    offset,
+                    data,
+                    eof,
+                })
+            }
+        });
+        self.runtime
+            .block_on(stream::iter(jobs).buffered(concurrency).collect())
+    }
+
     pub(super) fn read_results(&mut self, reads: &[ReadOp]) -> vfsi_core::VecResult<ReadOutput> {
         use vfsi_core::{OpError, OpResult};
         if reads.is_empty() {
@@ -991,16 +1086,26 @@ impl SmbVecFs {
             .params()
             .map(|params| params.max_read_size as usize)
             .unwrap_or(65_536);
-        let concurrent = reads.len() > 1
+        let positional = reads.len() > 1
             && reads.iter().all(|read| {
-                !read.file.is_fd()
-                    && !matches!(read.file, FileOperand::Saved)
-                    && matches!(read.offset, VfOffset::At(_))
+                matches!(read.offset, VfOffset::At(_))
                     && read.length > 0
                     && read.length <= max_read
                     && read.length <= u32::MAX as usize
             });
-        if !concurrent {
+        // Fault-injection tests observe the existing per-request size and
+        // chunk boundaries. Dependent offsets also keep the ordered path.
+        let descriptor_batch = positional && reads.iter().all(|read| read.file.is_fd());
+        #[cfg(feature = "test-faults")]
+        let descriptor_batch = descriptor_batch && self.fault_injector.is_none();
+        if descriptor_batch {
+            return Ok(self.read_positional_descriptors(reads));
+        }
+        if !positional
+            || reads
+                .iter()
+                .any(|read| read.file.is_fd() || matches!(read.file, FileOperand::Saved))
+        {
             return Ok(reads.iter().map(|read| self.read_one(read)).collect());
         }
         let connection = self.client.connection_mut().clone();

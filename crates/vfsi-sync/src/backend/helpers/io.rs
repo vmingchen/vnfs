@@ -124,7 +124,15 @@ pub fn vopen_typed_default<F: VectorBackend + ?Sized>(
     requests: &[OpenOp],
 ) -> vfsi_core::VecResult<FileOperand> {
     let paths: Vec<&std::path::Path> = requests.iter().map(|request| request.path()).collect();
-    let flags = translate_open_flags(requests)?;
+    let mut flags = translate_open_flags(requests)?;
+    let positioned = backend.positioned_io_open_flags();
+    if positioned != 0 {
+        for (request, flags) in requests.iter().zip(&mut flags) {
+            if request.is_positioned_io() {
+                *flags |= positioned;
+            }
+        }
+    }
     let modes: Vec<u32> = requests
         .iter()
         .map(|request| request.creation_mode())

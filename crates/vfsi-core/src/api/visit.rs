@@ -83,10 +83,11 @@ impl ListDirOptions {
         self
     }
     /// Whether resolving an input directory path may follow symlinks (default:
-    /// true). False requires no-follow resolution, including parent components;
-    /// backends unable to guarantee it return Unsupported. Recursive entry
-    /// symlinks are never traversed regardless of this setting. Buffered
-    /// recursive/lifecycle `listdir` enforces false when reopening directories.
+    /// true). False requires no-follow resolution, including parent components.
+    /// Backends unable to guarantee it return Unsupported. Local and NFS allow
+    /// symlinks only in the ancestors of a recursive root. Recursive entry
+    /// symlinks are never traversed. Buffered recursive and lifecycle `listdir`
+    /// enforce false when reopening directories.
     pub const fn with_allow_symlink_components(mut self, value: bool) -> Self {
         self.flags.set_no_follow(!value);
         self

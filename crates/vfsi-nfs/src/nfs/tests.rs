@@ -2542,7 +2542,11 @@ fn live_quarantined_identity_reconnects_fresh_and_reopens_exact_retained_objects
         Some(owner.as_slice())
     );
     fs.nfs.quarantine_open_identity();
-    fs.reconnect().unwrap();
+    let replacement = fs
+        .vopen_impl(&[OpenOp::for_positioned_io(&path, OpenFlags::READ)])
+        .unwrap()
+        .remove(0)
+        .unwrap();
     assert!(
         fs.connection.client_owner.is_none(),
         "a configured stable identity must not renew unaddressable OPEN state"
@@ -2553,13 +2557,14 @@ fn live_quarantined_identity_reconnects_fresh_and_reopens_exact_retained_objects
         b"original",
         "recovery must use the retained FH, never the replacement at its saved path"
     );
-    let replacement = fs.open_raw_impl(&path, libc::O_RDONLY, 0).unwrap();
     assert_eq!(
         fs.read_raw_impl(&replacement, 0, 11).unwrap(),
         b"replacement"
     );
-    fs.close_impl(&replacement).unwrap();
-    fs.close_impl(&retained).unwrap();
+    let closed = fs.vclose_owned_impl(vec![replacement, retained]).unwrap();
+    assert_eq!(closed.len(), 2);
+    assert!(closed.into_iter().all(|result| result.is_ok()));
+    assert!(fs.open_files.is_empty());
     fs.unlink_impl(&saved).unwrap();
     fs.unlink_impl(&path).unwrap();
     fs.shutdown().unwrap();

@@ -866,31 +866,9 @@ impl NfsVecFs {
         if let Some(_index) = reads.iter().position(|op| op.length > isize::MAX as usize) {
             return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
         }
-        let mut storage: Vec<_> = reads.iter().map(|op| vec![0; op.length]).collect();
-        let mut buffers: Vec<_> = storage.iter_mut().map(Vec::as_mut_slice).collect();
-        let results = self.descriptor_read_into_results(reads, &mut buffers)?;
-        Ok(results
-            .into_iter()
-            .zip(storage)
-            .map(|(result, mut data)| match result {
-                Ok(result) => {
-                    data.truncate(result.bytes_read);
-                    Ok(ReadOutput {
-                        file: result.file,
-                        offset: result.offset,
-                        data,
-                        eof: result.eof,
-                    })
-                }
-                Err(error) => {
-                    let offset = match error.progress() {
-                        Some(IoProgress::Read(read)) => read.offset(),
-                        _ => 0,
-                    };
-                    Err(vfsi_core::internal::own_read_error(error, offset, data))
-                }
-            })
-            .collect())
+        vfsi_core::internal::read_with_owned_buffers(reads, |reads, buffers| {
+            self.descriptor_read_into_results(reads, buffers)
+        })
     }
 
     pub(super) fn read_into_results(

@@ -1,6 +1,9 @@
 //! Mount eligibility, connection identities, and path routing.
 
 use super::*;
+use std::ffi::OsStr;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MountSpec {
@@ -56,7 +59,7 @@ impl Route {
 }
 
 impl Resolved {
-    fn posix(path: &Path) -> Self {
+    pub(super) fn posix(path: &Path) -> Self {
         Self {
             route: Route::Posix,
             path: path.to_path_buf(),
@@ -77,17 +80,6 @@ impl Auto {
             }
             _ => false,
         }
-    }
-
-    pub(super) fn public_path(&self, connection: &NfsConnection, path: &Path) -> VfResult<PathBuf> {
-        let suffix = path
-            .strip_prefix("/")
-            .map_err(|_| std::io::Error::from_raw_os_error(libc::EIO))?;
-        let host = connection.spec.mount_point.join(suffix);
-        let relative = host
-            .strip_prefix(&self.root)
-            .map_err(|_| std::io::Error::from_raw_os_error(libc::EIO))?;
-        Ok(Path::new("/").join(relative))
     }
 
     /// Recursive operations retain kernel routing if another mount appears
@@ -147,7 +139,16 @@ impl Auto {
                 let Some(name) = host_path.file_name() else {
                     return mounted();
                 };
-                (parent.join(name), Some(parent))
+                // Canonicalization and lstat on a spelling ending in a
+                // separator can both follow a dangling link. Inspect the
+                // final entry directly before treating it as missing.
+                let candidate = parent.join(name);
+                if !fs::symlink_metadata(&candidate)
+                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+                {
+                    return mounted();
+                }
+                (candidate, Some(parent))
             }
             Err(_) => return mounted(),
         };
@@ -209,6 +210,61 @@ impl Auto {
         } else {
             resolved
         }
+    }
+
+    pub(super) fn mounted_copy_path_on(
+        &self,
+        path: &Path,
+        follow_leaf: bool,
+        mounts: &MountTable,
+        other: &Route,
+    ) -> bool {
+        self.rooted_copy_mount_id(path, follow_leaf)
+            .and_then(|id| mounts.eligible.iter().find(|mount| mount.id == id))
+            .and_then(|mount| self.connection(mount))
+            .is_some_and(|connection| Route::Nfs(connection).same_backend(other))
+    }
+
+    fn rooted_copy_mount_id(&self, path: &Path, follow_leaf: bool) -> Option<u64> {
+        use vfsi_core::path::{normalize_bytes, path_bytes, path_from_bytes};
+        use vfsi_local::open_rooted_path;
+
+        let rooted = |path: &Path| path_from_bytes(&normalize_bytes(path_bytes(path)));
+        let root = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_DIRECTORY)
+            .open(&self.root)
+            .ok()?;
+        let mut path = rooted(path);
+        for _ in 0..=40 {
+            // Resolve ancestors with the same rooted kernel lookup as Local.
+            // For a final link, mirror Local's absolute and relative rebasing
+            // so a dangling destination can still use its real parent mount.
+            let parent = path.parent().unwrap_or(Path::new(""));
+            let directory = open_rooted_path(&root, parent, true).ok()?;
+            let anchor = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+            let entry = anchor.join(path.file_name().unwrap_or(OsStr::new(".")));
+            if fs::symlink_metadata(&entry).is_ok_and(|attrs| attrs.file_type().is_symlink()) {
+                if !follow_leaf {
+                    return path_mount_id(&anchor);
+                }
+                let target = fs::read_link(entry).ok()?;
+                path = if target.is_absolute() {
+                    rooted(&target)
+                } else {
+                    parent.join(target)
+                };
+                continue;
+            }
+            return match open_rooted_path(&root, &path, false) {
+                Ok(actual) => {
+                    path_mount_id(Path::new(&format!("/proc/self/fd/{}", actual.as_raw_fd())))
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => path_mount_id(&anchor),
+                Err(_) => None,
+            };
+        }
+        None
     }
 
     pub(super) fn connection(&self, spec: &MountSpec) -> Option<NfsConnection> {

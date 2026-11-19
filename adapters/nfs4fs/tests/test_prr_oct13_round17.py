@@ -42,6 +42,8 @@ def test_invalid_group_cache_options_fail_before_truncation_or_mkdir(dummy_fs):
         ({"block_size": "bad"}, ValueError),
         ({"cache_type": "readahead", "cache_options": {"typo": True}}, TypeError),
         ({"cache_type": "blockcache", "cache_options": {"maxblocks": "8"}}, TypeError),
+        ({"cache_type": "parts", "cache_options": {"data": [1]}}, TypeError),
+        ({"cache_type": "parts", "cache_options": {"data": {"bad": b"x"}}}, TypeError),
     ],
 )
 def test_invalid_group_reader_options_do_not_truncate_writer(dummy_fs, options, error):
@@ -55,6 +57,286 @@ def test_invalid_group_reader_options_do_not_truncate_writer(dummy_fs, options, 
         )
     assert fs.cat_file("/writer") == b"original"
     assert not fs._client._fds
+
+
+def test_shared_mmap_location_fails_before_grouped_writer_open(dummy_fs, tmp_path):
+    fs = dummy_fs
+    fs.pipe({"/first": b"first", "/other": b"other", "/writer": b"original"})
+    location = tmp_path / "cache"
+    with pytest.raises(ValueError, match="one grouped reader"):
+        fs.open_many(
+            [
+                OpenFile(fs, "/writer", mode="wb"),
+                OpenFile(fs, "/first", mode="rb"),
+                OpenFile(fs, "/other", mode="rb"),
+            ],
+            cache_type="mmap",
+            cache_options={"location": location},
+        )
+    assert fs.cat_file("/writer") == b"original"
+    assert not location.exists()
+    assert not fs._client._fds
+
+    files = fs.open_many(
+        [OpenFile(fs, "/first", mode="rb"), OpenFile(fs, "/other", mode="rb")],
+        cache_type="mmap",
+        block_size=2,
+    )
+    try:
+        assert [file.read() for file in files] == [b"first", b"other"]
+        assert files[0].seek(0) == 0
+        assert files[0].read() == b"first"
+    finally:
+        fs.commit_many(files)
+
+
+@pytest.mark.parametrize("inherited", [False, True])
+def test_mmap_setup_failure_precedes_grouped_writer_open(dummy_fs, tmp_path, inherited):
+    fs = dummy_fs
+    fs.pipe({"/reader": b"payload", "/writer": b"original"})
+    fs.auto_mkdir = True
+    location = tmp_path / "cache-directory"
+    location.mkdir()
+    options = {"location": location}
+    if inherited:
+        fs.cache_options = options
+        options = None
+    with pytest.raises(IsADirectoryError):
+        fs.open_many(
+            [
+                OpenFile(fs, "/writer", mode="wb"),
+                OpenFile(fs, "/reader", mode="rb"),
+                OpenFile(fs, "/new/file", mode="wb"),
+            ],
+            cache_type="mmap",
+            cache_options=options,
+        )
+    assert fs.cat_file("/writer") == b"original"
+    assert not fs.exists("/new")
+    assert not fs._client._fds
+
+
+@pytest.mark.parametrize("cache_type", ["readahead", "mmap"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_grouped_lazy_reader_can_open_after_writer(dummy_fs, cache_type, existing):
+    fs = dummy_fs
+    if existing:
+        fs.pipe_file("/target", b"original")
+    files = fs.open_many(
+        [OpenFile(fs, "/target", mode="wb"), OpenFile(fs, "/target", mode="rb")],
+        cache_type=cache_type,
+    )
+    try:
+        assert files[1].read(1) == b""
+        files[0].write(b"new")
+    finally:
+        fs.commit_many(files)
+    assert fs.cat_file("/target") == b"new"
+    assert not fs._client._fds
+
+
+@pytest.mark.parametrize("mode", ["ab", "ab+"])
+@pytest.mark.parametrize("symlink", [False, True])
+def test_grouped_mmap_reader_can_follow_missing_append_target(dummy_fs, mode, symlink):
+    fs = dummy_fs
+    reader = "/target"
+    if symlink:
+        fs.symlink("/target", "/alias")
+        reader = "/alias"
+    files = fs.open_many(
+        [OpenFile(fs, "/target", mode=mode), OpenFile(fs, reader, mode="rb")],
+        cache_type="mmap",
+    )
+    try:
+        assert files[1].read(1) == b""
+        files[0].write(b"new")
+    finally:
+        fs.commit_many(files)
+    assert fs.cat_file("/target") == b"new"
+    assert not fs._client._fds
+
+
+def test_existing_append_mmap_reader_validates_backing_before_writer(
+    dummy_fs, tmp_path
+):
+    fs = dummy_fs
+    fs.pipe({"/append": b"existing", "/writer": b"original"})
+    location = tmp_path / "directory"
+    location.mkdir()
+    with pytest.raises(IsADirectoryError):
+        fs.open_many(
+            [
+                OpenFile(fs, "/append", mode="ab"),
+                OpenFile(fs, "/writer", mode="wb"),
+                OpenFile(fs, "/append", mode="rb"),
+            ],
+            cache_type="mmap",
+            cache_options={"location": location},
+        )
+    assert fs.cat_file("/writer") == b"original"
+    assert fs.cat_file("/append") == b"existing"
+    assert not fs._client._fds
+
+
+def test_grouped_mmap_reader_refreshes_truncated_hardlink_size(dummy_fs):
+    fs = dummy_fs
+    fs.pipe_file("/target", b"original")
+    fs.hardlink("/target", "/alias")
+    files = fs.open_many(
+        [OpenFile(fs, "/target", mode="wb"), OpenFile(fs, "/alias", mode="rb")],
+        cache_type="mmap",
+    )
+    try:
+        assert files[1].read(1) == b""
+    finally:
+        fs.commit_many(files)
+    assert not fs._client._fds
+
+
+@pytest.mark.parametrize("sizes", [None, [None, 8, None]])
+def test_eager_read_budget_fails_before_grouped_writer_open(dummy_fs, sizes):
+    fs = dummy_fs
+    fs.pipe({"/reader": b"readable", "/writer": b"keep"})
+    fs.read_all_max_total_bytes = 4
+    fs.auto_mkdir = True
+    requests = [
+        OpenFile(fs, "/writer", mode="wb"),
+        OpenFile(fs, "/reader", mode="rb"),
+        OpenFile(fs, "/new/file", mode="wb"),
+    ]
+    with pytest.raises(OSError) as raised:
+        fs.open_many(requests, cache_type="all", sizes=sizes)
+    assert raised.value.errno == errno.EFBIG
+    assert raised.value.filename == "/reader"
+    assert fs.cat_file("/writer") == b"keep"
+    assert not fs.exists("/new")
+    assert not fs._client._fds
+
+    files = fs.open_many(
+        requests[:2],
+        cache_type="all",
+        cache_options={"data": b"cached!!"},
+        sizes=[None, 8],
+    )
+    try:
+        assert files[1].read(4) == b"cach"
+        files[0].write(b"done")
+    finally:
+        fs.commit_many(files)
+    assert fs.cat_file("/writer") == b"done"
+
+
+def test_mixed_eager_read_failure_reports_original_index(dummy_fs, monkeypatch):
+    fs = dummy_fs
+    fs.pipe({"/reader": b"payload", "/writer": b"original"})
+
+    def fail_reads(tokens, offsets, lengths):
+        return [OSError(errno.EIO, "eager read failed") for _ in tokens]
+
+    with monkeypatch.context() as patch:
+        patch.setattr(fs._client, "preadv", fail_reads)
+        with pytest.raises(OSError, match="eager read failed") as raised:
+            fs.open_many(
+                [
+                    OpenFile(fs, "/writer", mode="wb"),
+                    OpenFile(fs, "/reader", mode="rb"),
+                ],
+                cache_type="all",
+            )
+    assert raised.value.index == 1
+    assert raised.value.filename == "/reader"
+    assert not fs._client._fds
+    assert fs.cat_file("/writer") == b"original"
+
+
+def test_eager_group_closes_restored_reader_after_writer_open_failure(
+    dummy_fs, monkeypatch
+):
+    fs = dummy_fs
+    fs.pipe({"/reader": b"payload", "/writer": b"original"})
+    client = fs._client
+    open_many = client.open_many
+    preadv = client.preadv
+    tokens_seen = []
+
+    def reconnect_once(tokens, offsets, lengths):
+        tokens_seen.extend(tokens)
+        if len(tokens_seen) == 1:
+            return [ConnectionError("reader connection lost")]
+        return preadv(tokens, offsets, lengths)
+
+    def fail_writer(paths, modes):
+        if modes == ["wb"]:
+            error = PermissionError(errno.EACCES, "writer open failed")
+            error.index = 0
+            raise error
+        return open_many(paths, modes)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(client, "preadv", reconnect_once)
+        patch.setattr(client, "open_many", fail_writer)
+        with pytest.raises(PermissionError, match="writer open failed") as raised:
+            fs.open_many(
+                [
+                    OpenFile(fs, "/reader", mode="rb"),
+                    OpenFile(fs, "/writer", mode="wb"),
+                ],
+                cache_type="all",
+            )
+    assert raised.value.index == 1
+    assert len(set(tokens_seen)) == 2, "the eager reader must have been restored"
+    assert not client._fds
+    assert fs.cat_file("/writer") == b"original"
+
+
+def test_mixed_eager_group_pins_reader_snapshot_before_writer_open(dummy_fs):
+    fs = dummy_fs
+    fs.pipe_file("/target", b"original")
+    files = fs.open_many(
+        [OpenFile(fs, "/target", mode="wb"), OpenFile(fs, "/target", mode="rb")],
+        cache_type="all",
+    )
+    try:
+        files[0].write(b"updated")
+        assert files[1].read() == b"original"
+    finally:
+        fs.commit_many(files)
+    assert fs.cat_file("/target") == b"updated"
+    assert not fs._client._fds
+
+
+def test_grouped_parts_cache_uses_an_independent_copy_for_each_reader(
+    dummy_fs, monkeypatch
+):
+    fs = dummy_fs
+    fs.pipe({"/first": b"data", "/second": b"data"})
+    known = {(0, 2): b"da", (2, 4): b"ta"}
+    files = fs.open_many(
+        [OpenFile(fs, path, mode="rb") for path in ["/first", "/second"]],
+        block_size=2,
+        cache_type="parts",
+        cache_options={"data": known, "strict": True},
+    )
+    try:
+
+        def no_backend_read(*args):
+            pytest.fail("configured cache parts must satisfy the full read")
+
+        monkeypatch.setattr(fs._client, "preadv", no_backend_read)
+        assert [file.read(3) for file in files] == [b"dat", b"dat"]
+        assert known == {(0, 2): b"da", (2, 4): b"ta"}
+    finally:
+        fs.commit_many(files)
+
+
+def test_write_only_group_does_not_consult_read_cache_type(dummy_fs):
+    fs = dummy_fs
+    files = fs.open_many([OpenFile(fs, "/target", mode="wb")], cache_type=[])
+    try:
+        files[0].write(b"replacement")
+    finally:
+        fs.commit_many(files)
+    assert fs.cat_file("/target") == b"replacement"
 
 
 def test_missing_required_cache_option_does_not_truncate_writer(dummy_fs, monkeypatch):

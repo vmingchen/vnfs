@@ -1430,6 +1430,139 @@ impl VectorBackend for WorkflowOverride {
     }
 }
 
+#[derive(Default)]
+struct ReplacingPathReader {
+    scalar: ScalarOnly,
+    open_calls: usize,
+    replaced: bool,
+    fail_read: bool,
+    closed: Vec<i32>,
+}
+handle_contract!(ReplacingPathReader;
+    fn vclose_owned_impl(&mut self, files: Vec<FileOperand>) -> vfsi_sync::VecResult<()> {
+        Ok(files
+            .into_iter()
+            .map(|file| {
+                let fd = file.fd().unwrap();
+                self.closed.push(fd);
+                if fd == 8 {
+                    Err(vfsi_sync::OpError::unknown(
+                        vfsi_core::internal::errors::transport(
+                            vfsi_core::TransportKind::Timeout,
+                            "lost close",
+                        ),
+                        None,
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+            .collect())
+    }
+);
+
+impl VectorBackend for ReplacingPathReader {
+    fn vopen_raw_impl(
+        &mut self,
+        paths: &[&std::path::Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> vfsi_sync::VecResult<FileOperand> {
+        self.scalar.vopen_raw_impl(paths, flags, modes)
+    }
+
+    fn vopen_impl(&mut self, requests: &[vfsi_sync::OpenOp]) -> vfsi_sync::VecResult<FileOperand> {
+        self.open_calls += 1;
+        Ok(requests
+            .iter()
+            .map(|request| {
+                assert!(request.is_positioned_io());
+                match request.path().to_str() {
+                    Some("/changing") => Ok(FileOperand::from_fd(8)),
+                    Some("/healthy") => Ok(FileOperand::from_fd(9)),
+                    Some("/missing") => Err(vfsi_sync::OpError::failed(
+                        std::io::Error::from_raw_os_error(libc::ENOENT),
+                        None,
+                    )),
+                    path => panic!("unexpected open path {path:?}"),
+                }
+            })
+            .collect())
+    }
+
+    fn vread_impl(&mut self, reads: &[ReadOp]) -> vfsi_sync::VecResult<vfsi_sync::ReadOutput> {
+        let results = reads
+            .iter()
+            .map(|read| {
+                let data: &[u8] = match read.file.fd() {
+                    Some(8) => b"abcde",
+                    Some(9) => b"xyz",
+                    None if self.replaced => b"replacement",
+                    None => b"abcde",
+                    _ => panic!("unexpected read descriptor"),
+                };
+                let VfOffset::At(offset) = read.offset else {
+                    panic!("whole reads require a positional offset");
+                };
+                if self.fail_read && read.file.fd() == Some(8) && offset >= 2 {
+                    return Err(vfsi_sync::OpError::failed(
+                        std::io::Error::from_raw_os_error(libc::EIO),
+                        None,
+                    ));
+                }
+                let begin = (offset as usize).min(data.len());
+                let end = (begin + read.length).min(data.len());
+                Ok(vfsi_sync::ReadOutput {
+                    file: read.file.clone(),
+                    offset,
+                    data: data[begin..end].to_vec(),
+                    eof: end == data.len(),
+                })
+            })
+            .collect();
+        self.replaced = true;
+        Ok(results)
+    }
+}
+
+#[test]
+fn pinned_whole_paths_keep_identity_and_confirmed_bytes_after_close_failure() {
+    for fail_read in [false, true] {
+        let mut backend = ReplacingPathReader {
+            fail_read,
+            ..Default::default()
+        };
+        let paths = ["/changing", "/missing", "healthy"].map(FileOperand::from_path);
+        let outcomes = vfsi_sync::backend::helpers::read_all_pinned_paths(
+            &mut backend,
+            &paths,
+            vfsi_sync::ReadAllOptions::new().with_max_total_bytes(8),
+            |pending, remaining| (pending.min(remaining.max(1)), remaining.clamp(1, 2)),
+        )
+        .unwrap();
+        assert_eq!(backend.open_calls, 1);
+        assert_eq!(backend.closed, [8, 9]);
+        let error = outcomes[0].as_ref().unwrap_err();
+        assert_eq!(error.state(), vfsi_core::FailureState::Unknown);
+        let Some(vfsi_core::IoProgress::Read(progress)) = error.progress() else {
+            panic!("confirmed complete read must survive CLOSE failure");
+        };
+        if fail_read {
+            assert_eq!(error.cause().raw_os_error(), Some(libc::EIO));
+            assert!(!progress.eof());
+            assert_eq!(progress.data(), Some(b"ab".as_slice()));
+        } else {
+            assert!(progress.eof());
+            assert_eq!(progress.data(), Some(b"abcde".as_slice()));
+        }
+        assert_eq!(
+            outcomes[1].as_ref().unwrap_err().cause().raw_os_error(),
+            Some(libc::ENOENT)
+        );
+        assert_eq!(outcomes[2].as_ref().unwrap(), b"xyz");
+    }
+}
+
 #[test]
 fn shared_workflows_keep_dynamic_backend_overrides_reachable() {
     let mut concrete = WorkflowOverride::default();
@@ -4834,7 +4967,23 @@ fn generic_path_conversion_can_reenter_namespace_operations() {
     );
     assert!(fs.ensure_empty_dir(path("/dir")).is_err());
 
+    struct ReentrantPolicy<'a>(&'a FsClient<DirectoryProbe>);
+    impl From<ReentrantPolicy<'_>> for vfsi_sync::backend::DirectorySymlinkPolicy {
+        fn from(policy: ReentrantPolicy<'_>) -> Self {
+            policy.0.directory_page_batch_size().unwrap();
+            Self::Follow
+        }
+    }
     let fs = FsClient::new(DirectoryProbe::default());
+    let pages = fs.read_dir_pages_with_fields(
+        &[std::path::Path::new("/0")],
+        vfsi_core::api::Attributes::MODE,
+        vec![None],
+        1,
+        1,
+        ReentrantPolicy(&fs),
+    );
+    assert!(pages.is_ok_and(|pages| pages.len() == 1));
     let closed = fs
         .open_dirs(&[
             ReentrantPath(&fs, std::path::Path::new("/0")),
@@ -7638,7 +7787,12 @@ fn directory_open_projects_each_path_once_before_backend_locking() {
 
 #[test]
 fn stream_read_error_prefixes_are_delivered_once_without_replaying_siblings() {
-    for stop in [false, true] {
+    for (stop, fail, contextual) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, true, true),
+    ] {
         let client = FsClient::new(StreamBackend {
             scalar: ScalarOnly {
                 data: b"abcde".to_vec(),
@@ -7663,6 +7817,21 @@ fn stream_read_error_prefixes_are_delivered_once_without_replaying_siblings() {
                 |index, offset, bytes| {
                     assert_eq!(offset, received[index].len() as u64);
                     received[index].extend_from_slice(bytes);
+                    if fail && index == 1 {
+                        let cause = if contextual {
+                            vfsi_core::internal::errors::with_context(
+                                vfsi_core::internal::errors::transport(
+                                    vfsi_core::TransportKind::Timeout,
+                                    "sink completion timed out",
+                                ),
+                                "write_sink",
+                                "/destination",
+                            )
+                        } else {
+                            std::io::Error::from_raw_os_error(libc::ENOSPC)
+                        };
+                        return Err(cause);
+                    }
                     Ok(if stop && index == 1 {
                         std::ops::ControlFlow::Break(())
                     } else {
@@ -7678,12 +7847,42 @@ fn stream_read_error_prefixes_are_delivered_once_without_replaying_siblings() {
         );
         let error = outcomes[1].as_ref().unwrap_err();
         assert_eq!(error.state(), vfsi_core::FailureState::Unknown);
-        assert!(vfsi_core::transport_kind(error.cause()).is_some());
-        let _: &std::io::Error = error.cause();
-        assert_eq!(
-            error.progress(),
-            Some(&vfsi_core::IoProgress::Stream { next_offset: 1 })
-        );
+        if fail {
+            if contextual {
+                assert_eq!(
+                    vfsi_core::transport_kind(error.cause()),
+                    Some(vfsi_core::TransportKind::Timeout)
+                );
+                assert!(
+                    error
+                        .cause()
+                        .to_string()
+                        .contains("sink completion timed out")
+                );
+                let cause = error.cause();
+                assert_eq!(
+                    vfsi_core::internal::errors::operation(cause),
+                    Some("write_sink")
+                );
+                assert_eq!(
+                    vfsi_core::internal::errors::path(cause),
+                    Some(std::path::Path::new("/destination"))
+                );
+            } else {
+                assert_eq!(
+                    vfsi_core::native_status(error.cause()),
+                    Some(vfsi_core::StatusCode::Errno(libc::ENOSPC as u32))
+                );
+            }
+            assert!(error.cause().to_string().contains("lost read suffix"));
+            assert!(error.progress().is_none());
+        } else {
+            assert!(vfsi_core::transport_kind(error.cause()).is_some());
+            assert_eq!(
+                error.progress(),
+                Some(&vfsi_core::IoProgress::Stream { next_offset: 1 })
+            );
+        }
         assert_eq!(received[0], b"abcde");
         assert_eq!(received[1], b"a");
         if stop {

@@ -1082,10 +1082,10 @@ impl NfsVecFs {
         masks: AttrMask,
         cursors: Vec<Option<DirPageCursor>>,
         page_size: usize,
-        max_entries: usize,
-        follow_symlinks: bool,
+        symlinks: vfsi_sync::backend::DirectorySymlinkPolicy,
     ) -> vfsi_core::VecResult<vfsi_sync::BackendDirectoryPage> {
         use vfsi_core::OpError;
+        use vfsi_sync::backend::DirectorySymlinkPolicy;
         if dirs.len() != cursors.len() || page_size == 0 {
             return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
@@ -1096,23 +1096,21 @@ impl NfsVecFs {
             return self.vector_read_with_recovery(
                 |_, _| true,
                 |client, indices| match indices {
-                    None => client.vlistdir_pages_impl(
+                    None => client.vlistdir_pages_nfs(
                         dirs,
                         masks,
                         (0..dirs.len()).map(|_| None).collect(),
                         page_size,
-                        max_entries,
-                        follow_symlinks,
+                        symlinks,
                     ),
                     Some(indices) => {
                         let pending: Vec<_> = indices.iter().map(|&index| dirs[index]).collect();
-                        client.vlistdir_pages_impl(
+                        client.vlistdir_pages_nfs(
                             &pending,
                             masks,
                             (0..indices.len()).map(|_| None).collect(),
                             page_size,
-                            max_entries,
-                            follow_symlinks,
+                            symlinks,
                         )
                     }
                 },
@@ -1142,7 +1140,7 @@ impl NfsVecFs {
             seen_cookies: std::collections::HashSet::new(),
             buffered: VecDeque::new(),
         };
-        if !follow_symlinks || fresh.len() == 1 {
+        if symlinks == DirectorySymlinkPolicy::NoFollow || fresh.len() == 1 {
             // Keep atomic no-follow component resolution and the scalar deep
             // path fast path; failures remain local to their logical input.
             let mut fatal: Option<std::sync::Arc<std::io::Error>> = None;
@@ -1152,7 +1150,7 @@ impl NfsVecFs {
                         vfsi_core::internal::errors::from_shared(cause),
                     ))
                 } else {
-                    self.resolve_directory_path(dirs[index], follow_symlinks)
+                    self.resolve_directory_path(dirs[index], symlinks)
                         .map_err(|mut cause| {
                             if vfsi_core::transport_kind(&cause).is_some() {
                                 fatal =
@@ -1169,11 +1167,13 @@ impl NfsVecFs {
                 .map(|&index| FileOperand::from_os_path(dirs[index]))
                 .collect();
             let refs: Vec<_> = files.iter().collect();
-            let resolved = self.resolve_files_nfs(&refs, true).unwrap_or_else(|cause| {
-                vfsi_core::internal::errors::fanout(cause, fresh.len())
-                    .map(|cause| Err(OpError::not_attempted(cause)))
-                    .collect()
-            });
+            let resolved = self
+                .resolve_files_nfs(&refs, symlinks == DirectorySymlinkPolicy::Follow)
+                .unwrap_or_else(|cause| {
+                    vfsi_core::internal::errors::fanout(cause, fresh.len())
+                        .map(|cause| Err(OpError::not_attempted(cause)))
+                        .collect()
+                });
             for (&index, result) in fresh.iter().zip(resolved) {
                 states[index] = Some(result.and_then(|(fh, kind)| {
                     if kind != nfs_ftype4_NF4DIR {
@@ -1443,7 +1443,7 @@ mod verifier_tests {
             fs.listdir_page_impl(Path::new("/"), masks, Some(cursor), 1, 10, true)
         } else {
             let mut pages = vfsi_core::internal::collect_vec_result(
-                fs.vlistdir_pages_nfs(&[Path::new("/")], masks, vec![Some(cursor)], 1, 10, true),
+                fs.vlistdir_pages_nfs(&[Path::new("/")], masks, vec![Some(cursor)], 1, true.into()),
                 1,
             )
             .map_err(vfsi_core::IndexedError::into_cause)?;

@@ -55,6 +55,157 @@ pub fn vread_all_owned_impl_default<F: VectorBackend + ?Sized>(
     )
 }
 
+/// Collect whole paths through bounded, owned descriptors. Each path stays
+/// bound to the same object through EOF, including across read recovery.
+#[doc(hidden)]
+pub fn read_all_pinned_paths<F: VectorBackend + ?Sized>(
+    backend: &mut F,
+    files: &[FileOperand],
+    options: ReadAllOptions,
+    plan: impl Fn(usize, usize) -> (usize, usize),
+) -> VecResult<Vec<u8>> {
+    let is_path = |file: &FileOperand| {
+        matches!(
+            file,
+            FileOperand::Path { .. } | FileOperand::Cwd | FileOperand::CwdPath(_)
+        )
+    };
+    if !files.iter().any(is_path) {
+        return read_all_vectors(backend, files, options, plan, false);
+    }
+    let mut remaining = options.max_total_bytes();
+    let mut output = Vec::with_capacity(files.len());
+    // A borrowed token must never collide with a temporary descriptor that was
+    // allocated after admission. Keep path and borrowed cohorts separate.
+    for group in files.chunk_by(|left, right| is_path(left) == is_path(right)) {
+        let pinned = is_path(&group[0]);
+        let capacity = if pinned { 32 } else { group.len() };
+        for files in group.chunks(capacity) {
+            let options = options.with_max_total_bytes(remaining);
+            let outcomes = if pinned {
+                read_all_path_cohort(backend, files, options, &plan)
+            } else {
+                read_all_vectors(backend, files, options, &plan, false)?
+            };
+            for outcome in outcomes {
+                let used = match &outcome {
+                    Ok(data) => data.len(),
+                    Err(error) => match error.progress() {
+                        Some(IoProgress::Read(prefix)) => prefix.bytes_read(),
+                        _ => 0,
+                    },
+                };
+                remaining -= used;
+                output.push(outcome);
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn read_all_path_cohort<F: VectorBackend + ?Sized>(
+    backend: &mut F,
+    files: &[FileOperand],
+    options: ReadAllOptions,
+    plan: impl Fn(usize, usize) -> (usize, usize),
+) -> Vec<OpResult<Vec<u8>>> {
+    use std::{collections::HashSet, path::Path};
+    use vfsi_core::internal::{errors::invalid_reply, vec_result_slots};
+
+    let mut paths = Vec::with_capacity(files.len());
+    let mut indices = Vec::with_capacity(files.len());
+    let mut slots: Vec<_> = (0..files.len()).map(|_| None).collect();
+    for (index, file) in files.iter().enumerate() {
+        match backend.vf_path(file) {
+            Ok(path) => {
+                paths.push(Path::new("/").join(path));
+                indices.push(index);
+            }
+            Err(cause) => slots[index] = Some(Err(OpError::not_attempted(cause))),
+        }
+    }
+    let requests: Vec<_> = paths
+        .iter()
+        .map(|path| OpenOp::for_positioned_io(path, OpenFlags::READ))
+        .collect();
+    let raw = if requests.is_empty() {
+        Ok(Vec::new())
+    } else {
+        backend.vopen_impl(&requests)
+    };
+    let mut owners = HashSet::new();
+    let raw = match raw {
+        Ok(excess) if excess.len() > requests.len() => {
+            let opened: Vec<_> = excess
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|file| file.fd().is_some_and(|fd| fd >= 0 && owners.insert(fd)))
+                .collect();
+            let _ = backend.vclose_owned_impl(opened);
+            let malformed =
+                || OpError::unknown(invalid_reply("excess whole-file OPEN outcomes"), None);
+            Ok((0..requests.len()).map(|_| Err(malformed())).collect())
+        }
+        result => result,
+    };
+    let mut handles = Vec::with_capacity(requests.len());
+    let mut admitted = Vec::with_capacity(requests.len());
+    for (index, outcome) in indices
+        .into_iter()
+        .zip(vec_result_slots(raw, requests.len()))
+    {
+        match outcome {
+            Ok(file) if file.fd().is_some_and(|fd| fd >= 0 && owners.insert(fd)) => {
+                handles.push(file);
+                admitted.push(index);
+            }
+            Ok(_) => {
+                slots[index] = Some(Err(OpError::unknown(
+                    invalid_reply("invalid whole-file OPEN handle"),
+                    None,
+                )));
+            }
+            Err(error) => slots[index] = Some(Err(error)),
+        }
+    }
+    if !handles.is_empty() {
+        let reads = vec_result_slots(
+            read_all_vectors(backend, &handles, options, plan, false),
+            handles.len(),
+        );
+        let closes = vec_result_slots(backend.vclose_owned_impl(handles), admitted.len());
+        for ((index, read), close) in admitted.into_iter().zip(reads).zip(closes) {
+            let result = match (read, close) {
+                (Ok(data), Ok(())) => Ok(data),
+                (Ok(data), Err(error)) => {
+                    let (cause, state, _) = error.into_parts();
+                    let progress = Some(IoProgress::Read(vfsi_core::api::ReadOutput::owned(
+                        0, data, true,
+                    )));
+                    Err(if state == FailureState::Unknown {
+                        OpError::unknown(cause, progress)
+                    } else {
+                        OpError::failed(cause, progress)
+                    })
+                }
+                (Err(read), Err(close)) if close.state() == FailureState::Unknown => {
+                    let (cause, _, progress) = read.into_parts();
+                    Err(OpError::unknown(cause, progress))
+                }
+                (Err(error), _) if error.state() == FailureState::NotAttempted => {
+                    Err(OpError::failed(error.into_cause(), None))
+                }
+                (Err(error), _) => Err(error),
+            };
+            slots[index] = Some(result);
+        }
+    }
+    slots
+        .into_iter()
+        .map(|slot| slot.expect("all whole-file slots resolved"))
+        .collect()
+}
+
 /// Shared whole-file accumulation. The backend supplies its existing cohort and
 /// chunk policy; each logical file stops only on its own EOF or failure.
 pub fn read_all_vectors<F: VectorBackend + ?Sized>(
@@ -63,6 +214,24 @@ pub fn read_all_vectors<F: VectorBackend + ?Sized>(
     options: ReadAllOptions,
     plan: impl Fn(usize, usize) -> (usize, usize),
     adopt_small: bool,
+) -> VecResult<Vec<u8>> {
+    collect_whole_reads(
+        files,
+        options,
+        plan,
+        adopt_small,
+        |reads| backend.vread_impl(reads),
+        |data, additional| data.try_reserve(additional).is_ok(),
+    )
+}
+
+fn collect_whole_reads(
+    files: &[FileOperand],
+    options: ReadAllOptions,
+    plan: impl Fn(usize, usize) -> (usize, usize),
+    adopt_small: bool,
+    mut read: impl FnMut(&[ReadOp]) -> VecResult<ReadOutput>,
+    mut reserve: impl FnMut(&mut Vec<u8>, usize) -> bool,
 ) -> VecResult<Vec<u8>> {
     use std::collections::VecDeque;
     let mut pending: VecDeque<_> = (0..files.len()).collect();
@@ -87,7 +256,7 @@ pub fn read_all_vectors<F: VectorBackend + ?Sized>(
             ));
             indices.push(index);
         }
-        let outcomes = match backend.vread_impl(&reads) {
+        let outcomes = match read(&reads) {
             Ok(mut outcomes) if outcomes.len() <= reads.len() => {
                 outcomes.resize_with(reads.len(), || {
                     Err(OpError::unknown(
@@ -161,32 +330,41 @@ pub fn read_all_vectors<F: VectorBackend + ?Sized>(
             if exceeded {
                 chunk.truncate(available);
             }
-            total += chunk.len();
+            let additional = chunk.len();
             let bytes = &mut data[index];
             // Preserve the measured small-file adoption and large-file layout.
-            if adopt_small
+            let appended = if adopt_small
                 && bytes.is_empty()
                 && chunk.len() <= 64 * 1024
                 && chunk.capacity() == chunk.len()
             {
                 *bytes = chunk;
-            } else {
+                true
+            } else if reserve(bytes, additional) {
                 bytes.extend_from_slice(&chunk);
+                true
+            } else {
+                false
+            };
+            if appended {
+                total += additional;
             }
             let failure = failure.or_else(|| {
-                exceeded.then(|| {
-                    (
-                        std::io::Error::from_raw_os_error(libc::EFBIG),
-                        FailureState::Failed,
-                    )
-                })
+                let cause = if !appended {
+                    std::io::Error::from(std::io::ErrorKind::OutOfMemory)
+                } else if exceeded {
+                    std::io::Error::from_raw_os_error(libc::EFBIG)
+                } else {
+                    return None;
+                };
+                Some((cause, FailureState::Failed))
             });
             if let Some((cause, state)) = failure {
                 let progress = (!bytes.is_empty()).then(|| {
                     IoProgress::Read(vfsi_core::api::ReadOutput::owned(
                         0,
                         std::mem::take(bytes),
-                        eof && !exceeded,
+                        eof && !exceeded && appended,
                     ))
                 });
                 output[index] = Some(Err(match state {
@@ -234,6 +412,19 @@ pub fn stream_read_chunks(
     chunk_size: impl Fn(usize) -> usize,
     memory_limit: usize,
     mut read: impl FnMut(&[ReadOp]) -> Result<Vec<ReadOutput>, IndexedError>,
+    cb: impl FnMut(usize, ReadOutput) -> bool,
+) -> Result<(), IndexedError> {
+    stream_read_chunks_indexed(files, chunk_size, memory_limit, |_, reads| read(reads), cb)
+}
+
+/// Provide logical input indices for backends that pin operands on the first
+/// admitted wave. Read outcomes must match the dispatched request operands.
+#[doc(hidden)]
+pub fn stream_read_chunks_indexed(
+    files: &[FileOperand],
+    chunk_size: impl Fn(usize) -> usize,
+    memory_limit: usize,
+    mut read: impl FnMut(&[usize], &mut [ReadOp]) -> Result<Vec<ReadOutput>, IndexedError>,
     mut cb: impl FnMut(usize, ReadOutput) -> bool,
 ) -> Result<(), IndexedError> {
     use std::collections::VecDeque;
@@ -275,7 +466,7 @@ pub fn stream_read_chunks(
             },
             None => error,
         };
-        let results = read(&reads).map_err(remap)?;
+        let results = read(&batch_indices, &mut reads).map_err(remap)?;
         validate_read_results("vstream_impl", &reads, &results).map_err(remap)?;
         for (batch_index, result) in results.into_iter().enumerate() {
             let index = batch_indices[batch_index];
@@ -329,6 +520,56 @@ pub fn native_read_file_impl_default<F: VectorBackend + ?Sized>(
 #[cfg(test)]
 mod stream_error_tests {
     use super::*;
+
+    #[test]
+    fn whole_read_growth_failure_keeps_prefix_and_sibling_budget() {
+        let files = [FileOperand::from_fd(1), FileOperand::from_fd(2)];
+        let results = collect_whole_reads(
+            &files,
+            ReadAllOptions::default().with_max_total_bytes(5),
+            |pending, _| (pending.min(2), 2),
+            false,
+            |reads| {
+                Ok(reads
+                    .iter()
+                    .map(|request| {
+                        let VfOffset::At(offset) = request.offset else {
+                            panic!("whole reads must use positional offsets");
+                        };
+                        let (data, eof) = match (request.file.fd(), offset) {
+                            (Some(1), 0) => (b"ab".as_slice(), false),
+                            (Some(1), 2) => (b"cd".as_slice(), true),
+                            (Some(2), 0) => (b"x".as_slice(), false),
+                            (Some(2), 1) => (b"yz".as_slice(), true),
+                            _ => panic!("unexpected read {request:?}"),
+                        };
+                        Ok(ReadOutput {
+                            file: request.file.clone(),
+                            offset,
+                            data: data.to_vec(),
+                            eof,
+                        })
+                    })
+                    .collect())
+            },
+            |bytes, additional| {
+                if bytes.as_slice() == b"ab" {
+                    return false;
+                }
+                bytes.try_reserve(additional).is_ok()
+            },
+        )
+        .unwrap();
+        let error = results[0].as_ref().unwrap_err();
+        assert_eq!(error.state(), FailureState::Failed);
+        assert_eq!(error.cause().kind(), std::io::ErrorKind::OutOfMemory);
+        let Some(IoProgress::Read(prefix)) = error.progress() else {
+            panic!("expected retained read progress");
+        };
+        assert_eq!(prefix.data(), Some(b"ab".as_slice()));
+        assert!(!prefix.eof());
+        assert_eq!(results[1].as_ref().unwrap(), b"xyz");
+    }
 
     #[test]
     fn stream_errors_reject_indices_outside_the_submitted_wave() {

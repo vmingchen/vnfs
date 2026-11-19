@@ -65,6 +65,21 @@ impl HandleBackend for SmbVecFs {
             .collect())
     }
 
+    fn vclose_owned_impl(&mut self, files: Vec<FileOperand>) -> vfsi_core::VecResult<()> {
+        let outcomes = self.vclose_impl(&files);
+        // Submitted failures have already moved to NoReplay. Keep cleanup
+        // ownership of unsent slots without issuing another CLOSE here.
+        for file in files {
+            if let Some(open) = file.fd().and_then(|fd| self.open_files.remove(&fd)) {
+                self.deferred_closes.push(DeferredClose::new(
+                    open.tree,
+                    CloseState::Ready(open.file_id),
+                ));
+            }
+        }
+        outcomes
+    }
+
     fn close_deferred(&mut self, file: &FileOperand) -> VfResult<()> {
         let fd = file
             .fd()

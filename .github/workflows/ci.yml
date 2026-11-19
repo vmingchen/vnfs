@@ -827,6 +827,8 @@ jobs:
             tests/test_review_findings.py::test_scalar_reader_whole_file_retry_stays_pinned \
             tests/test_review_findings.py::test_closed_scalar_reader_size_does_not_open_descriptor \
             tests/test_review_findings.py::test_group_recovery_keeps_healthy_reader_when_sibling_was_replaced \
+            tests/test_review_findings.py::test_grouped_restore_transport_failure_does_not_block_live_reader \
+            tests/test_review_findings.py::test_attributed_reader_restore_failure_isolated \
             tests/test_review_findings.py::test_uncached_read_error_keeps_cursor_at_call_start
       - name: Smoke-test nfs4fs benchmark drivers
         run: |
@@ -996,6 +998,8 @@ jobs:
             tests/test_review_findings.py::test_scalar_reader_whole_file_retry_stays_pinned \
             tests/test_review_findings.py::test_closed_scalar_reader_size_does_not_open_descriptor \
             tests/test_review_findings.py::test_group_recovery_keeps_healthy_reader_when_sibling_was_replaced \
+            tests/test_review_findings.py::test_grouped_restore_transport_failure_does_not_block_live_reader \
+            tests/test_review_findings.py::test_attributed_reader_restore_failure_isolated \
             tests/test_review_findings.py::test_uncached_read_error_keeps_cursor_at_call_start
       - name: Show patched NFS-Ganesha log after failure
         if: failure()

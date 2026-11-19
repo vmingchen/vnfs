@@ -192,6 +192,17 @@ pub fn with_message(error: io::Error, message: impl Into<Cow<'static, str>>) -> 
     update_context(error, |context| context.message = Some(message.into()))
 }
 
+/// Attach secondary diagnostic text without replacing an existing message.
+pub fn append_message(error: io::Error, message: impl Into<Cow<'static, str>>) -> io::Error {
+    let message = message.into();
+    update_context(error, |context| {
+        context.message = Some(match context.message.take() {
+            Some(primary) => Cow::Owned(format!("{primary}. {message}")),
+            None => message,
+        });
+    })
+}
+
 // Follow only our own wrappers, not arbitrary foreign Error::source chains.
 // The bound also limits inspection of user-created chains assembled by repeatedly
 // sharing and adding context. Native/provenance facts above are cached directly.

@@ -32,6 +32,47 @@ def _pooled_filesystem(backend, tmp_path, nfs_parameters=None, size=2):
     )
 
 
+def test_failed_mixed_mmap_setup_closes_descriptors_by_owner(tmp_path, monkeypatch):
+    with _pooled_filesystem("dummy", tmp_path) as fs:
+        fs.pipe({"/reader": b"payload", "/writer": b"original"})
+        client = fs._client
+        fstat_many = client.fstat_many
+        close_many = client.close_many
+        fstat_calls = 0
+        closed_owners = []
+
+        def fail_size_refresh(tokens):
+            nonlocal fstat_calls
+            fstat_calls += 1
+            if fstat_calls == 2:
+                assert len({client._resolve(token)[0] for token in client._fds}) == 2
+                raise OSError(errno.EIO, "mmap size refresh failed")
+            return fstat_many(tokens)
+
+        def check_close(tokens):
+            owners = {client._resolve(token)[0] for token in tokens}
+            assert len(owners) == 1
+            closed_owners.extend(owners)
+            return close_many(tokens)
+
+        monkeypatch.setattr(client, "fstat_many", fail_size_refresh)
+        monkeypatch.setattr(client, "close_many", check_close)
+        with pytest.raises(OSError, match="mmap size refresh failed") as raised:
+            fs.open_many(
+                [
+                    OpenFile(fs, "/reader", mode="rb"),
+                    OpenFile(fs, "/writer", mode="wb"),
+                ],
+                cache_type="mmap",
+            )
+        assert raised.value.errno == errno.EIO
+        assert raised.value.__cause__ is None
+        assert len(closed_owners) == 2
+        assert set(closed_owners) == {0, 1}
+        assert not client._fds
+        assert not client._deferred_close
+
+
 @pytest.fixture
 def nfs_parameters():
     from ._servers import nfs_config, nfs_reachable
@@ -258,6 +299,177 @@ def test_group_recovery_keeps_healthy_reader_when_sibling_was_replaced(
         assert error.value.errno == errno.ESTALE
         assert error.value.filename == "/replaced"
         assert files[0].read() == b"althy"
+    finally:
+        fs.commit_many(files)
+    assert not fs._client._fds
+
+
+@pytest.mark.parametrize("phase", ["open", "fstat"])
+@pytest.mark.parametrize("kind", ["auth", "connection"])
+def test_grouped_restore_transport_failure_does_not_block_live_reader(
+    fs, monkeypatch, phase, kind
+):
+    fs.pipe({"/live": b"healthy-file", "/stale": b"stale-file"})
+    files = fs.open_many(
+        [OpenFile(fs, path, mode="rb") for path in ["/live", "/stale"]],
+        block_size=2,
+    )
+    live, stale = files
+    try:
+        fs._client.reconnect()
+        fs.batch_size = 1
+        assert live.read(1) == b"h"
+        pinned = live._raw._fd
+        assert fs._client.descriptor_valid(pinned)
+        assert not fs._client.descriptor_valid(stale._raw._fd)
+        fs.batch_size = 8
+        setup_calls = []
+
+        def fail_restore(*args):
+            setup_calls.append(args)
+            error = OSError(errno.EIO, "stale reader could not be restored")
+            error.transport_kind = kind
+            raise error
+
+        monkeypatch.setattr(
+            fs._client, "open_many" if phase == "open" else "fstat_many", fail_restore
+        )
+        live.seek(5)
+        assert live.read(1) == b"h"
+        assert setup_calls, "the speculative reader must reach the failure"
+        assert live._raw._fd == pinned
+        assert fs._client.descriptor_valid(pinned)
+        with pytest.raises(
+            OSError, match="stale reader could not be restored"
+        ) as failed:
+            stale.read(1)
+        assert failed.value.filename == "/stale"
+        assert failed.value.index == 1
+        assert failed.value.transport_kind == kind
+        assert failed.value.failure_state == "not_attempted"
+        assert set(fs._client._fds) == {pinned}
+    finally:
+        fs.commit_many(files)
+    assert not fs._client._fds
+
+
+@pytest.mark.parametrize("phase", ["open", "fstat"])
+def test_attributed_reader_restore_failure_isolated(fs, monkeypatch, phase):
+    fs.pipe({"/live": b"healthy", "/stale": b"unavailable"})
+    files = fs.open_many(
+        [OpenFile(fs, path, mode="rb") for path in ["/live", "/stale"]],
+        block_size=2,
+    )
+    live, stale = files
+    try:
+        fs._client.reconnect()
+        method = "open_many" if phase == "open" else "fstat_many"
+        calls = []
+
+        def fail_restore(values, *args):
+            calls.append(values)
+            error = OSError(errno.EIO, "attributed restore failed")
+            error.transport_kind = "auth"
+            error.index = len(values) - 1
+            raise error
+
+        monkeypatch.setattr(fs._client, method, fail_restore)
+        assert live.read(1) == b"h"
+        assert len(calls[0]) == 2
+        assert fs._client.descriptor_valid(live._raw._fd)
+        live.seek(4)
+        assert live.read(1) == b"t"
+        with pytest.raises(OSError, match="attributed restore failed") as failed:
+            stale.read(1)
+        assert failed.value.filename == "/stale"
+        assert failed.value.index == 1
+        assert failed.value.transport_kind == "auth"
+        assert failed.value.failure_state == "not_attempted"
+    finally:
+        fs.commit_many(files)
+    assert not fs._client._fds
+
+
+@pytest.mark.parametrize("failed_first", [False, True])
+def test_grouped_read_retries_healthy_owner_after_another_owner_fails(
+    tmp_path, monkeypatch, failed_first
+):
+    fs = _pooled_filesystem("dummy", tmp_path)
+    fs.pipe({"/live": b"abc", "/stale": b"def"})
+    files = fs.open_many(
+        [OpenFile(fs, path, mode="rb") for path in ["/live", "/stale"]],
+        block_size=2,
+    )
+    live, stale = files
+    try:
+        client = fs._client
+        owner, _, _ = client._resolve(live._raw._fd)
+        client.close(stale._raw._fd)
+        client._next_client = 1 - owner
+        stale_fd = stale._raw._ensure_open()
+        assert client._resolve(stale_fd)[0] != owner
+        preadv = client.preadv
+        reconnect = client.reconnect_descriptor
+        failures = {}
+        for file, prefix in [(live, b"a"), (stale, b"d")]:
+            error = ConnectionError("READ reply unavailable")
+            error.read_prefix = prefix
+            error.read_offset = 0
+            error.failure_state = "failed"
+            failures[file._raw._fd] = error
+
+        offsets_seen = []
+
+        def read(tokens, offsets, lengths):
+            assert len(tokens) == 1
+            offsets_seen.extend(offsets)
+            if offsets == [0]:
+                return [failures[tokens[0]]]
+            return preadv(tokens, offsets, lengths)
+
+        def revive(fd):
+            if fd == stale_fd:
+                raise ConnectionError("owner unavailable")
+            reconnect(fd)
+
+        monkeypatch.setattr(client, "preadv", read)
+        monkeypatch.setattr(client, "reconnect_descriptor", revive)
+        order = [stale, live] if failed_first else files
+        data, errors = live._buffer_group._pread_many(order, [0, 0], [3, 3])
+        live_index = 1 if failed_first else 0
+        assert data[live_index] == b"abc"
+        assert errors == {1 - live_index: failures[stale_fd]}
+        assert errors[1 - live_index].read_prefix == b"d"
+        assert offsets_seen == [0, 0, 1]
+    finally:
+        fs.commit_many(files)
+        fs.close()
+
+
+def test_legacy_group_retries_transient_restore_failure(dummy_fs, monkeypatch):
+    fs = dummy_fs
+    fs.pipe({"/first": b"abc", "/second": b"def"})
+    files = fs.open_many(
+        [OpenFile(fs, path, mode="rb") for path in ["/first", "/second"]],
+        block_size=2,
+    )
+    try:
+        client = fs._client
+        client.reconnect()
+        original = client.open_many
+        calls = []
+
+        def transient(paths, modes):
+            calls.append(paths)
+            if len(calls) == 1:
+                raise ConnectionError("transient restore rejection")
+            return original(paths, modes)
+
+        monkeypatch.setattr(client, "_native_has_vector_outcomes", False)
+        monkeypatch.setattr(client, "open_many", transient)
+        assert files[0].read(1) == b"a"
+        assert calls[0] == ["/first", "/second"]
+        assert files[1].read(1) == b"d"
     finally:
         fs.commit_many(files)
     assert not fs._client._fds
