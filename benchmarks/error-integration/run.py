@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Randomized paired actual-Vfsi comparison. Timing and allocation binaries differ."""
 
-import argparse, hashlib, json, os, random, statistics, subprocess
+import argparse, hashlib, json, random, statistics, subprocess
 from pathlib import Path
 
 
@@ -37,15 +37,15 @@ def parity(rows):
         assert rows["baseline"].get(f) == rows["final"].get(f), (f, rows)
 
 
-def main():
+def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--work", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--pairs", type=int, default=9)
     p.add_argument("--cpu", default="2")
     p.add_argument("--controls-only", action="store_true")
-    a = p.parse_args()
-    if a.pairs < 7:
+    a = p.parse_args(argv)
+    if not a.controls_only and a.pairs < 7:
         p.error("at least seven pairs required")
     if not __debug__:
         raise RuntimeError("assertions must be enabled")
@@ -55,13 +55,14 @@ def main():
         "uring": w / "posix",
         **{b: (w / f"{b}.root").read_text().strip() for b in ["nfs41", "nfs42", "smb"]},
     }
+    modes = ("allocations",) if a.controls_only else ("timing", "allocations")
     binaries = {
-        name: {mode: w / f"{name}-{mode}" for mode in ["timing", "allocations"]}
+        name: {mode: w / f"{name}-{mode}" for mode in modes}
         for name in ["baseline", "final"]
     }
     result = {
         "schema": 1,
-        "pairs": a.pairs,
+        "pairs": 0 if a.controls_only else a.pairs,
         "cpu": a.cpu,
         "scope": "Actual Vfsi clients; equal VecResult semantics; native error boxing accepted, no sequential baseline.",
         "rustc": checked(["rustc", "-Vv"]),

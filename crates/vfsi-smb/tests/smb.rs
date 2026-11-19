@@ -2374,9 +2374,11 @@ fn copy_range_overflow_leaves_missing_destination_and_keeps_healthy_sibling() {
     let mut observations = Vec::new();
     for server in [false, true] {
         let invalid = root.join(format!("invalid-{server}"));
+        let signed_overflow = root.join(format!("signed-overflow-{server}"));
         let valid = root.join(format!("valid-{server}"));
         let pairs = [
             ExtentPair::from_os_paths(&source, 0, &invalid, u64::MAX, Some(1)),
+            ExtentPair::from_os_paths(&source, 0, &signed_overflow, i64::MAX as u64 + 1, Some(0)),
             ExtentPair::from_os_paths(&source, 1, &valid, 1, Some(u64::MAX)),
         ];
         let results = if server {
@@ -2385,7 +2387,8 @@ fn copy_range_overflow_leaves_missing_destination_and_keeps_healthy_sibling() {
             backend.vcopy_data_impl(&pairs)
         }
         .unwrap();
-        let exists = backend.exists_impl(&invalid).unwrap();
+        let exists = backend.exists_impl(&invalid).unwrap()
+            || backend.exists_impl(&signed_overflow).unwrap();
         let read = backend
             .vread_all_impl(&[FileOperand::from_os_path(&valid)])
             .unwrap()
@@ -2394,12 +2397,14 @@ fn copy_range_overflow_leaves_missing_destination_and_keeps_healthy_sibling() {
     }
     cleanup_test_tree(&root);
     for (results, exists, read) in observations {
-        assert_eq!(
-            results[0].as_ref().unwrap_err().cause().raw_os_error(),
-            Some(libc::EOVERFLOW)
-        );
+        for result in &results[..2] {
+            assert_eq!(
+                result.as_ref().unwrap_err().cause().raw_os_error(),
+                Some(libc::EOVERFLOW)
+            );
+        }
         assert!(!exists, "overflow must not create the destination");
-        assert!(results[1].is_ok(), "{:?}", results[1]);
+        assert!(results[2].is_ok(), "{:?}", results[2]);
         assert_eq!(read.unwrap(), b"\0b");
     }
 }

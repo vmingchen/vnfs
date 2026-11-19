@@ -42,10 +42,12 @@ success, the failing element when known, or `VFSI_INDEX_UNKNOWN`. The
 
 Provide one `vfsi_result` per element and inspect every slot, including after
 an overall failure. A request rejected before submission marks the failing
-element when known and leaves the rest not attempted. Close, attribute updates, mkdir,
-remove, rename, and copy preserve independently confirmed outcomes after
-submission. Some other calls mark sibling outcomes indeterminate when their
-completion cannot be established.
+element when known and leaves the rest not attempted. Close, attribute updates,
+mkdir, remove, rename, and copy preserve independently confirmed outcomes
+after submission. Their item results use `VFSI_ERROR_NOT_ATTEMPTED` for work
+that was skipped and retain the cause in `err_no` and `message`. The overall
+result keeps the selected failure's diagnostic category. Some other calls
+mark sibling outcomes indeterminate when their completion cannot be established.
 
 ## Scoped object identity (additive ABI v3)
 

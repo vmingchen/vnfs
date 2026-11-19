@@ -381,6 +381,9 @@ impl VectorBackend for SmbVecFs {
                 } else {
                     None
                 };
+                if attrs.masks.contains(AttrMask::SIZE) {
+                    Self::file_end_of_file(attrs.size).map_err(OpError::not_attempted)?;
+                }
                 // Validate both timestamp fields before SIZE can mutate the file.
                 for (mask, seconds, nanos) in [
                     (AttrMask::ATIME, attrs.atime_sec, attrs.atime_nsec),

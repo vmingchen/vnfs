@@ -285,7 +285,6 @@ impl NfsVecFs {
 
     fn copy_extents_server_side(&mut self, pairs: &[ExtentPair]) -> Vec<vfsi_core::OpResult<()>> {
         use vfsi_core::{OpError, OpResult};
-        let mut output: Vec<Option<OpResult<()>>> = (0..pairs.len()).map(|_| None).collect();
         let sources: Vec<_> = pairs.iter().map(|pair| pair.src_path.as_path()).collect();
         let opened = copy_slots(
             self.vopen_raw_impl(
@@ -295,60 +294,117 @@ impl NfsVecFs {
             ),
             pairs.len(),
         );
+        let mut output: Vec<Option<OpResult<()>>> = (0..pairs.len()).map(|_| None).collect();
         let mut src = (0..pairs.len()).map(|_| None).collect::<Vec<_>>();
         let mut dst = (0..pairs.len()).map(|_| None).collect::<Vec<_>>();
         let mut active = Vec::new();
+        let mut retry_from = pairs.len();
+        let source_missing = |error: &OpError| {
+            error.state() != vfsi_core::FailureState::Unknown
+                && error.cause().kind() == std::io::ErrorKind::NotFound
+        };
         for (index, result) in opened.into_iter().enumerate() {
             match result {
                 Ok(file) => {
                     src[index] = Some(file);
                     active.push(index);
                 }
-                Err(error) => output[index] = Some(Err(error)),
-            }
-        }
-        let paths: Vec<_> = active
-            .iter()
-            .map(|&index| pairs[index].dst_path.as_path())
-            .collect();
-        let opened = copy_slots(
-            self.vopen_raw_impl(
-                &paths,
-                &vec![libc::O_WRONLY | libc::O_CREAT; paths.len()],
-                &vec![0o644; paths.len()],
-            ),
-            paths.len(),
-        );
-        let mut ready = Vec::new();
-        for (index, result) in active.into_iter().zip(opened) {
-            match result {
-                Ok(file) => {
-                    dst[index] = Some(file);
-                    ready.push(index);
+                Err(error) => {
+                    if !active.is_empty() && source_missing(&error) {
+                        retry_from = retry_from.min(index);
+                    }
+                    output[index] = Some(Err(error));
                 }
-                Err(error) => output[index] = Some(Err(error)),
             }
         }
-        // Identity dependencies retain the existing serial backend semantics;
-        // unique OPEN owners let us reuse the admitted handles without reopening.
-        let aliases = copy_pairs_alias(ready.iter().map(|&index| {
-            let source = &self.open_files[&src[index].as_ref().unwrap().fd().unwrap()];
-            let destination = &self.open_files[&dst[index].as_ref().unwrap().fd().unwrap()];
-            (&source.fh, &destination.fh)
-        }));
-        if aliases {
-            for (position, &index) in ready.iter().enumerate() {
-                self.copy_opened_batch(
-                    pairs,
-                    &src,
-                    &dst,
-                    &ready[position..position + 1],
-                    &mut output,
-                );
-                debug_assert!(output[index].is_some());
+        let prefix = active.partition_point(|&index| index < retry_from);
+        self.copy_admitted_extents(pairs, &src, &mut dst, &active[..prefix], &mut output);
+        // An absent source can be created by an earlier copy, including
+        // through an alias. Recheck only definite missing sources, in order.
+        // Keep already-open owners until cleanup and preserve other failures.
+        if retry_from < pairs.len() {
+            use vfsi_core::FailureState;
+            let mut failed = Vec::new();
+            let record_failure = |index, slot: &mut Option<OpResult<()>>, failed: &mut Vec<_>| {
+                let error = slot.as_mut()?.as_mut().err()?;
+                match error.state() {
+                    FailureState::Unknown => {
+                        Some(vfsi_core::internal::errors::share_op_cause(error))
+                    }
+                    FailureState::Failed => {
+                        failed.push((index, vfsi_core::internal::errors::share_op_cause(error)));
+                        None
+                    }
+                    FailureState::NotAttempted => None,
+                }
+            };
+            let mut uncertain = active[..prefix]
+                .iter()
+                .find_map(|&index| record_failure(index, &mut output[index], &mut failed));
+            for index in retry_from..pairs.len() {
+                let retry_source = output[index]
+                    .as_ref()
+                    .and_then(|result| result.as_ref().err())
+                    .is_some_and(source_missing);
+                let blocker = if retry_source || src[index].is_some() {
+                    uncertain.as_ref()
+                } else {
+                    None
+                };
+                if blocker.is_none() && retry_source {
+                    let opened = self.vopen_raw_impl(
+                        &[pairs[index].src_path.as_path()],
+                        &[libc::O_RDONLY],
+                        &[0],
+                    );
+                    match copy_slots(opened, 1).pop().expect("one source slot") {
+                        Ok(file) => {
+                            src[index] = Some(file);
+                            output[index] = None;
+                        }
+                        Err(error) => output[index] = Some(Err(error)),
+                    }
+                }
+                // Re-admitted and preopened sources use the same pinned
+                // identity check. A failure on a different file cannot
+                // suppress an otherwise valid dependent copy.
+                let blocker = blocker.or_else(|| {
+                    let source_fd = src[index].as_ref()?.fd()?;
+                    let source = self.open_files[&source_fd].fh.clone();
+                    failed.iter().find_map(|&(failed_index, ref cause)| {
+                        let affected = match dst[failed_index].as_ref().and_then(FileOperand::fd) {
+                            Some(fd) => self.open_files[&fd].fh == source,
+                            // An OPEN can create a file before local handle
+                            // registration fails. Resolve that destination
+                            // only when a previously missing source appeared.
+                            None if retry_source => {
+                                let path = self.server_path(&pairs[failed_index].dst_path);
+                                match self.resolve_path(&path, true) {
+                                    Ok(destination) => destination == source,
+                                    Err(error) => {
+                                        error.raw_os_error() != Some(libc::ELOOP)
+                                            && !matches!(
+                                                error.kind(),
+                                                std::io::ErrorKind::NotFound
+                                                    | std::io::ErrorKind::NotADirectory
+                                            )
+                                    }
+                                }
+                            }
+                            None => false,
+                        };
+                        affected.then_some(cause)
+                    })
+                });
+                if let Some(cause) = blocker {
+                    output[index] = Some(Err(OpError::not_attempted(
+                        vfsi_core::internal::errors::from_shared(cause),
+                    )));
+                } else if src[index].is_some() {
+                    self.copy_admitted_extents(pairs, &src, &mut dst, &[index], &mut output);
+                    uncertain = record_failure(index, &mut output[index], &mut failed);
+                }
             }
-        } else {
-            self.copy_opened_batch(pairs, &src, &dst, &ready, &mut output);
         }
         let mut cleanup = Vec::new();
         let mut owners = Vec::new();
@@ -380,6 +436,56 @@ impl NfsVecFs {
                 })
             })
             .collect()
+    }
+
+    fn copy_admitted_extents(
+        &mut self,
+        pairs: &[ExtentPair],
+        src: &[Option<FileOperand>],
+        dst: &mut [Option<FileOperand>],
+        active: &[usize],
+        output: &mut [Option<vfsi_core::OpResult<()>>],
+    ) {
+        if active.is_empty() {
+            return;
+        }
+        let paths: Vec<_> = active
+            .iter()
+            .map(|&index| pairs[index].dst_path.as_path())
+            .collect();
+        let opened = copy_slots(
+            self.vopen_raw_impl(
+                &paths,
+                &vec![libc::O_WRONLY | libc::O_CREAT; paths.len()],
+                &vec![0o644; paths.len()],
+            ),
+            paths.len(),
+        );
+        let mut ready = Vec::new();
+        for (index, result) in active.iter().copied().zip(opened) {
+            match result {
+                Ok(file) => {
+                    dst[index] = Some(file);
+                    ready.push(index);
+                }
+                Err(error) => output[index] = Some(Err(error)),
+            }
+        }
+        // Identity dependencies retain the existing serial backend semantics;
+        // unique OPEN owners let us reuse the admitted handles without reopening.
+        let aliases = copy_pairs_alias(ready.iter().map(|&index| {
+            let source = &self.open_files[&src[index].as_ref().unwrap().fd().unwrap()];
+            let destination = &self.open_files[&dst[index].as_ref().unwrap().fd().unwrap()];
+            (&source.fh, &destination.fh)
+        }));
+        if aliases {
+            for (position, &index) in ready.iter().enumerate() {
+                self.copy_opened_batch(pairs, src, dst, &ready[position..position + 1], output);
+                debug_assert!(output[index].is_some());
+            }
+        } else {
+            self.copy_opened_batch(pairs, src, dst, &ready, output);
+        }
     }
 
     fn copy_opened_batch(
@@ -591,6 +697,8 @@ impl NfsVecFs {
     pub(super) fn vcopy_data_nfs(&mut self, pairs: &[ExtentPair]) -> vfsi_core::VecResult<()> {
         self.ensure_writable(pairs.len())?;
         let mut output = Vec::with_capacity(pairs.len());
+        // Admission recovery is scoped to an OPEN batch. Use separate calls
+        // for dependencies that require completion of an earlier copy.
         for batch in pairs.chunks(8) {
             if self.server_copy_enabled {
                 output.extend(self.copy_extents_server_side(batch));

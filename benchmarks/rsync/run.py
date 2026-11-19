@@ -22,7 +22,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'du'))
 from generate import fingerprint
-from run import CLIENT, SERVER, Link, capture_summary, checked, sha
+from run import SERVER, Link, capture_summary, checked, sha
 
 HERE = Path(__file__).resolve().parent
 

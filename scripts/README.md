@@ -53,7 +53,7 @@ Rust port tests, builds Git/rsync against this checkout's C header/library, and
 checks C port parity. Configure rsync with `--enable-vfsi` first. It does not
 fetch, reset, patch, commit or publish application checkouts. Build artifacts and
 Cargo lockfiles may be updated. This checks local/kernel-backed behavior; run
-`scripts/test-ports-nfs.sh` separately for NFSv4.1/v4.2 parity with a live export.
+`bash scripts/test-ports-nfs.sh` separately for NFSv4.1/v4.2 parity with a live export.
 
 The compatibility workflow runs on relevant pushes on any branch and pull
 requests, schedule and manual dispatch. It derives all four application jobs from

@@ -622,7 +622,7 @@ impl LocalBackend {
         if fd < 0 {
             let error = std::io::Error::last_os_error();
             let error = match error.raw_os_error() {
-                Some(libc::EXDEV | libc::ELOOP) => std::io::Error::from_raw_os_error(libc::EACCES),
+                Some(libc::EXDEV) => std::io::Error::from_raw_os_error(libc::EACCES),
                 _ => error,
             };
             return Err(error);
@@ -724,7 +724,7 @@ impl LocalBackend {
                 return Ok(no_follow);
             }
             let error = match error.raw_os_error() {
-                Some(libc::EXDEV | libc::ELOOP) => std::io::Error::from_raw_os_error(libc::EACCES),
+                Some(libc::EXDEV) => std::io::Error::from_raw_os_error(libc::EACCES),
                 _ => error,
             };
             Err(error)
@@ -1929,10 +1929,28 @@ impl LocalBackend {
     fn copy_extent(&mut self, p: &ExtentPair) -> VfResult<()> {
         let sp = self.real_path(&self.resolve(&p.src_path))?;
         let dp = self.real_path(&self.resolve(&p.dst_path))?;
-        let mut src_options = OpenOptions::new();
-        src_options.read(true);
-        Self::protect_create_open(&sp, &mut src_options);
-        let src = src_options.open(&sp)?;
+        // A FIFO must not stall the whole copy vector waiting for a peer.
+        let open_flags = |path: &AnchoredPath| {
+            libc::O_NONBLOCK
+                | if path.nofollow_on_open {
+                    libc::O_NOFOLLOW
+                } else {
+                    0
+                }
+        };
+        let src = OpenOptions::new()
+            .read(true)
+            .custom_flags(open_flags(&sp))
+            .open(&sp)?;
+        let src_metadata = src.metadata()?;
+        if !src_metadata.is_file() {
+            let errno = if src_metadata.is_dir() {
+                libc::EISDIR
+            } else {
+                libc::EINVAL
+            };
+            return Err(std::io::Error::from_raw_os_error(errno));
+        }
         if i64::try_from(p.dst_offset).is_err()
             || (p.length != Some(0) && i64::try_from(p.src_offset).is_err())
         {
@@ -1940,30 +1958,35 @@ impl LocalBackend {
             // never reads the source, but still sets the destination length.
             return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
         }
-        let mut dst_options = OpenOptions::new();
-        dst_options.write(true).create(true).truncate(false);
-        Self::protect_create_open(&dp, &mut dst_options);
-        let dst = dst_options.open(&dp)?;
+        let dst = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .custom_flags(open_flags(&dp))
+            .open(&dp)?;
+        let dst_metadata = dst.metadata()?;
+        if !dst_metadata.is_file() {
+            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+        }
         let mut length = p.length;
-        if p.dst_offset > p.src_offset && length != Some(0) {
-            let src_metadata = src.metadata()?;
-            let dst_metadata = dst.metadata()?;
-            if src_metadata.dev() == dst_metadata.dev() && src_metadata.ino() == dst_metadata.ino()
-            {
-                let Some(requested) = length else {
-                    // A forward to-EOF alias copy can extend its own source.
-                    return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
-                };
-                let available = src_metadata.len().saturating_sub(p.src_offset);
-                let actual = requested.min(available);
-                if p.dst_offset - p.src_offset < actual {
-                    // Do not overwrite bytes that a later chunk still needs.
-                    return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
-                }
-                // A finite alias copy must not consume data or holes created
-                // by its own writes beyond the original source EOF.
-                length = Some(actual);
+        if p.dst_offset > p.src_offset
+            && length != Some(0)
+            && src_metadata.dev() == dst_metadata.dev()
+            && src_metadata.ino() == dst_metadata.ino()
+        {
+            let Some(requested) = length else {
+                // A forward to-EOF alias copy can extend its own source.
+                return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+            };
+            let available = src_metadata.len().saturating_sub(p.src_offset);
+            let actual = requested.min(available);
+            if p.dst_offset - p.src_offset < actual {
+                // Do not overwrite bytes that a later chunk still needs.
+                return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
             }
+            // A finite alias copy must not consume data or holes created
+            // by its own writes beyond the original source EOF.
+            length = Some(actual);
         }
         let mut so = p.src_offset;
         let mut doff = p.dst_offset;

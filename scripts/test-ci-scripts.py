@@ -397,6 +397,7 @@ class RustRunnerTests(unittest.TestCase):
             stub.chmod(0o755)
         result = self.run_script(
             "test-ci-local.sh", "full", VFSI_LOCAL_CI_VENV=str(venv.parent),
+            python_bin="inherited", smb_python_ready="inherited",
             VFSI_NFS_SERVER="test-server.invalid", VFSI_SMB_SERVER="test-server.invalid",
             VFSI_SMB_SHARE="test-share", VFSI_SMB_LOCAL_ROOT=str(self.root),
         )
@@ -405,6 +406,16 @@ class RustRunnerTests(unittest.TestCase):
         self.assertEqual(jobs, ["check", "rust", "python", "nfs", "smb"])
         calls = self.log.read_text().splitlines()
         self.assertEqual(calls.count("native-tests"), 1)
+        for package in ("vfsi-fsspec", "vsmbfs"):
+            self.assertEqual(
+                calls.count(f"python -m pip install --no-deps -e adapters/{package} -q"),
+                1,
+            )
+        for package in ("nfs4fs", "vsmb"):
+            self.assertEqual(
+                calls.count(f"maturin develop --manifest-path adapters/{package}/Cargo.toml --locked"),
+                1,
+            )
         self.assertTrue(any("pytest adapters/nfs4fs/tests" in call for call in calls))
         self.assertTrue(any("pytest adapters/vsmb/tests adapters/vsmbfs/tests" in call
                             for call in calls))
@@ -483,6 +494,7 @@ class RustRunnerTests(unittest.TestCase):
             "uname": "printf 'Linux\n'\n",
             "rpcinfo": "printf '100003 4 tcp 2049 nfs\n'\n",
             "cargo": (
+                'printf "%s\\n" "facade-endpoint ${VNFS_TEST_HOST:-unset}" >> "$CALL_LOG"\n'
                 'printf "%s %s\n" "${VFSI_NFS_MINOR:-none}" "$*" >> "$CALL_LOG"\n'
                 'printf "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"\n'
             ),
@@ -496,16 +508,31 @@ class RustRunnerTests(unittest.TestCase):
             stub = venv / name
             stub.write_text("#!/bin/sh\nexit 0\n")
             stub.chmod(0o755)
-        result = self.run_script("test-ci-local.sh", "nfs",
-                                 VFSI_LOCAL_CI_VENV=str(venv.parent))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        calls = self.log.read_text().splitlines()
-        for minor in (1, 2):
-            for test in (
-                "identity::tests::live_nfs_retained_identity_survives_rename_replacement_and_reconnect",
-                "directory::tests::retained_cohort_children_survive_parent_rename_with_bounded_compounds",
-            ):
-                self.assertEqual(calls.count(f"{minor} test -p vfsi-c --lib {test} -- --ignored --exact"), 1)
+        for server, override, endpoint in [
+            ("test-server.invalid", "", "test-server.invalid:2049"),
+            ("127.0.0.1:12345", "", "127.0.0.1:12345"),
+            ("::1", "", "[::1]:2049"),
+            ("[::1]", "", "[::1]:2049"),
+            ("[::1]:12345", "", "[::1]:12345"),
+            ("test-server.invalid", "explicit.invalid:12345", "explicit.invalid:12345"),
+        ]:
+            with self.subTest(server=server, override=override):
+                if self.log.exists():
+                    self.log.unlink()
+                result = self.run_script(
+                    "test-ci-local.sh", "nfs", VFSI_LOCAL_CI_VENV=str(venv.parent),
+                    VFSI_NFS_SERVER=server, VNFS_TEST_HOST=override,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = self.log.read_text().splitlines()
+                endpoints = {line for line in calls if line.startswith("facade-endpoint ")}
+                self.assertEqual(endpoints, {f"facade-endpoint {endpoint}"})
+                for minor in (1, 2):
+                    for test in (
+                        "identity::tests::live_nfs_retained_identity_survives_rename_replacement_and_reconnect",
+                        "directory::tests::retained_cohort_children_survive_parent_rename_with_bounded_compounds",
+                    ):
+                        self.assertEqual(calls.count(f"{minor} test -p vfsi-c --lib {test} -- --ignored --exact"), 1)
 
     def test_live_c_gate_rejects_empty_test_selection(self):
         result = subprocess.run(["bash", str(self.root / "ci/test-c-nfs.sh")],
@@ -876,6 +903,61 @@ class BenchmarkPreflightTests(unittest.TestCase):
                             module.main()
                     self.assertEqual(caught.exception.code, 2)
                     self.assertFalse(output.exists())
+
+    def test_allocation_controls_do_not_require_timing_binaries(self):
+        import importlib.util
+        from unittest.mock import patch
+
+        path = self.repo / "benchmarks/error-integration/run.py"
+        spec = importlib.util.spec_from_file_location("allocation_controls", path)
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        output = self.root / "controls.json"
+        for backend in ("nfs41", "nfs42", "smb"):
+            (self.root / f"{backend}.root").write_text(str(self.root))
+        (self.root / "final-source.patch").write_text("test diff")
+        for variant in ("baseline", "final"):
+            (self.root / f"{variant}.revision").write_text("test revision")
+            (self.root / f"{variant}-allocations").write_bytes(b"test allocations")
+            source = self.root / f"{variant}-source"
+            for relative in (
+                "benchmarks/error-integration/Cargo.toml",
+                "benchmarks/error-integration/Cargo.lock",
+                "benchmarks/error-integration/src/main.rs",
+                "crates/vfsi-nfs/src/nfs/io.rs",
+            ):
+                file = source / relative
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text("test source")
+
+        def checked(args, **kwargs):
+            if args[0] != "taskset":
+                return "test toolchain"
+            binary, backend, _, count, _ = args[3:]
+            self.assertTrue(binary.name.endswith("-allocations"))
+            self.assertTrue(binary.is_file())
+            return json.dumps({
+                "iterations": count,
+                "allocation_instrumented": True,
+                "closed_handles": 64,
+                "ring": {
+                    "sqes": 64 * count, "cqes": 64 * count, "waves": count,
+                    "retained_descriptors": 0, "retained_buffer_bytes": 0,
+                } if backend == "uring" else None,
+                "nfs": {"rpcs": 1} if backend.startswith("nfs") else None,
+            })
+
+        with patch.object(runner, "checked", checked):
+            runner.main([
+                "--work", str(self.root), "--output", str(output),
+                "--controls-only", "--pairs", "0",
+            ])
+        result = json.loads(output.read_text())
+        self.assertTrue(result["allocation_controls"])
+        self.assertFalse(result["timings"])
+        self.assertEqual(result["pairs"], 0)
+        self.assertTrue(all(set(hashes) == {"allocations"}
+                            for hashes in result["binary_sha256"].values()))
 
     def test_assertion_based_evidence_tools_refuse_optimized_python_before_effects(self):
         for relative, entry, takes_args in [

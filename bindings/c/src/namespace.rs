@@ -334,7 +334,8 @@ pub unsafe extern "C" fn vfsi_renamev(
     })
 }
 
-/// Copy an extent-pair array in one backend vector call.
+/// Copy independent extent pairs in one backend vector call.
+/// Submit a dependent copy separately after checking its predecessor's result.
 ///
 /// # Safety
 /// All pointers, buffers and callbacks must satisfy the module-level C

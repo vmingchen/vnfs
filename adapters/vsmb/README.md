@@ -8,6 +8,10 @@ both scalar operations and vector operations such as `stat_many`, `read_many`,
 python -m pip install vsmb
 ```
 
+Published wheels support standard CPython 3.9 and newer on Linux x86-64 and
+AArch64 with glibc 2.28 or newer. A separate wheel supports free-threaded
+CPython 3.14 on Linux x86-64 with the same glibc minimum.
+
 ```python
 from vsmb import SmbClient
 

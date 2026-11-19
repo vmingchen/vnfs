@@ -56,7 +56,7 @@ jobs:
           python -m venv .sbom-venv
           .sbom-venv/bin/pip install cyclonedx-bom==7.3.1
           python -m venv .sbom-runtime
-          .sbom-runtime/bin/pip install 'fsspec>=2024.12.0'
+          .sbom-runtime/bin/pip install adapters/vfsi-fsspec/dist/*.whl
           mkdir -p sbom
           .sbom-venv/bin/cyclonedx-py environment .sbom-runtime \
             --pyproject adapters/vfsi-fsspec/pyproject.toml \

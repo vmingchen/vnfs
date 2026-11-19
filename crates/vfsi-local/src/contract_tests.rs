@@ -600,6 +600,13 @@ mod tests {
                 .unwrap_err();
             assert_eq!(create_error.raw_os_error(), Some(libc::EEXIST));
         }
+        #[cfg(target_os = "linux")]
+        for path in [Path::new("/self/child"), Path::new("/first/child")] {
+            let error = backend.stat_impl(path).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::ELOOP));
+            let error = backend.lstat_impl(path).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::ELOOP));
+        }
     }
 
     #[test]
@@ -3566,7 +3573,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "test-faults")]
     fn run_filtered_test_child(test_name: &str, marker: &str) {
         use std::process::Command;
         use std::time::{Duration, Instant};
@@ -4861,6 +4867,44 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    #[test]
+    fn extent_copy_rejects_nonregular_files_before_copying_and_keeps_healthy_siblings() {
+        use std::os::unix::ffi::OsStrExt;
+
+        const CHILD: &str = "VFSI_LOCAL_COPY_NONREGULAR_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            run_filtered_test_child(
+                "contract_tests::tests::extent_copy_rejects_nonregular_files_before_copying_and_keeps_healthy_siblings",
+                CHILD,
+            );
+            return;
+        }
+
+        let (root, mut backend) = fs("copy-nonregular");
+        std::fs::write(root.0.join("source"), b"abc").unwrap();
+        std::fs::create_dir(root.0.join("directory")).unwrap();
+        let fifo = std::ffi::CString::new(root.0.join("fifo").as_os_str().as_bytes()).unwrap();
+        // SAFETY: fifo is a valid NUL-terminated path under the private test root.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+        let pairs = [
+            ExtentPair::new("/directory", 0, "/from-directory", 0, None),
+            ExtentPair::new("/fifo", 0, "/from-fifo", 0, Some(0)),
+            ExtentPair::new("/source", 0, "/fifo", 0, None),
+            ExtentPair::new("/source", 0, "/valid", 0, None),
+        ];
+        let outcomes = backend.vcopy_data_impl(&pairs).unwrap();
+        assert_eq!(
+            outcomes[0].as_ref().unwrap_err().cause().raw_os_error(),
+            Some(libc::EISDIR)
+        );
+        assert!(outcomes[1].is_err() && outcomes[2].is_err());
+        assert!(!root.0.join("from-directory").exists());
+        assert!(!root.0.join("from-fifo").exists());
+        assert!(outcomes[3].is_ok());
+        assert_eq!(std::fs::read(root.0.join("valid")).unwrap(), b"abc");
+    }
+
     #[test]
     fn impossible_copy_offset_leaves_missing_destinations_absent() {
         let (root, mut backend) = fs("copy-offset-preflight");

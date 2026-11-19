@@ -963,6 +963,7 @@ jobs:
           VFSI_NFS_MINOR: 2
         run: |
           cargo test -p vfsi-nfs --features "server-copy test-faults" --test nfs -- --test-threads=1
+          cargo test -p vfsi-nfs --features "server-copy test-faults" --test prr_rust20_round12 -- --test-threads=1
           # Include every non-ignored live/fault regression, including COPY.
           cargo test -p vfsi-nfs --features "server-copy test-faults" --lib -- --test-threads=1
           cargo test -p vfsi-nfs --features "server-copy test-faults" --lib copy_metadata_recovery -- --ignored --test-threads=1

@@ -229,7 +229,7 @@ The API is synchronous, and Linux is the only native-package platform. Read-only
 operations recover automatically from transport and session failures with
 bounded reconnect/reopen attempts; mutations are not replayed when a lost
 reply makes their outcome ambiguous. See the [`vnfs` production notes and
-failure semantics](crates/vnfs/README.md#failure-and-recovery-semantics).
+failure semantics](crates/vnfs/README.md#before-production).
 
 Issues and focused pull requests are welcome. Start with
 [CONTRIBUTING.md](CONTRIBUTING.md); security reports follow

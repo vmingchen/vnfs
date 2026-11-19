@@ -49,3 +49,47 @@ fn aggregate_unit_failures_keep_the_selected_item_indeterminate_category() {
         assert_eq!(root.err_no, items[0].err_no);
     }
 }
+
+#[test]
+fn copy_unit_results_distinguish_skipped_dependency_from_failed_copy() {
+    use vfsi_core::OpError;
+
+    let mut items = [vfsi_result::item_success(0); 3];
+    let mut completed = Vec::new();
+    let status = unit_results(
+        "copy",
+        &mut items,
+        Ok(vec![
+            Err(OpError::failed(
+                std::io::Error::from_raw_os_error(libc::EIO),
+                None,
+            )),
+            Err(OpError::not_attempted(std::io::Error::from_raw_os_error(
+                libc::EIO,
+            ))),
+            Ok(()),
+        ]),
+        |index| completed.push(index),
+    );
+
+    assert_eq!(completed, [2]);
+    assert_eq!(status.index, 0);
+    assert_eq!(status.category, VFSI_ERROR_FILESYSTEM);
+    assert_eq!(items[0].category, VFSI_ERROR_FILESYSTEM);
+    assert_eq!(items[1].category, VFSI_ERROR_NOT_ATTEMPTED);
+    assert_eq!(items[1].index, 1);
+    assert_eq!(items[1].err_no, libc::EIO as u32);
+    assert_eq!(items[2].category, VFSI_ERROR_NONE);
+
+    let status = unit_results(
+        "copy",
+        &mut items[..1],
+        Ok(vec![Err(OpError::not_attempted(
+            std::io::ErrorKind::Unsupported.into(),
+        ))]),
+        |_| panic!("skipped input cannot retire ownership"),
+    );
+    assert_eq!(status.category, VFSI_ERROR_UNSUPPORTED);
+    assert_eq!(items[0].category, VFSI_ERROR_NOT_ATTEMPTED);
+    assert_eq!(items[0].err_no, status.err_no);
+}

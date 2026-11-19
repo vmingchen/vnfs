@@ -42,7 +42,7 @@ pub const VFSI_ERROR_TRANSPORT: u32 = 2;
 pub const VFSI_ERROR_UNSUPPORTED: u32 = 3;
 /// The C request itself was malformed.
 pub const VFSI_ERROR_INVALID_ARGUMENT: u32 = 4;
-/// The operation was not submitted because an earlier request was invalid.
+/// The operation was not submitted, for example because an earlier dependency failed.
 pub const VFSI_ERROR_NOT_ATTEMPTED: u32 = 5;
 /// The backend batch failed and this element's final state cannot be proven.
 pub const VFSI_ERROR_INDETERMINATE: u32 = 6;
@@ -520,7 +520,12 @@ fn unit_results(
                 if error.state() == FailureState::Unknown {
                     item.category = VFSI_ERROR_INDETERMINATE;
                 }
+                // Keep the aggregate diagnostic for callers selecting a
+                // fallback, but expose per-item completion to vector callers.
                 first_error.get_or_insert(item);
+                if error.state() == FailureState::NotAttempted {
+                    item.category = VFSI_ERROR_NOT_ATTEMPTED;
+                }
                 item
             }
         };

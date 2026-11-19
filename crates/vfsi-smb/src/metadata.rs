@@ -74,7 +74,13 @@ impl SmbVecFs {
         handle_info(&basic.output_buffer, &standard.output_buffer)
     }
 
+    pub(super) fn file_end_of_file(size: u64) -> VfResult<i64> {
+        // MS-FSCC FILE_END_OF_FILE_INFORMATION accepts only nonnegative signed offsets.
+        i64::try_from(size).map_err(|_| std::io::Error::from_raw_os_error(libc::EOVERFLOW))
+    }
+
     pub(super) fn set_size_handle(&mut self, file_id: FileId, size: u64) -> VfResult<()> {
+        let size = Self::file_end_of_file(size)?;
         let request = SetInfoRequest {
             info_type: InfoType::File,
             file_info_class: FILE_END_OF_FILE_INFORMATION,

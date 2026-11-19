@@ -13,7 +13,6 @@ from pathlib import Path
 import pwd
 import signal
 import statistics
-import subprocess
 import sys
 
 import run

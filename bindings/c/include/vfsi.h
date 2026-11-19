@@ -39,7 +39,7 @@
 #define VFSI_ERROR_INVALID_ARGUMENT 4
 
 /**
- * The operation was not submitted because an earlier request was invalid.
+ * The operation was not submitted, for example because an earlier dependency failed.
  */
 #define VFSI_ERROR_NOT_ATTEMPTED 5
 
@@ -1084,7 +1084,8 @@ struct vfsi_result vfsi_renamev(struct vfsi_fs *fs,
                                 struct vfsi_result *item_results);
 
 /**
- * Copy an extent-pair array in one backend vector call.
+ * Copy independent extent pairs in one backend vector call.
+ * Submit a dependent copy separately after checking its predecessor's result.
  *
  * # Safety
  * All pointers, buffers and callbacks must satisfy the module-level C

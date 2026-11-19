@@ -221,7 +221,9 @@ impl SmbVecFs {
         let available = src_size.saturating_sub(pair.src_offset);
         let length = pair.length.unwrap_or(available).min(available);
         // Validate the effective range before creating the destination.
-        if let Err(error) = checked_offset(pair.dst_offset, length, 0) {
+        if let Err(error) =
+            checked_offset(pair.dst_offset, length, 0).and_then(Self::file_end_of_file)
+        {
             let _ = self.copy_close_handle(src_id, false);
             return Err(error);
         }

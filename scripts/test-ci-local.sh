@@ -72,6 +72,8 @@ state_dir=$(mktemp -d /tmp/vnfs-local-ci.XXXXXXXX)
 nfs_launcher_pid=''
 nfs_server_pid=''
 smb_server_pid=''
+python_bin=''
+smb_python_ready=''
 
 stop_owned() {
   local pid=$1 marker=$2 elevated=$3 args
@@ -223,7 +225,7 @@ EOF
 }
 
 prepare_python() {
-  [[ -z "${python_bin:-}" ]] || return 0
+  [[ -z "$python_bin" ]] || return 0
   local venv=${VFSI_LOCAL_CI_VENV:-$repo_root/.venv}
   if [[ ! -x "$venv/bin/python" ]]; then
     venv="$state_dir/venv"
@@ -236,14 +238,15 @@ prepare_python() {
   export VIRTUAL_ENV="$venv"
   "$python_bin" -m pip install --no-deps -e adapters/vfsi-fsspec -q
   "$maturin_bin" develop --manifest-path adapters/nfs4fs/Cargo.toml --locked
-  "$python_bin" -m pip install --no-deps -e adapters/vfsi-fsspec -q
 }
 
 prepare_smb_python() {
+  [[ -z "$smb_python_ready" ]] || return 0
+  # This includes nfs4fs for the coexistence tests in the vsmbfs suite.
   prepare_python
   "$maturin_bin" develop --manifest-path adapters/vsmb/Cargo.toml --locked
   "$python_bin" -m pip install --no-deps -e adapters/vsmbfs -q
-  "$python_bin" -m pip install --no-deps -e adapters/vfsi-fsspec -q
+  smb_python_ready=1
 }
 
 run_check() {
@@ -294,7 +297,16 @@ run_nfs() {
   fi
   # Most vnfs tests can use a direct endpoint, but a few hard-code a
   # localhost/rpcbind connection; the preflight above covers those.
-  export VNFS_TEST_HOST=${VNFS_TEST_HOST:-${VFSI_NFS_SERVER}:2049}
+  if [[ -z "${VNFS_TEST_HOST:-}" ]]; then
+    case "$VFSI_NFS_SERVER" in
+      \[*\]:*) VNFS_TEST_HOST=$VFSI_NFS_SERVER ;;
+      \[*\]) VNFS_TEST_HOST="$VFSI_NFS_SERVER:2049" ;;
+      *:*:*) VNFS_TEST_HOST="[$VFSI_NFS_SERVER]:2049" ;;
+      *:*) VNFS_TEST_HOST=$VFSI_NFS_SERVER ;;
+      *) VNFS_TEST_HOST="$VFSI_NFS_SERVER:2049" ;;
+    esac
+  fi
+  export VNFS_TEST_HOST
   prepare_python
   for minor in 1 2; do
     export VNFS_TEST_MINOR=$minor VFSI_NFS_MINOR=$minor
