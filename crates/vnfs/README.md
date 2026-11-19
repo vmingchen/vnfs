@@ -17,7 +17,7 @@ Connect directly to a server—no kernel mount required.
 
 ```toml
 [dependencies]
-vnfs = "0.0.38"
+vnfs = "0.0.39"
 ```
 
 On Ubuntu 24.04 or newer, install the Linux native build prerequisites:

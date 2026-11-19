@@ -3,6 +3,26 @@
 This project follows [Semantic Versioning](https://semver.org/) for the
 `nfs4fs` package. Rust crate and C ABI versions are tracked independently.
 
+## 2026-11-18 — pinned reads, recovery, and copy routing
+
+Rust releases: vnfs 0.0.39; vfsi-core/vfsi-sync and the local, POSIX,
+io_uring, NFS, and SMB backends 0.5.0; vfsi-c 0.3.23. Python releases:
+nfs4fs 0.3.18, vfsi-fsspec 0.1.17, vsmb 0.1.12, and vsmbfs 0.1.11.
+The C ABI remains v3. nfsv41-sys and libntirpc-sys keep their versions.
+
+- Use the 0.5.x Rust dependency cohort together. The native directory visitor
+  now distinguishes following parent components from following the final
+  symlink. The 0.4.x cohort remains compatible with published 0.0.38 clients.
+- Retain file identity and confirmed progress across path reads, grouped reads,
+  and reconnects. Bound the number of open stream descriptors and preserve a
+  healthy reader when a sibling cannot reopen.
+- Keep copy results aligned with their input pairs and route Auto copies
+  according to the source and destination symlink policies.
+- Validate eager reader caches before mutating existing files. A grouped writer
+  can still create a file for a later reader.
+- Verify wheel layout, native dependencies, and the minimum supported Python
+  engine in release CI.
+
 ## 2026-11-15 — buffered I/O and failure-boundary fixes
 
 Rust releases: vnfs 0.0.38; vfsi-core/vfsi-sync and local/POSIX/io_uring/NFS/SMB
