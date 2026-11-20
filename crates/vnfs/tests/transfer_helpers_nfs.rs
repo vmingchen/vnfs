@@ -164,3 +164,49 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
         cleanup.unwrap();
     }
 }
+
+#[cfg(all(feature = "auto", target_os = "linux"))]
+#[test]
+#[ignore = "requires two NFS subtree mounts and an NFS bind fixture"]
+fn mounted_nfs_transfer_recognizes_the_same_server_subtrees() {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::PathBuf;
+    use vnfs::{mounted::Auto, posix::Posix};
+
+    let root = PathBuf::from(std::env::var_os("VFSI_TRANSFER_NFS_ROOT").expect("mount fixture"));
+    let device = |name| std::fs::metadata(root.join(name)).unwrap().dev();
+    assert_ne!(device("whole"), device("separate"));
+    assert_eq!(device("whole"), device("bound"));
+
+    fn check(fs: &impl Vfsi, disjoint: &str) {
+        let options = TransferOptions::new()
+            .with_layout(CopyLayout::Contents)
+            .with_existing(Existing::Replace)
+            .with_max_depth(DepthLimit::new(0).unwrap());
+        for alias in ["/separate", "/bound"] {
+            let error = copy_items(fs, &["/whole/tree"], alias, options).unwrap_err();
+            assert_eq!(error.index(), Some(0));
+            assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
+            assert_eq!(fs.read("/whole/tree/file").unwrap(), b"top source");
+            assert_eq!(
+                fs.read("/whole/tree/nested/file").unwrap(),
+                b"nested source"
+            );
+        }
+
+        let source = format!("/whole/{disjoint}");
+        let target = format!("/bound/{disjoint}");
+        let copied = copy_tree(fs, &source, &target, TransferOptions::new()).unwrap();
+        assert_eq!(copied.files_copied, 1);
+        assert_eq!(fs.read(format!("{source}/file")).unwrap(), b"disjoint");
+        assert_eq!(fs.read(format!("{target}/file")).unwrap(), b"disjoint");
+    }
+
+    check(&Posix::new(&root).unwrap(), "disjoint-posix");
+    let auto = Auto::new(&root).unwrap();
+    check(&auto, "disjoint-auto");
+    auto.create_dir("/bound/disjoint-auto/fresh").unwrap();
+    let created = "/bound/disjoint-auto/fresh/file";
+    auto.write(created, b"ordinary create").unwrap();
+    assert_eq!(auto.read(created).unwrap(), b"ordinary create");
+}

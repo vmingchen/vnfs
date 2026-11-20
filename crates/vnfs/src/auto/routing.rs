@@ -375,54 +375,62 @@ impl Auto {
             return mounted();
         };
         // Do not bypass kernel symlink resolution or map a path outside root.
-        // For creation, inspect the existing parent instead of the missing file.
-        let (canonical, parent) = match fs::canonicalize(&host_path) {
-            Ok(actual) => (actual, None),
+        // Direct creation can leave a negative kernel dentry for a directory.
+        // Use the closest visible parent to identify the mount, then prove
+        // every missing parent is a directory in that same native namespace.
+        let (anchor, missing) = match fs::canonicalize(&host_path) {
+            Ok(actual) if actual == host_path => (actual, 0),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let Some(parent) = host_path.parent() else {
+                let Some((parent, missing)) = closest_visible_parent(&host_path) else {
                     return mounted();
                 };
-                let Ok(parent) = fs::canonicalize(parent) else {
-                    return mounted();
-                };
-                let Some(name) = host_path.file_name() else {
-                    return mounted();
-                };
-                // Canonicalization and lstat on a spelling ending in a
-                // separator can both follow a dangling link. Inspect the
-                // final entry directly before treating it as missing.
-                let candidate = parent.join(name);
-                if !fs::symlink_metadata(&candidate)
-                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
-                {
-                    return mounted();
+                if missing == 1 {
+                    let Some(name) = host_path.file_name() else {
+                        return mounted();
+                    };
+                    // A trailing separator can make lstat follow a dangling
+                    // final link. Probe the actual entry without the separator.
+                    if !fs::symlink_metadata(parent.join(name))
+                        .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+                    {
+                        return mounted();
+                    }
                 }
-                (candidate, Some(parent))
+                (parent, missing)
             }
-            Err(_) => return mounted(),
+            _ => return mounted(),
         };
-        if canonical != host_path || !canonical.starts_with(&self.root) {
+        if !anchor.starts_with(&self.root) {
             return mounted();
         }
-        let Some(mount_id) = path_mount_id(parent.as_deref().unwrap_or(&canonical)) else {
+        let Some(mount_id) = path_mount_id(&anchor) else {
             return mounted();
         };
         let Some(spec) = mounts
             .eligible
             .iter()
-            .find(|mount| mount.id == mount_id && canonical.starts_with(&mount.mount_point))
+            .find(|mount| mount.id == mount_id && host_path.starts_with(&mount.mount_point))
         else {
             return mounted();
         };
+        if missing > 1 && !covered_by_visible_parent(mounts, &anchor, &host_path) {
+            return mounted();
+        }
         let Some(connection) = self.connection(spec) else {
             return mounted();
         };
-        let Ok(suffix) = canonical.strip_prefix(&spec.mount_point) else {
+        let suffix = host_path
+            .strip_prefix(&spec.mount_point)
+            .expect("covering mount");
+        let backend_path = Path::new("/").join(suffix);
+        if missing > 1
+            && !native_parents_are_directories(&connection.client, &backend_path, missing)
+        {
             return mounted();
-        };
+        }
         Resolved {
             route: Route::Nfs(connection),
-            path: Path::new("/").join(suffix),
+            path: backend_path,
         }
     }
 
@@ -630,7 +638,25 @@ impl Auto {
                 let connection = parents
                     .entry(parent.to_path_buf())
                     .or_insert_with(|| {
-                        let canonical = fs::canonicalize(parent).ok()?;
+                        let canonical = match fs::canonicalize(parent) {
+                            Ok(actual) => actual,
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                                if mounts.mount_points.contains(parent) {
+                                    return None;
+                                }
+                                let relative = parent.strip_prefix(&self.root).ok()?;
+                                let resolved = self.resolve(&Path::new("/").join(relative), mounts);
+                                let Route::Nfs(connection) = resolved.route else {
+                                    return None;
+                                };
+                                return connection
+                                    .client
+                                    .symlink_attrs(&resolved.path)
+                                    .is_ok_and(|attrs| attrs.is_dir())
+                                    .then_some(connection);
+                            }
+                            Err(_) => return None,
+                        };
                         if canonical != parent || !canonical.starts_with(&self.root) {
                             return None;
                         }
@@ -683,7 +709,11 @@ impl Auto {
                             for (index, item) in checked.into_iter().zip(attrs) {
                                 if match item {
                                     Ok(item) => item.file_type() == crate::FileType::Symlink,
-                                    Err(_) => true,
+                                    Err(error) => {
+                                        !requests[index].flags().contains(OpenFlags::CREATE)
+                                            || error.state() != vfsi_core::FailureState::Failed
+                                            || error.cause().kind() != io::ErrorKind::NotFound
+                                    }
                                 } {
                                     resolved[index] = Resolved {
                                         route: Route::Posix,
@@ -707,6 +737,50 @@ impl Auto {
         }
         resolved
     }
+}
+
+fn closest_visible_parent(host_path: &Path) -> Option<(PathBuf, usize)> {
+    for (index, parent) in host_path.ancestors().skip(1).enumerate() {
+        match fs::canonicalize(parent) {
+            Ok(actual) => return (actual == parent).then_some((actual, index + 1)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+fn covered_by_visible_parent(mounts: &MountTable, anchor: &Path, path: &Path) -> bool {
+    let covers = |table: &MountTable| {
+        !table.mount_points.is_empty()
+            && !table.mount_points.iter().any(|point| {
+                point != anchor && point.starts_with(anchor) && path.starts_with(point)
+            })
+    };
+    if mounts.mount_points.is_empty() {
+        read_mount_table(true, false).is_ok_and(|table| covers(&table))
+    } else {
+        covers(mounts)
+    }
+}
+
+fn native_parents_are_directories(client: &NfsClient, path: &Path, missing: usize) -> bool {
+    let paths: Vec<_> = path.ancestors().take(missing).collect();
+    let options = crate::AttrsOptions::new()
+        .with_fields(crate::Attributes::MODE)
+        .with_follow_final_symlink(false);
+    client.vgetattrs(&paths, options).is_ok_and(|outcomes| {
+        outcomes.len() == missing
+            && outcomes
+                .iter()
+                .enumerate()
+                .all(|(index, result)| match (index, result) {
+                    (0, Ok(attrs)) => !attrs.is_symlink(),
+                    (0, Err(error)) => error.cause().kind() == io::ErrorKind::NotFound,
+                    (_, Ok(attrs)) => attrs.is_dir(),
+                    (_, Err(_)) => false,
+                })
+    })
 }
 
 fn object_identity(attrs: &crate::Attrs) -> VfResult<FsObjId> {

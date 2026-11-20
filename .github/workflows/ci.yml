@@ -746,6 +746,34 @@ jobs:
           sudo mount --bind "$fixture/occluded/replacement" "$fixture/occluded/source/child"
           VFSI_TRANSFER_BIND_ROOT="$fixture" cargo test -p vnfs --test transfer_helpers \
             overlapping_bind_aliases_preserve_directory_and_regular_sources -- --exact --ignored --nocapture
+      - name: Protect transfers across NFS subtree mounts
+        run: |
+          fixture=$(mktemp -d)
+          mount_root=/srv/vnfs-ci
+          export_dir=$(mktemp -d "$mount_root/.vnfs-transfer-mounts.XXXXXXXX")
+          remote_dir=${export_dir##*/}
+          chmod 755 "$export_dir"
+          cleanup() {
+            for point in bound separate whole; do
+              if mountpoint -q "$fixture/$point"; then
+                sudo umount "$fixture/$point" || return
+              fi
+            done
+            rm -rf -- "$fixture" "$export_dir"
+          }
+          trap cleanup EXIT
+          mkdir -p "$fixture/whole" "$fixture/separate" "$fixture/bound"
+          mkdir -p "$export_dir/tree/nested" "$export_dir/disjoint-posix" "$export_dir/disjoint-auto"
+          printf 'top source' > "$export_dir/tree/file"
+          printf 'nested source' > "$export_dir/tree/nested/file"
+          printf disjoint > "$export_dir/disjoint-posix/file"
+          printf disjoint > "$export_dir/disjoint-auto/file"
+          options="vers=4.${{ matrix.minor-version }},proto=tcp,port=2049,sec=sys,nosharecache"
+          sudo mount -t nfs4 -o "$options" "127.0.0.1:/$remote_dir" "$fixture/whole"
+          sudo mount -t nfs4 -o "$options" "127.0.0.1:/$remote_dir/tree/nested" "$fixture/separate"
+          sudo mount --bind "$fixture/whole/tree/nested" "$fixture/bound"
+          VFSI_TRANSFER_NFS_ROOT="$fixture" cargo test -p vnfs --test transfer_helpers_nfs \
+            mounted_nfs_transfer_recognizes_the_same_server_subtrees -- --exact --ignored --nocapture
       - name: Run NFS integration suite
         env:
           VNFS_TEST_MINOR: ${{ matrix.minor-version }}

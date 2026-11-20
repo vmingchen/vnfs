@@ -4,15 +4,22 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, ErrorKind};
+use std::net::{IpAddr, SocketAddr, SocketAddrV6};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use vfsi_core::IndexedError;
 use vfsi_core::internal::{TransferRoot, errors};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum MountNamespace {
+    Device(u32, u32),
+    NfsV4(SocketAddr),
+}
+
 struct Mount {
     id: u64,
-    device: (u32, u32),
+    namespace: MountNamespace,
     root: PathBuf,
     point: PathBuf,
 }
@@ -25,7 +32,7 @@ struct Extent<'a> {
 
 impl Extent<'_> {
     fn overlap_path<'a>(&'a self, other: &'a Self) -> Option<&'a Path> {
-        if self.mount.id == other.mount.id || self.mount.device != other.mount.device {
+        if self.mount.id == other.mount.id || self.mount.namespace != other.mount.namespace {
             return None;
         }
         if self.path == other.path || (self.directory && other.path.starts_with(&self.path)) {
@@ -45,12 +52,12 @@ pub(super) fn check(
 ) -> Result<(), IndexedError> {
     let mounts = read_mounts().map_err(IndexedError::unattributed)?;
     let namespace = fs::read_link(fd_path(anchor)).map_err(IndexedError::unattributed)?;
-    let mut devices = HashSet::new();
+    let mut namespaces = HashSet::new();
     let aliases: HashSet<_> = mounts
         .iter()
         .filter(|mount| namespace.starts_with(&mount.point) || mount.point.starts_with(&namespace))
-        .filter(|mount| !devices.insert(mount.device))
-        .map(|mount| mount.device)
+        .filter(|mount| !namespaces.insert(mount.namespace))
+        .map(|mount| mount.namespace)
         .collect();
     if aliases.is_empty() {
         return Ok(());
@@ -115,7 +122,7 @@ struct View<'a> {
     anchor: &'a File,
     namespace: &'a Path,
     mounts: &'a [Mount],
-    aliases: &'a HashSet<(u32, u32)>,
+    aliases: &'a HashSet<MountNamespace>,
 }
 
 impl<'a> View<'a> {
@@ -159,7 +166,7 @@ impl<'a> View<'a> {
             .iter()
             .find(|mount| mount.id == id)
             .ok_or_else(|| io::Error::other("transfer mount disappeared"))?;
-        if self.aliases.contains(&mount.device) {
+        if self.aliases.contains(&mount.namespace) {
             let relative = host
                 .strip_prefix(&mount.point)
                 .map_err(|_| io::Error::other("transfer path is outside its covering mount"))?;
@@ -179,7 +186,7 @@ impl<'a> View<'a> {
             return Ok(());
         }
         for nested in self.mounts.iter().filter(|candidate| {
-            self.aliases.contains(&candidate.device)
+            self.aliases.contains(&candidate.namespace)
                 && candidate.point != host
                 && candidate.point.starts_with(&host)
         }) {
@@ -280,12 +287,65 @@ fn parse_mount(line: &[u8]) -> Option<Mount> {
     let id = std::str::from_utf8(fields.next()?).ok()?.parse().ok()?;
     fields.next()?; // Parent mount ID.
     let (major, minor) = std::str::from_utf8(fields.next()?).ok()?.split_once(':')?;
+    let mut namespace = MountNamespace::Device(major.parse().ok()?, minor.parse().ok()?);
+    let mut root = mount_path(fields.next()?)?;
+    let point = mount_path(fields.next()?)?;
+    fields.find(|field| *field == b"-")?;
+    let filesystem = fields.next()?;
+    let source = fields.next()?;
+    let options = fields.next()?;
+    if matches!(filesystem, b"nfs" | b"nfs4")
+        && let Some(index) = source.windows(2).position(|pair| pair == b":/")
+        && let Some(remote_root) = mount_path(&source[index + 1..])
+    {
+        // Linux reports "/" in the NFS mountinfo root and includes the
+        // actual server path in the source, including for subdirectory binds.
+        root = remote_root;
+        if let Some(server) = nfs4_endpoint(options) {
+            // Separate NFSv4 superblocks (e.g. nosharecache) can still name
+            // the same server namespace.
+            namespace = MountNamespace::NfsV4(server);
+        }
+    }
     Some(Mount {
         id,
-        device: (major.parse().ok()?, minor.parse().ok()?),
-        root: mount_path(fields.next()?)?,
-        point: mount_path(fields.next()?)?,
+        namespace,
+        root,
+        point,
     })
+}
+
+fn nfs4_endpoint(options: &[u8]) -> Option<SocketAddr> {
+    let option = |prefix: &[u8]| {
+        options
+            .split(|&byte| byte == b',')
+            .find_map(|field| field.strip_prefix(prefix))
+    };
+    let version = option(b"vers=")?;
+    if (version != b"4" && !version.starts_with(b"4."))
+        || !matches!(option(b"proto=")?, b"tcp" | b"tcp6")
+    {
+        return None;
+    }
+    let address = std::str::from_utf8(option(b"addr=")?).ok()?;
+    let port = match option(b"port=") {
+        Some(port) => std::str::from_utf8(port).ok()?.parse().ok()?,
+        None => 2049,
+    };
+    if port == 0 {
+        return None;
+    }
+    if let Ok(address) = address.parse::<IpAddr>() {
+        return Some(SocketAddr::new(address.to_canonical(), port));
+    }
+    // The kernel appends a numeric interface index for a scoped IPv6 peer.
+    let (address, scope) = address.rsplit_once('%')?;
+    Some(SocketAddr::V6(SocketAddrV6::new(
+        address.parse().ok()?,
+        port,
+        0,
+        scope.parse().ok()?,
+    )))
 }
 
 fn mount_path(field: &[u8]) -> Option<PathBuf> {
@@ -306,4 +366,27 @@ fn mount_path(field: &[u8]) -> Option<PathBuf> {
     }
     let path = PathBuf::from(OsString::from_vec(decoded));
     path.is_absolute().then_some(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nfs_mount_namespace_uses_the_ipv6_server_path_and_port() {
+        let line = br"37 20 0:51 / /view rw - nfs4 [::1]:/export/sub\040dir rw,vers=4.2,proto=tcp6,addr=::1,port=2050";
+        let mount = parse_mount(line).unwrap();
+        assert_eq!(
+            mount.namespace,
+            MountNamespace::NfsV4("[::1]:2050".parse().unwrap())
+        );
+        let scoped = nfs4_endpoint(b"vers=4.2,proto=tcp6,addr=fe80::1%3").unwrap();
+        assert_eq!(scoped.to_string(), "[fe80::1%3]:2049");
+        assert_ne!(
+            scoped,
+            nfs4_endpoint(b"vers=4.2,proto=tcp6,addr=fe80::1%4").unwrap()
+        );
+        assert_eq!(mount.root, Path::new("/export/sub dir"));
+        assert_eq!(mount.point, Path::new("/view"));
+    }
 }
