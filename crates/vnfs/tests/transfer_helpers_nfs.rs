@@ -216,6 +216,22 @@ fn mounted_nfs_transfer_recognizes_the_same_server_subtrees() {
             );
         }
 
+        let leaf = "/whole/tree/nested/file";
+        let replace = TransferOptions::new().with_existing(Existing::Replace);
+        for alias in ["/separate", "/bound"] {
+            for moving in [false, true] {
+                let result = if moving {
+                    move_items(fs, &[leaf], alias, replace)
+                } else {
+                    copy_items(fs, &[leaf], alias, replace)
+                };
+                let error = result.unwrap_err();
+                assert_eq!(error.index(), Some(0));
+                assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
+                assert_eq!(fs.read(leaf).unwrap(), b"nested source");
+            }
+        }
+
         let source = format!("/whole/{disjoint}");
         let target = format!("/bound/{disjoint}");
         let copied = copy_tree(fs, &source, &target, TransferOptions::new()).unwrap();

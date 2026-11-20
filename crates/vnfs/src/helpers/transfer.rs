@@ -441,7 +441,9 @@ fn roots<P: AsRef<Path>>(
         }
     }
     reject_aliased_overlap(fs, &tasks, options, max_path_bytes)?;
-    if tasks.iter().any(|task| task.metadata.is_dir()) {
+    if tasks.iter().any(|task| {
+        task.metadata.is_dir() || (options.existing == Existing::Replace && task.metadata.is_file())
+    }) {
         let paths: Vec<_> = tasks
             .iter()
             .filter(|task| task.metadata.is_dir() || task.metadata.is_file())

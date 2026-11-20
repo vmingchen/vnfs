@@ -2379,6 +2379,16 @@ fn shared_ancestor_alias_reads_each_link_once() {
 fn overlapping_bind_aliases_preserve_directory_and_regular_sources() {
     let path = std::env::var_os("VFSI_TRANSFER_BIND_ROOT").expect("bind fixture root");
     let fs = Posix::new(Path::new(&path)).unwrap();
+    fs.create_dir("/s").unwrap();
+    let copied = copy_tree(
+        &fs,
+        "/s",
+        "/d",
+        TransferOptions::new().with_max_path_bytes(8),
+    )
+    .unwrap();
+    assert_eq!(copied.directories_processed, 1);
+
     let alias = fs.symlink_attrs("/mirror/same").unwrap();
     let original = fs.symlink_attrs("/base/folder/same").unwrap();
     assert!(alias.fs_obj_id().is_some());

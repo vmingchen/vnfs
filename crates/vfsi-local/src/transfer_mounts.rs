@@ -63,6 +63,9 @@ pub(super) fn check(
         return Ok(());
     }
 
+    // This storage includes host and server mount prefixes. Keep it bounded
+    // separately from the caller's budget for logical transfer operands.
+    let max_projection_bytes = max_path_bytes.max(vfsi_core::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES);
     let view = View {
         anchor,
         namespace: &namespace,
@@ -76,7 +79,7 @@ pub(super) fn check(
             root.source,
             root.directory,
             &mut source_bytes,
-            max_path_bytes,
+            max_projection_bytes,
             &mut sources,
         )
         .map_err(|error| attributed(root.index, root.source, error))?;
@@ -93,7 +96,7 @@ pub(super) fn check(
             root.destination,
             root.directory,
             &mut destination_bytes,
-            max_path_bytes,
+            max_projection_bytes,
             &mut destinations,
         )
         .map_err(|error| attributed(root.index, root.destination, error))?;
