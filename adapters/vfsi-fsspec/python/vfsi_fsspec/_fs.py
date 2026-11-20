@@ -781,7 +781,11 @@ class _ClientPool:
                     by_owner.setdefault(mapping[0], []).append(token)
             return by_owner
 
-    def _close_live_tokens(self, owner, tokens):
+    def _close_live_token(self, token):
+        for owner, tokens in self._tokens_by_owner([token]).items():
+            self._close_live_tokens(owner, tokens, scalar=True)
+
+    def _close_live_tokens(self, owner, tokens, *, scalar=False):
         if not self.closed and self._pid != os.getpid():
             self.ensure_ready()
         # Revalidate after taking the same lock used for session retirement.
@@ -790,7 +794,10 @@ class _ClientPool:
             live = self._tokens_by_owner(tokens).get(owner)
             if live:
                 try:
-                    self.close_many(live)
+                    if scalar:
+                        self.close(live[0])
+                    else:
+                        self.close_many(live)
                 except (OSError, ValueError) as error:
                     if not self.closed or (
                         isinstance(error, OSError) and error.errno != errno.EBADF
@@ -1069,8 +1076,8 @@ class _ClientPool:
                         if name == "close":
                             self.defer_close_many([token])
                         raise
-                if name == "close":
-                    self._discard_tokens([token])
+                    if name == "close":
+                        self._discard_tokens([token])
                 return result
 
             return fd_call
@@ -1231,7 +1238,7 @@ class _RawVfsiFile(io.RawIOBase):
                 # been checked. A later call must retry this check, not trust a
                 # descriptor whose metadata probe failed.
                 try:
-                    self.fs._client.close(fd)
+                    self.fs._client._close_live_token(fd)
                 except BaseException:
                     self.fs._client.defer_close_many([fd])
                 raise
@@ -1452,14 +1459,10 @@ class _RawVfsiFile(io.RawIOBase):
         if self._closed:
             return
         fd = self._fd
-        if (
-            fd is not None
-            and self.fs._client.descriptor_valid(fd)
-            and not self.fs._client.closed
-        ):
-            # Retain ownership when CLOSE fails so callers (and __del__) can
-            # retry cleanup instead of silently leaking server-side open state.
-            self.fs._client.close(fd)
+        if fd is not None:
+            # A retired session has already released its descriptors. A live
+            # session's CLOSE failure retains ownership for retry.
+            self.fs._client._close_live_token(fd)
         self._fd = None
         self._fd_generation = None
         self._closed = True
@@ -5133,7 +5136,7 @@ class VfsiFileSystem(AbstractFileSystem):
             raise
         finally:
             try:
-                self._client.close(fd)
+                self._client._close_live_token(fd)
             except BaseException:
                 # This helper has no file object to retain cleanup ownership.
                 self._client.defer_close_many([fd])
@@ -5818,9 +5821,9 @@ class VfsiFileSystem(AbstractFileSystem):
             )
             return file
         except BaseException:
-            if fd is not None and self._client.descriptor_valid(fd):
+            if fd is not None:
                 try:
-                    self._client.close(fd)
+                    self._client._close_live_token(fd)
                 except BaseException:
                     self._client.defer_close_many([fd])
             raise

@@ -1690,6 +1690,26 @@ def test_close_many_rejects_invalid_completion_metadata(dummy_fs, monkeypatch, i
     assert not pool._fds
 
 
+def test_scalar_close_finishes_after_session_retirement(dummy_fs, monkeypatch):
+    dummy_fs.pipe_file("/close-retired", b"data")
+    file = dummy_fs.open("/close-retired", "rb")
+    pool = dummy_fs._client
+    token = file._fd
+    snapshot = pool._tokens_by_owner
+
+    def retire_after_snapshot(tokens):
+        owners = snapshot(tokens)
+        if owners and token in tokens:
+            pool._reconnect_client(next(iter(owners)))
+        return owners
+
+    monkeypatch.setattr(pool, "_tokens_by_owner", retire_after_snapshot)
+    file.close()
+    assert file.closed
+    assert file._fd is None
+    assert not pool.descriptor_valid(token)
+
+
 def test_scalar_close_retry_reconciles_consumed_native_ownership(dummy_fs, monkeypatch):
     dummy_fs.pipe_file("/close-consumed", b"data")
     pool = dummy_fs._client

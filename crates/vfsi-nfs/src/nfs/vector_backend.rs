@@ -132,17 +132,9 @@ impl VectorBackend for NfsVecFs {
             }) {
                 continue;
             }
-            if flags[index] & (libc::O_CREAT | libc::O_EXCL) == (libc::O_CREAT | libc::O_EXCL) {
-                *result = Err(vfsi_core::OpError::failed(
-                    vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
-                        nfsstat4_NFS4ERR_EXIST,
-                    )),
-                    None,
-                ));
-                continue;
-            }
-            // This actual OPEN/lookup rejection made no mutation. Follow only
-            // that input's symlink, preserving every already acquired sibling.
+            // The failure may come from a parent lookup or from OPEN on the
+            // leaf. Scalar OPEN resolves the parent and keeps exclusive
+            // creation atomic at the leaf. Retry only this rejected input.
             *result = self
                 .nfs
                 .ensure_usable()

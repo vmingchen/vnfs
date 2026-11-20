@@ -46,6 +46,10 @@ impl FileHandle for crate::NfsFile {
 impl Vfsi for crate::NfsClient {
     type File = crate::NfsFile;
     type Dir = crate::NfsDir;
+    fn normalizes_symlink_targets_lexically(&self) -> bool {
+        true
+    }
+
     client_methods!(crate::NfsClient, std::convert::identity);
 }
 

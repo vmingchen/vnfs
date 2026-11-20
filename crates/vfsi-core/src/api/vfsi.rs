@@ -70,6 +70,13 @@ pub trait Vfsi {
         true
     }
 
+    /// Whether symlink targets collapse parent components before lookup.
+    /// Transfer helpers use this for otherwise ambiguous ancestor aliases.
+    #[doc(hidden)]
+    fn normalizes_symlink_targets_lexically(&self) -> bool {
+        false
+    }
+
     /// Compare names from routed filesystem views using observed metadata.
     /// Routers may use a common identity representation or return an error if
     /// it is unsafe to assume the objects differ. `None` uses ordinary IDs.

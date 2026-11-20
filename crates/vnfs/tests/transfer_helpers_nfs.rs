@@ -125,6 +125,38 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
                 batched.compounds < serial.compounds,
                 "copy vectorization regressed"
             );
+            let payload = format!("{root}/base/folder/same/folder/same/payload");
+            fs.create_dir_all(format!("{root}/base/folder/same/folder/same"))?;
+            fs.write(&payload, b"retain")?;
+            let link = format!("{root}/shortcut");
+            fs.symlink("missing/../base/folder", &link)?;
+            let aliased = format!("{link}/same");
+            let contents = TransferOptions::new().with_layout(CopyLayout::Contents);
+            let overlap =
+                move_items(&fs, &[&aliased], format!("{root}/base"), contents).unwrap_err();
+            assert_eq!(overlap.index(), Some(0));
+            assert_eq!(overlap.cause().kind(), std::io::ErrorKind::InvalidInput);
+            assert_eq!(fs.read(&payload)?, b"retain");
+            let moved = move_items(&fs, &[&aliased], format!("{root}/separate"), contents)
+                .map_err(vfsi_core::IndexedError::into_cause)?;
+            assert_eq!(moved.roots_removed, 1);
+            assert_eq!(
+                fs.read(format!("{root}/separate/folder/same/payload"))?,
+                b"retain"
+            );
+            fs.create_dir_all(format!("{root}/new-parent"))?;
+            fs.symlink("missing/../new-parent", format!("{root}/destination-link"))?;
+            copy_tree(
+                &fs,
+                format!("{root}/separate"),
+                format!("{root}/destination-link/new"),
+                TransferOptions::new(),
+            )?;
+            assert_eq!(
+                fs.read(format!("{root}/new-parent/new/folder/same/payload"))?,
+                b"retain"
+            );
+
             Ok(())
         })();
         let cleanup = fs.remove_dir_all(&root);

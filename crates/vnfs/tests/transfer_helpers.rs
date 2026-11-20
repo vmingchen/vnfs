@@ -53,6 +53,7 @@ struct Calls {
     directory_waves: Vec<Vec<std::path::PathBuf>>,
     stream_calls: usize,
     metadata: Vec<usize>,
+    identity_pairs: usize,
     destination_probes: Vec<Vec<std::path::PathBuf>>,
     syncs: Vec<(SyncMode, usize)>,
     attrs: Vec<usize>,
@@ -132,6 +133,18 @@ impl Vfsi for Harness {
     fn limits(&self) -> ResourceLimits {
         self.fs.limits()
     }
+
+    fn compare_routed_objects(
+        &self,
+        pairs: &[(
+            vfsi_core::internal::ObservedObject<'_>,
+            vfsi_core::internal::ObservedObject<'_>,
+        )],
+    ) -> Vec<Result<Option<bool>>> {
+        self.calls.borrow_mut().identity_pairs += pairs.len();
+        self.fs.compare_routed_objects(pairs)
+    }
+
     fn vgetattrs<P: AsTarget<Self::File>>(
         &self,
         p: &[P],
@@ -1145,6 +1158,149 @@ fn directory_aliases_are_rejected_before_copy_or_move() {
     assert!(root.path().join("parent/same/same/nested").is_dir());
     assert!(!root.path().join("parent/same/nested").exists());
     assert_eq!(fs.calls.borrow().removes, 0);
+}
+
+#[test]
+fn directory_moves_check_ancestors_introduced_by_a_link_target() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Harness::new(root.path());
+    std::fs::create_dir_all(root.path().join("base/folder/same/folder/same")).unwrap();
+    std::fs::write(
+        root.path().join("base/folder/same/folder/same/payload"),
+        b"original",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("base/folder", root.path().join("shortcut")).unwrap();
+    let options = TransferOptions::new().with_layout(CopyLayout::Contents);
+
+    let error = move_items(&fs, &["/shortcut/same"], "/base", options).unwrap_err();
+    assert_eq!(error.index(), Some(0));
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(fs.calls.borrow().removes, 0);
+    assert!(!root.path().join("base/folder/same/payload").exists());
+
+    let result = move_items(&fs, &["/shortcut/same"], "/separate", options).unwrap();
+    assert_eq!(result.roots_removed, 1);
+    assert_eq!(
+        std::fs::read(root.path().join("separate/folder/same/payload")).unwrap(),
+        b"original"
+    );
+}
+
+#[test]
+fn regular_contents_replacement_queries_only_plausible_identity_pairs() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Harness::new(root.path());
+    std::fs::create_dir(root.path().join("source")).unwrap();
+    std::fs::create_dir(root.path().join("destination")).unwrap();
+    let names: Vec<_> = (0..32).map(|index| format!("file-{index}")).collect();
+    for name in &names {
+        std::fs::write(root.path().join("source").join(name), b"new").unwrap();
+        std::fs::write(root.path().join("destination").join(name), b"old").unwrap();
+    }
+    let sources: Vec<_> = names.iter().map(|name| format!("/source/{name}")).collect();
+    let result = copy_items(
+        &fs,
+        &sources,
+        "/destination",
+        TransferOptions::new()
+            .with_layout(CopyLayout::Contents)
+            .with_existing(Existing::Replace),
+    )
+    .unwrap();
+    assert_eq!(result.files_copied, names.len() as u64);
+    assert_eq!(fs.calls.borrow().identity_pairs, names.len() * 2);
+    for name in &names {
+        assert_eq!(
+            std::fs::read(root.path().join("destination").join(name)).unwrap(),
+            b"new"
+        );
+    }
+}
+
+#[test]
+fn repeated_contents_destinations_are_checked_once() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Harness::new(root.path());
+    std::fs::create_dir(root.path().join("destination")).unwrap();
+    std::fs::write(root.path().join("destination/file"), b"previous").unwrap();
+    let sources: Vec<_> = (0..12)
+        .map(|index| {
+            let directory = format!("source-{index}");
+            std::fs::create_dir(root.path().join(&directory)).unwrap();
+            std::fs::write(root.path().join(&directory).join("file"), [index]).unwrap();
+            format!("/{directory}/file")
+        })
+        .collect();
+    let result = copy_items(
+        &fs,
+        &sources,
+        "/destination",
+        TransferOptions::new()
+            .with_layout(CopyLayout::Contents)
+            .with_existing(Existing::Replace),
+    )
+    .unwrap();
+    assert_eq!(result.files_copied, sources.len() as u64);
+    assert_eq!(fs.calls.borrow().identity_pairs, sources.len() * 2);
+    assert_eq!(
+        std::fs::read(root.path().join("destination/file")).unwrap(),
+        [11]
+    );
+}
+
+#[test]
+fn directory_transfer_does_not_assume_final_link_and_ancestor_lookup_agree() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Harness::new(root.path());
+    std::fs::create_dir_all(root.path().join("tree/sub/child")).unwrap();
+    std::fs::create_dir_all(root.path().join("tree/sub/sub")).unwrap();
+    std::fs::create_dir_all(root.path().join("external/sub")).unwrap();
+    std::fs::write(root.path().join("tree/sub/payload"), b"retain").unwrap();
+    std::os::unix::fs::symlink("/tree/sub/child", root.path().join("external/redirect")).unwrap();
+    std::os::unix::fs::symlink("/external/redirect/../sub", root.path().join("shortcut")).unwrap();
+    assert!(copy_tree(&fs, "/tree/sub", "/shortcut/new", TransferOptions::new()).is_err());
+    assert!(!root.path().join("tree/sub/sub/new").exists());
+    assert_eq!(
+        std::fs::read(root.path().join("tree/sub/payload")).unwrap(),
+        b"retain"
+    );
+}
+
+#[test]
+fn contents_replace_rejects_directory_colliding_with_a_regular_root() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Harness::new(root.path());
+    std::fs::create_dir(root.path().join("src")).unwrap();
+    std::fs::create_dir_all(root.path().join("dst/b")).unwrap();
+    std::fs::write(root.path().join("src/a"), b"first").unwrap();
+    std::fs::write(root.path().join("src/b"), b"second").unwrap();
+    std::fs::write(root.path().join("dst/a"), b"original").unwrap();
+    std::fs::write(root.path().join("dst/b/child"), b"keep").unwrap();
+    let options = TransferOptions::new()
+        .with_layout(CopyLayout::Contents)
+        .with_existing(Existing::Replace);
+
+    for moving in [false, true] {
+        let result = if moving {
+            move_items(&fs, &["/src/a", "/src/b"], "/dst", options)
+        } else {
+            copy_items(&fs, &["/src/a", "/src/b"], "/dst", options)
+        };
+        let error = result.unwrap_err();
+        assert_eq!(error.index(), Some(1));
+        assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read(root.path().join("src/a")).unwrap(), b"first");
+        assert_eq!(std::fs::read(root.path().join("src/b")).unwrap(), b"second");
+        assert_eq!(
+            std::fs::read(root.path().join("dst/a")).unwrap(),
+            b"original"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("dst/b/child")).unwrap(),
+            b"keep"
+        );
+    }
 }
 
 #[test]

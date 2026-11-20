@@ -410,11 +410,16 @@ fn roots<P: AsRef<Path>>(
             }
         }
     }
-    reject_aliased_overlap(fs, &tasks, options)?;
+    reject_aliased_overlap(fs, &tasks, options, max_path_bytes)?;
     Ok(tasks)
 }
 
-fn reject_aliased_overlap(fs: &impl Vfsi, tasks: &[Task], options: TransferOptions) -> Result<()> {
+fn reject_aliased_overlap(
+    fs: &impl Vfsi,
+    tasks: &[Task],
+    options: TransferOptions,
+    max_path_bytes: usize,
+) -> Result<()> {
     let sources: Vec<_> = tasks
         .iter()
         .filter(|task| task.metadata.is_dir() || task.metadata.is_file())
@@ -440,25 +445,67 @@ fn reject_aliased_overlap(fs: &impl Vfsi, tasks: &[Task], options: TransferOptio
             .map(|task| (task.root, task.destination.as_path())),
         false,
         options.batch_size,
+        HashMap::new(),
     )?;
+    if let Some(task) = sources.iter().find(|task| {
+        task.metadata.is_file()
+            && entries
+                .get(task.destination.as_path())
+                .and_then(Option::as_ref)
+                .is_some_and(Attrs::is_dir)
+    }) {
+        return Err(invalid(task.root, &task.destination));
+    }
+    let mut resolved = HashMap::new();
     let followed = if directories.is_empty() {
         HashMap::new()
     } else {
-        read_transfer_ancestry(
-            fs,
+        let operands = || {
             sources.iter().flat_map(|task| {
                 [&task.destination, &task.source]
                     .into_iter()
-                    .flat_map(|path| path.ancestors().skip(1))
-                    .map(|path| (task.root, path))
+                    .map(|path| (task.root, path.as_path()))
+            })
+        };
+        let mut nofollow = read_transfer_ancestry(
+            fs,
+            operands()
+                .flat_map(|(root, path)| path.ancestors().skip(1).map(move |path| (root, path))),
+            false,
+            options.batch_size,
+            HashMap::new(),
+        )?;
+        let mut projected_bytes = 0usize;
+        for (root, path) in operands() {
+            if resolved.contains_key(path) {
+                continue;
+            }
+            if let Some(projected) =
+                resolve_transfer_ancestor_alias(fs, root, path, &nofollow, max_path_bytes)?
+            {
+                projected_bytes = projected_bytes.saturating_add(projected.as_os_str().len());
+                if projected_bytes > max_path_bytes {
+                    return Err(limit(root, path));
+                }
+                resolved.insert(path, projected);
+            }
+        }
+        // A no-follow result for a non-link is also the followed result.
+        nofollow.retain(|_, attrs| !attrs.as_ref().is_some_and(Attrs::is_symlink));
+        read_transfer_ancestry(
+            fs,
+            operands().flat_map(|(root, path)| {
+                transfer_ancestors(path, &resolved).map(move |path| (root, path))
             }),
             true,
             options.batch_size,
+            nofollow,
         )?
     };
+    let mut checked_regular_targets = HashSet::new();
     for &task in &sources {
         if !directories.is_empty() {
-            let ancestors = task.destination.ancestors().skip(1).filter_map(|path| {
+            let ancestors = transfer_ancestors(&task.destination, &resolved).filter_map(|path| {
                 followed[path]
                     .as_ref()
                     .filter(|attrs| attrs.is_dir())
@@ -483,7 +530,7 @@ fn reject_aliased_overlap(fs: &impl Vfsi, tasks: &[Task], options: TransferOptio
             reject_identity_pairs(fs, task, pairs, options.batch_size)?;
             let pairs = sources
                 .iter()
-                .flat_map(|source| source.source.ancestors().skip(1))
+                .flat_map(|source| transfer_ancestors(&source.source, &resolved))
                 .filter_map(|path| {
                     followed[path]
                         .as_ref()
@@ -495,11 +542,20 @@ fn reject_aliased_overlap(fs: &impl Vfsi, tasks: &[Task], options: TransferOptio
             .get(task.destination.as_path())
             .and_then(Option::as_ref)
             && attrs.is_file()
+            && checked_regular_targets.insert(task.destination.as_path())
         {
             let destination = (task.destination.as_path(), attrs);
             let pairs = sources
                 .iter()
-                .filter(|source| source.metadata.is_file())
+                .filter(|source| {
+                    source.metadata.is_file()
+                        && match (source.metadata.file_id(), attrs.file_id()) {
+                            (Some(left), Some(right)) if left != right => {
+                                source.source.file_name() == task.destination.file_name()
+                            }
+                            _ => true,
+                        }
+                })
                 .map(|source| ((source.source.as_path(), &source.metadata), destination));
             reject_identity_pairs(fs, task, pairs, options.batch_size)?;
         }
@@ -507,13 +563,135 @@ fn reject_aliased_overlap(fs: &impl Vfsi, tasks: &[Task], options: TransferOptio
     Ok(())
 }
 
+fn transfer_ancestors<'a>(
+    path: &'a Path,
+    resolved: &'a HashMap<&Path, PathBuf>,
+) -> impl Iterator<Item = &'a Path> {
+    path.ancestors().skip(1).chain(
+        resolved
+            .get(path)
+            .into_iter()
+            .flat_map(|alias| alias.ancestors().skip(1)),
+    )
+}
+
+fn resolve_transfer_ancestor_alias(
+    fs: &impl Vfsi,
+    root: usize,
+    original: &Path,
+    observed: &HashMap<&Path, Option<Attrs>>,
+    max_path_bytes: usize,
+) -> Result<Option<PathBuf>> {
+    let Some(first) = original
+        .ancestors()
+        .skip(1)
+        .filter(|path| {
+            observed
+                .get(path)
+                .and_then(Option::as_ref)
+                .is_some_and(Attrs::is_symlink)
+        })
+        .last()
+    else {
+        return Ok(None);
+    };
+    let mut path = original.to_path_buf();
+    let mut link = first.to_path_buf();
+    let attributed =
+        |error| IndexedError::at(root, error).with_context("transfer ancestry", original);
+    for _ in 0..40 {
+        let target = fs.read_link(&link).map_err(attributed)?;
+        let mut resolved = if target.is_absolute() {
+            PathBuf::from("/")
+        } else {
+            link.parent().unwrap_or(Path::new("/")).to_path_buf()
+        };
+        let suffix = path.strip_prefix(&link).expect("alias is a path prefix");
+        let mut checked_bytes = resolved.as_os_str().len();
+        for component in target.components() {
+            match component {
+                Component::RootDir | Component::CurDir => {}
+                Component::Normal(name) => resolved.push(name),
+                Component::ParentDir => {
+                    // A kernel lookup can follow a component before a parent
+                    // step that native NFS instead folds lexically. Only
+                    // collapse it in the kernel view with proven ancestry.
+                    if !fs.normalizes_symlink_targets_lexically()
+                        && resolved
+                            .ancestors()
+                            .take_while(|path| path.as_os_str().len() > checked_bytes)
+                            .any(|prefix| {
+                                !fs.symlink_attrs(prefix).is_ok_and(|attrs| attrs.is_dir())
+                            })
+                    {
+                        return Err(attributed(std::io::Error::new(
+                            std::io::ErrorKind::Unsupported,
+                            "cannot verify directory ancestry through this symlink target",
+                        )));
+                    }
+                    resolved.pop();
+                    checked_bytes = resolved.as_os_str().len();
+                }
+                Component::Prefix(_) => {
+                    return Err(attributed(std::io::ErrorKind::Unsupported.into()));
+                }
+            }
+            if resolved.as_os_str().len() > max_path_bytes {
+                return Err(limit(root, original));
+            }
+        }
+        if resolved
+            .as_os_str()
+            .len()
+            .saturating_add(suffix.as_os_str().len())
+            > max_path_bytes
+        {
+            return Err(limit(root, original));
+        }
+        resolved.push(suffix);
+        if resolved.as_os_str().len() > max_path_bytes {
+            return Err(limit(root, original));
+        }
+        path = resolved;
+        let mut ancestors: Vec<_> = path.ancestors().skip(1).collect();
+        let mut next = None;
+        while let Some(prefix) = ancestors.pop() {
+            let is_link = if let Some(attrs) = observed.get(prefix) {
+                attrs.as_ref().is_some_and(Attrs::is_symlink)
+            } else {
+                match fs.symlink_attrs(prefix) {
+                    Ok(attrs) => attrs.is_symlink(),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        ) =>
+                    {
+                        break;
+                    }
+                    Err(error) => return Err(attributed(error)),
+                }
+            };
+            if is_link {
+                next = Some(prefix.to_path_buf());
+                break;
+            }
+        }
+        match next {
+            Some(next) => link = next,
+            None => return Ok(Some(path)),
+        }
+    }
+    Err(attributed(std::io::Error::from_raw_os_error(libc::ELOOP)))
+}
+
 fn read_transfer_ancestry<'a>(
     fs: &impl Vfsi,
     paths: impl Iterator<Item = (usize, &'a Path)>,
     follow_final: bool,
     batch_size: usize,
+    mut observed: HashMap<&'a Path, Option<Attrs>>,
 ) -> Result<HashMap<&'a Path, Option<Attrs>>> {
-    let mut observed = HashMap::new();
     let mut paths = paths;
     let options = AttrsOptions::new()
         .with_fields(Attributes::MODE | Attributes::identity())
