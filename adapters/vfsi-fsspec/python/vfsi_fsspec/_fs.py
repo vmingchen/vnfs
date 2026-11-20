@@ -18,6 +18,7 @@ from collections import OrderedDict, deque
 from collections.abc import MutableMapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from copy import copy
 from functools import partial
 from glob import has_magic
@@ -36,6 +37,7 @@ from ._caching import _Nfs4MMapCache
 __all__ = ["VfsiFile", "VfsiFileSystem"]
 
 _MEMORY_PATH = "<memory>"
+_OPERATION_WRITERS = ContextVar("vfsi_operation_writers", default=None)
 _ERR_SAME_FILE = 0xFFFF_FFFD
 _ERR_UNSUPPORTED = 0xFFFF_FFFE
 
@@ -770,20 +772,38 @@ class _ClientPool:
         with self._lock:
             self._deferred_close.update(token for token in tokens if token in self._fds)
 
-    def _close_setup_handles(self, tokens, batch_size):
+    def _tokens_by_owner(self, tokens):
         with self._lock:
             by_owner = {}
             for token in dict.fromkeys(tokens):
                 mapping = self._fds.get(token)
                 if mapping is not None:
                     by_owner.setdefault(mapping[0], []).append(token)
+            return by_owner
 
+    def _close_live_tokens(self, owner, tokens):
+        if not self.closed and self._pid != os.getpid():
+            self.ensure_ready()
+        # Revalidate after taking the same lock used for session retirement.
+        # Keep it through CLOSE so the vector cannot acquire stale tokens.
+        with self._client_locks[owner]:
+            live = self._tokens_by_owner(tokens).get(owner)
+            if live:
+                try:
+                    self.close_many(live)
+                except (OSError, ValueError) as error:
+                    if not self.closed or (
+                        isinstance(error, OSError) and error.errno != errno.EBADF
+                    ):
+                        raise
+
+    def _close_setup_handles(self, tokens, batch_size):
         first_error = None
-        for owned in by_owner.values():
+        for owner, owned in self._tokens_by_owner(tokens).items():
             for start in range(0, len(owned), batch_size):
                 batch = owned[start : start + batch_size]
                 try:
-                    self.close_many(batch)
+                    self._close_live_tokens(owner, batch)
                 except BaseException as error:
                     first_error = first_error or error
                     self.defer_close_many(batch)
@@ -1006,16 +1026,7 @@ class _ClientPool:
             # the slots. Each success belongs either here or to deferred cleanup.
             with self._lock:
                 abandoned = True
-            by_owner = {}
-            for token in opened:
-                if token is not None:
-                    owner, _, _ = self._resolve(token)
-                    by_owner.setdefault(owner, []).append(token)
-            for tokens in by_owner.values():
-                try:
-                    self.close_many(tokens)
-                except BaseException:
-                    self.defer_close_many(tokens)
+            self._close_setup_handles(opened, len(opened))
             raise failures[0]
 
         return opened
@@ -2660,30 +2671,55 @@ class _BufferGroup:
             return current_data
 
     def flush_files(self, files):
-        pending = [
-            file
-            for file in files
-            if not file._write_failed
-            and file._write_spool is not None
-            and file._spool_read_offset < file._write_spool.seek(0, io.SEEK_END)
-        ]
+        pending = []
         first_error = None
+        for file in files:
+            if file._write_failed or file._write_spool is None:
+                continue
+            try:
+                end = file._write_spool.seek(0, io.SEEK_END)
+            except OSError as error:
+                file._mark_write_failure(error)
+                first_error = first_error or _oserror(
+                    error, file.path, index=self.files.index(file)
+                )
+                continue
+            if file._spool_read_offset < end:
+                pending.append((file, end))
         while pending:
             wave = []
             datas = []
             total = 0
-            for file in pending:
+            for file, end in pending:
                 # Full waves cannot admit later files. Avoid reading payloads
                 # only to discard and reread them in every subsequent wave.
                 if len(wave) >= self.fs.batch_size or total == self.fs.max_batch_bytes:
                     break
                 if wave and (file._base_mode == "a") != (wave[0]._base_mode == "a"):
                     continue
-                file._write_spool.seek(file._spool_read_offset)
-                data = file._write_spool.read(
-                    min(file.blocksize, self.fs.max_batch_bytes)
-                )
+                try:
+                    file._write_spool.seek(file._spool_read_offset)
+                    data = file._write_spool.read(
+                        min(
+                            file.blocksize,
+                            self.fs.max_batch_bytes,
+                            end - file._spool_read_offset,
+                        )
+                    )
+                except OSError as error:
+                    file._mark_write_failure(error)
+                    first_error = first_error or _oserror(
+                        error, file.path, index=self.files.index(file)
+                    )
+                    continue
                 if not data:
+                    error = OSError(
+                        errno.EIO, "incomplete buffered write spool", file.path
+                    )
+                    file._mark_write_failure(error)
+                    first_error = first_error or _oserror(
+                        error, file.path, index=self.files.index(file)
+                    )
                     continue
                 if wave and total + len(data) > self.fs.max_batch_bytes:
                     continue
@@ -2714,8 +2750,7 @@ class _BufferGroup:
                             if isinstance(result, BaseException):
                                 # A failed append prefix has no trustworthy actual
                                 # position. Retain its error and never replay it.
-                                file._write_failed = True
-                                file._raw._broken = True
+                                file._mark_write_failure(result)
                                 first_error = first_error or _oserror(
                                     result, file.path, index=self.files.index(file)
                                 )
@@ -2734,8 +2769,7 @@ class _BufferGroup:
                                 )
                                 error.failure_state = "failed"
                                 error.bytes_written = written
-                                file._write_failed = True
-                                file._raw._broken = True
+                                file._mark_write_failure(error)
                                 first_error = first_error or error
                     elif wave[0]._base_mode == "a":
                         results = self.fs._client.append_many(fds, datas)
@@ -2777,10 +2811,9 @@ class _BufferGroup:
                     file._raw._broken = True
                 raise
             pending = [
-                file
-                for file in pending
-                if not file._write_failed
-                and file._spool_read_offset < file._write_spool.seek(0, io.SEEK_END)
+                (file, end)
+                for file, end in pending
+                if not file._write_failed and file._spool_read_offset < end
             ]
         if first_error is not None:
             raise first_error
@@ -2795,15 +2828,18 @@ class _BufferGroup:
                 try:
                     if self._wrapped_files is not None:
                         self._finalize_wrappers()
-                    buffered = [
-                        file
-                        for file in self.files
-                        if file._buffered_write and not file.closed
-                    ]
-                    for file in buffered:
-                        if file._write_failed:
-                            file._raise_write_failure()
-                        file._stage_buffer()
+                    buffered = []
+                    for file in self.files:
+                        if not file._buffered_write or file.closed:
+                            continue
+                        try:
+                            if file._write_failed:
+                                file._raise_write_failure()
+                            file._stage_buffer()
+                        except Exception as error:
+                            self._finalization_error = self._finalization_error or error
+                        else:
+                            buffered.append(file)
                     self.flush_files(buffered)
                 except BaseException as error:
                     self._finalization_error = self._finalization_error or error
@@ -2864,22 +2900,21 @@ class _BufferGroup:
         with self._lock:
             if self._group_closed:
                 return
-            by_owner = OrderedDict()
-            for member in self.files:
-                fd = member._raw._fd
-                if fd is None or not self.fs._client.descriptor_valid(fd):
-                    continue
-                owner, _, _ = self.fs._client._resolve(fd)
-                by_owner.setdefault(owner, []).append(member)
-
+            members = {
+                member._raw._fd: member
+                for member in self.files
+                if member._raw._fd is not None
+            }
+            client = self.fs._client
+            by_owner = client._tokens_by_owner(members)
             first_error = None
-            if not self.fs._client.closed:
-                for members in by_owner.values():
-                    for start in range(0, len(members), self.fs.batch_size):
-                        batch = members[start : start + self.fs.batch_size]
-                        fds = [member._raw._fd for member in batch]
+            if not client.closed:
+                for owner, tokens in by_owner.items():
+                    for start in range(0, len(tokens), self.fs.batch_size):
+                        fds = tokens[start : start + self.fs.batch_size]
+                        batch = [members[fd] for fd in fds]
                         try:
-                            self.fs._client.close_many(fds)
+                            client._close_live_tokens(owner, fds)
                         except BaseException as error:
                             _finish_group_files(
                                 [
@@ -3161,6 +3196,26 @@ class _VfsiTransaction(Transaction):
                 return
             prepared = []
             try:
+                if len(files) > 1 and any("a" in file.mode for file in files):
+                    paths = list(dict.fromkeys(file.path for file in files))
+                    canonical = {}
+                    if len(paths) > 1:
+                        canonical, uncertain = fs._canonical_namespace_paths(paths)
+                        if uncertain:
+                            raise ValueError(
+                                "cannot resolve transactional append destination aliases"
+                            )
+                    appending_by_path = {}
+                    for file in files:
+                        path = canonical.get(file.path, file.path)
+                        appending = "a" in file.mode
+                        if path in appending_by_path and (
+                            appending or appending_by_path[path]
+                        ):
+                            raise ValueError(
+                                f"transactional append requires a single writer for {file.path!r}"
+                            )
+                        appending_by_path[path] = appending
                 for file in files:
                     file.prepare()
                     prepared.append(file)
@@ -3708,14 +3763,14 @@ class VfsiFileSystem(AbstractFileSystem):
             self._dircache_fill_generation += 1
             return True
 
-    def _canonical_namespace_paths(self, paths):
-        """Resolve parents in bounded waves, preserving final namespace names."""
+    def _canonical_namespace_paths(self, paths, *, follow_final=False):
+        """Resolve namespace paths in bounded waves."""
         mapped = {}
         known = {}
         targets = {}
         try:
             pending = [
-                (path, native, posixpath.dirname(native))
+                (path, native, native if follow_final else posixpath.dirname(native))
                 for path in paths
                 for native in (self._native_path(path),)
             ]
@@ -3759,21 +3814,52 @@ class VfsiFileSystem(AbstractFileSystem):
                     )
                     if link is not None:
                         if link not in targets:
-                            targets[link] = self._client.readlink(link)
-                        if ".." in targets[link].split("/"):
-                            # Resolving '..' before intermediate symlinks changes
-                            # server traversal semantics. Evict conservatively.
-                            return {}, True
+                            target = self._client.readlink(link)
+                            parts = target.split("/")
+                            if ".." in parts:
+                                last_parent = len(parts) - 1 - parts[::-1].index("..")
+                                resolved = (
+                                    "/"
+                                    if target.startswith("/")
+                                    else posixpath.dirname(link)
+                                )
+                                # Before removing a parent step, prove every
+                                # intervening name is an ordinary directory.
+                                for part in parts[: last_parent + 1]:
+                                    if part == "..":
+                                        resolved = posixpath.dirname(resolved)
+                                    elif part not in ("", "."):
+                                        resolved = posixpath.join(resolved, part)
+                                        if resolved not in known:
+                                            known[resolved] = self._client.lstat(
+                                                resolved
+                                            )
+                                        attrs = known[resolved]
+                                        if (
+                                            attrs is None
+                                            or attrs["type"] != "directory"
+                                        ):
+                                            return {}, True
+                                target = posixpath.join(
+                                    resolved, *parts[last_parent + 1 :]
+                                )
+                            targets[link] = target
                         suffix = parent[len(link) :].lstrip("/")
+                        target = targets[link]
+                        if follow_final and not suffix and target.endswith(("/", "/.")):
+                            # A grouped reader needs a regular file. Normalizing
+                            # away the directory requirement can admit a writer
+                            # that will create a file the reader cannot open.
+                            return {}, True
                         parent = posixpath.normpath(
-                            posixpath.join(
-                                posixpath.dirname(link), targets[link], suffix
-                            )
+                            posixpath.join(posixpath.dirname(link), target, suffix)
                         )
                         unresolved.append((path, native, parent))
                         continue
                     canonical = posixpath.normpath(
-                        posixpath.join(parent, posixpath.basename(native))
+                        parent
+                        if follow_final
+                        else posixpath.join(parent, posixpath.basename(native))
                     )
                     if self._root:
                         prefix = "/" + self._root
@@ -4971,15 +5057,41 @@ class VfsiFileSystem(AbstractFileSystem):
                 for index in batch:
                     report(index)
 
+    @contextmanager
+    def _rollback_transaction_writers(self):
+        transaction = self._transaction if self._intrans else None
+        opened = []
+
+        def open_tracked(opener, *args, **kwargs):
+            if transaction is None:
+                return opener(*args, **kwargs)
+            token = _OPERATION_WRITERS.set((self, opened))
+            try:
+                return opener(*args, **kwargs)
+            finally:
+                _OPERATION_WRITERS.reset(token)
+
+        try:
+            yield open_tracked
+        except BaseException as primary:
+            for file in opened:
+                if file in transaction.files:
+                    transaction.files.remove(file)
+            try:
+                _DeferredWriteFile.discard_many(opened)
+            except BaseException as cleanup:
+                raise primary from cleanup
+            raise
+
     def _write_one_streamed(
         self, path, value, callback=None, mode="wb", *, input_index=None
     ):
         """Write one in-memory value through the existing scalar/deferred path."""
         view = memoryview(value)
         on_progress = callback.relative_update if callback is not None else None
-        with ExitStack() as stack:
+        with self._rollback_transaction_writers() as open_tracked, ExitStack() as stack:
             try:
-                remote = self.open(path, mode)
+                remote = open_tracked(self.open, path, mode)
             except Exception as error:
                 if input_index is not None:
                     _rebase_error(error, [input_index], [path])
@@ -5372,7 +5484,7 @@ class VfsiFileSystem(AbstractFileSystem):
         _validate_write_mode(mode)
         on_progress = callback.relative_update if callback is not None else None
         internal = self._checked_strip_protocol(remote_path)
-        with ExitStack() as stack:
+        with self._rollback_transaction_writers() as open_tracked, ExitStack() as stack:
             source = stack.enter_context(open(local_path, "rb"))
             callback.set_size(
                 os.fstat(source.fileno()).st_size
@@ -5388,10 +5500,14 @@ class VfsiFileSystem(AbstractFileSystem):
                     raise
             native_mode = "xb" if mode == "create" else "wb"
             if input_index is None:
-                remote = self.open(internal, native_mode, **open_kwargs)
+                remote = open_tracked(self.open, internal, native_mode, **open_kwargs)
             else:
-                remote = self._open_transfer_file(
-                    internal, native_mode, input_index, **open_kwargs
+                remote = open_tracked(
+                    self._open_transfer_file,
+                    internal,
+                    native_mode,
+                    input_index,
+                    **open_kwargs,
                 )
             stack.push(partial(_close_reader_on_exit, remote))
             while True:
@@ -5655,7 +5771,11 @@ class VfsiFileSystem(AbstractFileSystem):
             raise NotImplementedError("transactional update modes are unsupported")
         if not autocommit and any(c in mode for c in "wax"):
             # fsspec transactions: defer the write until commit()/discard().
-            return _DeferredWriteFile(self, internal, mode)
+            file = _DeferredWriteFile(self, internal, mode)
+            operation = _OPERATION_WRITERS.get()
+            if operation is not None and operation[0] is self:
+                operation[1].append(file)
+            return file
         block_size, cache_type, cache_options = self._file_options(
             block_size, cache_type, cache_options, reading=base_mode == "r"
         )
@@ -5705,6 +5825,73 @@ class VfsiFileSystem(AbstractFileSystem):
                     self._client.defer_close_many([fd])
             raise
 
+    def _dependent_group_readers(self, paths, modes, writers, missing):
+        """Identify missing reader targets that an earlier OPEN may create."""
+        latest = max(missing)
+        exclusive = [
+            index for index in writers if index < latest and modes[index][0] == "x"
+        ]
+        unchecked_creator = None
+        if exclusive:
+            # Without LSTAT, the native binding follows the final component.
+            # A dangling link can then look absent and still block exclusive OPEN.
+            lstat_flag = getattr(self._native_module, "CAP_LSTAT", 0)
+            capabilities = getattr(self._client, "capabilities", None)
+            if not (lstat_flag and capabilities and capabilities() & lstat_flag):
+                # A sole writer can rely on exclusive OPEN itself. A dangling
+                # link collision cannot truncate or create an unrelated name.
+                if len(writers) == 1:
+                    unchecked_creator = exclusive[0]
+                exclusive = []
+        absent_exclusive = set()
+        for batch in _bounded_batches(
+            [len(os.fsencode(self._native_path(paths[index]))) for index in exclusive],
+            self.batch_size,
+            self.max_batch_bytes,
+        ):
+            native = [self._native_path(paths[exclusive[index]]) for index in batch]
+            try:
+                _, errors = self._client.lstat_many(native)
+            except (OSError, NotImplementedError):
+                continue
+            absent_exclusive.update(
+                exclusive[batch[slot]]
+                for slot, code in errors.items()
+                if _errno(code) == errno.ENOENT
+            )
+        creators = {}
+        for index in writers:
+            if index >= latest:
+                break
+            if modes[index][0] != "x" or index in absent_exclusive:
+                creators.setdefault(paths[index], index)
+        dependent = {
+            index for index in missing if creators.get(paths[index], index) < index
+        }
+        if unchecked_creator is not None:
+            dependent.update(
+                index
+                for index in missing
+                if unchecked_creator < index and paths[index] == paths[unchecked_creator]
+            )
+        unresolved = sorted(missing - dependent)
+        if creators and unresolved:
+            aliases, _ = self._canonical_namespace_paths(
+                [*creators, *(paths[index] for index in unresolved)],
+                follow_final=True,
+            )
+            first_creator = {}
+            for path, index in creators.items():
+                if path in aliases:
+                    first_creator.setdefault(aliases[path], index)
+            dependent.update(
+                index
+                for index in unresolved
+                if paths[index] in aliases
+                and first_creator.get(aliases[paths[index]], index) < index
+            )
+        return dependent
+
     def open_many(
         self,
         open_files,
@@ -5719,8 +5906,14 @@ class VfsiFileSystem(AbstractFileSystem):
 
         Eager reads and mmap backing files are prepared before opening writers.
         Missing reader paths can open with an earlier writer that may create
-        them. An empty file needs no backing map.
-        An explicit mmap location can back one buffered reader.
+        them. With multiple writers, an exclusive creator requires support for
+        checking the final entry without following symlinks. A sole exclusive
+        writer can create a file for a later reader using the same spelling.
+        Use the same spelling for new SMB names
+        because the share's case-equivalence policy may vary by directory.
+        An empty file needs no backing map.
+        Supplied sizes are nonnegative integer file sizes. An explicit mmap
+        location can back one buffered reader.
         """
         paths = [self._checked_strip_protocol(f.path) for f in open_files]
         modes = [_normalize_mode(f.mode) + "b" for f in open_files]
@@ -5754,6 +5947,14 @@ class VfsiFileSystem(AbstractFileSystem):
             discovered_sizes = list(sizes)
             if len(discovered_sizes) != len(paths):
                 raise ValueError("sizes must have one entry per open file")
+            for index, size in enumerate(discovered_sizes):
+                if size is not None:
+                    size = operator.index(size)
+                    if not 0 <= size <= (1 << 64) - 1:
+                        raise ValueError(
+                            f"sizes[{index}] must fit an unsigned 64-bit file size"
+                        )
+                    discovered_sizes[index] = size
         eager_readers = (
             "rb" in modes
             and caches[effective_cache_type] is AllBytes
@@ -5769,7 +5970,8 @@ class VfsiFileSystem(AbstractFileSystem):
                 raise NotImplementedError("transactional update modes are unsupported")
             # OpenFile already handles text/compression finalization and scalar
             # transaction enrollment. Reuse it instead of a second coordinator.
-            return _enter_individually(open_files)
+            with self._rollback_transaction_writers() as open_tracked:
+                return open_tracked(_enter_individually, open_files)
         mutating_indices = [
             index for index, mode in enumerate(modes) if mode[0] in "wax"
         ]
@@ -5849,7 +6051,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 for index, (path, mode) in enumerate(zip(paths, modes)):
                     if mode[0] in "wax":
                         earlier_creator = True
-                        if mode[0] in "wx":
+                        if mode[0] == "w":
                             emptied_paths.add(path)
                     elif mode == "rb":
                         size = discovered_sizes[index]
@@ -5877,7 +6079,11 @@ class VfsiFileSystem(AbstractFileSystem):
                         if relative in errors
                         and _errno(errors[relative]) == errno.ENOENT
                     }
-                    readers = [index for index in readers if index not in missing]
+                    if missing:
+                        dependent = self._dependent_group_readers(
+                            paths, modes, mutating_indices, missing
+                        )
+                        readers = [index for index in readers if index not in dependent]
 
                 if readers:
                     if mmap_readers:

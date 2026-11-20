@@ -1300,6 +1300,60 @@ class EcosystemBaselineTests(unittest.TestCase):
             self.assertEqual(applied, [])
 
 
+class DevelopmentPortRunnerTests(unittest.TestCase):
+    def test_sdk_target_is_shared_but_git_build_keeps_its_archive_path(self):
+        source = Path(__file__).resolve().parent / "test-ports-local.sh"
+        with tempfile.TemporaryDirectory(prefix="vfsi-dev-ports-") as directory:
+            temp = Path(directory)
+            platform = temp / "platform"
+            (platform / "scripts").mkdir(parents=True)
+            runner = platform / "scripts" / source.name
+            shutil.copyfile(source, runner)
+            ports = temp / "ports"
+            for port in ("coreutils", "findutils", "git", "rsync"):
+                (ports / f"vfsi-port-{port}" / ".git").mkdir(parents=True)
+            rsync = ports / "vfsi-port-rsync"
+            (rsync / "config.h").write_text("#define SUPPORT_VFSI 1\n")
+            for script in (
+                ports / "vfsi-port-git/contrib/vfsi/test-port.sh",
+                rsync / "support/test-vfsi-port.sh",
+                platform / "scripts/test-port-listing-overflow.sh",
+            ):
+                script.parent.mkdir(parents=True, exist_ok=True)
+                script.write_text('printf "sdk %s\\n" "$VFSI_LIBRARY" >>"$CALL_LOG"\n')
+            bins = temp / "bin"
+            bins.mkdir()
+            cargo = bins / "cargo"
+            cargo.write_text(
+                '#!/bin/sh\nprintf "cargo %s\\n" "$CARGO_TARGET_DIR" >>"$CALL_LOG"\n'
+                'if [ "$1" = metadata ]; then printf "%s\\n" "$TEST_METADATA"; fi\n'
+            )
+            make = bins / "make"
+            make.write_text('#!/bin/sh\nprintf "make %s\\n" "${CARGO_TARGET_DIR:-unset}" >>"$CALL_LOG"\n')
+            for stub in (cargo, make):
+                stub.chmod(0o755)
+            log = temp / "calls"
+            result = subprocess.run(
+                ["bash", str(runner), str(ports)], cwd=temp,
+                env=dict(os.environ, PATH=str(bins) + os.pathsep + os.environ["PATH"],
+                         CARGO_TARGET_DIR="cache", CALL_LOG=str(log),
+                         TEST_METADATA=json.dumps({"packages": [{
+                             "name": "vnfs", "manifest_path": str(platform / "crates/vnfs/Cargo.toml"),
+                         }]})),
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = log.read_text().splitlines()
+            target = temp / "cache"
+            targets = [call for call in calls if call.startswith("cargo ")]
+            self.assertTrue(targets)
+            self.assertEqual(set(targets), {f"cargo {target}"})
+            self.assertEqual([call for call in calls if call.startswith("make ")],
+                             ["make unset", f"make {target}"])
+            self.assertEqual([call for call in calls if call.startswith("sdk ")],
+                             [f"sdk {target}/debug/libvfsi_c.so"] * 3)
+
+
 class PortWorkflowTriggerTests(unittest.TestCase):
     def test_relevant_pushes_are_not_limited_to_main(self):
         import fnmatch

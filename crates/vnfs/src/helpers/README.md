@@ -170,9 +170,10 @@ existing files; it currently reserves destinations individually to preserve
 its reservation/failure phases. Failed all-success OPEN collection cannot undo
 creation or truncation; per-input outcomes do not provide rollback. `Existing::Replace`
 unlinks existing regular files before exclusive creation, protecting unrelated
-hard links from truncation. It selects native vector COPY when neither progress
-nor permission preservation is requested. Native COPY has no portable byte-count
-result, so `bytes_copied` is `None`, not an estimate. Links and special objects
+hard links from truncation. It selects native vector COPY when the paths share a
+copy route and neither progress nor permission preservation is requested.
+Transfers across incompatible routes use bounded reads and writes on open
+handles. Native COPY sets `bytes_copied` to `None`. Links and special objects
 are rejected unless explicitly skipped. New files initially use mode 0600;
 `preserve_permissions(true)` applies source file permission bits after completion
 and fails if the backend cannot supply/apply them. It does not preserve directory

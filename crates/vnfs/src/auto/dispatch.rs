@@ -735,24 +735,40 @@ impl Auto {
             let to = pairs[index].1.as_ref();
             // Keep both operands under kernel resolution when the mounted
             // spelling still addresses the same eligible backend.
-            let mounted_pair = match (&source.route, &target.route) {
-                (other @ Route::Nfs(_), Route::Posix) => {
-                    // Preserving a source symlink creates a directory entry
-                    // and never follows the destination's final symlink.
-                    let follow_target = options.follow_source_symlinks()
-                        || !self
+            let mounted_pair = if options.follow_source_symlinks() {
+                self.mounted_regular_copy_pair(from, to, &mounts, &source.route, &target.route)
+            } else {
+                match (&source.route, &target.route) {
+                    (other @ Route::Nfs(_), Route::Posix) => {
+                        // A symlink-preserving copy cannot replace an existing
+                        // link. Decide from the destination entry's mount, without
+                        // dispatching a copy that could reclassify the source.
+                        if self
                             .mounted
                             .symlink_attrs(from)
-                            .is_ok_and(|attrs| attrs.is_symlink());
-                    self.mounted_copy_path_on(to, follow_target, &mounts, other)
+                            .is_ok_and(|attrs| attrs.is_symlink())
+                            && self
+                                .mounted
+                                .symlink_attrs(to)
+                                .is_ok_and(|attrs| attrs.is_symlink())
+                        {
+                            if self.mounted_copy_path_on(to, false, &mounts, other) {
+                                slots[index] = Some(Err(vfsi_core::OpError::not_attempted(
+                                    std::io::Error::from_raw_os_error(libc::EEXIST),
+                                )
+                                .with_context("vcopy", to)));
+                                continue;
+                            }
+                            false
+                        } else {
+                            self.mounted_copy_path_on(to, true, &mounts, other)
+                        }
+                    }
+                    (Route::Posix, other @ Route::Nfs(_)) => {
+                        self.mounted_copy_path_on(from, false, &mounts, other)
+                    }
+                    _ => false,
                 }
-                (Route::Posix, other @ Route::Nfs(_)) => self.mounted_copy_path_on(
-                    from,
-                    options.follow_source_symlinks(),
-                    &mounts,
-                    other,
-                ),
-                _ => false,
             };
             if mounted_pair {
                 *source = Resolved::posix(from);

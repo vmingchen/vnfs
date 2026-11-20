@@ -452,9 +452,9 @@ pub trait VectorBackend: HandleBackend {
         )
     }
 
-    /// Compatibility for backends with a legacy boolean hook. The recursive
-    /// caller still validates each root. Backends with an atomic final-entry
-    /// open may override this hook to enforce ancestor-only resolution.
+    /// A legacy boolean hook can use strict resolution for ancestor-only
+    /// requests. Backends that support following only ancestors can override
+    /// this hook. An already-open cursor retains its original directory.
     #[doc(hidden)]
     fn vlistdir_pages_with_policy_impl(
         &mut self,
@@ -471,7 +471,7 @@ pub trait VectorBackend: HandleBackend {
             cursors,
             page_size,
             max_entries,
-            symlinks != DirectorySymlinkPolicy::NoFollow,
+            symlinks == DirectorySymlinkPolicy::Follow,
         )
     }
 

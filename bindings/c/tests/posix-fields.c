@@ -1,4 +1,5 @@
 #define _DEFAULT_SOURCE 1
+#define _LARGEFILE64_SOURCE 1
 #define _POSIX_C_SOURCE 200809L
 #include <vfsi_posix.h>
 #include <assert.h>
@@ -35,6 +36,18 @@ int main(void)
 #else
     assert(st.st_atim.tv_nsec == 999999999);
     assert(st.st_mtim.tv_nsec == 123456789 && st.st_ctim.tv_nsec == 987654321);
+#endif
+#ifdef VFSI_POSIX_STAT64_FIELDS
+    struct stat64 large;
+    attrs.size = UINT64_C(1) << 33;
+    attrs.blocks = UINT64_C(1) << 33;
+    assert(vfsi_attrs_stat64_fields(&attrs, &large) == 0);
+    assert((uint64_t)large.st_size == attrs.size && (uint64_t)large.st_blocks == attrs.blocks);
+    assert(large.st_ctim.tv_sec == 1600000002 && large.st_ctim.tv_nsec == 987654321);
+    attrs.ctime_nsec = 1000000000;
+    assert(vfsi_attrs_stat64_fields(&attrs, &large) == EINVAL);
+    attrs.ctime_nsec = 987654321;
+    attrs.blocks = 0;
 #endif
     attrs.mtime_nsec = 1000000000;
     assert(vfsi_attrs_stat_fields(&attrs, &st) == EINVAL);

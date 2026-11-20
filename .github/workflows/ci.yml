@@ -681,20 +681,22 @@ jobs:
         run: |
           sudo mkdir -p /mnt/vnfs-ci-auto
           sudo mount -t nfs4 -o vers=4.${{ matrix.minor-version }},proto=tcp,sec=sys,port=2049 127.0.0.1:/ /mnt/vnfs-ci-auto
+          sudo mkdir -p /mnt/vnfs-ci-auto-alias
+          sudo mount -t nfs4 -o vers=4.${{ matrix.minor-version }},proto=tcp,sec=sys,port=2049,nosharecache 127.0.0.1:/ /mnt/vnfs-ci-auto-alias
           sudo mkdir -p /mnt/vnfs-ci-discovery-ro
-          sudo mount -t nfs4 -o ro,vers=4.${{ matrix.minor-version }},proto=tcp,sec=sys,port=2049 127.0.0.1:/ /mnt/vnfs-ci-discovery-ro
+          sudo mount -t nfs4 -o ro,vers=4.${{ matrix.minor-version }},proto=tcp,sec=sys,port=2049,nosharecache 127.0.0.1:/ /mnt/vnfs-ci-discovery-ro
           bind_target=/mnt/vnfs-ci-auto/.vnfs-auto-bind
           bind_source=$(mktemp)
           nested_root=/mnt/vnfs-ci-auto/.vnfs-auto-nested
           nested_source=$(mktemp -d)
-          trap 'sudo umount "$nested_root/child" 2>/dev/null || true; rm -f "$nested_root/child/hidden"; rmdir "$nested_root/child" "$nested_root" "$nested_source" 2>/dev/null || true; sudo umount "$bind_target" 2>/dev/null || true; rm -f "$bind_target" "$bind_source"; sudo umount /mnt/vnfs-ci-discovery-ro; sudo umount /mnt/vnfs-ci-auto' EXIT
+          trap 'sudo umount "$nested_root/child" 2>/dev/null || true; rm -f "$nested_root/child/hidden"; rmdir "$nested_root/child" "$nested_root" "$nested_source" 2>/dev/null || true; sudo umount "$bind_target" 2>/dev/null || true; rm -f "$bind_target" "$bind_source"; sudo umount /mnt/vnfs-ci-discovery-ro; sudo umount /mnt/vnfs-ci-auto-alias; sudo umount /mnt/vnfs-ci-auto' EXIT
           printf 'underlying NFS\n' > "$bind_target"
           printf 'bind source\n' > "$bind_source"
           sudo mount --bind "$bind_source" "$bind_target"
           mkdir "$nested_root" "$nested_root/child"
           printf 'preserve\n' > "$nested_root/child/hidden"
           sudo mount --bind "$nested_source" "$nested_root/child"
-          VFSI_AUTO_TEST_MOUNT=/mnt/vnfs-ci-auto VFSI_AUTO_TEST_BIND="$bind_target" VFSI_AUTO_TEST_NESTED_ROOT="$nested_root" \
+          VFSI_AUTO_TEST_MOUNT=/mnt/vnfs-ci-auto VFSI_AUTO_TEST_ALIAS_MOUNT=/mnt/vnfs-ci-auto-alias VFSI_AUTO_TEST_READONLY_MOUNT=/mnt/vnfs-ci-discovery-ro VFSI_AUTO_TEST_BIND="$bind_target" VFSI_AUTO_TEST_NESTED_ROOT="$nested_root" \
             cargo test -p vnfs --lib auto::tests::live_ -- --ignored --nocapture --test-threads=1 \
               --skip live_retained_directory_cursor_rechecks_filesystem_credentials
           # This regression changes fsuid and must run alone as root; never
@@ -824,6 +826,9 @@ jobs:
             tests/test_callbacks.py::test_callback_smoke_on_network_backends \
             tests/test_listing_cache.py::test_listing_cache_smoke_on_network_backends \
             tests/test_file_buffering.py::test_file_buffering_smoke_on_network_backends \
+            tests/test_readiness_regressions.py::test_transaction_rejects_conflicting_append_before_publication \
+            tests/test_readiness_regressions.py::test_transaction_rejects_conflicting_append_through_directory_alias \
+            tests/test_fresh_readiness.py::test_caught_transaction_write_error_preserves_previous_enrollment \
             tests/test_review_findings.py::test_scalar_reader_whole_file_retry_stays_pinned \
             tests/test_review_findings.py::test_closed_scalar_reader_size_does_not_open_descriptor \
             tests/test_review_findings.py::test_group_recovery_keeps_healthy_reader_when_sibling_was_replaced \
@@ -995,6 +1000,9 @@ jobs:
             tests/test_callbacks.py::test_callback_smoke_on_network_backends \
             tests/test_listing_cache.py::test_listing_cache_smoke_on_network_backends \
             tests/test_file_buffering.py::test_file_buffering_smoke_on_network_backends \
+            tests/test_readiness_regressions.py::test_transaction_rejects_conflicting_append_before_publication \
+            tests/test_readiness_regressions.py::test_transaction_rejects_conflicting_append_through_directory_alias \
+            tests/test_fresh_readiness.py::test_caught_transaction_write_error_preserves_previous_enrollment \
             tests/test_review_findings.py::test_scalar_reader_whole_file_retry_stays_pinned \
             tests/test_review_findings.py::test_closed_scalar_reader_size_does_not_open_descriptor \
             tests/test_review_findings.py::test_group_recovery_keeps_healthy_reader_when_sibling_was_replaced \

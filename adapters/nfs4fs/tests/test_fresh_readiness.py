@@ -5,6 +5,7 @@ import gzip
 import shutil
 
 import pytest
+from fsspec.callbacks import Callback
 from fsspec.core import OpenFile, OpenFiles
 
 
@@ -340,6 +341,43 @@ def test_transaction_group_setup_failure_closes_failed_and_previous_entries(
     finally:
         for entry in entries:
             entry.close()
+
+
+@pytest.mark.parametrize("operation", ["group", "pipe", "put"])
+def test_caught_transaction_write_error_preserves_previous_enrollment(
+    fs, tmp_path, operation
+):
+    class StopAfterWrite(Callback):
+        def relative_update(self, delta=1):
+            with fs.open("/checkpoint", "wb") as checkpoint:
+                checkpoint.write(b"staged from callback")
+            raise ValueError("stop after a staged write")
+
+    fs.transfer_chunk_size = 4
+    fs.pipe_file("/existing", b"original")
+    source = tmp_path / "upload"
+    source.write_bytes(b"partial failure")
+
+    with fs.transaction:
+        fs.pipe_file("/independent", b"commit")
+        if operation == "group":
+            with pytest.raises(FileNotFoundError):
+                fs.open_many(
+                    [OpenFile(fs, "/existing", "wb"), OpenFile(fs, "/missing", "rb")]
+                )
+        else:
+            with pytest.raises(ValueError, match="stop after a staged write"):
+                if operation == "pipe":
+                    fs.pipe_file(
+                        "/existing", b"partial failure", callback=StopAfterWrite()
+                    )
+                else:
+                    fs.put_file(source, "/existing", callback=StopAfterWrite())
+    assert fs.cat_file("/existing") == b"original"
+    assert fs.cat_file("/independent") == b"commit"
+    if operation != "group":
+        assert fs.cat_file("/checkpoint") == b"staged from callback"
+    assert not fs._client._fds
 
 
 @pytest.mark.parametrize("signature", ["legacy", "uninspectable"])

@@ -120,9 +120,12 @@ impl SmbVecFs {
         })
     }
 
+    pub(super) fn path_read_reconnect_enabled(&self) -> bool {
+        self.client.config().auto_reconnect && self.client.connection().can_reconnect()
+    }
+
     pub(super) fn can_recover_path_read(&self, error: &SmbError) -> bool {
-        self.client.config().auto_reconnect
-            && self.client.connection().can_reconnect()
+        self.path_read_reconnect_enabled()
             && matches!(
                 error,
                 SmbError::Disconnected

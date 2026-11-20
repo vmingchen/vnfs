@@ -284,14 +284,14 @@ impl VectorBackend for SmbVecFs {
                 }
             }
             let results = self.runtime.block_on(join_all(jobs));
-            let disconnected = results.iter().any(Result::is_err) && self.client.is_disconnected();
+            let disconnected = self.client.is_disconnected();
             for (index, result) in indices.into_iter().zip(results) {
                 let result = (|| {
                     let info = match result {
                         Ok(info) => info,
                         // Rebuild a path only for failed/reparse inputs; do not
                         // clone every successful request's path for bookkeeping.
-                        Err(_) if disconnected => {
+                        Err(ref error) if disconnected && self.can_recover_path_read(error) => {
                             let path = self
                                 .file_path(&attrs[index].file)
                                 .and_then(|path| self.path_string(&path))?;
@@ -1146,13 +1146,25 @@ impl SmbVecFs {
         });
         // Recovery of one input changes the live connection state. Eligibility
         // belongs to the failed wave, so keep it for every original sibling.
-        let disconnected = self.client.is_disconnected();
+        let recover = self.client.is_disconnected() && self.path_read_reconnect_enabled();
         for (index, outcome) in indices.into_iter().zip(results) {
             let read = &reads[index];
-            // Only failed inputs with no confirmed data enter the existing
-            // reconnect path. Successful sibling results are never replayed.
+            // A disconnect leaves confirmed sibling results intact.
             let result = match outcome.result {
-                Err(error) if disconnected && error.progress().is_none() => self.read_one(read),
+                Err(error)
+                    if recover
+                        && protocol::is_path_read_reconnect_error(error.cause())
+                        && error.progress().is_none() =>
+                {
+                    self.read_one(read).map_err(|retry| {
+                        if error.state() == vfsi_core::FailureState::Unknown {
+                            let (cause, _, progress) = retry.into_parts();
+                            OpError::unknown(cause, progress)
+                        } else {
+                            retry
+                        }
+                    })
+                }
                 result => result.map(|data| {
                     let VfOffset::At(offset) = read.offset else {
                         unreachable!()

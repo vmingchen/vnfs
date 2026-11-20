@@ -1,6 +1,7 @@
 """Production-review regressions for mutation failure and recovery paths."""
 
 import errno
+import os
 
 import pytest
 from fsspec.callbacks import Callback
@@ -218,4 +219,68 @@ def test_exclusive_failure_never_unlinks_replacement_file(fs, monkeypatch, failu
     assert caught.value is error
     assert fs.cat_file("/exclusive") == b"other writer"
     assert fs.cat_file("/original-inode") == b"original data"
+    assert not fs._client._fds
+
+
+def test_failed_explicit_group_flush_preserves_healthy_sibling(dummy_fs, monkeypatch):
+    from fsspec.core import OpenFile
+
+    fs = dummy_fs
+    files = fs.open_many(
+        [OpenFile(fs, "/failed", mode="wb"), OpenFile(fs, "/healthy", mode="wb")],
+        write_buffering=True,
+    )
+    first, second = files
+    first.write(b"discard")
+    second.write(b"retain")
+    pwritev = fs._client.pwritev
+
+    def fail_first(fds, offsets, datas):
+        if first._raw._fd in fds:
+            assert fds == [first._raw._fd]
+            return [OSError(errno.ENOSPC, "disk full")]
+        return pwritev(fds, offsets, datas)
+
+    monkeypatch.setattr(fs._client, "pwritev", fail_first)
+    with pytest.raises(OSError) as flush_error:
+        first.flush()
+    assert flush_error.value.errno == errno.ENOSPC
+    with pytest.raises(OSError) as close_error:
+        fs.commit_many(files)
+    assert close_error.value.errno == errno.ENOSPC
+    assert close_error.value.filename == "/failed"
+    assert fs.cat_file("/failed") == b""
+    assert fs.cat_file("/healthy") == b"retain"
+    assert not fs._client._fds
+
+
+@pytest.mark.parametrize("method", ["read", "seek"])
+def test_grouped_spool_failure_preserves_healthy_sibling(dummy_fs, monkeypatch, method):
+    from fsspec.core import OpenFile
+
+    fs = dummy_fs
+    files = fs.open_many(
+        [OpenFile(fs, "/failed", mode="wb"), OpenFile(fs, "/healthy", mode="wb")],
+        write_buffering=True,
+    )
+    first, second = files
+    first.write(b"discard")
+    second.write(b"retain")
+    first._stage_buffer()
+    second._stage_buffer()
+    original = getattr(first._write_spool, method)
+
+    def fail_spool(*args):
+        if method == "seek" and len(args) == 2 and args[1] == os.SEEK_END:
+            return original(*args)
+        raise OSError(errno.EIO, "spool error")
+
+    monkeypatch.setattr(first._write_spool, method, fail_spool)
+    with pytest.raises(OSError) as failure:
+        fs.commit_many(files)
+    assert failure.value.errno == errno.EIO
+    assert failure.value.filename == "/failed"
+    assert failure.value.index == 0
+    assert fs.cat_file("/failed") == b""
+    assert fs.cat_file("/healthy") == b"retain"
     assert not fs._client._fds

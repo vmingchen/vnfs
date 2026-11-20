@@ -8,6 +8,9 @@ pub use crate::write::WriteRequest;
 
 use crate::VfResult;
 
+/// A pathname and its observed metadata for comparing filesystem identities.
+pub type ObservedObject<'a> = (&'a std::path::Path, &'a crate::Attrs);
+
 /// Reserve owned read storage without aborting if the caller's configured
 /// byte limit permits a request the allocator cannot satisfy.
 pub fn reserve_read_buffer(length: usize) -> VfResult<Vec<u8>> {

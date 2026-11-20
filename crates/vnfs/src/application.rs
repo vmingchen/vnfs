@@ -67,12 +67,24 @@ impl Vfsi for crate::Uring {
 #[cfg(all(feature = "auto", target_os = "linux"))]
 mod routed {
     use super::*;
+    use vfsi_core::internal::ObservedObject;
     impl FileHandle for crate::AutoFile {
         vfsi_sync::__vfsi_file_methods!(crate::AutoFile);
     }
     impl Vfsi for crate::Auto {
         fn same_object_namespace(&self, left: &Path, right: &Path) -> bool {
             self.same_object_namespace_impl(left, right)
+        }
+
+        fn compare_routed_objects(
+            &self,
+            pairs: &[(ObservedObject<'_>, ObservedObject<'_>)],
+        ) -> Vec<Result<Option<bool>>> {
+            self.compare_routed_objects_impl(pairs)
+        }
+
+        fn supports_regular_path_copies(&self, pairs: &[(&Path, &Path)]) -> Vec<bool> {
+            self.supports_regular_path_copies_impl(pairs)
         }
 
         type File = crate::AutoFile;

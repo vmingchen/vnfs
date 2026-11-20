@@ -157,6 +157,137 @@ def test_grouped_reader_can_follow_missing_target(dummy_fs, cache_type, mode, sy
     assert not fs._client._fds
 
 
+@pytest.mark.parametrize("cache_type", ["mmap", "all"])
+@pytest.mark.parametrize("alias", [False, True])
+def test_unrelated_missing_grouped_reader_leaves_writers_untouched(
+    dummy_fs, cache_type, alias
+):
+    fs = dummy_fs
+    fs.pipe_file("/writer", b"original")
+    fs.auto_mkdir = True
+    reader = "/missing"
+    if alias:
+        fs.symlink(reader, "/alias")
+        reader = "/alias"
+    with pytest.raises(FileNotFoundError):
+        fs.open_many(
+            [
+                OpenFile(fs, "/writer", mode="wb"),
+                OpenFile(fs, "/new/file", mode="ab"),
+                OpenFile(fs, reader, mode="rb"),
+            ],
+            cache_type=cache_type,
+        )
+    assert fs.cat_file("/writer") == b"original"
+    assert not fs.exists("/new")
+    assert not fs._client._fds
+
+
+@pytest.mark.parametrize("mode", ["xb", "xb+"])
+@pytest.mark.parametrize("cache_type", ["mmap", "all"])
+@pytest.mark.parametrize("reader", ["/alias", "/missing"])
+def test_exclusive_dangling_writer_cannot_create_a_grouped_reader(
+    dummy_fs, mode, reader, cache_type
+):
+    fs = dummy_fs
+    fs.pipe_file("/writer", b"original")
+    fs.symlink("/missing", "/alias")
+    with pytest.raises(FileNotFoundError):
+        fs.open_many(
+            [
+                OpenFile(fs, "/writer", mode="wb"),
+                OpenFile(fs, "/alias", mode=mode),
+                OpenFile(fs, reader, mode="rb"),
+            ],
+            cache_type=cache_type,
+        )
+    assert fs.cat_file("/writer") == b"original"
+    assert not fs._client._fds
+
+
+@pytest.mark.parametrize("cache_type", ["mmap", "all"])
+def test_grouped_reader_requires_nofollow_for_exclusive_writer(
+    dummy_fs, cache_type, monkeypatch
+):
+    fs = dummy_fs
+    fs.pipe_file("/writer", b"original")
+    fs.symlink("/missing", "/alias")
+    monkeypatch.setattr(fs._client, "capabilities", lambda: 0)
+    monkeypatch.setattr(fs._client, "lstat_many", fs._client.stat_many)
+    with pytest.raises(FileNotFoundError):
+        fs.open_many(
+            [
+                OpenFile(fs, "/writer", mode="wb"),
+                OpenFile(fs, "/alias", mode="xb"),
+                OpenFile(fs, "/alias", mode="rb"),
+            ],
+            cache_type=cache_type,
+        )
+    assert fs.cat_file("/writer") == b"original"
+    assert not fs._client._fds
+
+
+@pytest.mark.parametrize("cache_type", ["mmap", "all"])
+@pytest.mark.parametrize("mode", ["xb", "xb+"])
+def test_sole_exclusive_writer_can_create_reader_target_without_lstat(
+    dummy_fs, cache_type, mode, monkeypatch
+):
+    fs = dummy_fs
+    monkeypatch.setattr(fs._client, "capabilities", lambda: 0)
+    monkeypatch.setattr(fs._client, "lstat_many", fs._client.stat_many)
+    files = fs.open_many(
+        [OpenFile(fs, "/new", mode=mode), OpenFile(fs, "/new", mode="rb")],
+        cache_type=cache_type,
+    )
+    try:
+        assert files[1].read() == b""
+    finally:
+        fs.commit_many(files)
+    assert fs.exists("/new")
+    assert not fs._client._fds
+
+
+@pytest.mark.parametrize("cache_type", ["all", "mmap"])
+@pytest.mark.parametrize("target", ["../target", "directory/../../target"])
+def test_grouped_reader_can_follow_relative_dangling_alias(
+    dummy_fs, cache_type, target
+):
+    fs = dummy_fs
+    fs.mkdir("/links/directory", create_parents=True)
+    fs.symlink(target, "/links/alias")
+    files = fs.open_many(
+        [OpenFile(fs, "/target", mode="wb"), OpenFile(fs, "/links/alias", mode="rb")],
+        cache_type=cache_type,
+    )
+    try:
+        assert files[1].read(1) == b""
+    finally:
+        fs.commit_many(files)
+
+
+@pytest.mark.parametrize("cache_type", ["all", "mmap"])
+@pytest.mark.parametrize(
+    "target", ["missing/../target", "target/", "directory/../target/."]
+)
+def test_grouped_reader_preserves_directory_requirements(dummy_fs, cache_type, target):
+    fs = dummy_fs
+    fs.pipe_file("/writer", b"original")
+    fs.mkdir("/directory")
+    fs.symlink(target, "/alias")
+    with pytest.raises(FileNotFoundError):
+        fs.open_many(
+            [
+                OpenFile(fs, "/writer", mode="wb"),
+                OpenFile(fs, "/target", mode="wb"),
+                OpenFile(fs, "/alias", mode="rb"),
+            ],
+            cache_type=cache_type,
+        )
+    assert fs.cat_file("/writer") == b"original"
+    assert not fs.exists("/target")
+    assert not fs._client._fds
+
+
 def test_existing_append_mmap_reader_validates_backing_before_writer(
     dummy_fs, tmp_path
 ):
@@ -449,3 +580,19 @@ def test_group_constructor_failure_closes_every_remaining_token(
     assert not dummy_fs._client._fds
     assert not dummy_fs._client._deferred_close
     assert facades[-1].closed
+
+
+@pytest.mark.parametrize(
+    ("hint", "error"), [("bad", TypeError), (-1, ValueError), (1 << 64, ValueError)]
+)
+def test_invalid_grouped_size_hint_leaves_writer_untouched(dummy_fs, hint, error):
+    fs = dummy_fs
+    fs.pipe({"/writer": b"original", "/reader": b"input"})
+    with pytest.raises(error):
+        fs.open_many(
+            [OpenFile(fs, "/writer", mode="wb"), OpenFile(fs, "/reader", mode="rb")],
+            cache_type="blockcache",
+            sizes=[None, hint],
+        )
+    assert fs.cat_file("/writer") == b"original"
+    assert not fs._client._fds

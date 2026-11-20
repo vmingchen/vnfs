@@ -376,3 +376,39 @@ def test_recovery_policy_controls_native_rpc_reconnects(nfs_fs, reconnect, opera
                 # Filesystem shutdown owns cleanup after this test failure.
                 if reader is not None and reconnect:
                     reader.close()
+
+
+@pytest.mark.parametrize("modes", [("ab", "ab"), ("wb", "ab"), ("ab", "wb")])
+def test_transaction_rejects_conflicting_append_before_publication(fs, modes):
+    fs.pipe_file("/shared", b"original")
+    with pytest.raises(
+        ValueError, match="transactional append requires a single writer"
+    ):
+        with fs.transaction:
+            fs.pipe_file("/other", b"unpublished")
+            for mode in modes:
+                with fs.open("/shared", mode) as file:
+                    file.write(b"new")
+    assert fs.cat_file("/shared") == b"original"
+    assert not fs.exists("/other")
+    assert not any(".nfs4fs-txn-" in name for name in fs.ls("/", detail=False))
+
+
+@pytest.mark.parametrize(
+    ("alias", "target"), [("/alias", "directory"), ("/nest/alias", "../directory/")]
+)
+def test_transaction_rejects_conflicting_append_through_directory_alias(
+    fs, alias, target
+):
+    fs.mkdir("/directory")
+    fs.mkdir("/nest")
+    fs.pipe_file("/directory/target", b"original")
+    fs.symlink(target, alias)
+    with pytest.raises(
+        ValueError, match="transactional append requires a single writer"
+    ):
+        with fs.transaction:
+            for path in ("/directory/target", alias + "/target"):
+                with fs.open(path, "ab") as file:
+                    file.write(b"new")
+    assert fs.cat_file("/directory/target") == b"original"

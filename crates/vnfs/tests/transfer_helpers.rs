@@ -29,6 +29,7 @@ enum Fault {
     RejectedRename,
     LostRename,
     MissingSize,
+    OversizedSource,
     OwnedShortRead,
     NoReadProgress,
     OversizedOwnedRead,
@@ -170,6 +171,19 @@ impl Vfsi for Harness {
                 .push(destinations.clone());
         }
         let mut results = self.fs.vgetattrs(p, o)?;
+        if self.fault.get() == Fault::OversizedSource {
+            for (target, result) in p.iter().zip(&mut results) {
+                if matches!(target.as_target(), Target::Path(path) if path == Path::new("/src/a")) {
+                    *result = Ok(vfsi_core::metadata_from_attrs(vfsi_core::VfAttrs {
+                        returned: Attributes::MODE | Attributes::SIZE,
+                        ftype: FileType::Regular,
+                        mode: libc::S_IFREG | 0o644,
+                        size: isize::MAX as u64 + 1,
+                        ..Default::default()
+                    }));
+                }
+            }
+        }
         if destination_query {
             match self.fault.get() {
                 Fault::DestinationDenied => {
@@ -655,6 +669,53 @@ fn zero_read_budget_rejects_nonempty_descriptor_copies_before_file_mutation() {
 }
 
 #[test]
+fn transfer_buffer_allocation_failure_preserves_existing_destination() {
+    let (root, mut fs) = fixture();
+    let chunk = isize::MAX as usize + 1;
+    fs.fs = fs
+        .fs
+        .with_limits(ResourceLimits::new().with_max_read_bytes(chunk));
+    fs.fault.set(Fault::OversizedSource);
+    std::fs::create_dir(root.path().join("dst")).unwrap();
+    std::fs::write(root.path().join("dst/a"), b"previous").unwrap();
+
+    let error = copy_items_with_progress(
+        &fs,
+        &["/src/a"],
+        "/dst",
+        TransferOptions::new()
+            .with_existing(Existing::Replace)
+            .with_chunk_size(std::num::NonZeroUsize::new(chunk).unwrap()),
+        |_| Ok(ControlFlow::Continue(())),
+    )
+    .unwrap_err();
+    assert_eq!(error.index(), Some(0));
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::OutOfMemory);
+    assert_eq!(
+        std::fs::read(root.path().join("dst/a")).unwrap(),
+        b"previous"
+    );
+    assert_eq!(fs.calls.borrow().removes, 0);
+    assert_eq!(fs.calls.borrow().opens, 0);
+
+    let skipped = copy_items(
+        &fs,
+        &["/src/a"],
+        "/dst",
+        TransferOptions::new()
+            .with_existing(Existing::Skip)
+            .with_chunk_size(std::num::NonZeroUsize::new(chunk).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(skipped.entries_skipped, 1);
+    assert_eq!(skipped.files_copied, 0);
+    assert_eq!(
+        std::fs::read(root.path().join("dst/a")).unwrap(),
+        b"previous"
+    );
+}
+
+#[test]
 fn recursive_copy_is_bounded_and_short_reads_have_no_gaps() {
     let (t, fs) = fixture();
     fs.fault.set(Fault::ShortRead);
@@ -878,6 +939,10 @@ fn move_rename_and_cross_device_fallback_are_not_general_retry() {
     for fault in [Fault::None, Fault::CrossDevice, Fault::Rename] {
         let (t, fs) = fixture();
         fs.fault.set(fault);
+        if fault == Fault::CrossDevice {
+            std::fs::create_dir_all(t.path().join("dst/src")).unwrap();
+            std::fs::write(t.path().join("dst/src/a"), b"previous").unwrap();
+        }
         let result = move_items(
             &fs,
             &["/src"],
@@ -892,6 +957,12 @@ fn move_rename_and_cross_device_fallback_are_not_general_retry() {
             let s = result.unwrap();
             assert_eq!(s.roots_renamed, u64::from(fault == Fault::None));
             assert_eq!(s.roots_removed, u64::from(fault == Fault::CrossDevice));
+            if fault == Fault::CrossDevice {
+                let calls = fs.calls.borrow();
+                assert_eq!(calls.copies, 0);
+                assert!(calls.writes > 0 && calls.max_bytes <= 64);
+                assert_eq!(s.bytes_copied, Some(157));
+            }
             assert!(!t.path().join("src").exists());
             assert_eq!(
                 std::fs::read(t.path().join("dst/src/a")).unwrap(),
@@ -1016,6 +1087,190 @@ fn aggregate_move_budget_and_progress_span_all_roots() {
         .is_err()
     );
     assert!(t.path().join("second/f").exists());
+}
+
+#[test]
+fn ancestry_preflight_batches_distinct_prefixes() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Harness::new(root.path());
+    std::fs::create_dir_all(root.path().join("source/one/two/tree")).unwrap();
+    std::fs::create_dir_all(root.path().join("target/one/two")).unwrap();
+
+    copy_tree(
+        &fs,
+        "/source/one/two/tree",
+        "/target/one/two/new",
+        TransferOptions::new().with_batch_size(std::num::NonZeroUsize::new(3).unwrap()),
+    )
+    .unwrap();
+
+    let calls = fs.calls.borrow();
+    assert_eq!(calls.metadata, [1, 1, 3, 3, 1]);
+    assert!(root.path().join("target/one/two/new").is_dir());
+}
+
+#[test]
+fn directory_aliases_are_rejected_before_copy_or_move() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Harness::new(root.path());
+    std::fs::create_dir_all(root.path().join("source/child")).unwrap();
+    std::os::unix::fs::symlink(".", root.path().join("alias")).unwrap();
+    let error = move_items(
+        &fs,
+        &["/source"],
+        "/alias/source",
+        TransferOptions::new().with_layout(CopyLayout::Contents),
+    )
+    .unwrap_err();
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
+    assert!(root.path().join("source/child").is_dir());
+    let error = copy_tree(
+        &fs,
+        "/source",
+        "/alias/source/child/new",
+        TransferOptions::new(),
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(!root.path().join("source/child/new").exists());
+    std::fs::create_dir_all(root.path().join("parent/same/same/nested")).unwrap();
+    let error = move_items(
+        &fs,
+        &["/parent/same"],
+        "/alias/parent",
+        TransferOptions::new().with_layout(CopyLayout::Contents),
+    )
+    .unwrap_err();
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
+    assert!(root.path().join("parent/same/same/nested").is_dir());
+    assert!(!root.path().join("parent/same/nested").exists());
+    assert_eq!(fs.calls.borrow().removes, 0);
+}
+
+#[test]
+fn aliased_contents_moves_do_not_replace_a_later_source() {
+    for mixed in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let fs = Harness::new(root.path());
+        std::fs::create_dir(root.path().join("base")).unwrap();
+        std::fs::create_dir_all(root.path().join("outside/tree")).unwrap();
+        std::os::unix::fs::symlink(".", root.path().join("alias")).unwrap();
+        std::fs::write(root.path().join("base/file"), b"later source").unwrap();
+        let first = if mixed {
+            "/outside/tree"
+        } else {
+            "/outside/file"
+        };
+        let payload = if mixed {
+            "outside/tree/file"
+        } else {
+            "outside/file"
+        };
+        std::fs::write(root.path().join(payload), b"first source").unwrap();
+        let error = move_items(
+            &fs,
+            &[first, "/base/file"],
+            "/alias/base",
+            TransferOptions::new()
+                .with_layout(CopyLayout::Contents)
+                .with_existing(Existing::Replace),
+        )
+        .unwrap_err();
+        assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            std::fs::read(root.path().join("base/file")).unwrap(),
+            b"later source"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join(payload)).unwrap(),
+            b"first source"
+        );
+        assert_eq!(fs.calls.borrow().removes, 0);
+    }
+}
+
+#[test]
+fn skip_preserves_an_existing_alias_and_copies_other_sources() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Harness::new(root.path());
+    std::fs::create_dir(root.path().join("src")).unwrap();
+    std::fs::create_dir(root.path().join("dst")).unwrap();
+    std::fs::write(root.path().join("src/a"), b"existing").unwrap();
+    std::fs::write(root.path().join("src/b"), b"copy").unwrap();
+    std::fs::hard_link(root.path().join("src/a"), root.path().join("dst/a")).unwrap();
+    let result = copy_items(
+        &fs,
+        &["/src/a", "/src/b"],
+        "/dst",
+        TransferOptions::new().with_existing(Existing::Skip),
+    )
+    .unwrap();
+    assert_eq!(result.entries_skipped, 1);
+    assert_eq!(result.files_copied, 1);
+    assert_eq!(
+        std::fs::read(root.path().join("dst/a")).unwrap(),
+        b"existing"
+    );
+    assert_eq!(std::fs::read(root.path().join("dst/b")).unwrap(), b"copy");
+}
+
+#[test]
+fn skipped_source_leaves_its_unresolvable_destination_unprobed() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Harness::new(root.path());
+    std::fs::create_dir_all(root.path().join("source/dir")).unwrap();
+    std::fs::create_dir(root.path().join("out")).unwrap();
+    std::fs::write(root.path().join("source/dir/file"), b"copy").unwrap();
+    std::os::unix::fs::symlink("dir", root.path().join("source/link")).unwrap();
+    std::os::unix::fs::symlink("link", root.path().join("out/link")).unwrap();
+    let summary = copy_items(
+        &fs,
+        &["/source/dir", "/source/link"],
+        "/out",
+        TransferOptions::new().with_unsupported_entries(UnsupportedEntry::Skip),
+    )
+    .unwrap();
+    assert_eq!(summary.entries_skipped, 1);
+    assert_eq!(
+        std::fs::read(root.path().join("out/dir/file")).unwrap(),
+        b"copy"
+    );
+    assert_eq!(
+        std::fs::read_link(root.path().join("out/link")).unwrap(),
+        Path::new("link")
+    );
+}
+
+#[test]
+fn skip_regular_destination_loop_preserves_supported_directory_copy() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Harness::new(root.path());
+    std::fs::create_dir_all(root.path().join("source/dir")).unwrap();
+    std::fs::create_dir(root.path().join("out")).unwrap();
+    std::fs::write(root.path().join("source/dir/file"), b"copy").unwrap();
+    std::fs::write(root.path().join("source/link"), b"preserve").unwrap();
+    std::os::unix::fs::symlink("link", root.path().join("out/link")).unwrap();
+    let summary = move_items(
+        &fs,
+        &["/source/dir", "/source/link"],
+        "/out",
+        TransferOptions::new().with_existing(Existing::Skip),
+    )
+    .unwrap();
+    assert_eq!(summary.entries_skipped, 1);
+    assert_eq!(summary.roots_removed, 1);
+    assert_eq!(
+        std::fs::read(root.path().join("out/dir/file")).unwrap(),
+        b"copy"
+    );
+    assert_eq!(
+        std::fs::read(root.path().join("source/link")).unwrap(),
+        b"preserve"
+    );
+    assert_eq!(
+        std::fs::read_link(root.path().join("out/link")).unwrap(),
+        Path::new("link")
+    );
 }
 
 #[test]

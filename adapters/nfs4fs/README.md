@@ -427,8 +427,10 @@ visible when the TTL expires or when the caller requests a refresh. Use
   limits are configurable per filesystem instance and survive reconnects.
 - `with fs.transaction:` stages scalar and grouped write/append/exclusive
   opens, `pipe`, and file uploads through `put`, independently of file size.
-  Update modes containing `+` and directory uploads are rejected within a
-  transaction before mutation. Other namespace operations such as `mkdir`
+  A transactional append requires a single staged writer for its destination.
+  If other destinations are staged in the same transaction, their parent
+  aliases must resolve before publication. Update modes containing `+` and directory uploads are rejected within
+  a transaction before mutation. Other namespace operations such as `mkdir`
   and `rm` are not transactional. Remote staging files are created privately
   with mode `0600`; replacement preserves the destination's ordinary permission
   bits before publication. New transactional files remain private. Replacement

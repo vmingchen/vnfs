@@ -458,6 +458,13 @@ pub(super) async fn flush_file(
     require_status(&frame, Command::Flush, 0).map_err(|error| wire_failure(error, None))
 }
 
+pub(super) fn is_path_read_reconnect_error(cause: &std::io::Error) -> bool {
+    matches!(
+        vfsi_core::transport_kind(cause),
+        Some(vfsi_core::TransportKind::Connection | vfsi_core::TransportKind::Timeout)
+    )
+}
+
 pub(super) fn wire_failure(cause: std::io::Error, progress: Option<IoProgress>) -> OpError {
     if vfsi_core::transport_kind(&(cause)).is_some() {
         OpError::unknown(cause, progress)

@@ -4,6 +4,8 @@ use super::*;
 use std::ffi::OsStr;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
+use vfsi_core::FsObjId;
+use vfsi_core::internal::{ObservedObject, errors};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MountSpec {
@@ -18,6 +20,7 @@ pub(super) struct MountSpec {
 pub(super) struct MountTable {
     pub(super) eligible: Vec<MountSpec>,
     pub(super) mount_points: HashSet<PathBuf>,
+    pub(super) nfs_mount_ids: HashSet<u64>,
 }
 
 pub(super) type NfsConnection = Arc<NfsConnectionState>;
@@ -45,6 +48,14 @@ impl Route {
             (Self::Nfs(a), Self::Nfs(b)) => Arc::ptr_eq(&a.identity, &b.identity),
             _ => false,
         }
+    }
+
+    fn shares_nfs_identity(&self, other: &Self) -> bool {
+        matches!(
+            (self, other),
+            (Self::Nfs(a), Self::Nfs(b))
+                if a.spec.server == b.spec.server && a.credentials == b.credentials
+        )
     }
 
     pub(super) fn public(&self) -> AutoRoute {
@@ -75,8 +86,246 @@ impl Auto {
             self.resolve(right, &mounts).route,
         ) {
             (Route::Posix, Route::Posix) => true,
-            (Route::Nfs(a), Route::Nfs(b)) => {
-                a.spec.server == b.spec.server && a.credentials == b.credentials
+            (a, b) => a.shares_nfs_identity(&b),
+        }
+    }
+
+    pub(crate) fn compare_routed_objects_impl(
+        &self,
+        pairs: &[(ObservedObject<'_>, ObservedObject<'_>)],
+    ) -> Vec<VfResult<Option<bool>>> {
+        if pairs.is_empty() {
+            return Vec::new();
+        }
+        let mounts = match read_mounts_for_identity() {
+            Ok(mounts) => mounts,
+            Err(error) => {
+                return vfsi_core::internal::errors::fanout(error, pairs.len())
+                    .map(Err)
+                    .collect();
+            }
+        };
+        let mut routes = HashMap::new();
+        for &(left, right) in pairs {
+            for path in [left.0, right.0] {
+                routes
+                    .entry(path)
+                    .or_insert_with(|| self.resolve(path, &mounts));
+            }
+        }
+        let direct = Self::direct_identities(pairs, &routes);
+        let mut mounted = HashMap::new();
+        pairs
+            .iter()
+            .map(|&(left, right)| {
+                if routes[left.0]
+                    .route
+                    .shares_nfs_identity(&routes[right.0].route)
+                {
+                    let id =
+                        |path: &Path| direct[path].as_ref().copied().map_err(errors::from_shared);
+                    Ok(Some(id(left.0)? == id(right.0)?))
+                } else {
+                    self.compare_objects_in_mounts(left, right, &routes, &mounts, &mut mounted)
+                        .map(Some)
+                }
+            })
+            .collect()
+    }
+
+    fn direct_identities<'a>(
+        pairs: &[(ObservedObject<'a>, ObservedObject<'a>)],
+        routes: &HashMap<&Path, Resolved>,
+    ) -> HashMap<&'a Path, Result<FsObjId, Arc<io::Error>>> {
+        // Observe fresh IDs in known views. Earlier metadata could have
+        // used kernel fallback. Keep one vector query per direct connection.
+        let mut groups = HashMap::<_, Vec<&Path>>::new();
+        let mut seen = HashSet::new();
+        for &(left, right) in pairs {
+            if !routes[left.0]
+                .route
+                .shares_nfs_identity(&routes[right.0].route)
+            {
+                continue;
+            }
+            for path in [left.0, right.0] {
+                if seen.insert(path) {
+                    let Route::Nfs(connection) = &routes[path].route else {
+                        unreachable!()
+                    };
+                    groups
+                        .entry(Arc::as_ptr(&connection.identity))
+                        .or_default()
+                        .push(path);
+                }
+            }
+        }
+        let mut observed = HashMap::with_capacity(seen.len());
+        for paths in groups.into_values() {
+            let Route::Nfs(connection) = &routes[paths[0]].route else {
+                unreachable!()
+            };
+            let native: Vec<_> = paths
+                .iter()
+                .map(|path| routes[path].path.as_path())
+                .collect();
+            let options = crate::AttrsOptions::new()
+                .with_fields(crate::Attributes::identity())
+                .with_follow_final_symlink(false);
+            let error = match connection.client.vgetattrs(&native, options) {
+                Ok(results) if results.len() == paths.len() => {
+                    observed.extend(paths.into_iter().zip(results.into_iter().map(|result| {
+                        result
+                            .map_err(vfsi_core::OpError::into_cause)
+                            .and_then(|attrs| object_identity(&attrs))
+                            .map_err(errors::shared_source)
+                    })));
+                    continue;
+                }
+                Ok(_) => errors::invalid_reply("invalid routed identity outcome count"),
+                Err(error) => error,
+            };
+            let shared = errors::shared_source(error);
+            observed.extend(paths.into_iter().map(|path| (path, Err(shared.clone()))));
+        }
+        observed
+    }
+
+    fn compare_objects_in_mounts<'a>(
+        &self,
+        (left, left_attrs): ObservedObject<'a>,
+        (right, right_attrs): ObservedObject<'a>,
+        routes: &HashMap<&Path, Resolved>,
+        mounts: &MountTable,
+        identities: &mut HashMap<&'a Path, FsObjId>,
+    ) -> VfResult<bool> {
+        let left_route = &routes[left];
+        let right_route = &routes[right];
+        let mut observe = |path: &'a Path, attrs: &crate::Attrs| {
+            if let Some(id) = identities.get(path) {
+                return Ok(*id);
+            }
+            let current = if attrs.is_symlink() {
+                self.mounted.symlink_attrs(path)?
+            } else {
+                self.mounted.attrs(path)?
+            };
+            let id = object_identity(&current)?;
+            identities.insert(path, id);
+            Ok::<_, io::Error>(id)
+        };
+        // A direct NFS object and an entry on a non-NFS mount are distinct.
+        // Prove the mounted side's type before asking the kernel about a
+        // direct-created name that its cache may still report as absent.
+        let mounted = match (&left_route.route, &right_route.route) {
+            (Route::Posix, Route::Nfs(_)) => Some(left),
+            (Route::Nfs(_), Route::Posix) => Some(right),
+            _ => None,
+        };
+        if let Some(path) = mounted
+            && let Some(id) = self.rooted_copy_mount_id(path, true)
+            && !mounts.nfs_mount_ids.contains(&id)
+        {
+            return Ok(false);
+        }
+        let left_id = observe(left, left_attrs)?;
+        let right_id = observe(right, right_attrs)?;
+        if left_id.fs_id() == right_id.fs_id() {
+            return Ok(left_id == right_id);
+        }
+        if left_attrs.is_symlink() || right_attrs.is_symlink() {
+            return Ok(false);
+        }
+        if mounts.nfs_mount_ids.len() < 2 {
+            return Ok(false);
+        }
+        use vfsi_local::open_rooted_path;
+        let root = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_DIRECTORY)
+            .open(&self.root)?;
+        let entries = [left, right].map(|path| {
+            let file = open_rooted_path(&root, path, false)?;
+            let fd = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+            let id =
+                path_mount_id(&fd).ok_or_else(|| io::Error::from(io::ErrorKind::Unsupported))?;
+            Ok::<_, io::Error>((id, fs::read_link(fd)?))
+        });
+        let [left_entry, right_entry] = entries;
+        let (left_mount_id, left_path) = left_entry?;
+        let (right_mount_id, right_path) = right_entry?;
+        if !mounts.nfs_mount_ids.contains(&left_mount_id)
+            || !mounts.nfs_mount_ids.contains(&right_mount_id)
+        {
+            return Ok(false);
+        }
+        let compatible = mounts
+            .eligible
+            .iter()
+            .find(|mount| mount.id == left_mount_id)
+            .zip(
+                mounts
+                    .eligible
+                    .iter()
+                    .find(|mount| mount.id == right_mount_id),
+            )
+            .filter(|(left, right)| left.server == right.server);
+        let Some((left_mount, right_mount)) = compatible else {
+            // Kernel inode numbers agree, but these mounted views cannot
+            // share a native identity comparison. Do not remove either name.
+            if left_id.file_id() == right_id.file_id() {
+                return Err(io::ErrorKind::Unsupported.into());
+            }
+            return Ok(false);
+        };
+        let native_id = |mount: &MountSpec, path: &Path| -> VfResult<_> {
+            let path = path
+                .strip_prefix(&mount.mount_point)
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+            let connection = self
+                .connection(mount)
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))?;
+            object_identity(&connection.client.symlink_attrs(Path::new("/").join(path))?)
+        };
+        Ok(native_id(left_mount, &left_path)? == native_id(right_mount, &right_path)?)
+    }
+
+    pub(crate) fn supports_regular_path_copies_impl(&self, pairs: &[(&Path, &Path)]) -> Vec<bool> {
+        if pairs.is_empty() {
+            return Vec::new();
+        }
+        let mounts = read_mounts(false);
+        pairs
+            .iter()
+            .map(|&(from, to)| {
+                let source = self.resolve(from, &mounts);
+                let destination = self.resolve(to, &mounts);
+                source.route.same_backend(&destination.route)
+                    || self.mounted_regular_copy_pair(
+                        from,
+                        to,
+                        &mounts,
+                        &source.route,
+                        &destination.route,
+                    )
+            })
+            .collect()
+    }
+
+    pub(super) fn mounted_regular_copy_pair(
+        &self,
+        from: &Path,
+        to: &Path,
+        mounts: &MountTable,
+        source: &Route,
+        destination: &Route,
+    ) -> bool {
+        match (source, destination) {
+            (other @ Route::Nfs(_), Route::Posix) => {
+                self.mounted_copy_path_on(to, true, mounts, other)
+            }
+            (Route::Posix, other @ Route::Nfs(_)) => {
+                self.mounted_copy_path_on(from, true, mounts, other)
             }
             _ => false,
         }
@@ -460,21 +709,45 @@ impl Auto {
     }
 }
 
+fn object_identity(attrs: &crate::Attrs) -> VfResult<FsObjId> {
+    attrs
+        .fs_obj_id()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::Unsupported))
+}
+
 pub(super) fn read_mounts(include_covering_mounts: bool) -> MountTable {
-    fs::read("/proc/self/mountinfo")
-        .ok()
-        .map_or_else(MountTable::default, |contents| {
-            let mut table = MountTable::default();
-            for line in contents.split(|byte| *byte == b'\n') {
-                if include_covering_mounts && let Some(point) = mount_point(line) {
-                    table.mount_points.insert(point);
-                }
-                if let Some(spec) = parse_mount(line) {
-                    table.eligible.push(spec);
-                }
-            }
-            table
-        })
+    read_mount_table(include_covering_mounts, false).unwrap_or_default()
+}
+
+fn read_mounts_for_identity() -> VfResult<MountTable> {
+    read_mount_table(false, true)
+}
+
+fn read_mount_table(covering_mounts: bool, nfs_mounts: bool) -> VfResult<MountTable> {
+    let contents = fs::read("/proc/self/mountinfo")?;
+    let mut table = MountTable::default();
+    for line in contents.split(|byte| *byte == b'\n') {
+        if covering_mounts && let Some(point) = mount_point(line) {
+            table.mount_points.insert(point);
+        }
+        if nfs_mounts && let Some(id) = nfs_mount_id(line) {
+            table.nfs_mount_ids.insert(id);
+        }
+        if let Some(spec) = parse_mount(line) {
+            table.eligible.push(spec);
+        }
+    }
+    Ok(table)
+}
+
+fn nfs_mount_id(line: &[u8]) -> Option<u64> {
+    let mut fields = line.split(|byte| *byte == b' ');
+    let id = fields.next()?;
+    let filesystem = fields.skip(5).skip_while(|field| *field != b"-").nth(1)?;
+    if matches!(filesystem, b"nfs" | b"nfs4") {
+        return std::str::from_utf8(id).ok()?.parse().ok();
+    }
+    None
 }
 
 pub(super) fn mount_point(line: &[u8]) -> Option<PathBuf> {

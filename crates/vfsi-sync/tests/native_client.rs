@@ -495,10 +495,12 @@ struct DefaultBackend {
     vector_reads: usize,
 }
 
+type PageCall = (vfsi_sync::AttrMask, usize, usize, bool);
+
 #[derive(Default)]
 struct PagedBackend {
     scalar: ScalarOnly,
-    page_calls: Arc<Mutex<Vec<(vfsi_sync::AttrMask, usize, usize)>>>,
+    page_calls: Arc<Mutex<Vec<PageCall>>>,
 }
 
 macro_rules! handle_contract {
@@ -1215,12 +1217,12 @@ impl VectorBackend for PagedBackend {
         cursor: Option<DirPageCursor>,
         page_size: usize,
         max_entries: usize,
-        _follow_symlinks: bool,
+        follow_symlinks: bool,
     ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
         self.page_calls
             .lock()
             .unwrap()
-            .push((masks, page_size, max_entries));
+            .push((masks, page_size, max_entries, follow_symlinks));
         let start = cursor
             .map(|cursor| cursor.into_state::<usize>())
             .transpose()?
@@ -1304,8 +1306,37 @@ fn default_directory_pages_preserve_cursor_fields_and_bounds() {
     assert_eq!((calls[0].1, calls[0].2), (1, 3));
     assert_eq!(
         calls[1],
-        (vfsi_sync::AttrMask::MODE | vfsi_sync::AttrMask::SIZE, 2, 3)
+        (
+            vfsi_sync::AttrMask::MODE | vfsi_sync::AttrMask::SIZE,
+            2,
+            3,
+            true
+        )
     );
+}
+
+#[test]
+fn ordered_directory_root_uses_strict_legacy_paging() {
+    let concrete = PagedBackend::default();
+    let calls = concrete.page_calls.clone();
+    let client = FsClient::new(concrete);
+    let mut visited = 0;
+    client
+        .visit_dirs_ordered(
+            "/tree",
+            ListDirOptions::new(),
+            |_, _| std::cmp::Ordering::Equal,
+            |_| false,
+            |_, _| {
+                visited += 1;
+                Ok(vfsi_core::api::WalkControl::Continue)
+            },
+        )
+        .unwrap();
+    assert_eq!(visited, 1);
+    let calls = calls.lock().unwrap();
+    assert!(!calls.is_empty());
+    assert!(calls.iter().all(|(_, _, _, follows)| !follows));
 }
 
 #[test]
@@ -1337,8 +1368,18 @@ fn default_directory_visitor_uses_native_pages_without_materializing_a_listing()
     assert_eq!(
         *calls.lock().unwrap(),
         [
-            (vfsi_sync::AttrMask::MODE | vfsi_sync::AttrMask::SIZE, 1, 4),
-            (vfsi_sync::AttrMask::MODE | vfsi_sync::AttrMask::SIZE, 3, 3),
+            (
+                vfsi_sync::AttrMask::MODE | vfsi_sync::AttrMask::SIZE,
+                1,
+                4,
+                true
+            ),
+            (
+                vfsi_sync::AttrMask::MODE | vfsi_sync::AttrMask::SIZE,
+                3,
+                3,
+                true
+            ),
         ]
     );
 }

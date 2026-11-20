@@ -561,7 +561,7 @@ fn mount_id_prevents_prefix_based_misrouting() {
                 &local,
                 &MountTable {
                     eligible: vec![fake],
-                    mount_points: HashSet::new(),
+                    ..MountTable::default()
                 }
             )
             .route,
@@ -915,6 +915,7 @@ fn live_dangling_symlink_keeps_kernel_routing() {
         .unwrap()
         .remove(0)
         .unwrap_err();
+    assert_eq!(existing.state(), vfsi_core::FailureState::NotAttempted);
     assert_eq!(existing.cause().kind(), io::ErrorKind::AlreadyExists);
     let cross_mount = host_client
         .vcopy(&[(&fixture.path().join("file"), &off_mount)], preserve_link)
@@ -937,6 +938,271 @@ fn live_dangling_symlink_keeps_kernel_routing() {
         .unwrap_err();
     assert_eq!(result.cause().kind(), io::ErrorKind::Unsupported);
     assert!(!local.path().join("missing").exists());
+}
+
+#[test]
+#[ignore = "requires configured NFS mount fixtures"]
+fn live_cross_device_transfer_replaces_file_through_open_handles() {
+    use crate::directory::DepthLimit;
+    use crate::helpers::{Existing, TransferOptions, copy_items, move_items};
+
+    let mount = std::env::var("VFSI_AUTO_TEST_MOUNT").expect("NFS mount fixture");
+    let remote = tempfile::tempdir_in(mount).unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let client = Auto::new("/").unwrap();
+    let variants = [(true, None), (false, DepthLimit::new(1)), (false, None)];
+    for (index, (copy, depth)) in variants.into_iter().enumerate() {
+        let name = format!("source-{index}");
+        let source = remote.path().join(&name);
+        let target = local.path().join(&name);
+        fs::write(&source, b"new payload").unwrap();
+        fs::write(&target, b"previous").unwrap();
+
+        let resolved = client.resolve(&source, &read_mounts(false));
+        let Route::Nfs(connection) = resolved.route else {
+            panic!("expected direct route for source");
+        };
+        assert!(matches!(
+            client.resolve(&target, &read_mounts(false)).route,
+            Route::Posix
+        ));
+        let mut options = TransferOptions::new().with_existing(Existing::Replace);
+        if let Some(depth) = depth {
+            options = options.with_max_depth(depth);
+        }
+        let summary = if copy {
+            copy_items(&client, &[&source], local.path(), options)
+        } else {
+            move_items(&client, &[&source], local.path(), options)
+        }
+        .unwrap();
+        assert_eq!(summary.roots_renamed, 0);
+        assert_eq!(summary.roots_removed, u64::from(!copy));
+        assert_eq!(summary.bytes_copied, Some(11));
+        assert_eq!(fs::read(&target).unwrap(), b"new payload");
+        let source_attrs = connection.client.symlink_attrs(&resolved.path);
+        if copy {
+            assert!(source_attrs.unwrap().is_file());
+        } else {
+            assert_eq!(source_attrs.unwrap_err().kind(), io::ErrorKind::NotFound);
+        }
+    }
+
+    // Direct OPEN can leave a negative kernel entry for its own new name.
+    let direct_created = remote.path().join("direct-created");
+    let same_route_destination = remote.path().join("direct-targets");
+    fs::create_dir(&same_route_destination).unwrap();
+    fs::write(same_route_destination.join("direct-created"), b"previous").unwrap();
+    client.write(&direct_created, b"direct payload").unwrap();
+    let direct_summary = copy_items(
+        &client,
+        &[&direct_created],
+        &same_route_destination,
+        TransferOptions::new().with_existing(Existing::Replace),
+    )
+    .unwrap();
+    assert_eq!(direct_summary.bytes_copied, None);
+    assert_eq!(
+        client
+            .read(same_route_destination.join("direct-created"))
+            .unwrap(),
+        b"direct payload",
+    );
+
+    let local_source = local.path().join("local-created");
+    let mixed_destination = local.path().join("mixed-targets");
+    fs::create_dir(&mixed_destination).unwrap();
+    fs::write(&local_source, b"local data").unwrap();
+    fs::write(mixed_destination.join("local-created"), b"previous").unwrap();
+    let mixed = copy_items(
+        &client,
+        &[&direct_created, &local_source],
+        &mixed_destination,
+        TransferOptions::new()
+            .with_existing(Existing::Replace)
+            .with_layout(crate::helpers::CopyLayout::Contents),
+    )
+    .unwrap();
+    assert_eq!(mixed.files_copied, 2);
+    assert_eq!(
+        fs::read(mixed_destination.join("direct-created")).unwrap(),
+        b"direct payload"
+    );
+    assert_eq!(
+        fs::read(mixed_destination.join("local-created")).unwrap(),
+        b"local data"
+    );
+
+    let alias = local.path().join("alias");
+    std::os::unix::fs::symlink(remote.path(), &alias).unwrap();
+    fs::create_dir(remote.path().join("same-mount")).unwrap();
+    let source = remote.path().join("source-0");
+    let directory = alias.join("same-mount");
+    let target = directory.join("source-0");
+    let mounts = read_mounts(false);
+    assert!(matches!(
+        client.resolve(&source, &mounts).route,
+        Route::Nfs(_)
+    ));
+    assert!(matches!(
+        client.resolve(&target, &mounts).route,
+        Route::Posix
+    ));
+    let zero_read_budget = client.with_limits(crate::ResourceLimits::new().with_max_read_bytes(0));
+    let summary = copy_items(
+        &zero_read_budget,
+        &[&source],
+        &directory,
+        TransferOptions::new().with_existing(Existing::Replace),
+    )
+    .unwrap();
+    assert_eq!(summary.bytes_copied, None);
+    assert_eq!(fs::read(&target).unwrap(), b"new payload");
+
+    let direct = remote.path().join("same-mount/source-0");
+    let error = copy_items(
+        &zero_read_budget,
+        &[&direct],
+        &directory,
+        TransferOptions::new().with_existing(Existing::Replace),
+    )
+    .unwrap_err();
+    assert_eq!(error.cause().kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(fs::read(&direct).unwrap(), b"new payload");
+    assert_eq!(fs::read(&target).unwrap(), b"new payload");
+
+    if let Some(other_mount) = std::env::var_os("VFSI_AUTO_TEST_ALIAS_MOUNT") {
+        let same_remote = PathBuf::from(other_mount).join(remote.path().file_name().unwrap());
+        let second_alias = local.path().join("second-alias");
+        std::os::unix::fs::symlink(same_remote, &second_alias).unwrap();
+        let second_directory = second_alias.join("same-mount");
+        let second_target = second_directory.join("source-0");
+        let second_direct = PathBuf::from(std::env::var_os("VFSI_AUTO_TEST_ALIAS_MOUNT").unwrap())
+            .join(remote.path().file_name().unwrap())
+            .join("same-mount/source-0");
+        let earlier_kernel = zero_read_budget.mounted.symlink_attrs(&direct).unwrap();
+        require_live_direct_route(&zero_read_budget, &direct);
+        require_live_direct_route(&zero_read_budget, &second_direct);
+        let later_native = zero_read_budget.symlink_attrs(&second_direct).unwrap();
+        assert_ne!(earlier_kernel.fs_obj_id(), later_native.fs_obj_id());
+        let identity = zero_read_budget.compare_routed_objects(&[(
+            (direct.as_path(), &earlier_kernel),
+            (second_direct.as_path(), &later_native),
+        )]);
+        assert!(matches!(identity.as_slice(), [Ok(Some(true))]));
+        let directory_alias = local.path().join("directory-alias");
+        std::os::unix::fs::symlink(&second_directory, &directory_alias).unwrap();
+        let alias_error = crate::helpers::copy_tree(
+            &zero_read_budget,
+            remote.path().join("same-mount"),
+            directory_alias.join("never-created"),
+            TransferOptions::new(),
+        )
+        .unwrap_err();
+        assert_eq!(alias_error.kind(), io::ErrorKind::InvalidInput);
+        assert!(!directory_alias.join("never-created").exists());
+        assert_ne!(
+            fs::metadata(&direct).unwrap().dev(),
+            fs::metadata(&second_target).unwrap().dev()
+        );
+        for source in [&direct, &target] {
+            let error = copy_items(
+                &zero_read_budget,
+                &[source],
+                &second_directory,
+                TransferOptions::new().with_existing(Existing::Replace),
+            )
+            .unwrap_err();
+            assert_eq!(error.cause().kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(fs::read(&direct).unwrap(), b"new payload");
+            assert_eq!(fs::read(&second_target).unwrap(), b"new payload");
+        }
+    }
+
+    if let Some(readonly_mount) = std::env::var_os("VFSI_AUTO_TEST_READONLY_MOUNT") {
+        let readonly_source = PathBuf::from(readonly_mount)
+            .join(remote.path().file_name().unwrap())
+            .join("same-mount/source-0");
+        assert_ne!(
+            fs::metadata(&direct).unwrap().dev(),
+            fs::metadata(&readonly_source).unwrap().dev()
+        );
+        assert!(matches!(
+            zero_read_budget
+                .resolve(&readonly_source, &read_mounts(false))
+                .route,
+            Route::Posix
+        ));
+        let error = copy_items(
+            &zero_read_budget,
+            &[&readonly_source],
+            &directory,
+            TransferOptions::new().with_existing(Existing::Replace),
+        )
+        .unwrap_err();
+        assert_eq!(error.cause().kind(), io::ErrorKind::Unsupported);
+        assert_eq!(fs::read(direct).unwrap(), b"new payload");
+    }
+}
+
+#[test]
+#[ignore = "requires configured NFS mount fixtures"]
+fn live_transfer_identity_queries_batch_existing_direct_paths() {
+    let mount = std::env::var("VFSI_AUTO_TEST_MOUNT").expect("NFS mount fixture");
+    let fixture = tempfile::tempdir_in(mount).unwrap();
+    let client = Auto::new("/").unwrap();
+    let mut paths = Vec::new();
+    for index in 0..16 {
+        let source = fixture.path().join(format!("source-{index}"));
+        let destination = fixture.path().join(format!("destination-{index}"));
+        fs::write(&source, b"source").unwrap();
+        if index % 2 == 0 {
+            fs::hard_link(&source, &destination).unwrap();
+        } else {
+            fs::write(&destination, b"destination").unwrap();
+        }
+        paths.extend([source, destination]);
+    }
+    for path in &paths {
+        require_live_direct_route(&client, path);
+    }
+    let attrs = client
+        .getattrs_all(
+            &paths,
+            crate::AttrsOptions::new().with_fields(crate::Attributes::identity()),
+        )
+        .unwrap();
+    let observed: Vec<_> = paths
+        .iter()
+        .zip(&attrs)
+        .map(|(path, attrs)| (path.as_path(), attrs))
+        .collect();
+    let (pairs, remainder) = observed.as_chunks::<2>();
+    assert!(remainder.is_empty());
+    let pairs: Vec<_> = pairs.iter().map(|[left, right]| (*left, *right)).collect();
+
+    let calls = || vfsi_nfs::compound::thread_compound_stats().0;
+    let start = calls();
+    let scalar: Vec<_> = pairs
+        .iter()
+        .flat_map(|pair| client.compare_routed_objects(std::slice::from_ref(pair)))
+        .map(Result::unwrap)
+        .collect();
+    let scalar_calls = calls() - start;
+    let start = calls();
+    let vector: Vec<_> = client
+        .compare_routed_objects(&pairs)
+        .into_iter()
+        .map(Result::unwrap)
+        .collect();
+    let vector_calls = calls() - start;
+    let expected: Vec<_> = (0..pairs.len()).map(|index| Some(index % 2 == 0)).collect();
+    assert_eq!(scalar, expected);
+    assert_eq!(vector, expected);
+    assert!(
+        vector_calls > 0 && vector_calls < scalar_calls,
+        "{vector_calls} vector vs {scalar_calls} scalar compounds"
+    );
 }
 
 #[test]

@@ -329,6 +329,8 @@ impl SmbVecFs {
         error: OpError,
     ) -> OpResult<Vec<u8>> {
         if !self.client.is_disconnected()
+            || !self.path_read_reconnect_enabled()
+            || !protocol::is_path_read_reconnect_error(error.cause())
             || error.progress().is_some_and(|progress| {
                 matches!(progress, IoProgress::Read(read)
                 if read.eof() || read.bytes_read() > 0 || read.bytes_read() >= length)

@@ -1362,6 +1362,27 @@ fn path_metadata_follows_symlinks_for_scalar_and_vector_requests() {
     cleanup_test_tree(&root);
 }
 
+#[test]
+fn ordered_paging_declines_unsupported_strict_fresh_directory_opens() {
+    use vfsi_core::api::{ListDirOptions, VfsiExt};
+    let Some(fs) = connect() else { return };
+    let client = vfsi_sync::FsClient::new(fs);
+    let error = client
+        .visit_dirs_ordered(
+            "/",
+            ListDirOptions::new(),
+            |_, _| std::cmp::Ordering::Equal,
+            |_| false,
+            |_, _| panic!("an unsupported directory open must not deliver a listing"),
+        )
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert!(
+        client.read_dir("/").is_ok(),
+        "ordinary shallow listing follows roots"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn listing_walk_and_tree_copy_do_not_follow_directory_reparse_points() {

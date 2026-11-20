@@ -13,6 +13,19 @@ for name in coreutils findutils git rsync; do
         echo "Missing port checkout: vfsi-port-$name" >&2; exit 2;
     }
 done
+# Cargo runs from the platform and both Rust ports. Resolve a caller-relative
+# target directory once so the C smoke tests load the library just built.
+CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-"$repo_root/target"}
+case "$CARGO_TARGET_DIR" in
+    /*) ;;
+    *) CARGO_TARGET_DIR="$PWD/$CARGO_TARGET_DIR" ;;
+esac
+export CARGO_TARGET_DIR
+rsync="$ports_root/vfsi-port-rsync"
+# Configure rsync explicitly before running this script.
+grep -q '^#define SUPPORT_VFSI 1' "$rsync/config.h" || {
+    echo 'rsync must be configured with --enable-vfsi' >&2; exit 2;
+}
 # Refuse to accidentally validate registry builds while claiming dev coverage.
 for name in coreutils findutils; do
     cargo metadata --manifest-path "$ports_root/vfsi-port-$name/Cargo.toml" --format-version=1 --features vnfs |
@@ -41,15 +54,11 @@ find="$ports_root/vfsi-port-findutils"
     cargo test --features vnfs --lib
     cargo check --no-default-features
 )
-make -C "$ports_root/vfsi-port-git" -j2 USE_VFSI=YesPlease \
+# Git's Makefile links target/release/libgitcore.a inside its own checkout.
+env -u CARGO_TARGET_DIR make -C "$ports_root/vfsi-port-git" -j2 USE_VFSI=YesPlease \
     VFSI_CFLAGS="-I$repo_root/bindings/c/include" NO_CURL=YesPlease NO_GETTEXT=YesPlease NO_TCLTK=YesPlease git
-# Configure rsync with --enable-vfsi before running this script. Do not silently
-# reconfigure the caller's existing checkout or exercise an ordinary-only build.
-grep -q '^#define SUPPORT_VFSI 1' "$ports_root/vfsi-port-rsync/config.h" || {
-    echo 'rsync must be configured with --enable-vfsi' >&2; exit 2;
-}
-make -C "$ports_root/vfsi-port-rsync" -j2 CPPFLAGS="-I$repo_root/bindings/c/include"
-export VFSI_LIBRARY="${CARGO_TARGET_DIR:-$repo_root/target}/debug/libvfsi_c.so"
+make -C "$rsync" -j2 CPPFLAGS="-I$repo_root/bindings/c/include"
+export VFSI_LIBRARY="$CARGO_TARGET_DIR/debug/libvfsi_c.so"
 export VFSI_INCLUDE="$repo_root/bindings/c/include"
 bash "$ports_root/vfsi-port-git/contrib/vfsi/test-port.sh"
 bash "$ports_root/vfsi-port-rsync/support/test-vfsi-port.sh"

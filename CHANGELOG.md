@@ -3,6 +3,11 @@
 This project follows [Semantic Versioning](https://semver.org/) for the
 `nfs4fs` package. Rust crate and C ABI versions are tracked independently.
 
+## Unreleased
+
+- The next `vnfs` release requires `vfsi-core` 0.5.1 for routed transfer
+  identity and COPY checks. Publish the core crate before the new facade.
+
 ## 2026-11-18 — pinned reads, recovery, and copy routing
 
 Rust releases: vnfs 0.0.39; vfsi-core/vfsi-sync and the local, POSIX,

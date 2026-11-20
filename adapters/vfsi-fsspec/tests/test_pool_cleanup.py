@@ -351,3 +351,35 @@ for pool, (lock, reconnect, clients) in zip(parents, locks):
     pool.shutdown()
 """
     subprocess.run([sys.executable, "-c", code], check=True, timeout=10)
+
+
+def test_setup_close_skips_retired_owner_and_closes_healthy_sibling(monkeypatch):
+    class Native:
+        def __init__(self):
+            self.closes = []
+
+        def close_many(self, fds):
+            self.closes.append(list(fds))
+
+        def shutdown(self):
+            pass
+
+    pool = _ClientPool(SimpleNamespace(NfsClient=Native), (), size=2)
+    try:
+        natives = [client._native for client in pool._clients]
+        tokens = [pool._register(owner, 11) for owner in range(2)]
+        snapshot = pool._tokens_by_owner
+
+        def retire_first_after_snapshot(requested):
+            result = snapshot(requested)
+            if len(result) == 2:
+                pool._reconnect_client(0)
+            return result
+
+        monkeypatch.setattr(pool, "_tokens_by_owner", retire_first_after_snapshot)
+        assert pool._close_setup_handles(tokens, 2) is None
+        assert natives[0].closes == []
+        assert natives[1].closes == [[11]]
+        assert not pool._fds
+    finally:
+        pool.shutdown()

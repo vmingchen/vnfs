@@ -3,10 +3,15 @@
 import importlib.util
 import subprocess
 import sys
+from importlib.metadata import version
 
 import fsspec
 import pytest
 import vsmbfs
+
+
+def test_reports_the_adapter_distribution_version():
+    assert vsmbfs.__version__ == version("vsmbfs")
 
 
 def test_registers_dedicated_fsspec_protocol():

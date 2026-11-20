@@ -2,10 +2,10 @@ use crate::{
     Attributes, Attrs, AttrsOptions, ControlFlow, CopyOptions, DepthLimit, Error, ListDirOptions,
     OpenFlags, OpenOp, ReadOp, ReadOptions, SetAttrsOp, Vfsi, VfsiExt, WriteOp, WriteOptions,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use vfsi_core::IndexedError;
-use vfsi_core::internal::TraversalBudget;
+use vfsi_core::internal::{ObservedObject, TraversalBudget};
 type Result<T> = std::result::Result<T, IndexedError>;
 
 /// Destination-file policy. Existing directories are merged, never replaced.
@@ -232,6 +232,7 @@ struct Task {
     root: usize,
     depth: usize,
     fresh_destination: bool,
+    descriptor_copy: bool,
 }
 fn invalid_cause(path: &Path) -> Error {
     vfsi_core::internal::errors::with_context(
@@ -341,6 +342,7 @@ fn roots<P: AsRef<Path>>(
             root,
             depth: 0,
             fresh_destination: false,
+            descriptor_copy: false,
         });
     }
     for batch in tasks.chunks_mut(options.batch_size) {
@@ -408,8 +410,183 @@ fn roots<P: AsRef<Path>>(
             }
         }
     }
+    reject_aliased_overlap(fs, &tasks, options)?;
     Ok(tasks)
 }
+
+fn reject_aliased_overlap(fs: &impl Vfsi, tasks: &[Task], options: TransferOptions) -> Result<()> {
+    let sources: Vec<_> = tasks
+        .iter()
+        .filter(|task| task.metadata.is_dir() || task.metadata.is_file())
+        .collect();
+    let directories: Vec<_> = sources
+        .iter()
+        .copied()
+        .filter(|task| task.metadata.is_dir())
+        .collect();
+    let check_files = options.layout == CopyLayout::Contents
+        && options.existing == Existing::Replace
+        && sources.len() > 1;
+    if directories.is_empty() && !check_files {
+        return Ok(());
+    }
+    // Borrow each prefix from its already budgeted operand path. Owning
+    // every prefix would make a deep path consume quadratic path storage.
+    let entries = read_transfer_ancestry(
+        fs,
+        sources
+            .iter()
+            .filter(|task| task.metadata.is_dir() || check_files)
+            .map(|task| (task.root, task.destination.as_path())),
+        false,
+        options.batch_size,
+    )?;
+    let followed = if directories.is_empty() {
+        HashMap::new()
+    } else {
+        read_transfer_ancestry(
+            fs,
+            sources.iter().flat_map(|task| {
+                [&task.destination, &task.source]
+                    .into_iter()
+                    .flat_map(|path| path.ancestors().skip(1))
+                    .map(|path| (task.root, path))
+            }),
+            true,
+            options.batch_size,
+        )?
+    };
+    for &task in &sources {
+        if !directories.is_empty() {
+            let ancestors = task.destination.ancestors().skip(1).filter_map(|path| {
+                followed[path]
+                    .as_ref()
+                    .filter(|attrs| attrs.is_dir())
+                    .map(|attrs| (path, attrs))
+            });
+            let pairs = ancestors.flat_map(|destination| {
+                directories
+                    .iter()
+                    .map(move |source| ((source.source.as_path(), &source.metadata), destination))
+            });
+            reject_identity_pairs(fs, task, pairs, options.batch_size)?;
+        }
+        if let Some(attrs) = entries
+            .get(task.destination.as_path())
+            .and_then(Option::as_ref)
+            && attrs.is_dir()
+        {
+            let destination = (task.destination.as_path(), attrs);
+            let pairs = directories
+                .iter()
+                .map(|source| ((source.source.as_path(), &source.metadata), destination));
+            reject_identity_pairs(fs, task, pairs, options.batch_size)?;
+            let pairs = sources
+                .iter()
+                .flat_map(|source| source.source.ancestors().skip(1))
+                .filter_map(|path| {
+                    followed[path]
+                        .as_ref()
+                        .map(|attrs| ((path, attrs), destination))
+                });
+            reject_identity_pairs(fs, task, pairs, options.batch_size)?;
+        }
+        if let Some(attrs) = entries
+            .get(task.destination.as_path())
+            .and_then(Option::as_ref)
+            && attrs.is_file()
+        {
+            let destination = (task.destination.as_path(), attrs);
+            let pairs = sources
+                .iter()
+                .filter(|source| source.metadata.is_file())
+                .map(|source| ((source.source.as_path(), &source.metadata), destination));
+            reject_identity_pairs(fs, task, pairs, options.batch_size)?;
+        }
+    }
+    Ok(())
+}
+
+fn read_transfer_ancestry<'a>(
+    fs: &impl Vfsi,
+    paths: impl Iterator<Item = (usize, &'a Path)>,
+    follow_final: bool,
+    batch_size: usize,
+) -> Result<HashMap<&'a Path, Option<Attrs>>> {
+    let mut observed = HashMap::new();
+    let mut paths = paths;
+    let options = AttrsOptions::new()
+        .with_fields(Attributes::MODE | Attributes::identity())
+        .with_follow_final_symlink(follow_final);
+    loop {
+        let inputs: Vec<_> = paths
+            .by_ref()
+            .filter(|&(_, path)| {
+                use std::collections::hash_map::Entry;
+                if let Entry::Vacant(entry) = observed.entry(path) {
+                    entry.insert(None);
+                    true
+                } else {
+                    false
+                }
+            })
+            .take(batch_size)
+            .collect();
+        if inputs.is_empty() {
+            break;
+        }
+        let targets: Vec<_> = inputs.iter().map(|&(_, path)| path).collect();
+        let results = fs.vgetattrs(&targets, options).map_err(|error| {
+            IndexedError::unattributed(error).with_context("transfer ancestry", targets[0])
+        })?;
+        if results.len() != inputs.len() {
+            return Err(contract(
+                "transfer: invalid ancestry metadata outcome count",
+            ));
+        }
+        for ((root, path), result) in inputs.into_iter().zip(results) {
+            match result {
+                Ok(attrs) => {
+                    observed.insert(path, Some(attrs));
+                }
+                Err(error)
+                    if matches!(
+                        error.cause().kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) => {}
+                Err(error) => {
+                    return Err(IndexedError::at(root, error.into_cause())
+                        .with_context("transfer ancestry", path));
+                }
+            }
+        }
+    }
+    Ok(observed)
+}
+
+fn reject_identity_pairs<'a>(
+    fs: &impl Vfsi,
+    task: &Task,
+    mut pairs: impl Iterator<Item = (ObservedObject<'a>, ObservedObject<'a>)>,
+    batch_size: usize,
+) -> Result<()> {
+    loop {
+        let wave: Vec<_> = pairs.by_ref().take(batch_size).collect();
+        if wave.is_empty() {
+            return Ok(());
+        }
+        let results = fs.compare_routed_objects(&wave);
+        if results.len() != wave.len() {
+            return Err(contract("transfer: invalid identity decision count"));
+        }
+        for (pair, result) in wave.into_iter().zip(results) {
+            if compared_object(fs, pair, result, task.root)? {
+                return Err(invalid(task.root, &task.destination));
+            }
+        }
+    }
+}
+
 fn placeholder() -> Attrs {
     vfsi_core::metadata_from_attrs(vfsi_core::VfAttrs::default())
 }
@@ -487,6 +664,7 @@ fn run<P: AsRef<Path>>(
             root: 0,
             depth: 0,
             fresh_destination: false,
+            descriptor_copy: false,
         };
         let mut containers = [container];
         ensure_dirs(fs, &mut containers)?;
@@ -622,6 +800,7 @@ fn copy_independent_roots(
                             root: parent.root,
                             depth,
                             fresh_destination: parent.fresh_destination,
+                            descriptor_copy: parent.descriptor_copy,
                         });
                         if children.len() == options.batch_size {
                             dispatch(
@@ -704,6 +883,9 @@ fn dispatch(
 ) -> Result<()> {
     let mut dirs = Vec::new();
     let mut files = Vec::new();
+    let native_copy = progress.is_none()
+        && options.existing == Existing::Replace
+        && !options.flags.preserve_permissions();
     for mut task in tasks {
         if task.metadata.is_dir() {
             dirs.push(task);
@@ -733,6 +915,26 @@ fn dispatch(
             ));
         }
     }
+    if native_copy {
+        let candidates: Vec<_> = files
+            .iter()
+            .filter(|task| !task.descriptor_copy)
+            .map(|task| (task.source.as_path(), task.destination.as_path()))
+            .collect();
+        if !candidates.is_empty() {
+            let supported = fs.supports_regular_path_copies(&candidates);
+            if supported.len() != candidates.len() {
+                return Err(contract("transfer: invalid COPY route decision count"));
+            }
+            for (task, supported) in files
+                .iter_mut()
+                .filter(|task| !task.descriptor_copy)
+                .zip(supported)
+            {
+                task.descriptor_copy = !supported;
+            }
+        }
+    }
     ensure_dirs(fs, &mut dirs)?;
     summary.directories_processed += dirs.len() as u64;
     if let Some(callback) = progress.as_mut() {
@@ -755,20 +957,22 @@ fn dispatch(
         }
     }
     pending.extend(dirs);
-    let chunk = options.chunk_bytes.min(fs.limits().max_read_bytes());
-    let native_copy = progress.is_none()
-        && options.existing == Existing::Replace
-        && !options.flags.preserve_permissions();
+    let read_budget = fs.limits().max_read_bytes();
+    let chunk = options.chunk_bytes.min(read_budget);
     let mut start = 0;
     while start < files.len() {
         let mut end = start;
         let mut bytes = 0;
+        let use_native = native_copy && !files[start].descriptor_copy;
         while end < files.len() && end - start < options.batch_size {
-            let required = chunk.min(usize::try_from(files[end].size).unwrap_or(usize::MAX));
-            if !native_copy && required > fs.limits().max_read_bytes() - bytes {
+            if (native_copy && !files[end].descriptor_copy) != use_native {
                 break;
             }
-            if !native_copy {
+            let required = chunk.min(usize::try_from(files[end].size).unwrap_or(usize::MAX));
+            if !use_native && required > read_budget - bytes {
+                break;
+            }
+            if !use_native {
                 bytes += required;
             }
             end += 1;
@@ -812,7 +1016,8 @@ fn copy_batch(
             }
         }
     }
-    if progress.is_none()
+    if !tasks[0].descriptor_copy
+        && progress.is_none()
         && options.existing == Existing::Replace
         && !options.flags.preserve_permissions()
     {
@@ -847,6 +1052,13 @@ fn copy_batch(
     {
         return Err(limit(task.root, &task.source));
     }
+    // Reserve read buffers before any replacement. Skip mode reserves buffers
+    // only for files admitted by its exclusive destination OPEN.
+    let mut buffers = if options.existing == Existing::Skip {
+        Vec::new()
+    } else {
+        allocate_transfer_buffers(tasks.iter(), chunk)?
+    };
     let requests: Vec<_> = tasks
         .iter()
         .map(|t| OpenOp::for_positioned_io(&t.source, OpenFlags::READ))
@@ -899,12 +1111,12 @@ fn copy_batch(
             }
             selected.extend(0..tasks.len());
         }
+        if options.existing == Existing::Skip {
+            buffers =
+                allocate_transfer_buffers(selected.iter().map(|&index| &tasks[index]), chunk)?;
+        }
         let mut offsets = vec![0u64; selected.len()];
         let mut done = vec![false; selected.len()];
-        let mut buffers: Vec<_> = selected
-            .iter()
-            .map(|i| vec![0u8; chunk.min(usize::try_from(tasks[*i].size).unwrap_or(usize::MAX))])
-            .collect();
         while done.iter().any(|v| !v) {
             let active: Vec<_> = (0..selected.len()).filter(|i| !done[*i]).collect();
             let reads: Vec<_> = buffers
@@ -1039,6 +1251,21 @@ fn copy_batch(
     close_sources?;
     close_destinations
 }
+fn allocate_transfer_buffers<'a>(
+    tasks: impl Iterator<Item = &'a Task>,
+    chunk: usize,
+) -> Result<Vec<Vec<u8>>> {
+    tasks
+        .map(|task| {
+            let length = chunk.min(usize::try_from(task.size).unwrap_or(usize::MAX));
+            vfsi_core::internal::zeroed_read_buffer(length).map_err(|cause| {
+                IndexedError::at(task.root, cause)
+                    .with_context("transfer read buffer", &task.source)
+            })
+        })
+        .collect()
+}
+
 fn active_error(
     error: IndexedError,
     active: &[usize],
@@ -1064,10 +1291,34 @@ fn same_file(
     source: &Attrs,
     destination_path: &Path,
     destination: &Attrs,
-) -> bool {
-    fs.same_object_namespace(source_path, destination_path)
-        && source.fs_obj_id().is_some()
-        && source.fs_obj_id() == destination.fs_obj_id()
+    root: usize,
+) -> Result<bool> {
+    if source_path == destination_path {
+        // Comparing two snapshots of the same source detects replacement.
+        return Ok(source.fs_obj_id().is_some() && source.fs_obj_id() == destination.fs_obj_id());
+    }
+    let pair = ((source_path, source), (destination_path, destination));
+    let mut results = fs.compare_routed_objects(&[pair]);
+    if results.len() != 1 {
+        return Err(contract("transfer: invalid identity decision count"));
+    }
+    compared_object(fs, pair, results.remove(0), root)
+}
+
+fn compared_object(
+    fs: &impl Vfsi,
+    ((left_path, left), (right_path, right)): (ObservedObject<'_>, ObservedObject<'_>),
+    result: std::io::Result<Option<bool>>,
+    root: usize,
+) -> Result<bool> {
+    let routed = result.map_err(|cause| {
+        IndexedError::at(root, cause).with_context("transfer identity", right_path)
+    })?;
+    Ok(routed.unwrap_or_else(|| {
+        left.fs_obj_id().is_some()
+            && left.fs_obj_id() == right.fs_obj_id()
+            && fs.same_object_namespace(left_path, right_path)
+    }))
 }
 fn prepare_replace(fs: &impl Vfsi, tasks: &[Task]) -> Result<()> {
     let paths: Vec<_> = tasks
@@ -1091,28 +1342,53 @@ fn prepare_replace(fs: &impl Vfsi, tasks: &[Task]) -> Result<()> {
             "transfer: invalid replacement metadata outcome count",
         ));
     }
-    let mut existing = Vec::new();
-    for (task, outcome) in tasks
+    let observed: Vec<_> = tasks
         .iter()
         .filter(|task| !task.fresh_destination)
         .zip(outcomes)
-    {
+        .collect();
+    let pairs: Vec<_> = observed
+        .iter()
+        .filter_map(|(task, outcome)| {
+            let attrs = outcome.as_ref().ok().filter(|attrs| attrs.is_file())?;
+            Some((
+                (task.source.as_path(), &task.metadata),
+                (task.destination.as_path(), attrs),
+            ))
+        })
+        .collect();
+    let identities = fs.compare_routed_objects(&pairs);
+    if identities.len() != pairs.len() {
+        return Err(contract("transfer: invalid identity decision count"));
+    }
+    let mut comparisons = pairs.into_iter().zip(identities);
+    let mut existing = Vec::new();
+    let mut failure = None;
+    for (index, (task, outcome)) in observed.iter().enumerate() {
         match outcome {
-            Ok(meta)
-                if !meta.is_file()
-                    || same_file(fs, &task.source, &task.metadata, &task.destination, &meta) =>
-            {
-                return Err(invalid(task.root, &task.destination));
+            Ok(meta) => {
+                if !meta.is_file() {
+                    return Err(invalid(task.root, &task.destination));
+                }
+                let (pair, result) = comparisons.next().expect("identity for each existing file");
+                if compared_object(fs, pair, result, task.root)? {
+                    return Err(invalid(task.root, &task.destination));
+                }
+                existing.push(*task);
             }
-            Ok(_) => existing.push(task),
             Err(error) if error.cause().kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(mapped(
-                    IndexedError::at(0, error.into_cause()),
-                    std::slice::from_ref(task),
-                ));
+            Err(_) => {
+                failure = Some(index);
+                break;
             }
         }
+    }
+    if let Some(index) = failure {
+        let (task, outcome) = observed.into_iter().nth(index).unwrap();
+        return Err(mapped(
+            IndexedError::at(0, outcome.unwrap_err().into_cause()),
+            std::slice::from_ref(task),
+        ));
     }
     if !existing.is_empty() {
         let paths: Vec<_> = existing.iter().map(|t| &t.destination).collect();
@@ -1194,6 +1470,7 @@ fn move_run<P: AsRef<Path>>(
             root: 0,
             depth: 0,
             fresh_destination: false,
+            descriptor_copy: false,
         };
         let mut containers = [container];
         ensure_dirs(fs, &mut containers)?;
@@ -1323,19 +1600,38 @@ fn prepare_rename_fallback(
         Err(error) => return Err(mapped(IndexedError::at(0, error), tasks)),
     };
     if task.metadata.fs_obj_id().is_some()
-        && !same_file(fs, &task.source, &task.metadata, &task.source, &source)
+        && !same_file(
+            fs,
+            &task.source,
+            &task.metadata,
+            &task.source,
+            &source,
+            task.root,
+        )?
     {
         return Err(invalid(task.root, &task.source));
     }
     match fs.symlink_attrs(&task.destination) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(mapped(IndexedError::at(0, error), tasks)),
-        Ok(target) if same_file(fs, &task.source, &task.metadata, &task.destination, &target) => {
-            return Err(mapped(IndexedError::at(0, failure), tasks));
+        Ok(target) => {
+            if same_file(
+                fs,
+                &task.source,
+                &task.metadata,
+                &task.destination,
+                &target,
+                task.root,
+            )? {
+                return Err(mapped(IndexedError::at(0, failure), tasks));
+            }
         }
-        Ok(_) => {}
     }
-    copies.push(task.clone());
+    let mut fallback = task.clone();
+    // Cross-device rename proves pathname COPY may use incompatible routes.
+    // Carry the descriptor strategy to descendants before replacing anything.
+    fallback.descriptor_copy = failure.kind() == std::io::ErrorKind::CrossesDevices;
+    copies.push(fallback);
     Ok(())
 }
 
@@ -1358,26 +1654,18 @@ mod object_identity_tests {
         let alias = attrs(1, Attributes::identity());
         let other_fs = attrs(2, Attributes::identity());
         let incomplete = attrs(1, Attributes::FILEID);
-        assert!(same_file(
-            &fs,
-            Path::new("/a"),
-            &a,
-            Path::new("/alias"),
-            &alias
-        ));
-        assert!(!same_file(
-            &fs,
-            Path::new("/a"),
-            &a,
-            Path::new("/other"),
-            &other_fs
-        ));
-        assert!(!same_file(
-            &fs,
-            Path::new("/a"),
-            &a,
-            Path::new("/unknown"),
-            &incomplete
-        ));
+        assert!(same_file(&fs, Path::new("/a"), &a, Path::new("/alias"), &alias, 0,).unwrap());
+        assert!(!same_file(&fs, Path::new("/a"), &a, Path::new("/other"), &other_fs, 0,).unwrap());
+        assert!(
+            !same_file(
+                &fs,
+                Path::new("/a"),
+                &a,
+                Path::new("/unknown"),
+                &incomplete,
+                0,
+            )
+            .unwrap()
+        );
     }
 }

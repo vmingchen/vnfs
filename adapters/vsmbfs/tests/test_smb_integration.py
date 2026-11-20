@@ -63,6 +63,22 @@ def test_smb_identity_and_capabilities(smb_fs):
     assert smb_fs._client.capabilities() & _native.CAP_LSTAT == 0
 
 
+@pytest.mark.parametrize("cache_type", ["all", "mmap"])
+def test_grouped_exclusive_create_can_supply_an_eager_reader(smb_fs, cache_type):
+    from fsspec.core import OpenFile
+
+    files = smb_fs.open_many(
+        [OpenFile(smb_fs, "/new", "xb"), OpenFile(smb_fs, "/new", "rb")],
+        cache_type=cache_type,
+    )
+    try:
+        assert files[1].read() == b""
+    finally:
+        smb_fs.commit_many(files)
+    assert smb_fs.exists("/new")
+    assert not smb_fs._client._fds
+
+
 def test_native_recursive_copy_creates_nested_share_directories(smb_fs):
     smb_fs.pipe_file("/source/nested/file", b"payload")
     smb_fs.mkdir("/source/nested/empty")

@@ -70,6 +70,28 @@ pub trait Vfsi {
         true
     }
 
+    /// Compare names from routed filesystem views using observed metadata.
+    /// Routers may use a common identity representation or return an error if
+    /// it is unsafe to assume the objects differ. `None` uses ordinary IDs.
+    #[doc(hidden)]
+    fn compare_routed_objects(
+        &self,
+        pairs: &[(
+            crate::internal::ObservedObject<'_>,
+            crate::internal::ObservedObject<'_>,
+        )],
+    ) -> Vec<crate::VfResult<Option<bool>>> {
+        pairs.iter().map(|_| Ok(None)).collect()
+    }
+
+    /// Whether pathname COPY can use one backend for each regular-file pair.
+    /// This advisory route check returns one decision per pair in input order.
+    /// A compatible route does not guarantee that COPY will succeed.
+    #[doc(hidden)]
+    fn supports_regular_path_copies(&self, pairs: &[(&Path, &Path)]) -> Vec<bool> {
+        vec![true; pairs.len()]
+    }
+
     /// Query filesystems for paths (following symlinks) and retained open handles.
     /// Exactly one outcome per input, in input order; execution may be unordered.
     /// Outer errors reject the call before dispatch. Item failures do not suppress

@@ -96,3 +96,25 @@ fn truncated_compounds_have_invalid_reply_provenance() {
         Some(vfsi_core::TransportKind::InvalidReply)
     );
 }
+
+#[test]
+fn path_read_reconnect_eligibility_preserves_definite_status() {
+    for status in [NtStatus::OBJECT_NAME_NOT_FOUND, NtStatus::ACCESS_DENIED] {
+        let cause = smb_error(
+            SmbError::Protocol {
+                status,
+                command: Command::Read,
+            },
+            None,
+        );
+        assert!(!protocol::is_path_read_reconnect_error(&cause));
+    }
+    for error in [SmbError::Timeout, SmbError::Disconnected] {
+        assert!(protocol::is_path_read_reconnect_error(&smb_error(
+            error, None
+        )));
+    }
+    assert!(!protocol::is_path_read_reconnect_error(
+        &compound_cardinality_error(1, 3)
+    ));
+}
