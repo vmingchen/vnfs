@@ -75,6 +75,11 @@ impl From<bool> for DirectorySymlinkPolicy {
 /// This includes handle-level metadata/statistics and synchronization vectors,
 /// but does not require namespace operations, enumeration or read/write vectors.
 pub trait HandleBackend {
+    /// Whether symlink targets collapse parent components before lookup.
+    #[doc(hidden)]
+    fn normalizes_symlink_targets_lexically(&self) -> bool {
+        false
+    }
     /// Reject transfer overlap visible in a client's mounted namespace.
     #[doc(hidden)]
     fn check_transfer_mounts(

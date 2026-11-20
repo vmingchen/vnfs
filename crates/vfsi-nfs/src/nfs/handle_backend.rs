@@ -34,6 +34,10 @@ fn open_after_create_probe<T>(
 }
 
 impl HandleBackend for NfsVecFs {
+    fn normalizes_symlink_targets_lexically(&self) -> bool {
+        true
+    }
+
     fn prepare_object_refs(&mut self, files: &[&FileOperand]) -> VfResult<()> {
         self.open_object_ids
             .retain(|fd, _| self.open_files.contains_key(fd));

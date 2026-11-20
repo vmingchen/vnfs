@@ -80,6 +80,13 @@ impl<F: HandleBackend> FsClient<F> {
     }
 
     #[doc(hidden)]
+    pub fn normalizes_symlink_targets_lexically(&self) -> bool {
+        self.inner
+            .lock_without_cleanup()
+            .is_ok_and(|backend| backend.normalizes_symlink_targets_lexically())
+    }
+
+    #[doc(hidden)]
     pub fn check_transfer_mounts(
         &self,
         roots: &[vfsi_core::internal::TransferRoot<'_>],

@@ -131,6 +131,28 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
             let link = format!("{root}/shortcut");
             fs.symlink("missing/../base/folder", &link)?;
             let aliased = format!("{link}/same");
+            let minor = match version {
+                NfsVersion::Auto => None,
+                NfsVersion::V4_1 => Some(1),
+                NfsVersion::V4_2 => Some(2),
+            };
+            let backend = vfsi_nfs::NfsVecFs::builder(&host)
+                .root(&export)
+                .minor_version(minor)
+                .connect()?;
+            let standalone = vfsi_sync::FsClient::new(backend);
+            let standalone_target = format!("{root}/standalone-copy");
+            let copied = copy_tree(
+                &standalone,
+                &aliased,
+                &standalone_target,
+                TransferOptions::new(),
+            )?;
+            assert_eq!(copied.files_copied, 1);
+            assert_eq!(
+                standalone.read(format!("{standalone_target}/folder/same/payload"))?,
+                b"retain"
+            );
             let contents = TransferOptions::new().with_layout(CopyLayout::Contents);
             let overlap =
                 move_items(&fs, &[&aliased], format!("{root}/base"), contents).unwrap_err();

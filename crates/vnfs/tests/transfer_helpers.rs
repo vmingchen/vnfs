@@ -2419,16 +2419,22 @@ fn overlapping_bind_aliases_preserve_directory_and_regular_sources() {
     );
 
     let replace = options.with_existing(Existing::Replace);
-    let error = move_items(&fs, &["/deep/a", "/deep/b"], "/deep/dest", replace).unwrap_err();
-    assert_eq!(error.index(), Some(0));
-    assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
-    assert_eq!(fs.read("/deep/a/first").unwrap(), b"first source");
-    assert_eq!(fs.read("/deep/a/sub/file").unwrap(), b"replacement payload");
-    assert_eq!(fs.read("/deep/b/nested/file").unwrap(), b"later source");
-    assert_eq!(
-        fs.symlink_attrs("/deep/dest/first").unwrap_err().kind(),
-        std::io::ErrorKind::NotFound,
-    );
+    fn check_nested_alias(fs: &impl Vfsi, replace: TransferOptions) {
+        let error = move_items(fs, &["/deep/a", "/deep/b"], "/deep/dest", replace).unwrap_err();
+        assert_eq!(error.index(), Some(0));
+        assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(fs.read("/deep/a/first").unwrap(), b"first source");
+        assert_eq!(fs.read("/deep/a/sub/file").unwrap(), b"replacement payload");
+        assert_eq!(fs.read("/deep/b/nested/file").unwrap(), b"later source");
+        assert_eq!(
+            fs.symlink_attrs("/deep/dest/first").unwrap_err().kind(),
+            std::io::ErrorKind::NotFound,
+        );
+    }
+
+    check_nested_alias(&fs, replace);
+    let native = vfsi_posix::connect(Path::new(&path)).unwrap();
+    check_nested_alias(&native, replace);
 
     let error = copy_items(
         &fs,

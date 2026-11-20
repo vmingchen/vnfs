@@ -627,6 +627,18 @@ impl<F: crate::backend::VectorBackend> vfsi_core::api::DirHandle for crate::FsDi
 }
 
 impl<F: crate::backend::VectorBackend + 'static> Vfsi for crate::FsClient<F> {
+    fn normalizes_symlink_targets_lexically(&self) -> bool {
+        crate::FsClient::normalizes_symlink_targets_lexically(self)
+    }
+
+    fn check_transfer_mounts(
+        &self,
+        roots: &[vfsi_core::internal::TransferRoot<'_>],
+        max_path_bytes: usize,
+    ) -> std::result::Result<(), vfsi_core::IndexedError> {
+        crate::FsClient::check_transfer_mounts(self, roots, max_path_bytes)
+    }
+
     type File = crate::OpenFile<F>;
     type Dir = crate::FsDir<F>;
     crate::__vfsi_client_methods!(
