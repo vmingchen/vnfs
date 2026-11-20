@@ -1261,7 +1261,9 @@ class _RawVfsiFile(io.RawIOBase):
                 self._last_attrs = attrs
                 if self._readable and not self._identity_required:
                     self._identity = identity
-                    self._identity_required = identity is not None
+                    # An open reader is pinned even if the backend cannot
+                    # supply enough identity to reopen it after retirement.
+                    self._identity_required = True
                 if self._base_mode.startswith("a"):
                     self._pos = attrs["size"]
         return self._fd

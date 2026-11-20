@@ -1879,3 +1879,28 @@ def test_sparse_fetch_reopens_after_retirement_before_dispatch(dummy_fs, monkeyp
         monkeypatch.setattr(pool, "pread_many", retire_then_read)
         assert list(file._fetch_ranges([(0, 3), (6, 9)])) == [b"abc", b"ghi"]
         assert pool.generation == generation + 1
+
+
+def test_lazy_reader_without_identity_cannot_reopen_replacement(dummy_fs, monkeypatch):
+    from vfsi_fsspec import VfsiFile
+
+    dummy_fs.pipe_file("/input", b"abcd")
+    pool = dummy_fs._client
+    fstat = pool.fstat
+
+    def stat_without_identity(token):
+        attrs = dict(fstat(token))
+        attrs.pop("fs_id", None)
+        return attrs
+
+    monkeypatch.setattr(pool, "fstat", stat_without_identity)
+    with VfsiFile(dummy_fs, "/input", "rb", cache_type="none") as reader:
+        assert reader.read(2) == b"ab"
+        dummy_fs.mv("/input", "/original")
+        dummy_fs.pipe_file("/input", b"WXYZ")
+        pool.reconnect_descriptor(reader._raw._fd)
+        with pytest.raises(OSError) as error:
+            reader.read(2)
+        assert error.value.errno == errno.ESTALE
+        assert reader.tell() == 2
+    assert not pool._fds
