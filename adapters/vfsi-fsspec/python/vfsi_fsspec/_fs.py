@@ -5872,7 +5872,8 @@ class VfsiFileSystem(AbstractFileSystem):
             dependent.update(
                 index
                 for index in missing
-                if unchecked_creator < index and paths[index] == paths[unchecked_creator]
+                if unchecked_creator < index
+                and paths[index] == paths[unchecked_creator]
             )
         unresolved = sorted(missing - dependent)
         if creators and unresolved:

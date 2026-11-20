@@ -958,6 +958,7 @@ fn live_cross_device_transfer_replaces_file_through_open_handles() {
         fs::write(&source, b"new payload").unwrap();
         fs::write(&target, b"previous").unwrap();
 
+        require_live_direct_route(&client, &source);
         let resolved = client.resolve(&source, &read_mounts(false));
         let Route::Nfs(connection) = resolved.route else {
             panic!("expected direct route for source");
