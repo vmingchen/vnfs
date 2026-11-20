@@ -2,7 +2,7 @@ use crate::{
     Attributes, Attrs, AttrsOptions, ControlFlow, CopyOptions, DepthLimit, Error, ListDirOptions,
     OpenFlags, OpenOp, ReadOp, ReadOptions, SetAttrsOp, Vfsi, VfsiExt, WriteOp, WriteOptions,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use vfsi_core::IndexedError;
 use vfsi_core::internal::{ObservedObject, TraversalBudget};
@@ -234,6 +234,36 @@ struct Task {
     fresh_destination: bool,
     descriptor_copy: bool,
 }
+
+#[derive(Default)]
+struct CopyState<'a> {
+    source_dirs: BTreeMap<usize, ObservedObject<'a>>,
+    source_files: BTreeMap<usize, ObservedObject<'a>>,
+    skipped: HashSet<usize>,
+}
+
+impl<'a> CopyState<'a> {
+    fn new(roots: impl Iterator<Item = &'a Task>) -> Self {
+        let mut state = Self::default();
+        for root in roots {
+            let observed = (root.source.as_path(), &root.metadata);
+            if root.metadata.is_dir() {
+                state.source_dirs.insert(root.root, observed);
+            } else if root.metadata.is_file() {
+                state.source_files.insert(root.root, observed);
+            }
+        }
+        state
+    }
+    fn retire(&mut self, root: &Task) {
+        if root.metadata.is_dir() {
+            self.source_dirs.remove(&root.root);
+        } else if root.metadata.is_file() {
+            self.source_files.remove(&root.root);
+        }
+    }
+}
+
 fn invalid_cause(path: &Path) -> Error {
     vfsi_core::internal::errors::with_context(
         std::io::ErrorKind::InvalidInput.into(),
@@ -411,6 +441,19 @@ fn roots<P: AsRef<Path>>(
         }
     }
     reject_aliased_overlap(fs, &tasks, options, max_path_bytes)?;
+    if tasks.iter().any(|task| task.metadata.is_dir()) {
+        let paths: Vec<_> = tasks
+            .iter()
+            .filter(|task| task.metadata.is_dir() || task.metadata.is_file())
+            .map(|task| vfsi_core::internal::TransferRoot {
+                index: task.root,
+                source: &task.source,
+                destination: &task.destination,
+                directory: task.metadata.is_dir(),
+            })
+            .collect();
+        fs.check_transfer_mounts(&paths, max_path_bytes)?;
+    }
     Ok(tasks)
 }
 
@@ -476,13 +519,19 @@ fn reject_aliased_overlap(
             HashMap::new(),
         )?;
         let mut projected_bytes = 0usize;
+        let mut link_targets = TransferLinkTargets::default();
         for (root, path) in operands() {
             if resolved.contains_key(path) {
                 continue;
             }
-            if let Some(projected) =
-                resolve_transfer_ancestor_alias(fs, root, path, &nofollow, max_path_bytes)?
-            {
+            if let Some(projected) = resolve_transfer_ancestor_alias(
+                fs,
+                root,
+                path,
+                &nofollow,
+                max_path_bytes,
+                &mut link_targets,
+            )? {
                 projected_bytes = projected_bytes.saturating_add(projected.as_os_str().len());
                 if projected_bytes > max_path_bytes {
                     return Err(limit(root, path));
@@ -516,7 +565,7 @@ fn reject_aliased_overlap(
                     .iter()
                     .map(move |source| ((source.source.as_path(), &source.metadata), destination))
             });
-            reject_identity_pairs(fs, task, pairs, options.batch_size)?;
+            reject_identity_pairs(fs, task, pairs, options.batch_size, Overlap::Object)?;
         }
         if let Some(attrs) = entries
             .get(task.destination.as_path())
@@ -527,7 +576,7 @@ fn reject_aliased_overlap(
             let pairs = directories
                 .iter()
                 .map(|source| ((source.source.as_path(), &source.metadata), destination));
-            reject_identity_pairs(fs, task, pairs, options.batch_size)?;
+            reject_identity_pairs(fs, task, pairs, options.batch_size, Overlap::Object)?;
             let pairs = sources
                 .iter()
                 .flat_map(|source| transfer_ancestors(&source.source, &resolved))
@@ -536,7 +585,7 @@ fn reject_aliased_overlap(
                         .as_ref()
                         .map(|attrs| ((path, attrs), destination))
                 });
-            reject_identity_pairs(fs, task, pairs, options.batch_size)?;
+            reject_identity_pairs(fs, task, pairs, options.batch_size, Overlap::Object)?;
         }
         if let Some(attrs) = entries
             .get(task.destination.as_path())
@@ -549,18 +598,28 @@ fn reject_aliased_overlap(
                 .iter()
                 .filter(|source| {
                     source.metadata.is_file()
-                        && match (source.metadata.file_id(), attrs.file_id()) {
-                            (Some(left), Some(right)) if left != right => {
-                                source.source.file_name() == task.destination.file_name()
-                            }
-                            _ => true,
-                        }
+                        && regular_alias_candidate(
+                            (source.source.as_path(), &source.metadata),
+                            destination,
+                        )
                 })
                 .map(|source| ((source.source.as_path(), &source.metadata), destination));
-            reject_identity_pairs(fs, task, pairs, options.batch_size)?;
+            reject_identity_pairs(fs, task, pairs, options.batch_size, Overlap::Object)?;
         }
     }
     Ok(())
+}
+
+fn regular_alias_candidate(
+    (source_path, source): ObservedObject<'_>,
+    (destination_path, destination): ObservedObject<'_>,
+) -> bool {
+    match (source.file_id(), destination.file_id()) {
+        (Some(left), Some(right)) if left != right => {
+            source_path.file_name() == destination_path.file_name()
+        }
+        _ => true,
+    }
 }
 
 fn transfer_ancestors<'a>(
@@ -575,12 +634,48 @@ fn transfer_ancestors<'a>(
     )
 }
 
+const MAX_SYMLINK_HOPS: usize = 40;
+
+#[derive(Default)]
+struct TransferLinkTargets {
+    paths: VecDeque<(PathBuf, PathBuf)>,
+    bytes: usize,
+}
+
+impl TransferLinkTargets {
+    fn read_link(
+        &mut self,
+        fs: &impl Vfsi,
+        link: &Path,
+        max_path_bytes: usize,
+    ) -> std::io::Result<PathBuf> {
+        if let Some((_, target)) = self.paths.iter().find(|(path, _)| path == link) {
+            return Ok(target.clone());
+        }
+        let target = fs.read_link(link)?;
+        let bytes = link
+            .as_os_str()
+            .len()
+            .saturating_add(target.as_os_str().len());
+        if bytes <= max_path_bytes {
+            while self.paths.len() >= MAX_SYMLINK_HOPS || self.bytes > max_path_bytes - bytes {
+                let (old_link, old_target) = self.paths.pop_front().expect("nonempty cache");
+                self.bytes -= old_link.as_os_str().len() + old_target.as_os_str().len();
+            }
+            self.paths.push_back((link.to_path_buf(), target.clone()));
+            self.bytes += bytes;
+        }
+        Ok(target)
+    }
+}
+
 fn resolve_transfer_ancestor_alias(
     fs: &impl Vfsi,
     root: usize,
     original: &Path,
     observed: &HashMap<&Path, Option<Attrs>>,
     max_path_bytes: usize,
+    link_targets: &mut TransferLinkTargets,
 ) -> Result<Option<PathBuf>> {
     let Some(first) = original
         .ancestors()
@@ -599,8 +694,10 @@ fn resolve_transfer_ancestor_alias(
     let mut link = first.to_path_buf();
     let attributed =
         |error| IndexedError::at(root, error).with_context("transfer ancestry", original);
-    for _ in 0..40 {
-        let target = fs.read_link(&link).map_err(attributed)?;
+    for _ in 0..MAX_SYMLINK_HOPS {
+        let target = link_targets
+            .read_link(fs, &link, max_path_bytes)
+            .map_err(attributed)?;
         let mut resolved = if target.is_absolute() {
             PathBuf::from("/")
         } else {
@@ -742,11 +839,18 @@ fn read_transfer_ancestry<'a>(
     Ok(observed)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Overlap {
+    Object,
+    DirectoryEntry,
+}
+
 fn reject_identity_pairs<'a>(
     fs: &impl Vfsi,
     task: &Task,
     mut pairs: impl Iterator<Item = (ObservedObject<'a>, ObservedObject<'a>)>,
     batch_size: usize,
+    overlap: Overlap,
 ) -> Result<()> {
     loop {
         let wave: Vec<_> = pairs.by_ref().take(batch_size).collect();
@@ -758,17 +862,50 @@ fn reject_identity_pairs<'a>(
             return Err(contract("transfer: invalid identity decision count"));
         }
         for (pair, result) in wave.into_iter().zip(results) {
-            if compared_object(fs, pair, result, task.root)? {
+            if compared_object(fs, pair, result, task.root)?
+                && (overlap == Overlap::Object || same_replacement_parent(fs, task, pair.0.0)?)
+            {
                 return Err(invalid(task.root, &task.destination));
             }
         }
     }
 }
 
+fn same_replacement_parent(fs: &impl Vfsi, task: &Task, source: &Path) -> Result<bool> {
+    let (Some(left), Some(right)) = (source.parent(), task.destination.parent()) else {
+        return Ok(true);
+    };
+    if left == right {
+        return Ok(true);
+    }
+    let observe = |path| {
+        fs.symlink_attrs(path).map_err(|error| {
+            IndexedError::at(task.root, error).with_context("transfer replacement parent", path)
+        })
+    };
+    let left_attrs = observe(left)?;
+    let right_attrs = observe(right)?;
+    // Distinct containing directories can safely hold separate hard links.
+    // Require identities for real directories before ruling out an alias.
+    if !left_attrs.is_dir()
+        || !right_attrs.is_dir()
+        || left_attrs.fs_obj_id().is_none()
+        || right_attrs.fs_obj_id().is_none()
+    {
+        return Ok(true);
+    }
+    same_file(fs, left, &left_attrs, right, &right_attrs, task.root)
+}
+
 fn placeholder() -> Attrs {
     vfsi_core::metadata_from_attrs(vfsi_core::VfAttrs::default())
 }
-fn ensure_dirs(fs: &impl Vfsi, tasks: &mut [Task]) -> Result<()> {
+fn ensure_dirs(
+    fs: &impl Vfsi,
+    tasks: &mut [Task],
+    state: Option<&CopyState<'_>>,
+    batch_size: usize,
+) -> Result<()> {
     if tasks.is_empty() {
         return Ok(());
     }
@@ -795,6 +932,24 @@ fn ensure_dirs(fs: &impl Vfsi, tasks: &mut [Task]) -> Result<()> {
                     return Err(invalid(task.root, &task.destination));
                 }
                 task.fresh_destination = false;
+                if task.depth > 0
+                    && let Some(state) = state
+                {
+                    // Mount aliases can hide a source root's ancestor from
+                    // preflight. Recheck an existing directory before descent.
+                    let destination = (task.destination.as_path(), &attrs);
+                    reject_identity_pairs(
+                        fs,
+                        task,
+                        state
+                            .source_dirs
+                            .values()
+                            .copied()
+                            .map(|source| (source, destination)),
+                        batch_size,
+                        Overlap::Object,
+                    )?;
+                }
             }
             Err(error) => return Err(mapped(IndexedError::at(index, error.into_cause()), tasks)),
         }
@@ -845,38 +1000,47 @@ fn run<P: AsRef<Path>>(
             descriptor_copy: false,
         };
         let mut containers = [container];
-        ensure_dirs(fs, &mut containers)?;
+        ensure_dirs(fs, &mut containers, None, options.batch_size)?;
         for task in &mut roots {
             task.fresh_destination = containers[0].fresh_destination;
         }
     }
+    let mut state = CopyState::new(roots.iter());
     copy_roots(
         fs,
-        roots,
+        &roots,
         options,
         &mut budget,
         &mut summary,
         &mut progress,
-        &mut HashSet::new(),
+        &mut state,
     )?;
     Ok(summary)
 }
 fn copy_roots(
     fs: &impl Vfsi,
-    roots: Vec<Task>,
+    roots: &[Task],
     options: TransferOptions,
     budget: &mut TraversalBudget,
     summary: &mut TransferSummary,
     progress: &mut Progress<'_>,
-    skipped: &mut HashSet<usize>,
+    state: &mut CopyState<'_>,
 ) -> Result<()> {
     if options.layout != CopyLayout::Contents || roots.len() < 2 {
-        return copy_independent_roots(fs, roots, options, budget, summary, progress, skipped);
+        return copy_independent_roots(
+            fs,
+            roots.iter().cloned(),
+            options,
+            budget,
+            summary,
+            progress,
+            state,
+        );
     }
     // Contents roots can map to the same destination, including descendants of
     // a directory operand. Complete conflicting roots in input order. Distinct
     // regular-file basenames remain independent and retain vector I/O.
-    let mut roots = roots.into_iter().peekable();
+    let mut roots = roots.iter().cloned().peekable();
     let mut first_cohort = true;
     while let Some(root) = roots.next() {
         let regular = root.metadata.is_file();
@@ -897,7 +1061,15 @@ fn copy_roots(
                 task.fresh_destination = false;
             }
         }
-        copy_independent_roots(fs, cohort, options, budget, summary, progress, skipped)?;
+        copy_independent_roots(
+            fs,
+            cohort.into_iter(),
+            options,
+            budget,
+            summary,
+            progress,
+            state,
+        )?;
         if summary.stopped {
             return Ok(());
         }
@@ -908,19 +1080,18 @@ fn copy_roots(
 
 fn copy_independent_roots(
     fs: &impl Vfsi,
-    roots: Vec<Task>,
+    mut roots: impl ExactSizeIterator<Item = Task>,
     options: TransferOptions,
     budget: &mut TraversalBudget,
     summary: &mut TransferSummary,
     progress: &mut Progress<'_>,
-    skipped: &mut HashSet<usize>,
+    state: &mut CopyState<'_>,
 ) -> Result<()> {
     let limits = fs.limits();
     let mut pending = Vec::new();
-    let mut roots = roots.into_iter();
     while roots.len() != 0 {
         let batch = roots.by_ref().take(options.batch_size).collect();
-        dispatch(fs, batch, &mut pending, options, summary, progress, skipped)?;
+        dispatch(fs, batch, &mut pending, options, summary, progress, state)?;
         if summary.stopped {
             return Ok(());
         }
@@ -964,7 +1135,7 @@ fn copy_independent_roots(
                         {
                             if options.depth.is_some() {
                                 summary.entries_skipped += 1;
-                                skipped.insert(parent.root);
+                                state.skipped.insert(parent.root);
                                 continue;
                             }
                             return Err(limit(parent.root, entry.path()));
@@ -988,7 +1159,7 @@ fn copy_independent_roots(
                                 options,
                                 summary,
                                 progress,
-                                skipped,
+                                state,
                             )?;
                             if summary.stopped {
                                 return Ok(ControlFlow::Break(()));
@@ -1002,7 +1173,7 @@ fn copy_independent_roots(
                         options,
                         summary,
                         progress,
-                        skipped,
+                        state,
                     )?;
                     Ok(if summary.stopped {
                         ControlFlow::Break(())
@@ -1057,7 +1228,7 @@ fn dispatch(
     options: TransferOptions,
     summary: &mut TransferSummary,
     progress: &mut Progress<'_>,
-    skipped: &mut HashSet<usize>,
+    state: &mut CopyState<'_>,
 ) -> Result<()> {
     let mut dirs = Vec::new();
     let mut files = Vec::new();
@@ -1081,7 +1252,7 @@ fn dispatch(
             files.push(task);
         } else if options.unsupported == UnsupportedEntry::Skip {
             summary.entries_skipped += 1;
-            skipped.insert(task.root);
+            state.skipped.insert(task.root);
         } else {
             return Err(IndexedError::at(
                 task.root,
@@ -1113,7 +1284,7 @@ fn dispatch(
             }
         }
     }
-    ensure_dirs(fs, &mut dirs)?;
+    ensure_dirs(fs, &mut dirs, Some(state), options.batch_size)?;
     summary.directories_processed += dirs.len() as u64;
     if let Some(callback) = progress.as_mut() {
         for task in &dirs {
@@ -1137,6 +1308,15 @@ fn dispatch(
     pending.extend(dirs);
     let read_budget = fs.limits().max_read_bytes();
     let chunk = options.chunk_bytes.min(read_budget);
+    if chunk == 0 && options.existing == Existing::Skip {
+        skip_without_payload(
+            fs,
+            &mut files,
+            options.batch_size,
+            summary,
+            &mut state.skipped,
+        )?;
+    }
     let mut start = 0;
     while start < files.len() {
         let mut end = start;
@@ -1162,7 +1342,7 @@ fn dispatch(
             chunk,
             summary,
             progress,
-            skipped,
+            state,
         )?;
         if summary.stopped {
             break;
@@ -1171,6 +1351,38 @@ fn dispatch(
     }
     Ok(())
 }
+fn skip_without_payload(
+    fs: &impl Vfsi,
+    files: &mut Vec<Task>,
+    batch_size: usize,
+    summary: &mut TransferSummary,
+    skipped: &mut HashSet<usize>,
+) -> Result<()> {
+    // Without any read budget, an exclusive OPEN would leave an empty file
+    // for a nonempty source. Only observe entries that can be skipped.
+    let nonempty = || files.iter().filter(|task| task.size != 0);
+    let existing = read_transfer_ancestry(
+        fs,
+        nonempty().map(|task| (task.root, task.destination.as_path())),
+        false,
+        batch_size,
+        HashMap::new(),
+    )?;
+    if let Some(task) = nonempty().find(|task| existing[task.destination.as_path()].is_none()) {
+        return Err(limit(task.root, &task.source));
+    }
+    files.retain(|task| {
+        if task.size == 0 {
+            true
+        } else {
+            summary.entries_skipped += 1;
+            skipped.insert(task.root);
+            false
+        }
+    });
+    Ok(())
+}
+
 fn copy_batch(
     fs: &impl Vfsi,
     tasks: &[Task],
@@ -1178,7 +1390,7 @@ fn copy_batch(
     chunk: usize,
     summary: &mut TransferSummary,
     progress: &mut Progress<'_>,
-    skipped: &mut HashSet<usize>,
+    state: &mut CopyState<'_>,
 ) -> Result<()> {
     if options.flags.preserve_permissions() {
         for task in tasks {
@@ -1199,7 +1411,7 @@ fn copy_batch(
         && options.existing == Existing::Replace
         && !options.flags.preserve_permissions()
     {
-        prepare_replace(fs, tasks)?;
+        prepare_replace(fs, tasks, options, state)?;
         let requests: Vec<_> = tasks
             .iter()
             .map(|t| {
@@ -1267,7 +1479,7 @@ fn copy_batch(
                     }
                     Err(e) if e.cause().kind() == std::io::ErrorKind::AlreadyExists => {
                         summary.entries_skipped += 1;
-                        skipped.insert(task.root);
+                        state.skipped.insert(task.root);
                     }
                     Err(e) => {
                         return Err(mapped(e, std::slice::from_ref(task)));
@@ -1276,7 +1488,7 @@ fn copy_batch(
             }
         } else {
             if options.existing == Existing::Replace {
-                prepare_replace(fs, tasks)?;
+                prepare_replace(fs, tasks, options, state)?;
             }
             let flags = OpenFlags::WRITE | OpenFlags::CREATE_NEW;
             let requests: Vec<_> = tasks
@@ -1498,7 +1710,12 @@ fn compared_object(
             && fs.same_object_namespace(left_path, right_path)
     }))
 }
-fn prepare_replace(fs: &impl Vfsi, tasks: &[Task]) -> Result<()> {
+fn prepare_replace(
+    fs: &impl Vfsi,
+    tasks: &[Task],
+    options: TransferOptions,
+    state: &CopyState<'_>,
+) -> Result<()> {
     let paths: Vec<_> = tasks
         .iter()
         .filter(|task| !task.fresh_destination)
@@ -1551,6 +1768,19 @@ fn prepare_replace(fs: &impl Vfsi, tasks: &[Task]) -> Result<()> {
                 let (pair, result) = comparisons.next().expect("identity for each existing file");
                 if compared_object(fs, pair, result, task.root)? {
                     return Err(invalid(task.root, &task.destination));
+                }
+                if task.depth > 0 || options.layout != CopyLayout::Contents {
+                    let destination = (task.destination.as_path(), meta);
+                    let other_sources = state.source_files.values().copied().filter(|&source| {
+                        source.0 != task.source && regular_alias_candidate(source, destination)
+                    });
+                    reject_identity_pairs(
+                        fs,
+                        task,
+                        other_sources.map(|source| (source, destination)),
+                        options.batch_size,
+                        Overlap::DirectoryEntry,
+                    )?;
                 }
                 existing.push(*task);
             }
@@ -1651,7 +1881,7 @@ fn move_run<P: AsRef<Path>>(
             descriptor_copy: false,
         };
         let mut containers = [container];
-        ensure_dirs(fs, &mut containers)?;
+        ensure_dirs(fs, &mut containers, None, options.batch_size)?;
         for task in &mut tasks {
             task.fresh_destination = containers[0].fresh_destination;
         }
@@ -1671,6 +1901,7 @@ fn move_run<P: AsRef<Path>>(
         && options.layout == CopyLayout::Container
         && options.existing == Existing::Replace
         && options.depth.is_none();
+    let mut state = CopyState::new(tasks.iter());
     for batch in tasks.chunks(cohort) {
         let mut copies = Vec::new();
         let mut renames = Vec::new();
@@ -1701,7 +1932,10 @@ fn move_run<P: AsRef<Path>>(
             }
             for (index, (task, result)) in renames.iter().zip(outcomes).enumerate() {
                 match result {
-                    Ok(()) => summary.roots_renamed += 1,
+                    Ok(()) => {
+                        summary.roots_renamed += 1;
+                        state.retire(task);
+                    }
                     Err(error) => {
                         if error.progress().is_some() {
                             return Err(mapped(
@@ -1734,15 +1968,14 @@ fn move_run<P: AsRef<Path>>(
             }
         }
         copies.sort_by_key(|task| task.root);
-        let mut skipped = HashSet::new();
         copy_roots(
             fs,
-            copies.clone(),
+            &copies,
             options,
             &mut budget,
             &mut summary,
             &mut progress,
-            &mut skipped,
+            &mut state,
         )?;
         // On error or cancellation retain all copied sources in this wave.
         // Only complete, successfully closed, unskipped roots are delete-eligible.
@@ -1751,12 +1984,15 @@ fn move_run<P: AsRef<Path>>(
         }
         let complete: Vec<_> = copies
             .into_iter()
-            .filter(|task| !skipped.contains(&task.root))
+            .filter(|task| !state.skipped.contains(&task.root))
             .collect();
         if !complete.is_empty() {
             let paths: Vec<_> = complete.iter().map(|task| &task.source).collect();
             fs.removes_all(&paths, crate::RemoveMode::Tree, crate::RemoveOptions::new())
                 .map_err(|error| mapped(error, &complete))?;
+            for task in &complete {
+                state.retire(task);
+            }
             summary.roots_removed += complete.len() as u64;
         }
     }

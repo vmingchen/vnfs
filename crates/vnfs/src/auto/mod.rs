@@ -21,6 +21,14 @@ type NfsClient = FsClient<vfsi_nfs::NfsVecFs>;
 type NfsFile = OpenFile<vfsi_nfs::NfsVecFs>;
 
 impl Auto {
+    pub(crate) fn check_transfer_mounts_impl(
+        &self,
+        roots: &[vfsi_core::internal::TransferRoot<'_>],
+        max_path_bytes: usize,
+    ) -> std::result::Result<(), vfsi_core::IndexedError> {
+        self.mounted.check_transfer_mounts(roots, max_path_bytes)
+    }
+
     /// Root all application paths at this existing host directory. For example,
     /// root `/work` plus application `/a` addresses host `/work/a`.
     /// The root is a namespace convention, not a security sandbox.

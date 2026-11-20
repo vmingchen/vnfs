@@ -63,6 +63,14 @@ impl crate::DirHandle for crate::uring::UringDir {
 }
 #[cfg(all(feature = "uring", target_os = "linux"))]
 impl Vfsi for crate::Uring {
+    fn check_transfer_mounts(
+        &self,
+        roots: &[vfsi_core::internal::TransferRoot<'_>],
+        max_path_bytes: usize,
+    ) -> std::result::Result<(), vfsi_core::IndexedError> {
+        self.inner.check_transfer_mounts(roots, max_path_bytes)
+    }
+
     type File = crate::uring::UringFile;
     type Dir = crate::uring::UringDir;
     client_methods!(crate::Uring, std::convert::identity);
@@ -76,6 +84,14 @@ mod routed {
         vfsi_sync::__vfsi_file_methods!(crate::AutoFile);
     }
     impl Vfsi for crate::Auto {
+        fn check_transfer_mounts(
+            &self,
+            roots: &[vfsi_core::internal::TransferRoot<'_>],
+            max_path_bytes: usize,
+        ) -> std::result::Result<(), vfsi_core::IndexedError> {
+            self.check_transfer_mounts_impl(roots, max_path_bytes)
+        }
+
         fn same_object_namespace(&self, left: &Path, right: &Path) -> bool {
             self.same_object_namespace_impl(left, right)
         }
@@ -99,6 +115,14 @@ mod routed {
 
 #[cfg(all(feature = "posix", unix))]
 impl Vfsi for crate::Posix {
+    fn check_transfer_mounts(
+        &self,
+        roots: &[vfsi_core::internal::TransferRoot<'_>],
+        max_path_bytes: usize,
+    ) -> std::result::Result<(), vfsi_core::IndexedError> {
+        self.inner.check_transfer_mounts(roots, max_path_bytes)
+    }
+
     type File = crate::PosixFile;
     type Dir = crate::PosixDir;
     client_methods!(crate::Posix, std::convert::identity);

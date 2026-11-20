@@ -174,6 +174,11 @@ impl std::ops::Deref for AnchoredPath {
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
 pub fn open_rooted_path(root: &File, path: &Path, directory: bool) -> VfResult<File> {
+    open_rooted_path_with_flags(root, path, if directory { libc::O_DIRECTORY } else { 0 })
+}
+
+#[cfg(target_os = "linux")]
+fn open_rooted_path_with_flags(root: &File, path: &Path, flags: i32) -> VfResult<File> {
     #[repr(C)]
     struct OpenHow {
         flags: u64,
@@ -191,7 +196,7 @@ pub fn open_rooted_path(root: &File, path: &Path, directory: bool) -> VfResult<F
     };
     let path = cstring_from_bytes(path_bytes(path))
         .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-    let flags = libc::O_PATH | libc::O_CLOEXEC | if directory { libc::O_DIRECTORY } else { 0 };
+    let flags = libc::O_PATH | libc::O_CLOEXEC | flags;
     let how = OpenHow {
         flags: flags as u64,
         mode: 0,
@@ -2141,7 +2146,19 @@ impl LocalBackend {
     }
 }
 
+#[cfg(target_os = "linux")]
+mod transfer_mounts;
+
 impl HandleBackend for LocalBackend {
+    #[cfg(target_os = "linux")]
+    fn check_transfer_mounts(
+        &self,
+        roots: &[vfsi_core::internal::TransferRoot<'_>],
+        max_path_bytes: usize,
+    ) -> std::result::Result<(), vfsi_core::IndexedError> {
+        transfer_mounts::check(&self.root_dir, roots, max_path_bytes)
+    }
+
     fn open_object_ref(
         &self,
         file: &FileOperand,

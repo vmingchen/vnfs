@@ -713,6 +713,39 @@ jobs:
             cargo test -p vfsi-nfs --lib nfs::tests::live_read_only_mount -- --ignored --nocapture
           VFSI_AUTO_TEST_MOUNT=/mnt/vnfs-ci-auto \
             cargo test -p vnfs --test nfs shared_pruning_contract_on_auto_nfs -- --exact --ignored --nocapture --test-threads=1
+      - name: Protect transfer sources behind directory bind mounts
+        run: |
+          fixture=$(mktemp -d "${TMPDIR:-/tmp}/vnfs transfer.XXXXXXXX")
+          cleanup() {
+            for point in occluded/source/child occluded/source/child/layer occluded/elsewhere inverse/mirror deep/dest/sub mirror; do
+              if mountpoint -q "$fixture/$point"; then
+                sudo umount "$fixture/$point" || return
+              fi
+            done
+            rm -rf -- "$fixture"
+          }
+          trap cleanup EXIT
+          mkdir -p "$fixture/base/folder/same/folder/same" "$fixture/mirror" "$fixture/stranger/folder"
+          printf 'directory payload' > "$fixture/base/folder/same/folder/same/payload"
+          printf 'original regular file' > "$fixture/base/folder/file"
+          printf 'replacement contents' > "$fixture/stranger/folder/file"
+          sudo mount --bind "$fixture/base/folder" "$fixture/mirror"
+          mkdir -p "$fixture/deep/a/sub" "$fixture/deep/b/nested" "$fixture/deep/dest/sub"
+          printf 'first source' > "$fixture/deep/a/first"
+          printf 'replacement payload' > "$fixture/deep/a/sub/file"
+          printf 'later source' > "$fixture/deep/b/nested/file"
+          sudo mount --bind "$fixture/deep/b/nested" "$fixture/deep/dest/sub"
+          mkdir -p "$fixture/inverse/source/sub" "$fixture/inverse/mirror"
+          printf 'top payload' > "$fixture/inverse/source/file"
+          printf 'nested payload' > "$fixture/inverse/source/sub/file"
+          sudo mount --bind "$fixture/inverse/source/sub" "$fixture/inverse/mirror"
+          mkdir -p "$fixture/occluded/source/child/layer" "$fixture/occluded/elsewhere" "$fixture/occluded/replacement" "$fixture/occluded/lower"
+          printf 'visible payload' > "$fixture/occluded/replacement/visible"
+          sudo mount --bind "$fixture/occluded/source/child" "$fixture/occluded/elsewhere"
+          sudo mount --bind "$fixture/occluded/lower" "$fixture/occluded/source/child/layer"
+          sudo mount --bind "$fixture/occluded/replacement" "$fixture/occluded/source/child"
+          VFSI_TRANSFER_BIND_ROOT="$fixture" cargo test -p vnfs --test transfer_helpers \
+            overlapping_bind_aliases_preserve_directory_and_regular_sources -- --exact --ignored --nocapture
       - name: Run NFS integration suite
         env:
           VNFS_TEST_MINOR: ${{ matrix.minor-version }}

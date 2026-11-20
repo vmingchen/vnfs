@@ -79,6 +79,18 @@ impl<F: HandleBackend> FsClient<F> {
         self
     }
 
+    #[doc(hidden)]
+    pub fn check_transfer_mounts(
+        &self,
+        roots: &[vfsi_core::internal::TransferRoot<'_>],
+        max_path_bytes: usize,
+    ) -> std::result::Result<(), vfsi_core::IndexedError> {
+        self.inner
+            .lock_without_cleanup()
+            .map_err(|_| vfsi_core::IndexedError::unattributed(poisoned()))?
+            .check_transfer_mounts(roots, max_path_bytes)
+    }
+
     pub fn limits(&self) -> ResourceLimits {
         self.limits
     }

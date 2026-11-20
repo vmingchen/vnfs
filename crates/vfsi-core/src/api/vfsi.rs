@@ -62,6 +62,16 @@ use super::{DirHandle, FileHandle};
 /// when required. Drop queues handle cleanup
 /// best-effort; explicit close methods let applications observe cleanup errors.
 pub trait Vfsi {
+    /// Reject transfer overlap visible in a client's mounted namespace.
+    #[doc(hidden)]
+    fn check_transfer_mounts(
+        &self,
+        _roots: &[crate::internal::TransferRoot<'_>],
+        _max_path_bytes: usize,
+    ) -> std::result::Result<(), crate::IndexedError> {
+        Ok(())
+    }
+
     /// Whether object IDs from these paths share a backend/server namespace.
     /// Single-backend clients use the default. Routers must override it;
     /// equal numeric IDs from unrelated servers do not identify one object.

@@ -75,6 +75,16 @@ impl From<bool> for DirectorySymlinkPolicy {
 /// This includes handle-level metadata/statistics and synchronization vectors,
 /// but does not require namespace operations, enumeration or read/write vectors.
 pub trait HandleBackend {
+    /// Reject transfer overlap visible in a client's mounted namespace.
+    #[doc(hidden)]
+    fn check_transfer_mounts(
+        &self,
+        _roots: &[vfsi_core::internal::TransferRoot<'_>],
+        _max_path_bytes: usize,
+    ) -> std::result::Result<(), vfsi_core::IndexedError> {
+        Ok(())
+    }
+
     /// Prepare object references in one backend batch when metadata is needed.
     /// Inputs retain request order so failure indices remain attributable.
     /// References returned for the batch must use a consistent, canonical

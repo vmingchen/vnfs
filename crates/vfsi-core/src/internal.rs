@@ -11,6 +11,15 @@ use crate::VfResult;
 /// A pathname and its observed metadata for comparing filesystem identities.
 pub type ObservedObject<'a> = (&'a std::path::Path, &'a crate::Attrs);
 
+/// Root operands before transfer dispatch. Mounted backends can use their
+/// physical namespace view to reject paths that overlap through a mount.
+pub struct TransferRoot<'a> {
+    pub index: usize,
+    pub source: &'a std::path::Path,
+    pub destination: &'a std::path::Path,
+    pub directory: bool,
+}
+
 /// Reserve owned read storage without aborting if the caller's configured
 /// byte limit permits a request the allocator cannot satisfy.
 pub fn reserve_read_buffer(length: usize) -> VfResult<Vec<u8>> {
