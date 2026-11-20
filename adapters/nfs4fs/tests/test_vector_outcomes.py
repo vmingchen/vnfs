@@ -284,3 +284,30 @@ def test_grouped_io_preserves_old_native_fallback(dummy_fs, monkeypatch, mode):
         files[1].write(b"new-b")
     assert fs.cat_file("/a") == (b"abcd" if mode == "ab" else b"") + b"new-a"
     assert fs.cat_file("/b") == (b"efgh" if mode == "ab" else b"") + b"new-b"
+
+
+@pytest.mark.parametrize("method", ["preadv", "pread_many"])
+def test_group_read_reopens_after_retirement_before_dispatch(
+    dummy_fs, monkeypatch, method
+):
+    fs = dummy_fs
+    fs.pipe({"/a": b"abcd", "/b": b"efgh"})
+    with opened(fs, ["/a", "/b"], "rb") as files:
+        pool = fs._client
+        monkeypatch.setattr(pool, "_native_has_vector_outcomes", method == "preadv")
+        original = getattr(pool, method)
+        calls = []
+
+        def retire_then_read(tokens, offsets, lengths):
+            if not calls:
+                pool.reconnect_descriptor(tokens[0])
+            calls.append(list(tokens))
+            return original(tokens, offsets, lengths)
+
+        monkeypatch.setattr(pool, method, retire_then_read)
+        generation = pool.generation
+        data, errors = files[0]._buffer_group._pread_many_once(files, [0, 0], [4, 4])
+        assert not errors
+        assert data == [b"abcd", b"efgh"]
+        assert len(calls) == 2 and calls[0] != calls[1]
+        assert pool.generation == generation + 1

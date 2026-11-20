@@ -65,6 +65,48 @@ mod live_shutdown_tests {
     }
 
     #[test]
+    fn removed_file_in_path_close_queue_does_not_block_independent_open() {
+        let Ok(host) = std::env::var("VFSI_NFS_SERVER") else {
+            assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+            return;
+        };
+        let minor = std::env::var("VFSI_NFS_MINOR")
+            .unwrap_or_else(|_| "2".into())
+            .parse()
+            .unwrap();
+        let mut client = NfsClient::connect_minor(&host, minor).unwrap();
+        let root = client.root().clone();
+        let name = format!("prr-removed-deferred-{}-{minor}", std::process::id());
+        let dir = client.mkdir(&root, &name).unwrap();
+        let (fh, stateid) = client
+            .open(
+                &dir,
+                b"closed",
+                nfsv41_sys::OPEN4_SHARE_ACCESS_BOTH,
+                OpenCreate::Unchecked,
+            )
+            .unwrap();
+        client.close(&fh, &stateid).unwrap();
+        // Retain the owner as if the successful CLOSE reply were lost.
+        client.deferred_path_closes.push(CloseOp { fh, stateid });
+        client.remove(&dir, "closed").unwrap();
+        let open = super::super::PathOpenOp {
+            path: format!("{name}/next").into_bytes(),
+            access: nfsv41_sys::OPEN4_SHARE_ACCESS_BOTH,
+            create: OpenCreate::Unchecked,
+            mode: Some(0o600),
+            truncate: false,
+        };
+        let mut outcomes = client.openv_path_compound(&[open]).unwrap();
+        let (fh, stateid) = outcomes.remove(0).unwrap();
+        assert_eq!(client.deferred_path_close_count(), 0);
+        client.close(&fh, &stateid).unwrap();
+        client.remove(&dir, "next").unwrap();
+        client.remove(&root, &name).unwrap();
+        client.shutdown().unwrap();
+    }
+
+    #[test]
     fn deferred_cleanup_retains_only_the_failed_close_and_unattempted_suffix() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use vfsi_core::internal::faults::FaultInjector;

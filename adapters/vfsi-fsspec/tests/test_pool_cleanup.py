@@ -1,5 +1,6 @@
 """Deferred cleanup must revalidate ownership after acquiring a session lock."""
 
+import errno
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -381,5 +382,102 @@ def test_setup_close_skips_retired_owner_and_closes_healthy_sibling(monkeypatch)
         assert natives[0].closes == []
         assert natives[1].closes == [[11]]
         assert not pool._fds
+    finally:
+        pool.shutdown()
+
+
+def test_vector_close_retires_tokens_before_releasing_owner_lock():
+    class Native:
+        def __init__(self):
+            self.closes = []
+
+        def close_many(self, fds):
+            self.closes.extend(fds)
+
+        def shutdown(self):
+            pass
+
+    pool = _ClientPool(SimpleNamespace(NfsClient=Native), (), size=1)
+    native = pool._clients[0]._native
+    token = pool._register(0, 11)
+    lock = pool._client_locks[0]
+
+    class CheckRetirement:
+        def __enter__(self):
+            return lock.__enter__()
+
+        def __exit__(self, *args):
+            try:
+                if native.closes:
+                    assert not pool.descriptor_valid(token)
+            finally:
+                lock.__exit__(*args)
+
+    pool._client_locks[0] = CheckRetirement()
+    try:
+        pool.close_many([token])
+        assert native.closes == [11]
+    finally:
+        pool._client_locks[0] = lock
+        pool.shutdown()
+
+
+def test_vector_revalidation_reports_index_without_dispatch():
+    class Native:
+        def fstat_many(self, fds):
+            pytest.fail("retired descriptor reached the native client")
+
+        def shutdown(self):
+            pass
+
+    pool = _ClientPool(SimpleNamespace(NfsClient=Native), (), size=1)
+    tokens = [pool._register(0, fd) for fd in (11, 12)]
+    lock = pool._client_locks[0]
+
+    class RetireBeforeAcquiring:
+        def __enter__(self):
+            pool._discard_tokens(tokens[1:])
+            return lock.__enter__()
+
+        def __exit__(self, *args):
+            return lock.__exit__(*args)
+
+    pool._client_locks[0] = RetireBeforeAcquiring()
+    try:
+        with pytest.raises(OSError) as raised:
+            pool.fstat_many(tokens)
+        assert raised.value.errno == errno.EBADF
+        assert raised.value.index == 1
+        assert pool.descriptor_valid(tokens[0])
+    finally:
+        pool.shutdown()
+
+
+def test_stale_reconnect_does_not_replace_a_recovered_session(monkeypatch):
+    class Native:
+        def open(self, path, mode):
+            return 11
+
+        def shutdown(self):
+            pass
+
+    pool = _ClientPool(SimpleNamespace(NfsClient=Native), (), size=1)
+    stale = pool.open("/reader", "rb")
+    snapshot = pool._tokens_by_owner
+    live = []
+
+    def retire_after_snapshot(tokens):
+        owned = snapshot(tokens)
+        if not live:
+            pool._reconnect_client(0)
+            live.append(pool.open("/replacement-session-reader", "rb"))
+        return owned
+
+    monkeypatch.setattr(pool, "_tokens_by_owner", retire_after_snapshot)
+    try:
+        pool.reconnect_descriptor(stale)
+        pool.reconnect_descriptor(stale)
+        assert pool.generation == 1
+        assert len(live) == 1 and pool.descriptor_valid(live[0])
     finally:
         pool.shutdown()

@@ -28,6 +28,16 @@ use io_progress::{complete_read_suffix, complete_write_suffix};
 #[cfg(feature = "test-faults")]
 use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 
+// A deferred CLOSE has no remaining target once the server rejects its
+// stateid or invalidates its filehandle. FHEXPIRED allows a volatile handle
+// to expire while the object still exists.
+pub(crate) fn is_terminal_close_status(status: u32) -> bool {
+    matches!(
+        status,
+        nfsstat4_NFS4ERR_BAD_STATEID | nfsstat4_NFS4ERR_OLD_STATEID | nfsstat4_NFS4ERR_STALE
+    )
+}
+
 /// An uncached duplicate reply hides the entire original compound, even
 /// though its SEQUENCE succeeded. Keep the native NFS cause independently of
 /// certainty instead of pretending this protocol status is a transport error.
@@ -1112,11 +1122,7 @@ impl NfsClient {
         while let Some(close) = remaining.next() {
             match self.close_cleanup_slot(&close.fh, &close.stateid, OwnerSlot::User) {
                 Ok(()) => {}
-                Err(error)
-                    if matches!(
-                        error.status,
-                        nfsstat4_NFS4ERR_BAD_STATEID | nfsstat4_NFS4ERR_OLD_STATEID
-                    ) => {}
+                Err(error) if is_terminal_close_status(error.status) => {}
                 Err(error) => {
                     self.deferred_path_closes.push(close);
                     self.deferred_path_closes.extend(remaining);
@@ -4609,12 +4615,10 @@ impl NfsClient {
 
     pub(crate) fn close_unregistered(&mut self, fh: &NfsFh, stateid: &stateid4) -> RpcResult<()> {
         let result = self.close_cleanup_slot(fh, stateid, OwnerSlot::User);
-        if result.as_ref().is_err_and(|error| {
-            !matches!(
-                error.status,
-                nfsstat4_NFS4ERR_BAD_STATEID | nfsstat4_NFS4ERR_OLD_STATEID
-            )
-        }) {
+        if result
+            .as_ref()
+            .is_err_and(|error| !is_terminal_close_status(error.status))
+        {
             self.deferred_path_closes.push(CloseOp {
                 fh: fh.clone(),
                 stateid: *stateid,

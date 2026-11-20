@@ -1841,3 +1841,41 @@ def test_readuntil_uses_delimiter_bytes_for_memoryviews(dummy_fs, blocks, delimi
         assert file.readuntil(delimiter, blocks=blocks) == b"abcWXYZ"
         assert file.tell() == 7
         assert file.read() == b"tail"
+
+
+def test_uncached_size_reopens_read_only_file_retired_before_fstat(
+    dummy_fs, monkeypatch
+):
+    dummy_fs.pipe_file("/sized", b"abcde")
+    with dummy_fs.open("/sized", "rb", cache_type="none") as file:
+        assert file.read(1) == b"a"
+        pool = dummy_fs._client
+        fstat = pool.fstat
+        generation = pool.generation
+        retired = file._raw._fd
+
+        def retire_then_fstat(token):
+            if token == retired:
+                pool.reconnect_descriptor(token)
+            return fstat(token)
+
+        monkeypatch.setattr(pool, "fstat", retire_then_fstat)
+        assert file.read() == b"bcde"
+        assert pool.generation == generation + 1
+
+
+def test_sparse_fetch_reopens_after_retirement_before_dispatch(dummy_fs, monkeypatch):
+    dummy_fs.pipe_file("/sparse", b"abcdefghi")
+    with dummy_fs.open("/sparse", "rb", block_size=3) as file:
+        file._raw._ensure_open()
+        pool = dummy_fs._client
+        generation = pool.generation
+        pread_many = pool.pread_many
+
+        def retire_then_read(tokens, offsets, lengths):
+            pool.reconnect_descriptor(tokens[0])
+            return pread_many(tokens, offsets, lengths)
+
+        monkeypatch.setattr(pool, "pread_many", retire_then_read)
+        assert list(file._fetch_ranges([(0, 3), (6, 9)])) == [b"abc", b"ghi"]
+        assert pool.generation == generation + 1

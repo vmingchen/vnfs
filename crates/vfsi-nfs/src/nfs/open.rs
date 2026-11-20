@@ -85,14 +85,11 @@ impl NfsVecFs {
                 let mut first_error = None;
                 for (open, outcome) in pending.into_iter().zip(outcomes) {
                     if let Err(error) = outcome {
-                        // A lost reply can leave an already-closed state in the
-                        // queue. Its terminal status is a cleanup completion.
-                        if matches!(
-                            vfsi_core::native_status(error.cause()),
-                            Some(vfsi_core::StatusCode::Nfs(
-                                nfsstat4_NFS4ERR_BAD_STATEID | nfsstat4_NFS4ERR_OLD_STATEID
-                            ))
-                        ) {
+                        if error.state() == vfsi_core::FailureState::Failed
+                            && let Some(vfsi_core::StatusCode::Nfs(status)) =
+                                vfsi_core::native_status(error.cause())
+                            && crate::client::is_terminal_close_status(status)
+                        {
                             continue;
                         }
                         first_error.get_or_insert_with(|| error.into_cause());

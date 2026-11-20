@@ -2640,7 +2640,13 @@ fn live_cleanup_lost_close_reply_does_not_block_later_vector_open() {
     let outcomes = fs.close_temporary_descriptors(vec![file]).unwrap();
     assert!(outcomes[0].is_err() && fault.is_consumed());
     assert_eq!(fs.deferred_descriptor_closes.len(), 1);
-    let opened = fs.vopen_raw_impl(&[path.as_path()], &[libc::O_RDONLY], &[0]);
+    fs.unlink_impl(&path).unwrap();
+    let next = path.with_extension("next");
+    let opened = fs.vopen_raw_impl(
+        &[next.as_path()],
+        &[libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY],
+        &[0o600],
+    );
     assert!(
         opened.is_ok(),
         "terminal cleanup status must not poison later opens: {opened:?}"
@@ -2648,7 +2654,7 @@ fn live_cleanup_lost_close_reply_does_not_block_later_vector_open() {
     let file = opened.unwrap().remove(0).unwrap();
     assert!(fs.deferred_descriptor_closes.is_empty());
     fs.close_impl(&file).unwrap();
-    fs.unlink_impl(&path).unwrap();
+    fs.unlink_impl(&next).unwrap();
     fs.shutdown().unwrap();
 }
 

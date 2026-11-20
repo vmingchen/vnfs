@@ -654,6 +654,10 @@ if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_reset_pool_locks_after_fork)
 
 
+class _RetiredDescriptorError(OSError):
+    """A token was rejected by the pool before any native call."""
+
+
 class _ClientPool:
     """Bounded pool of independent native sessions with virtual descriptors.
 
@@ -760,7 +764,19 @@ class _ClientPool:
                 owner, native_fd = self._fds[token]
                 return owner, native_fd, self._clients[owner]
             except (KeyError, IndexError):
-                raise OSError(errno.EBADF, "Bad file descriptor") from None
+                raise _RetiredDescriptorError(
+                    errno.EBADF, "Bad file descriptor"
+                ) from None
+
+    def _resolve_many(self, tokens):
+        resolved = []
+        for index, token in enumerate(tokens):
+            try:
+                resolved.append(self._resolve(token))
+            except _RetiredDescriptorError as error:
+                error.index = index
+                raise
+        return resolved
 
     def descriptor_valid(self, token):
         """Return whether a virtual descriptor still belongs to a live session."""
@@ -914,9 +930,11 @@ class _ClientPool:
                         self._generation += 1
 
     def reconnect_descriptor(self, token):
-        """Reconnect only the session that owns token."""
-        owner, _, _ = self._resolve(token)
-        self._reconnect_client(owner)
+        """Reconnect only if the token still belongs to the affected session."""
+        for owner in self._tokens_by_owner([token]):
+            with self._client_locks[owner]:
+                if self.descriptor_valid(token):
+                    self._reconnect_client(owner)
 
     def _reconnect_all(self, after_fork=False):
         with self._lock:
@@ -1086,13 +1104,8 @@ class _ClientPool:
 
             def fd_many_call(tokens, *args, **kwargs):
                 self.ensure_ready()
-                resolved = []
-                for index, token in enumerate(tokens):
-                    try:
-                        resolved.append(self._resolve(token))
-                    except OSError as error:
-                        error.index = index
-                        raise
+                tokens = tuple(tokens)
+                resolved = self._resolve_many(tokens)
                 owners = {owner for owner, _, _ in resolved}
                 if len(owners) > 1:
                     raise ValueError("descriptor vector spans multiple native sessions")
@@ -1103,7 +1116,7 @@ class _ClientPool:
                     owner = resolved[0][0]
                 with self._client_locks[owner]:
                     if resolved:
-                        resolved = [self._resolve(token) for token in tokens]
+                        resolved = self._resolve_many(tokens)
                         client = resolved[0][2]
                         native_fds = [native_fd for _, native_fd, _ in resolved]
                     try:
@@ -1119,8 +1132,8 @@ class _ClientPool:
                             self._discard_confirmed_closes(error, tokens)
                             self.defer_close_many(tokens)
                         raise
-                if name == "close_many":
-                    self._discard_tokens(tokens)
+                    if name == "close_many":
+                        self._discard_tokens(tokens)
                 return result
 
             return fd_many_call
@@ -1286,7 +1299,13 @@ class _RawVfsiFile(io.RawIOBase):
         # Uncached/update handles must observe growth and truncation, including
         # changes through another descriptor. Cached readers keep their own size.
         if not self.closed and self._uses_descriptor:
-            return self.fs._client.fstat(self._ensure_open())["size"]
+            fd = self._ensure_open()
+            try:
+                return self.fs._client.fstat(fd)["size"]
+            except _RetiredDescriptorError:
+                if self._writable or not self.fs.auto_reconnect:
+                    raise
+                return self.fs._client.fstat(self._ensure_open())["size"]
         return self.fs.size(self.path)
 
     # -- io.RawIOBase ------------------------------------------------------
@@ -1679,7 +1698,10 @@ class VfsiFile(AbstractBufferedFile):
                     [lengths[index] for index in batch],
                 )
             except OSError as error:
-                if not self.fs.auto_reconnect or not _can_reconnect(error):
+                if not self.fs.auto_reconnect or (
+                    not isinstance(error, _RetiredDescriptorError)
+                    and not _can_reconnect(error)
+                ):
                     raise
                 # Read-only recovery reuses the scalar identity/retry engine.
                 for index in batch:
@@ -2261,7 +2283,13 @@ class _BufferGroup:
             try:
                 if method == "preadv":
                     fd = file._raw._ensure_open()
-                    values = client.preadv([fd], [offset], [length])
+                    try:
+                        values = client.preadv([fd], [offset], [length])
+                    except _RetiredDescriptorError:
+                        if file._raw.writable() or not self.fs.auto_reconnect:
+                            raise
+                        fd = file._raw._ensure_open()
+                        values = client.preadv([fd], [offset], [length])
                 else:
                     outcomes.append(file._raw._pread_at(offset, length))
                     continue
@@ -2331,17 +2359,18 @@ class _BufferGroup:
         ]
         errors = {}
         if reconnect:
-            owners = {}
+            by_token = {}
             for file in active:
-                fd = file._raw._fd
-                if client.descriptor_valid(fd):
-                    owner, _, _ = client._resolve(fd)
-                    owners.setdefault(owner, []).append(file)
-            for members in owners.values():
+                by_token.setdefault(file._raw._fd, []).append(file)
+            for tokens in client._tokens_by_owner(by_token).values():
                 try:
-                    client.reconnect_descriptor(members[0]._raw._fd)
+                    client.reconnect_descriptor(tokens[0])
                 except OSError as error:
-                    errors.update((id(file), error) for file in members)
+                    errors.update(
+                        (id(file), error)
+                        for token in tokens
+                        for file in by_token[token]
+                    )
         # Failed owners cannot supply this retry even if their old token is
         # still registered. Leave other live tokens on their original owners.
         active = [
@@ -2464,18 +2493,26 @@ class _BufferGroup:
                 data[index] = bytes(value)
         return data, errors
 
+    def _read_vector_with_recovery(self, method, files, offsets, lengths):
+        try:
+            return self._read_vector(method, files, offsets, lengths)
+        except OSError as error:
+            # These outer errors reject before dispatch. If a token already
+            # retired, reopen readers without replacing the healthy session.
+            retired = isinstance(error, _RetiredDescriptorError)
+            if not self.fs.auto_reconnect or (
+                not retired and not _can_reconnect(error)
+            ):
+                raise
+            return self._read_vector(
+                method, files, offsets, lengths, reconnect=not retired
+            )
+
     def _pread_many_once(self, files, offsets, lengths):
         if getattr(self.fs._client, "_native_has_vector_outcomes", False):
-            try:
-                outcomes = self._read_vector("preadv", files, offsets, lengths)
-            except OSError as error:
-                # Native outer errors reject before dispatch. Retrying reads
-                # here cannot replay an already-delivered successful sibling.
-                if not self.fs.auto_reconnect or not _can_reconnect(error):
-                    raise
-                outcomes = self._read_vector(
-                    "preadv", files, offsets, lengths, reconnect=True
-                )
+            outcomes = self._read_vector_with_recovery(
+                "preadv", files, offsets, lengths
+            )
             if len(outcomes) != len(files):
                 raise OSError(errno.EIO, "invalid positioned-read outcome count")
             retry = [
@@ -2520,14 +2557,7 @@ class _BufferGroup:
                         result = prefix + result
                     outcomes[index] = result
             return self._split_read_outcomes(outcomes)
-        try:
-            return self._read_vector("pread_many", files, offsets, lengths)
-        except OSError as error:
-            if not self.fs.auto_reconnect or not _can_reconnect(error):
-                raise
-            return self._read_vector(
-                "pread_many", files, offsets, lengths, reconnect=True
-            )
+        return self._read_vector_with_recovery("pread_many", files, offsets, lengths)
 
     def fetch(self, current, start, end):
         if end <= start:
