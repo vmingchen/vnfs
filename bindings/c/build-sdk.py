@@ -36,7 +36,7 @@ def verify_sources(metadata):
             raise ValueError(f"non-registry dependency: {package['name']} {source}")
 
 
-def install(source, output, prefix, metadata):
+def install(source, output, prefix, metadata, runtime_dir=None):
     include, library = prefix / "include", prefix / "lib"
     include.mkdir(parents=True, exist_ok=True)
     library.mkdir(parents=True, exist_ok=True)
@@ -45,8 +45,14 @@ def install(source, output, prefix, metadata):
     for header in (source / "include").glob("*.h"):
         shutil.copy2(header, include / header.name)
     shutil.copy2(output / LIBRARY_NAME, library / LIBRARY_NAME)
-    if (output / "vfsi-libs").is_dir():
-        shutil.copytree(output / "vfsi-libs", library / "vfsi-libs", dirs_exist_ok=True)
+    for name in ("LICENSE-MIT", "LICENSE-APACHE"):
+        notice = source / name
+        if notice.is_file():
+            shutil.copy2(notice, prefix / name)
+    if runtime_dir is None:
+        runtime_dir = output / "vfsi-libs"
+    if runtime_dir.is_dir() and any(runtime_dir.iterdir()):
+        shutil.copytree(runtime_dir, library / "vfsi-libs", dirs_exist_ok=True)
     versions = {p["name"]: p["version"] for p in dependencies(metadata)
                 if p["name"].startswith(("vfsi-", "vnfs", "libntirpc", "nfsv41"))}
     (prefix / "versions.json").write_text(json.dumps(versions, indent=2, sort_keys=True) + "\n")
@@ -63,10 +69,14 @@ def build_output(manifest, target, profile, metadata):
         "--message-format=json-render-diagnostics",
     ], text=True)
     artifacts = set()
+    build_outputs = set()
     for line in messages.splitlines():
         message = json.loads(line)
-        if (message.get("reason") != "compiler-artifact"
-                or message.get("package_id") != root
+        if message.get("package_id") != root:
+            continue
+        if message["reason"] == "build-script-executed":
+            build_outputs.add(Path(message["out_dir"]).resolve())
+        if (message["reason"] != "compiler-artifact"
                 or "cdylib" not in message["target"]["crate_types"]):
             continue
         for filename in message["filenames"]:
@@ -75,7 +85,14 @@ def build_output(manifest, target, profile, metadata):
                 artifacts.add(artifact.resolve())
     if len(artifacts) != 1:
         raise ValueError(f"Cargo must report exactly one root {LIBRARY_NAME} artifact")
-    return artifacts.pop().parent
+    if len(build_outputs) > 1:
+        raise ValueError("Cargo must report at most one root build-script output")
+    runtime_dir = None
+    if build_outputs:
+        candidate = build_outputs.pop() / "vfsi-libs"
+        if candidate.is_dir():
+            runtime_dir = candidate
+    return artifacts.pop().parent, runtime_dir
 
 
 def main():
@@ -93,8 +110,8 @@ def main():
     if args.registry_only:
         verify_sources(metadata)
     target = (args.target_dir or Path(metadata["target_directory"])).resolve()
-    output = build_output(manifest, target, args.profile, metadata)
-    paths = install(manifest.parent, output, args.prefix.resolve(), metadata)
+    output, runtime_dir = build_output(manifest, target, args.profile, metadata)
+    paths = install(manifest.parent, output, args.prefix.resolve(), metadata, runtime_dir)
     for name, path in paths.items():
         print(f"{name}={path}")
     if os.environ.get("GITHUB_OUTPUT"):

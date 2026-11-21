@@ -6,6 +6,7 @@ Only newly created veth interfaces/namespaces receive netem configuration.
 """
 import argparse
 from collections import Counter
+from contextlib import contextmanager
 import gzip
 import hashlib
 import ipaddress
@@ -32,6 +33,61 @@ SERVER, CLIENT = '169.254.241.1', '169.254.241.2'
 def checked(args, **kwargs):
     kwargs.setdefault('timeout', 300)
     return subprocess.check_output([str(x) for x in args], text=True, **kwargs)
+
+
+@contextmanager
+def cleaning_up(cleanup):
+    try:
+        yield
+    except BaseException as primary:
+        try:
+            cleanup()
+        except BaseException as error:
+            primary.add_note(f"Cleanup failed: {error}")
+        raise
+    else:
+        cleanup()
+
+
+@contextmanager
+def mounted_fixture(export, prefix):
+    mount = Path(tempfile.mkdtemp(prefix=prefix, dir="/tmp"))
+    mounted = False
+
+    def unmount():
+        if mounted:
+            os.chdir("/")
+            checked(["umount", mount])
+        # rmdir cannot recurse into the source even if mount returned an
+        # error after attaching it. If unmount fails, leave it untouched.
+        mount.rmdir()
+
+    with cleaning_up(unmount):
+        checked(["mount", "-t", "nfs4", "-o",
+                 "vers=4.2,proto=tcp,sec=sys,nosharecache", SERVER + ":" + export, mount])
+        mounted = True
+        yield mount
+
+
+def stop_worker_processes(process, capture):
+    def stop_capture():
+        if not capture:
+            return
+        capture.send_signal(signal.SIGINT)
+        try:
+            capture.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            def kill_and_reap():
+                with cleaning_up(capture.wait):
+                    capture.kill()
+
+            with cleaning_up(kill_and_reap):
+                raise
+
+    with cleaning_up(stop_capture):
+        if process and process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
 
 
 def sha(path):
@@ -110,23 +166,22 @@ def worker(args):
     account = pwd.getpwnam(args.user)
     stem = args.output.resolve()
     checked(['mount', '--make-rprivate', '/'])
-    with tempfile.TemporaryDirectory(prefix='vfsi-du-mount-') as mounted:
-        checked(['mount', '-t', 'nfs4', '-o',
-                 'vers=4.2,proto=tcp,sec=sys,nosharecache', SERVER + ':' + args.export, mounted])
+    with mounted_fixture(args.export, 'vfsi-du-mount-') as mounted:
         capture = process = None
-        try:
+        with cleaning_up(lambda: stop_worker_processes(process, capture)):
             mount_options = checked(['findmnt', '-n', '-o', 'OPTIONS', '--target', mounted]).strip()
             os.chdir(mounted)  # CWD preparation is outside timing/capture.
             if args.capture:
-                capture_log = open(str(stem) + '.capture.log', 'w+')
+                log = Path(str(stem) + '.capture.log')
                 pcap = Path(str(stem) + '.pcap')
                 # Immediate kernel delivery protects short commands; buffered
                 # file writes and a bounded 16-MiB ring absorb scheduler stalls.
-                capture = subprocess.Popen(['tcpdump', '--immediate-mode', '-n', '-B', '16384', '-i', args.interface,
-                                            '-s', '0', '-w', str(pcap), 'tcp', 'port', '2049'],
-                                           stdout=subprocess.DEVNULL, stderr=capture_log)
+                with log.open('w') as stream:
+                    capture = subprocess.Popen(['tcpdump', '--immediate-mode', '-n', '-B', '16384', '-i', args.interface,
+                                                '-s', '0', '-w', str(pcap), 'tcp', 'port', '2049'],
+                                               stdout=subprocess.DEVNULL, stderr=stream)
                 deadline = time.monotonic() + 10
-                while 'listening on' not in Path(capture_log.name).read_text():
+                while 'listening on' not in log.read_text():
                     if capture.poll() is not None or time.monotonic() >= deadline:
                         raise RuntimeError('capture did not start')
                     time.sleep(.02)
@@ -164,9 +219,7 @@ def worker(args):
                 if capture.wait(timeout=10) != 0:
                     raise RuntimeError('capture process failed')
                 capture = None
-                capture_log.close()
-                log = Path(str(stem) + '.capture.log').read_text()
-                dropped = re.search(r'(\d+) packets dropped by kernel', log)
+                dropped = re.search(r'(\d+) packets dropped by kernel', log.read_text())
                 if not dropped or int(dropped[1]):
                     raise RuntimeError('capture drop count missing/nonzero')
             text = stderr.read_text()
@@ -186,15 +239,6 @@ def worker(args):
                     shutil.copyfileobj(source, target)
                 path.unlink()
             Path(str(stem) + '.json').write_text(json.dumps(result, indent=2) + '\n')
-        finally:
-            if process and process.poll() is None:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-            if capture:
-                capture.send_signal(signal.SIGINT)
-                capture.wait(timeout=10)
-            os.chdir('/')
-            checked(['umount', mounted])
 
 
 class Link:

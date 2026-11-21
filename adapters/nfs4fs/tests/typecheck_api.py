@@ -41,3 +41,5 @@ def use_api(root: Path) -> None:
         service_principal="nfs@nfs.example",
     )
     secure.close()
+    mounted: Nfs4FileSystem = Nfs4FileSystem(mount=root)
+    mounted.close()

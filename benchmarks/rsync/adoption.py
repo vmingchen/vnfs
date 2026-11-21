@@ -348,9 +348,10 @@ def _transfer(
         source + "/",
         str(destination) + "/",
     ]
-    capture = None if interrupt else start_capture(args.interface, stem)
-    process = None
-    try:
+    capture = process = None
+    with scan.cleaning_up(lambda: scan.stop_worker_processes(process, capture)):
+        if not interrupt:
+            capture = start_capture(args.interface, stem)
         with Path(str(stem) + ".stdout").open("wb") as out, Path(
             str(stem) + ".stderr"
         ).open("wb") as err:
@@ -423,13 +424,6 @@ def _transfer(
             path.unlink()
         Path(str(stem) + ".json").write_text(json.dumps(result, indent=2) + "\n")
         return rows, result
-    finally:
-        if process and process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
-        if capture:
-            capture.send_signal(signal.SIGINT)
-            capture.wait(timeout=10)
 
 
 def transfer(
@@ -461,22 +455,51 @@ def transfer(
 
 
 def mount_present(path):
+    spelling = os.fsencode(path)
+    # Match the kernel's escaped mountpoint field without decoding filename bytes.
+    for character, escape in (
+        (b"\\", rb"\134"),
+        (b" ", rb"\040"),
+        (b"\t", rb"\011"),
+        (b"\n", rb"\012"),
+    ):
+        spelling = spelling.replace(character, escape)
     return any(
-        line.split()[4] == str(path)
-        for line in Path("/proc/self/mountinfo").read_text().splitlines()
+        line.split(b" ", 5)[4:5] == [spelling]
+        for line in Path("/proc/self/mountinfo").read_bytes().split(b"\n")
     )
 
 
 @contextmanager
 def private_mount(export, *, uncached=True):
-    root = Path(tempfile.mkdtemp(prefix="vfsi-rsync-mount-"))
+    root = Path(tempfile.mkdtemp(prefix="vfsi-rsync-mount-")).resolve()
     root.chmod(0o755)
     mount = root / "mount"
     mount.mkdir()
     options = "vers=4.2,proto=tcp,sec=sys,nosharecache"
     if uncached:
         options += ",actimeo=0,lookupcache=none"
-    try:
+
+    def remove_directories():
+        if not mount_present(mount):
+            # Both directories are ours and should be empty after detaching.
+            # Nonrecursive removal also protects against a missed mount.
+            mount.rmdir()
+            root.rmdir()
+
+    def detach():
+        with scan.cleaning_up(remove_directories):
+            if mount_present(mount):
+                try:
+                    scan.checked(["umount", mount], timeout=30)
+                except BaseException:
+                    # Detach our private mount without replacing the initial error.
+                    with scan.cleaning_up(
+                        lambda: scan.checked(["umount", "-l", mount], timeout=10)
+                    ):
+                        raise
+
+    with scan.cleaning_up(detach):
         scan.checked(
             ["mount", "-t", "nfs4", "-o", options, scan.SERVER + ":" + export, mount]
         )
@@ -484,25 +507,16 @@ def private_mount(export, *, uncached=True):
         # Passing cwd=mount to Popen after dropping credentials adds a kernel
         # ACCESS/GETATTR RPC and would change the 273-RPC baseline.
         previous = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
-        try:
+
+        def restore_cwd():
+            try:
+                os.fchdir(previous)
+            finally:
+                os.close(previous)
+
+        with scan.cleaning_up(restore_cwd):
             os.chdir(mount)
             yield mount
-        finally:
-            os.fchdir(previous)
-            os.close(previous)
-    finally:
-        try:
-            if mount_present(mount):
-                try:
-                    scan.checked(["umount", mount], timeout=30)
-                except BaseException:
-                    # Detach only our private mount before removing its empty
-                    # mountpoint; never recurse into a still-mounted source.
-                    scan.checked(["umount", "-l", mount], timeout=10)
-                    raise
-        finally:
-            if not mount_present(mount):
-                shutil.rmtree(root)
 
 
 def scan_worker(args):

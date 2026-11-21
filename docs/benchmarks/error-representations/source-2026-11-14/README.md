@@ -7,12 +7,14 @@ This nonpublished standalone Cargo package compares:
 
 It does not modify production vnfs code or published error APIs.
 
-See [the measured comparison](../../docs/benchmarks/error-representations/README.md).
+See [the measured comparison](../README.md).
 
 ## Reproduce on the configured VM
 
-From /home/ubuntu/vnfs02, source the existing build environment, retaining its
-CARGO_TARGET_DIR and profile. Build two binaries from identical source:
+Restore this source at `benchmarks/error-representations` in a disposable
+checkout of baseline `70bea6a`. From that checkout, use the existing build
+environment, including its `CARGO_TARGET_DIR` and profile. Build two binaries
+from identical source:
 1. cargo build --offline --release --manifest-path benchmarks/error-representations/Cargo.toml
 2. Copy $CARGO_TARGET_DIR/release/vferror-comparison to a new owned timing path.
 3. cargo build --offline --release --features allocation-stats --manifest-path benchmarks/error-representations/Cargo.toml

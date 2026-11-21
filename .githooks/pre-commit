@@ -8,15 +8,19 @@ set -e
 
 staged=$(git diff --cached --name-only)
 
-# Format Python with black whenever a .py/.pyi file is staged.
-if echo "$staged" | grep -qE '\.(py|pyi)$'; then
+# Check the same four Python adapter trees as hosted CI.
+if printf '%s\n' "$staged" | grep -qE '^adapters/(vfsi-fsspec|nfs4fs|vsmb|vsmbfs)/(python|tests)/.*\.(py|pyi)$'; then
     if [ -x .venv/bin/black ]; then
         black=".venv/bin/black"
     else
         black="black"
     fi
     echo "Running black --check..."
-    "$black" --check adapters/nfs4fs/python/nfs4fs adapters/nfs4fs/tests
+    "$black" --check \
+        adapters/vfsi-fsspec/python adapters/vfsi-fsspec/tests \
+        adapters/nfs4fs/python adapters/nfs4fs/tests \
+        adapters/vsmb/python adapters/vsmb/tests \
+        adapters/vsmbfs/python adapters/vsmbfs/tests
 fi
 
 # Only run the Rust checks when Rust files are staged.

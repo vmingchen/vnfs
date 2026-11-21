@@ -1,4 +1,8 @@
 //! This target depends only on vfsi-core: extensions must not require a backend.
+
+#[path = "support/allocation.rs"]
+mod allocation;
+
 use std::{
     cell::{Cell, RefCell},
     path::{Path, PathBuf},
@@ -33,6 +37,7 @@ struct PortableFs {
     tree: Cell<bool>,
     metadata: Cell<usize>,
     page_calls: Cell<usize>,
+    closed: Cell<usize>,
     waves: RefCell<Vec<Vec<PathBuf>>>,
     directory_options: RefCell<Vec<ListDirOptions>>,
     removals: RefCell<Vec<(Vec<PathBuf>, RemoveOptions)>>,
@@ -117,12 +122,18 @@ impl Vfsi for PortableFs {
         }
         let mut results: Vec<_> = ops
             .into_iter()
-            .take(if self.shape.get() == 7 { 1 } else { usize::MAX })
+            .take(if matches!(self.shape.get(), 7 | 20) {
+                1
+            } else {
+                usize::MAX
+            })
             .enumerate()
             .map(|(index, mut op)| {
                 if let Some((_, offset, buffer)) = op.buffer_parts_mut() {
                     buffer.fill(index as u8);
                     ReadOutput::buffered(offset, buffer.len(), false)
+                } else if let Some((_, offset, length)) = op.range_parts() {
+                    ReadOutput::owned(offset, vec![index as u8; length.min(1)], false)
                 } else {
                     assert!(op.whole_file_path().is_some());
                     ReadOutput::owned(0, vec![index as u8], true)
@@ -137,18 +148,39 @@ impl Vfsi for PortableFs {
             3 => results[0] = ReadOutput::buffered(0, 1, true),
             4 => results[0] = ReadOutput::owned(1, vec![0], true),
             5 => results[0] = ReadOutput::owned(0, vec![0], false),
+            20 => results.push(ReadOutput::owned(0, vec![1], true)),
             _ => {}
         }
         Ok(results.into_iter().map(Ok).collect())
     }
     fn vwrite<'a>(
         &self,
-        _: &[WriteOp<'a, TestFile>],
+        requests: &[WriteOp<'a, TestFile>],
         _: WriteOptions,
     ) -> vfsi_core::VecResult<WriteOutput> {
-        panic!("unexpected write")
+        let (offset, bytes_written) = match self.shape.get() {
+            17 => (5, 1),
+            18 => (5, 3),
+            19 => (u64::MAX, 1),
+            _ => panic!("unexpected write"),
+        };
+        Ok(requests
+            .iter()
+            .map(|request| {
+                Ok(WriteOutput {
+                    offset,
+                    bytes_written: if request.data().is_empty() {
+                        0
+                    } else {
+                        bytes_written
+                    },
+                    stable: false,
+                })
+            })
+            .collect())
     }
     fn vclose(&self, files: &mut [TestFile]) -> vfsi_core::VecResult<()> {
+        self.closed.set(self.closed.get() + files.len());
         Ok(files.iter().map(|_| Ok(())).collect())
     }
     fn vmkdir<P: AsRef<Path>>(&self, _: &[vfsi_core::MkDirOp<P>]) -> vfsi_core::VecResult<()> {
@@ -242,7 +274,15 @@ impl Vfsi for PortableFs {
         }
         for (index, path) in paths.iter().enumerate() {
             let outcome = (|| -> vfsi_core::OpResult<TraversalCompletion> {
-                let pages = if self.tree.get() {
+                if self.shape.get() == 14 {
+                    return Ok(TraversalCompletion::Stopped);
+                }
+                if self.shape.get() == 15 && index == 0 {
+                    return Ok(TraversalCompletion::Complete);
+                }
+                let pages = if self.shape.get() == 16 {
+                    vec![vec![tree_entry(&path.as_ref().join(".."), true)]]
+                } else if self.tree.get() {
                     match path.as_ref().to_str().unwrap() {
                         "/tree" => vec![
                             vec![
@@ -274,6 +314,8 @@ impl Vfsi for PortableFs {
                         DirectoryListing {
                             path: if self.tree.get() && self.shape.get() == 10 {
                                 "/wrong-parent".into()
+                            } else if self.shape.get() == 15 {
+                                path.as_ref().components().collect()
                             } else {
                                 path.as_ref().to_owned()
                             },
@@ -413,6 +455,28 @@ fn listdir_default_stops_before_next_page_without_metadata_or_root_events() {
     assert_eq!(seen, [Path::new("/tree/z")]);
     assert_eq!(fs.page_calls.get(), 1);
     assert_eq!(fs.metadata.get(), 0);
+}
+
+#[test]
+fn listdir_requires_a_root_page_even_for_an_empty_directory() {
+    let fs = tree_fs();
+    for recursive in [false, true] {
+        let options = ListDirOptions::new().with_recursive(recursive);
+        let visitor = |_: &WalkEvent| panic!("empty directory must not emit an entry");
+        fs.shape.set(0);
+        assert_eq!(
+            fs.listdir("/empty", options, visitor).unwrap(),
+            TraversalCompletion::Complete
+        );
+        fs.shape.set(15);
+        let error = fs.listdir("/empty", options, visitor).unwrap_err();
+        assert_eq!(
+            vfsi_core::transport_kind(&error),
+            Some(vfsi_core::TransportKind::InvalidReply)
+        );
+    }
+    assert_eq!(fs.listings.get(), 4);
+    assert_eq!(fs.page_calls.get(), 2);
 }
 
 #[test]
@@ -697,6 +761,222 @@ fn blanket_extensions_preserve_vector_dispatch_and_root_grouping() {
 }
 
 #[test]
+fn directory_visitors_do_not_publish_malformed_entries() {
+    let fs = PortableFs::default();
+    fs.shape.set(16);
+    let error = fs
+        .listdirs_all(
+            &["/tree"],
+            ListDirOptions::new(),
+            |_, _| -> Result<ControlFlow<()>> {
+                panic!("malformed page must not reach the caller");
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.index(), Some(0));
+    assert_eq!(
+        vfsi_core::transport_kind(error.cause()),
+        Some(vfsi_core::TransportKind::InvalidReply)
+    );
+}
+
+#[test]
+fn strict_read_and_write_helpers_validate_backend_successes() {
+    let fs = PortableFs::default();
+    let error = fs
+        .read_files_with_options(
+            &["/a", "/b"],
+            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(1).unwrap()),
+        )
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(
+        vfsi_core::transport_kind(error.cause()),
+        Some(vfsi_core::TransportKind::InvalidReply)
+    );
+
+    let file = TestFile;
+    let writes = [WriteOp::at(&file, 0, b"ab")];
+    fs.shape.set(17);
+    let short = fs.write_batch(&writes, WriteOptions::new()).unwrap();
+    assert_eq!((short[0].offset, short[0].bytes_written), (5, 1));
+    for shape in [17, 18, 19] {
+        fs.shape.set(shape);
+        let error = fs
+            .write_batch(&writes, WriteOptions::new().with_write_all(true))
+            .unwrap_err();
+        assert_eq!(error.index(), Some(0));
+        assert_eq!(
+            vfsi_core::transport_kind(error.cause()),
+            Some(vfsi_core::TransportKind::InvalidReply)
+        );
+    }
+}
+
+#[test]
+fn whole_file_batch_adds_no_allocations_for_validation() {
+    let fs = PortableFs::default();
+    let ops = || (0..4096).map(|_| ReadOp::whole("/file"));
+    let (_, backend_allocations, backend_bytes) =
+        allocation::measure(|| fs.vread(ops(), ReadOptions::new()).unwrap());
+    let (results, allocations, bytes) =
+        allocation::measure(|| fs.read_batch(ops(), ReadOptions::new()).unwrap());
+    assert_eq!(results.len(), 4096);
+    assert!(
+        results
+            .iter()
+            .all(|read| read.bytes_read() == 1 && read.eof())
+    );
+    assert_eq!((allocations, bytes), (backend_allocations, backend_bytes));
+}
+
+#[test]
+fn read_batch_keeps_bounds_aligned_across_whole_file_runs() {
+    let fs = PortableFs::default();
+    let mut buffer = [0; 2];
+    let results = fs
+        .read_batch(
+            [
+                ReadOp::whole("/a"),
+                ReadOp::whole("/b"),
+                ReadOp::range(&TestFile, 7, 2),
+                ReadOp::whole("/c"),
+                ReadOp::whole("/d"),
+                ReadOp::into(&TestFile, 9, &mut buffer),
+                ReadOp::whole("/e"),
+                ReadOp::whole("/f"),
+            ],
+            ReadOptions::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        results.iter().map(ReadOutput::offset).collect::<Vec<_>>(),
+        [0, 0, 7, 0, 0, 9, 0, 0],
+    );
+    assert_eq!(results[2].data(), Some([2].as_slice()));
+    assert_eq!(results[5].bytes_read(), 2);
+    assert_eq!(buffer, [5, 5]);
+}
+
+#[test]
+fn read_batch_checks_buffer_and_range_successes() {
+    let fs = PortableFs::default();
+    let file = TestFile;
+    let mut buffer = [0; 2];
+    let results = fs
+        .read_batch(
+            [
+                ReadOp::range(&file, 7, 2),
+                ReadOp::into(&file, 9, &mut buffer),
+            ],
+            ReadOptions::new(),
+        )
+        .unwrap();
+    assert_eq!(results[0].data(), Some([0].as_slice()));
+    assert_eq!(results[1].bytes_read(), buffer.len());
+    assert_eq!(buffer, [1, 1]);
+
+    let error = fs
+        .read_batch(
+            [ReadOp::range(&file, 7, 2), ReadOp::range(&file, 9, 2)],
+            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(3).unwrap()),
+        )
+        .unwrap_err();
+    assert_eq!(error.index(), None);
+    assert_eq!(
+        vfsi_core::transport_kind(error.cause()),
+        Some(vfsi_core::TransportKind::InvalidReply)
+    );
+
+    let mut empty = [];
+    fs.shape.set(3);
+    let error = fs
+        .read_batch([ReadOp::into(&file, 0, &mut empty)], ReadOptions::new())
+        .unwrap_err();
+    assert_eq!(error.index(), Some(0));
+
+    fs.shape.set(4);
+    let error = fs
+        .read_batch([ReadOp::range(&file, 7, 2)], ReadOptions::new())
+        .unwrap_err();
+    assert_eq!(error.index(), Some(0));
+    assert_eq!(
+        vfsi_core::transport_kind(error.cause()),
+        Some(vfsi_core::TransportKind::InvalidReply)
+    );
+}
+
+#[test]
+fn file_replacement_rejects_a_success_at_the_wrong_offset() {
+    let fs = PortableFs::default();
+    fs.shape.set(17);
+    let error = fs.write("/file", b"x").unwrap_err();
+    assert_eq!(
+        vfsi_core::transport_kind(&error),
+        Some(vfsi_core::TransportKind::InvalidReply)
+    );
+    let error = fs
+        .write_files(&[("/empty", b"".as_slice()), ("/bad", b"x")])
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(
+        vfsi_core::transport_kind(error.cause()),
+        Some(vfsi_core::TransportKind::InvalidReply)
+    );
+    assert_eq!(fs.closed.get(), 2);
+}
+
+#[test]
+fn directory_collection_rejects_incomplete_or_misassociated_pages() {
+    let fs = tree_fs();
+    for shape in [10, 14, 15] {
+        fs.shape.set(shape);
+        let error = fs
+            .read_dirs_with_options(&["/tree"], ListDirOptions::new())
+            .unwrap_err();
+        assert_eq!(error.index(), Some(0));
+        assert_eq!(
+            vfsi_core::transport_kind(error.cause()),
+            Some(vfsi_core::TransportKind::InvalidReply)
+        );
+    }
+}
+
+#[test]
+fn directory_collection_bounds_entries_and_retained_paths() {
+    let fs = tree_fs();
+    let error = fs
+        .read_dirs_with_options(&["/one", "/two"], ListDirOptions::new().with_max_entries(1))
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(error.cause().raw_os_error(), Some(libc::EFBIG));
+
+    let fs = tree_fs();
+    let options = ListDirOptions::new().with_recursive(true);
+    let trees = fs.read_dirs_with_options(&["/tree"], options).unwrap();
+    let listing = &trees[0][0];
+    let path_bytes = listing.path.as_os_str().len()
+        + listing
+            .entries
+            .iter()
+            .map(|entry| entry.path().as_os_str().len())
+            .sum::<usize>();
+    assert_eq!(
+        fs.read_dirs_with_options(&["/tree"], options.with_max_path_bytes(path_bytes))
+            .unwrap()[0][0]
+            .entries
+            .len(),
+        6,
+        "count the directory path only once across its two pages",
+    );
+    let error = fs
+        .read_dirs_with_options(&["/tree"], options.with_max_path_bytes(path_bytes - 1))
+        .unwrap_err();
+    assert_eq!(error.index(), Some(0));
+    assert_eq!(error.cause().raw_os_error(), Some(libc::EFBIG));
+}
+
+#[test]
 fn extensions_reject_malformed_results_and_do_not_replay_transport_failures() {
     let fs = PortableFs::default();
     for shape in 1..=6 {
@@ -882,16 +1162,35 @@ fn default_portable_paging_collects_complete_roots_without_backend_types() {
 
 #[test]
 fn read_batch_checks_unconsumed_inputs_without_replaying_the_vector() {
+    for shape in [7, 20] {
+        let fs = PortableFs::default();
+        fs.shape.set(shape);
+        let error = fs
+            .read_batch(
+                [ReadOp::whole("/a"), ReadOp::whole("/b")],
+                Default::default(),
+            )
+            .unwrap_err();
+        assert_eq!(error.index(), None);
+        assert_eq!(
+            vfsi_core::transport_kind(error.cause()),
+            Some(vfsi_core::TransportKind::InvalidReply)
+        );
+        assert_eq!(fs.reads.get(), 1);
+    }
+}
+
+#[test]
+fn read_batch_treats_the_first_none_as_iterator_exhaustion() {
     let fs = PortableFs::default();
-    fs.shape.set(7);
-    let error = fs
+    let mut requests = [Some(ReadOp::whole("/a")), None, Some(ReadOp::whole("/b"))].into_iter();
+    let results = fs
         .read_batch(
-            [ReadOp::whole("/a"), ReadOp::whole("/b")],
-            Default::default(),
+            std::iter::from_fn(|| requests.next().flatten()),
+            ReadOptions::new(),
         )
-        .unwrap_err();
-    assert!(vfsi_core::transport_kind(error.cause()).is_some());
-    assert_eq!(fs.reads.get(), 1);
+        .unwrap();
+    assert_eq!(results.len(), 1);
 }
 
 #[test]
@@ -913,6 +1212,34 @@ fn fallback_pages_quarantine_byte_progress_without_losing_healthy_roots() {
     assert!(error.progress().is_none());
     assert!(outcomes.next().unwrap().is_ok());
     assert_eq!(fs.listings.get(), 1, "one vector, without replay");
+}
+
+#[test]
+fn fallback_pages_require_a_listing_even_for_an_empty_directory() {
+    let fs = PortableFs::default();
+    fs.shape.set(15);
+    let mut outcomes = fs
+        .vlistdir_pages(
+            &["/missing-page", "/empty//"],
+            vec![None, None],
+            ListDirOptions::new(),
+            std::num::NonZeroUsize::new(1).unwrap(),
+        )
+        .unwrap()
+        .into_iter();
+    let error = outcomes.next().unwrap().unwrap_err();
+    assert_eq!(error.state(), vfsi_core::FailureState::Unknown);
+    assert_eq!(
+        vfsi_core::transport_kind(error.cause()),
+        Some(vfsi_core::TransportKind::InvalidReply)
+    );
+    let page = outcomes.next().unwrap().unwrap();
+    assert_eq!(
+        page.listing.path.as_os_str(),
+        Path::new("/empty//").as_os_str()
+    );
+    assert!(page.listing.entries.is_empty());
+    assert_eq!(fs.listings.get(), 1, "the missing page is not replayed");
 }
 
 #[test]

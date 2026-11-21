@@ -3691,16 +3691,16 @@ class VfsiFileSystem(AbstractFileSystem):
         protos = (cls.protocol,) if isinstance(cls.protocol, str) else cls.protocol
         parsed = urlsplit(path)
         if parsed.scheme in protos:
-            if parsed.netloc:
-                if parsed.query or parsed.fragment:
-                    raise ValueError("query strings and fragments are not supported")
-                path = unquote(parsed.path)
-            elif "://" in path:
+            if parsed.netloc and (parsed.query or parsed.fragment):
+                raise ValueError("query strings and fragments are not supported")
+            if not parsed.netloc and "://" in path:
                 # Protocol paths produced by _fullpath have an empty authority.
                 # Preserve literal query/fragment characters in their filename.
-                path = unquote(path.split("://", 1)[1])
+                path = path.split("://", 1)[1]
             else:
-                path = unquote(parsed.path)
+                path = parsed.path
+            # Unix filenames may contain bytes that are not valid UTF-8.
+            path = unquote(path, errors="surrogateescape")
         for protocol in protos:
             if path.startswith(protocol + "://"):
                 path = path[len(protocol) + 3 :]

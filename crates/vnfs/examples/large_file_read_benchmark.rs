@@ -13,6 +13,8 @@ use vnfs::nfs::{Nfs, NfsReadPool, NfsReadPoolOptions};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+const PIPELINE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Debug)]
 struct Args {
     host: String,
@@ -46,9 +48,9 @@ fn value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> 
     })
 }
 
-fn parse() -> Result<Args> {
+fn parse(args: impl IntoIterator<Item = String>) -> Result<Args> {
     let mut parsed = Args::default();
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--host" => parsed.host = value(&mut args, "--host")?,
@@ -83,6 +85,9 @@ fn parse() -> Result<Args> {
                 println!(
                     "Usage: cargo run --release -p vnfs --example large_file_read_benchmark --features nfs -- --host HOST --root EXPORT_ROOT --path FILE [--minor-version 1|2] [--rounds N] [--warmups N] [--chunk-sizes BYTES,...] [--worker-counts N,...]"
                 );
+                println!(
+                    "The CSV workers column reports the requested count. The read pool may use fewer workers under buffer limits or when the server omits object identity."
+                );
                 std::process::exit(0);
             }
             _ => {
@@ -94,16 +99,35 @@ fn parse() -> Result<Args> {
             }
         }
     }
-    if parsed.path.is_empty()
-        || parsed.rounds == 0
-        || parsed.chunk_sizes.is_empty()
-        || parsed.chunk_sizes.contains(&0)
-        || parsed.worker_counts.is_empty()
-        || parsed.worker_counts.contains(&0)
+    if parsed.path.is_empty() || parsed.rounds == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a nonempty --path and positive --rounds are required",
+        )
+        .into());
+    }
+    if parsed.chunk_sizes.is_empty()
+        || parsed
+            .chunk_sizes
+            .iter()
+            .any(|size| !(1..=PIPELINE_BUFFER_BYTES).contains(size))
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "--path, --rounds, and non-zero --chunk-sizes are required",
+            format!("--chunk-sizes must be between 1 and {PIPELINE_BUFFER_BYTES} bytes"),
+        )
+        .into());
+    }
+    let max_workers = usize::MAX / 2;
+    if parsed.worker_counts.is_empty()
+        || parsed
+            .worker_counts
+            .iter()
+            .any(|count| !(1..=max_workers).contains(count))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("--worker-counts must be between 1 and {max_workers}"),
         )
         .into());
     }
@@ -112,7 +136,12 @@ fn parse() -> Result<Args> {
 
 fn median(mut values: Vec<f64>) -> f64 {
     values.sort_by(f64::total_cmp);
-    values[values.len() / 2]
+    let middle = values.len() / 2;
+    if values.len().is_multiple_of(2) {
+        (values[middle - 1] + values[middle]) / 2.0
+    } else {
+        values[middle]
+    }
 }
 
 fn read_once(
@@ -148,7 +177,7 @@ fn read_pipelined_once(pool: &mut NfsReadPool, path: &str) -> Result<(Duration, 
 }
 
 fn main() -> Result<()> {
-    let args = parse()?;
+    let args = parse(std::env::args().skip(1))?;
     let client = Nfs::builder(args.host.clone())
         .root(args.root.clone())
         .version(vnfs::nfs::NfsVersion::try_from(args.minor_version)?)
@@ -178,7 +207,7 @@ fn main() -> Result<()> {
         let chunks = median(samples.iter().map(|sample| sample.2 as f64).collect());
         let mib_per_sec = bytes as f64 / (1024.0 * 1024.0) / elapsed;
         println!(
-            "sequential,1,{chunk_size},{bytes},0,{:.3},{mib_per_sec:.2},{chunks:.0}",
+            "sequential,1,{chunk_size},{bytes},0,{:.3},{mib_per_sec:.2},{chunks}",
             elapsed * 1000.0
         );
 
@@ -200,7 +229,7 @@ fn main() -> Result<()> {
                             std::num::NonZeroUsize::new(worker_count * 2)
                                 .expect("nonzero tuning value"),
                         )
-                        .with_max_buffered_bytes(16 * 1024 * 1024),
+                        .with_max_buffered_bytes(PIPELINE_BUFFER_BYTES),
                 )?;
             let setup_ms = setup_started.elapsed().as_secs_f64() * 1000.0;
             for _ in 0..args.warmups {
@@ -222,10 +251,60 @@ fn main() -> Result<()> {
             let chunks = median(samples.iter().map(|sample| sample.2 as f64).collect());
             let mib_per_sec = bytes as f64 / (1024.0 * 1024.0) / elapsed;
             println!(
-                "pipeline,{worker_count},{chunk_size},{bytes},{setup_ms:.3},{:.3},{mib_per_sec:.2},{chunks:.0}",
+                "pipeline,{worker_count},{chunk_size},{bytes},{setup_ms:.3},{:.3},{mib_per_sec:.2},{chunks}",
                 elapsed * 1000.0
             );
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn median_uses_the_midpoint_for_even_samples() {
+        assert_eq!(median(vec![8.0, 1.0, 5.0, 2.0]), 3.5);
+        assert_eq!(median(vec![8.0, 1.0, 5.0]), 5.0);
+    }
+
+    #[test]
+    fn rejects_chunk_sizes_that_do_not_fit_the_read_pool_budget() {
+        let parse_chunk_size = |size: usize| {
+            parse([
+                "--path".to_owned(),
+                "/file".to_owned(),
+                "--chunk-sizes".to_owned(),
+                size.to_string(),
+            ])
+        };
+        for size in [0, PIPELINE_BUFFER_BYTES + 1] {
+            let error = parse_chunk_size(size).unwrap_err();
+            assert!(error.to_string().contains("--chunk-sizes"));
+        }
+        let args = parse_chunk_size(PIPELINE_BUFFER_BYTES).unwrap();
+        assert_eq!(args.chunk_sizes, [PIPELINE_BUFFER_BYTES]);
+    }
+
+    #[test]
+    fn rejects_worker_counts_that_cannot_form_a_read_window() {
+        let parse_worker_count = |count: usize| {
+            parse([
+                "--path".to_owned(),
+                "/file".to_owned(),
+                "--worker-counts".to_owned(),
+                count.to_string(),
+            ])
+        };
+        for count in [0, usize::MAX / 2 + 1, usize::MAX] {
+            let error = parse_worker_count(count).unwrap_err();
+            assert!(error.to_string().contains("--worker-counts"));
+        }
+        let largest = usize::MAX / 2;
+        assert_eq!(
+            parse_worker_count(largest).unwrap().worker_counts,
+            [largest]
+        );
+    }
 }

@@ -8,7 +8,7 @@ from vfsi_fsspec import VfsiFile, VfsiFileSystem, install_fsspec_blockcache_comp
 
 
 def accepts_filesystem_type(filesystem: type[VfsiFileSystem]) -> None:
-    install_fsspec_blockcache_compat(filesystem)
+    install_fsspec_blockcache_compat(target_type=filesystem)
 
 
 accepts_filesystem_type(VfsiFileSystem)

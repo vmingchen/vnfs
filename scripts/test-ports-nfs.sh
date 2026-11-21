@@ -19,15 +19,41 @@ for program in "$core/ls" "$core/du" "$core/cp" "$core/rm" "$core/rmdir" "$findb
     [[ -x "$program" ]] || { echo "Missing port executable: $program" >&2; exit 2; }
 done
 [[ -f "$library" ]] || { echo "Missing development C adapter: $library" >&2; exit 2; }
-fixture=$(mktemp -d "$export_root/vfsi-port-live.XXXXXX")
-mountdir=$(mktemp -d /tmp/vfsi-port-mount.XXXXXX)
-outputs=$(mktemp -d /tmp/vfsi-port-output.XXXXXX)
+work=$(mktemp -d /tmp/vfsi-port-nfs.XXXXXX)
+mountdir="$work/mount"
+outputs="$work/output"
+fixture=''
+mountdir_ready=0
+mounted=0
 cleanup() {
-    sudo umount "$mountdir" 2>/dev/null || true
-    chmod 755 "$fixture/excluded" "$fixture/.hidden" 2>/dev/null || true
-    rm -rf "${fixture:?}" "${mountdir:?}" "${outputs:?}"
+    local status=$? cleanup_failed=0
+    if { ((mounted)) || mountpoint -q "$mountdir"; } && ! sudo umount "$mountdir"; then
+        echo "Unmount failed; retained the port test state at $work and $fixture" >&2
+        ((status != 0)) || status=1
+        exit "$status"
+    fi
+    # An empty-directory removal cannot recurse into a mount even if its
+    # mountpoint check failed. Leave the export fixture intact on failure.
+    if ((mountdir_ready)) && ! rmdir -- "$mountdir"; then
+        echo "Could not remove the mountpoint; retained $work and $fixture" >&2
+        ((status != 0)) || status=1
+        exit "$status"
+    fi
+    if [[ -n "$fixture" ]]; then
+        chmod 755 "$fixture/excluded" "$fixture/.hidden" 2>/dev/null || true
+        rm -rf -- "$fixture" || cleanup_failed=1
+    fi
+    rm -rf -- "$outputs" || cleanup_failed=1
+    rmdir -- "$work" || cleanup_failed=1
+    exit "$((status != 0 ? status : cleanup_failed))"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+mkdir "$mountdir"
+mountdir_ready=1
+mkdir "$outputs"
+fixture=$(mktemp -d "$export_root/vfsi-port-live.XXXXXX")
 mkdir -p "$fixture/sub/deep" "$fixture/excluded" "$fixture/.hidden"
 printf 'hello\n' > "$fixture/file-1"
 printf 'world\n' > "$fixture/sub/file-2"
@@ -43,6 +69,7 @@ ln -s missing "$fixture/broken-link"
 for minor in 1 2; do
     sudo mount -t nfs4 -o "vers=4.$minor,proto=tcp,sec=sys,port=$port,actimeo=0,lookupcache=none" \
         "$server:${export_path%/}/${fixture##*/}" "$mountdir"
+    mounted=1
     VNFS_IMPL=off "$core/ls" -R "$mountdir" > "$outputs/kernel-ls"
     VNFS_IMPL=nfs VNFS_STATS=1 "$core/ls" -R "$mountdir" > "$outputs/vfsi-ls" 2> "$outputs/ls-trace"
     grep -Eq "rpc_calls=[1-9][0-9]*" "$outputs/ls-trace"
@@ -106,5 +133,6 @@ for minor in 1 2; do
     fi
     [[ -f "$mountdir/remove-a/keep" ]]
     sudo umount "$mountdir"
+    mounted=0
     printf 'Rust and C port parity passed on NFSv4.%s with a subdirectory export.\n' "$minor"
 done

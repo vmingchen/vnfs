@@ -2,11 +2,13 @@
 """Separate syscall and wire controls for the owned integration fixtures."""
 
 from collections import Counter
+from contextlib import contextmanager
 import argparse
 import hashlib
 import json
 import os
 import pwd
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -29,6 +31,39 @@ def decode_commands(text, response):
         else:
             complete.update(commands)
     return complete, pending
+
+
+def require_lossless_capture(text):
+    counts = re.findall(r"^([0-9]+) packets dropped by kernel$", text, re.MULTILINE)
+    if counts != ["0"]:
+        raise ValueError("invalid tcpdump drop count:\n" + text)
+
+
+def stop_capture(capture):
+    if capture.poll() is None:
+        subprocess.run(
+            ["sudo", "-n", "kill", "-INT", str(capture.pid)],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    status = capture.wait(timeout=10)
+    if status != 0:
+        raise RuntimeError(f"tcpdump exited with status {status}")
+
+
+@contextmanager
+def managed_capture(capture):
+    try:
+        yield
+    except BaseException as primary:
+        try:
+            stop_capture(capture)
+        except BaseException as error:
+            primary.add_note(f"Capture shutdown failed: {error}")
+        raise
+    else:
+        stop_capture(capture)
 
 
 def main():
@@ -139,7 +174,7 @@ def main():
                     stdout=diagnostics,
                     stderr=diagnostics,
                 )
-                try:
+                with managed_capture(capture):
                     for _ in range(50):
                         if "listening on" in log.read_text():
                             break
@@ -161,15 +196,7 @@ def main():
                         )
                     )
                     time.sleep(1.5)
-                finally:
-                    subprocess.run(
-                        ["sudo", "-n", "kill", "-INT", str(capture.pid)],
-                        check=False,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    capture.wait(timeout=10)
-            assert "0 packets dropped by kernel" in log.read_text(), log.read_text()
+            require_lossless_capture(log.read_text())
             counts = {}
             for response in ["0", "1"]:
                 text = subprocess.check_output(

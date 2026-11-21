@@ -144,13 +144,11 @@ pub fn native_read_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     request: &ReadOp,
 ) -> VfResult<ReadOutput> {
-    let mut results = backend
-        .vread_impl(std::slice::from_ref(request))
-        .and_then(|outcomes| {
-            let count = outcomes.len();
-            crate::internal::collect_vec_result(Ok(outcomes), count)
-                .map_err(vfsi_core::IndexedError::into_cause)
-        })?;
+    let mut results = vfsi_core::internal::collect_vec_result(
+        backend.vread_impl(std::slice::from_ref(request)),
+        1,
+    )
+    .map_err(vfsi_core::IndexedError::into_cause)?;
     validate_read_results("read_impl", std::slice::from_ref(request), &results)
         .map_err(vfsi_core::IndexedError::into_cause)?;
     Ok(results.pop().expect("validated one result"))
@@ -175,13 +173,11 @@ pub fn native_write_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     request: WriteOp<&FileOperand, &[u8]>,
 ) -> VfResult<WriteOutput> {
-    let mut results = backend
-        .vwrite_impl(std::slice::from_ref(&request))
-        .and_then(|outcomes| {
-            let count = outcomes.len();
-            crate::internal::collect_vec_result(Ok(outcomes), count)
-                .map_err(vfsi_core::IndexedError::into_cause)
-        })?;
+    let mut results = vfsi_core::internal::collect_vec_result(
+        backend.vwrite_impl(std::slice::from_ref(&request)),
+        1,
+    )
+    .map_err(vfsi_core::IndexedError::into_cause)?;
     validate_write_results("write_impl", std::slice::from_ref(&request), &results)
         .map_err(vfsi_core::IndexedError::into_cause)?;
     Ok(results.pop().expect("validated one result"))

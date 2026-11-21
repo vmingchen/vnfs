@@ -511,7 +511,7 @@ pub fn read_with_owned_buffers(
     reads: &[crate::ReadOp],
     dispatch: impl FnOnce(&[crate::ReadOp], &mut [&mut [u8]]) -> crate::VecResult<crate::ReadIntoResult>,
 ) -> crate::VecResult<crate::ReadOutput> {
-    use crate::{IoProgress, OpError, ReadOutput};
+    use crate::{IoProgress, OpError, ReadOutput, VfOffset};
     let mut storage = Vec::with_capacity(reads.len());
     let mut admitted = Vec::new();
     let mut rejected = Vec::new();
@@ -545,11 +545,14 @@ pub fn read_with_owned_buffers(
             results => vec_result_slots(results, requests.len()),
         }
     };
-    let mut owned = results
-        .into_iter()
-        .zip(storage)
-        .map(|(result, mut data)| match result {
-            Ok(read) if read.bytes_read <= data.len() => {
+    let mut owned = results.into_iter().zip(storage).zip(requests).map(
+        |((result, mut data), request)| match result {
+            Ok(read)
+                if read.file == request.file
+                    && read.bytes_read <= data.len()
+                    && read.offset.checked_add(read.bytes_read as u64).is_some()
+                    && !matches!(request.offset, VfOffset::At(offset) if offset != read.offset) =>
+            {
                 data.truncate(read.bytes_read);
                 Ok(ReadOutput {
                     file: read.file,
@@ -559,17 +562,19 @@ pub fn read_with_owned_buffers(
                 })
             }
             Ok(_) => Err(OpError::unknown(
-                errors::invalid_reply("read exceeds owned destination"),
+                errors::invalid_reply("invalid buffered read file, offset or length"),
                 None,
             )),
             Err(error) => {
-                let offset = match error.progress() {
-                    Some(IoProgress::Read(read)) => read.offset(),
+                let offset = match (request.offset, error.progress()) {
+                    (VfOffset::At(offset), _) => offset,
+                    (_, Some(IoProgress::Read(read))) => read.offset(),
                     _ => 0,
                 };
                 Err(own_read_error(error, offset, data))
             }
-        });
+        },
+    );
     if rejected.is_empty() {
         return Ok(owned.collect());
     }
@@ -595,7 +600,8 @@ pub fn own_read_error(error: crate::OpError, offset: u64, mut buffer: Vec<u8>) -
         Some(IoProgress::Read(prefix))
             if prefix.is_buffered()
                 && prefix.offset() == offset
-                && prefix.bytes_read() <= buffer.len() =>
+                && prefix.bytes_read() <= buffer.len()
+                && offset.checked_add(prefix.bytes_read() as u64).is_some() =>
         {
             buffer.truncate(prefix.bytes_read());
             Some(IoProgress::Read(crate::api::ReadOutput::owned(

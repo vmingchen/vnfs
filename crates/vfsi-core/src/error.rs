@@ -71,7 +71,7 @@ impl RpcError {
     /// Preserve classification at an I/O boundary without inspecting its text.
     pub fn from_io(error: std::io::Error) -> Self {
         use std::io::ErrorKind as K;
-        let kind = match error.kind() {
+        let kind = standard::transport_kind(&error).unwrap_or_else(|| match error.kind() {
             K::TimedOut => TransportKind::Timeout,
             K::ConnectionRefused
             | K::ConnectionReset
@@ -79,7 +79,7 @@ impl RpcError {
             | K::NotConnected
             | K::BrokenPipe => TransportKind::Connection,
             _ => TransportKind::Other,
-        };
+        });
         Self::transport_with_kind(kind, error.to_string())
     }
 

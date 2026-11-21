@@ -17,5 +17,6 @@ Cargo.lock
 !adapters/vfsi-python/Cargo.lock
 !fuzz/Cargo.lock
 !benchmarks/du/Cargo.lock
+!benchmarks/error-integration/Cargo.lock
 !benchmarks/rsync/Cargo.lock
 !/Cargo.lock

@@ -43,6 +43,7 @@ class Nfs4FileSystem(_VfsiFileSystem):
         auth: Optional[str] = None,
         service_principal: Optional[str] = None,
         connection_pool_size: int = 1,
+        *,
         mount: Optional[Union[str, PathLike[str]]] = None,
         **kwargs: Any,
     ) -> None: ...

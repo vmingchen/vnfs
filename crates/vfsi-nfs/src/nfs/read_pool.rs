@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use vfsi_core::{AttrMask, FsObjId, VfResult, api::AttrsOptions};
@@ -146,7 +146,7 @@ enum WorkerEvent {
 /// worker when a server omits object identity. Concurrent in-place changes
 /// may still be observed by independent range reads.
 pub struct NfsReadPool {
-    commands: Vec<SyncSender<WorkerCommand>>,
+    commands: Vec<Sender<WorkerCommand>>,
     events: Receiver<WorkerEvent>,
     threads: Vec<JoinHandle<()>>,
     options: NfsReadPoolOptions,
@@ -173,16 +173,25 @@ impl NfsReadPool {
         options: NfsReadPoolOptions,
     ) -> VfResult<Self> {
         let (worker_count, in_flight) = options.effective()?;
-        // The contiguous in-flight window is assigned round-robin. Each worker
-        // receives at most this many reads, with control messages sent between windows.
-        let queue_capacity = in_flight.div_ceil(worker_count);
         let (event_tx, events) = mpsc::channel();
+        let mut ready_workers = reserve_worker_slots(worker_count)?;
+        // Install the owner before starting threads. A later spawn error drops
+        // the pool, shutting down and joining workers that already started.
+        let mut pool = Self {
+            commands: reserve_worker_slots(worker_count)?,
+            events,
+            threads: reserve_worker_slots(worker_count)?,
+            options,
+            effective_workers: worker_count,
+            effective_in_flight: in_flight,
+            worker_alive: reserve_worker_slots(worker_count)?,
+            next_stream_id: 1,
+        };
         let pool_id = crate::session::next_client_token();
-        let mut commands = Vec::with_capacity(worker_count);
-        let mut threads = Vec::with_capacity(worker_count);
         for worker in 0..worker_count {
-            let (command_tx, command_rx) = mpsc::sync_channel(queue_capacity);
-            commands.push(command_tx);
+            // Start and Finish are separate phases and the in-flight window
+            // bounds queued reads. Allocate queue nodes only when needed.
+            let (command_tx, command_rx) = mpsc::channel();
             let worker_builder = builder.pool_member(pool_id, worker);
             let worker_events = event_tx.clone();
             let run_events = worker_events.clone();
@@ -195,22 +204,14 @@ impl NfsReadPool {
                     format!("failed to spawn read worker: {error}"),
                 )
             })?;
-            threads.push(thread);
+            pool.commands.push(command_tx);
+            pool.threads.push(thread);
+            pool.worker_alive.push(true);
         }
         drop(event_tx);
 
-        let mut pool = Self {
-            commands,
-            events,
-            threads,
-            options,
-            effective_workers: worker_count,
-            effective_in_flight: in_flight,
-            worker_alive: vec![true; worker_count],
-            next_stream_id: 1,
-        };
         let mut first_error = None;
-        let mut ready_workers = vec![false; worker_count];
+        ready_workers.resize(worker_count, false);
         for _ in 0..worker_count {
             match pool.events.recv() {
                 Ok(WorkerEvent::Ready { worker, result })
@@ -733,6 +734,14 @@ impl Drop for NfsReadPool {
     }
 }
 
+fn reserve_worker_slots<T>(count: usize) -> VfResult<Vec<T>> {
+    let mut slots = Vec::new();
+    slots
+        .try_reserve_exact(count)
+        .map_err(|_| std::io::Error::from_raw_os_error(libc::ENOMEM))?;
+    Ok(slots)
+}
+
 fn spawn_worker_thread(
     worker: usize,
     events: mpsc::Sender<WorkerEvent>,
@@ -928,7 +937,7 @@ mod tests {
         for (failed_prefetch, stopped) in
             [(false, false), (true, false), (false, true), (true, true)]
         {
-            let (commands, requests) = mpsc::sync_channel(8);
+            let (commands, requests) = mpsc::channel();
             let (send, events) = mpsc::channel();
             send.send(WorkerEvent::Started {
                 stream_id: 1,
@@ -1032,8 +1041,8 @@ mod tests {
         use super::{FsObjId, NfsReadPool, StreamCompletion, StreamFile, WorkerCommand};
 
         for mismatch in [true, false] {
-            let (first_command, first_requests) = mpsc::sync_channel(8);
-            let (second_command, second_requests) = mpsc::sync_channel(8);
+            let (first_command, first_requests) = mpsc::channel();
+            let (second_command, second_requests) = mpsc::channel();
             let (send, events) = mpsc::channel();
             for (worker, file) in [
                 (
@@ -1149,6 +1158,19 @@ mod tests {
         assert_eq!(options.max_in_flight(), 8);
         assert_eq!(options.max_buffered_bytes(), 12 * 1024);
         assert_eq!(options.effective().unwrap(), (3, 3));
+    }
+
+    #[test]
+    fn oversized_worker_tables_fail_before_starting_workers() {
+        let largest = std::num::NonZeroUsize::new(usize::MAX).unwrap();
+        let options = NfsReadPoolOptions::new()
+            .with_worker_count(largest)
+            .with_chunk_size(std::num::NonZeroUsize::new(1).unwrap())
+            .with_max_in_flight(largest)
+            .with_max_buffered_bytes(usize::MAX);
+        let error = super::NfsReadPool::connect(super::NfsClientBuilder::new("127.0.0.1"), options)
+            .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ENOMEM));
     }
 
     #[test]

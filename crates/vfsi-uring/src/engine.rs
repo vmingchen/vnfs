@@ -42,11 +42,12 @@ pub struct Stats {
     pub cache_probes: u64,
     /// Requests completely satisfied by synchronous RWF_NOWAIT probes.
     pub cache_hits: u64,
-    /// Requests routed to the ring by cache-read selection.
+    /// Requests sent to the ring after entering adaptive cache-read selection.
     pub cache_misses: u64,
     pub waves: u64,
     pub submissions: u64,
     pub completions: u64,
+    /// Largest planned ring wave in transfer bytes, including direct-owned reads.
     pub peak_bytes: u64,
     /// Calls to io_uring_enter, including interrupted attempts.
     pub enters: u64,
@@ -56,7 +57,7 @@ pub struct Stats {
     pub copied_read_bytes: u64,
     /// Fatal publication/drain failures; poisoned engines never submit again.
     pub poisoned_executors: u64,
-    /// Buffer allocation capacity deliberately retained after fatal submission failure.
+    /// Buffer capacity retained after a fatal submission or completion-drain failure.
     pub retained_buffer_bytes: u64,
     /// Descriptor ownership references retained (not necessarily distinct OS fds).
     pub retained_descriptors: u64,
@@ -203,7 +204,7 @@ impl Engine {
         ))
     }
 
-    fn cached_read(&self, op: &mut Read<'_>) -> io::Result<usize> {
+    fn cached_read(&self, op: &mut Read<'_>, offset: libc::off_t) -> io::Result<usize> {
         #[cfg(test)]
         {
             let calls = self.cache_read_calls.get();
@@ -231,15 +232,8 @@ impl Engine {
         // SAFETY: this synchronous syscall borrows one initialized, writable
         // buffer and a live descriptor only until it returns. RWF_NOWAIT never
         // schedules asynchronous access to caller storage on EAGAIN.
-        let count = unsafe {
-            libc::preadv2(
-                op.file.as_raw_fd(),
-                &vector,
-                1,
-                op.offset as libc::off_t,
-                libc::RWF_NOWAIT,
-            )
-        };
+        let count =
+            unsafe { libc::preadv2(op.file.as_raw_fd(), &vector, 1, offset, libc::RWF_NOWAIT) };
         if count < 0 {
             Err(io::Error::last_os_error())
         } else {
@@ -454,6 +448,7 @@ impl Engine {
         // Completed prefixes never become pending again. Keep a monotonic
         // cursor instead of rescanning all earlier jobs for every bounded wave.
         let mut first_pending = 0;
+        let mut stopped_cause = libc::EIO;
         while first_pending < jobs.len() {
             while first_pending < jobs.len() && done[first_pending] {
                 first_pending += 1;
@@ -490,7 +485,13 @@ impl Engine {
                 let count = (length - progress[index])
                     .min(budget)
                     .min(u32::MAX as usize);
-                let Some(offset) = job.offset.checked_add(progress[index] as u64) else {
+                // The ring interprets all-ones as the current file cursor.
+                // These requests always address signed, absolute offsets.
+                let Some(offset) = job
+                    .offset
+                    .checked_add(progress[index] as u64)
+                    .filter(|&offset| i64::try_from(offset).is_ok())
+                else {
                     errors[index] = Some((libc::EOVERFLOW, FailureState::NotAttempted));
                     done[index] = true;
                     continue;
@@ -526,7 +527,21 @@ impl Engine {
                 // reserve_exact avoids geometric growth beyond the configured
                 // byte budget. Already initialized read storage needs no reset:
                 // only bytes acknowledged by a CQE are copied to the caller.
-                self.scratch.reserve_exact(bytes - self.scratch.len());
+                if self
+                    .scratch
+                    .try_reserve_exact(bytes - self.scratch.len())
+                    .is_err()
+                {
+                    // Nothing in this wave has reached the kernel. Restore
+                    // owned buffers and leave the ring available for retry.
+                    stopped_cause = libc::ENOMEM;
+                    for op in pending.drain(..) {
+                        if let Buffer::OwnedRead(buffer) = &mut jobs[op.job].buffer {
+                            *buffer = op.owned.expect("owned read buffer");
+                        }
+                    }
+                    break;
+                }
                 self.scratch.resize(bytes, 0);
                 self.telemetry
                     .0
@@ -594,26 +609,18 @@ impl Engine {
                     pending = completed;
                 }
                 Err(error) => {
-                    let errno = error.raw_os_error().unwrap_or(libc::EIO);
-                    for error in &mut errors {
-                        if let Some((code, FailureState::Unknown)) = error {
-                            *code = errno;
+                    stopped_cause = error.raw_os_error().unwrap_or(libc::EIO);
+                    for (finished, error) in done.iter().zip(&mut errors) {
+                        if !finished && let Some((code, FailureState::Unknown)) = error {
+                            *code = stopped_cause;
                         }
                     }
+                    // Ordinary CQE failures do not stop sibling waves, but
+                    // a failed submission or drain poisons the executor.
+                    break;
                 }
             }
-            // Ordinary CQE failures affect only their own logical input.
-            // Preserve independent later waves; poisoned engines stop dispatch.
-            if self.ring.is_none() {
-                break;
-            }
         }
-        let stopped_cause = errors
-            .iter()
-            .flatten()
-            .next()
-            .map(|&(code, _)| code)
-            .unwrap_or(libc::EIO);
         let results = jobs
             .iter_mut()
             .enumerate()
@@ -743,13 +750,26 @@ impl DescriptorIo for Engine {
                     results.push(Ok(0));
                     continue;
                 }
+                if i64::try_from(op.offset).is_err() {
+                    results.push(Err(OpError::not_attempted(io::Error::from_raw_os_error(
+                        libc::EOVERFLOW,
+                    ))));
+                    continue;
+                }
                 // Require two cache hits before selecting ordinary reads;
                 // one hot file alone is weak evidence about its siblings.
                 let probing = warm_left == 0 || warm_left == 15;
                 let result = if probe && op.buffer.len() <= 64 * 1024 {
                     if probing {
-                        probes += 1;
-                        self.cached_read(op)
+                        // A narrow libc off_t may not hold a valid ring
+                        // offset. Fall back without issuing a truncated probe.
+                        match libc::off_t::try_from(op.offset) {
+                            Ok(offset) => {
+                                probes += 1;
+                                self.cached_read(op, offset)
+                            }
+                            Err(_) => Err(io::Error::from_raw_os_error(libc::EAGAIN)),
+                        }
                     } else {
                         use std::os::unix::fs::FileExt;
                         direct += 1;
@@ -955,6 +975,52 @@ mod tests {
     use vfsi_sync::backend::{HandleBackend, VectorBackend};
 
     #[test]
+    fn absolute_offsets_cannot_select_the_file_cursor() {
+        use std::io::{Seek, SeekFrom, Write as _};
+
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"abc").unwrap();
+        file.seek(SeekFrom::Start(1)).unwrap();
+        let file = Arc::new(file);
+        for cached in [false, true] {
+            let (mut engine, telemetry) = Engine::new(
+                Options::default()
+                    .with_cached_reads(cached)
+                    .with_syscall_writes(cached),
+            )
+            .unwrap();
+            let mut bytes = [0; 1];
+            let error = engine
+                .read(&mut [Read {
+                    file: &file,
+                    offset: u64::MAX,
+                    buffer: &mut bytes,
+                }])
+                .remove(0)
+                .unwrap_err();
+            assert_eq!(error.state(), FailureState::NotAttempted);
+            assert_eq!(error.cause().raw_os_error(), Some(libc::EOVERFLOW));
+            assert_eq!(bytes, [0]);
+
+            let error = engine
+                .write(&[Write {
+                    file: &file,
+                    offset: i64::MAX as u64 + 1,
+                    data: b"x",
+                }])
+                .remove(0)
+                .unwrap_err();
+            assert_eq!(error.state(), FailureState::NotAttempted);
+            assert_eq!(error.cause().raw_os_error(), Some(libc::EOVERFLOW));
+            assert_eq!(telemetry.snapshot().submissions, 0);
+            assert_eq!(telemetry.snapshot().cache_probes, 0);
+            assert_eq!(telemetry.snapshot().syscall_writes, 0);
+        }
+        let mut file = Arc::into_inner(file).unwrap();
+        assert_eq!(file.stream_position().unwrap(), 1);
+    }
+
+    #[test]
     fn owned_reads_fill_final_allocations_without_copying_and_reuse_bookkeeping() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("file");
@@ -1001,8 +1067,7 @@ mod tests {
                     pointer,
                     "the final allocation must be returned unchanged"
                 );
-                // The byte budget partitions the second file; a short CQE
-                // stops at its actual contiguous prefix, never skips bytes.
+                // The second read starts near EOF and returns a contiguous prefix.
                 let second = results[1].as_ref().unwrap();
                 assert!(b"89".starts_with(second));
                 if short.is_none() {
@@ -1029,7 +1094,7 @@ mod tests {
             let stats = telemetry.snapshot();
             assert_eq!((stats.copied_read_bytes, stats.scratch_growths), (0, 0));
             assert_eq!(stats.submissions, stats.completions);
-            assert!(stats.peak_bytes <= 16);
+            assert_eq!(stats.peak_bytes, 12);
             assert!(engine.scratch.is_empty());
             let mut borrowed = [99; 2];
             engine.short_completion = None;
@@ -2540,6 +2605,7 @@ mod tests {
         std::fs::write(&first_path, b"00000000").unwrap();
         std::fs::write(&last_path, b"untouched").unwrap();
         let first = Arc::new(File::options().write(true).open(&first_path).unwrap());
+        let read_only = Arc::new(File::open(&first_path).unwrap());
         let last = Arc::new(File::options().write(true).open(&last_path).unwrap());
         let (mut engine, telemetry) = Engine::new(
             Options::default()
@@ -2547,8 +2613,13 @@ mod tests {
                 .with_max_batch_bytes(std::num::NonZeroUsize::new(2).unwrap()),
         )
         .unwrap();
-        engine.fail_after_submit = Some(2);
+        engine.fail_after_submit = Some(3);
         let operations = [
+            Write {
+                file: &read_only,
+                offset: 0,
+                data: b"bad",
+            },
             Write {
                 file: &first,
                 offset: 0,
@@ -2561,23 +2632,28 @@ mod tests {
             },
         ];
         let results = engine.write(&operations);
-        let error = results[0].as_ref().unwrap_err();
+        let rejected = results[0].as_ref().unwrap_err();
+        assert_eq!(rejected.state(), FailureState::Failed);
+        assert_eq!(rejected.cause().raw_os_error(), Some(libc::EBADF));
+        let error = results[1].as_ref().unwrap_err();
         assert_eq!(error.state(), FailureState::Unknown);
         assert_eq!(
             error.progress(),
             Some(&IoProgress::Write { bytes_written: 2 })
         );
         assert_eq!(
-            results[1].as_ref().unwrap_err().state(),
+            results[2].as_ref().unwrap_err().state(),
             FailureState::NotAttempted
         );
-        assert!(results[1].as_ref().unwrap_err().progress().is_none());
+        let untouched = results[2].as_ref().unwrap_err();
+        assert_eq!(untouched.cause().raw_os_error(), Some(libc::EIO));
+        assert!(untouched.progress().is_none());
         assert_eq!(&std::fs::read(&first_path).unwrap()[..2], b"ab");
         assert_eq!(std::fs::read(&last_path).unwrap(), b"untouched");
         let stats = telemetry.snapshot();
         assert_eq!(
             (stats.waves, stats.submissions, stats.completions),
-            (2, 2, 1)
+            (3, 3, 2)
         );
         assert!(
             engine
@@ -2587,7 +2663,7 @@ mod tests {
         );
         assert_eq!(
             telemetry.snapshot().submissions,
-            2,
+            3,
             "poisoned write engine never replays"
         );
     }
