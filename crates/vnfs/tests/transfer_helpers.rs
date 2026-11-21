@@ -2427,7 +2427,7 @@ fn overlapping_bind_aliases_preserve_directory_and_regular_sources() {
         TransferOptions::new().with_existing(Existing::Skip),
     )
     .unwrap_err();
-    assert_eq!(error.index(), Some(1));
+    assert_eq!(error.index(), Some(1), "{error:?}");
     assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
     assert_eq!(
         fs.symlink_attrs("/inverse/source/sub/new")
