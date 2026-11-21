@@ -42,11 +42,12 @@ pub struct Stats {
     pub cache_probes: u64,
     /// Requests completely satisfied by synchronous RWF_NOWAIT probes.
     pub cache_hits: u64,
-    /// Requests routed to the ring by cache-read selection.
+    /// Requests sent to the ring after entering adaptive cache-read selection.
     pub cache_misses: u64,
     pub waves: u64,
     pub submissions: u64,
     pub completions: u64,
+    /// Largest planned ring wave in transfer bytes, including direct-owned reads.
     pub peak_bytes: u64,
     /// Calls to io_uring_enter, including interrupted attempts.
     pub enters: u64,
@@ -56,7 +57,7 @@ pub struct Stats {
     pub copied_read_bytes: u64,
     /// Fatal publication/drain failures; poisoned engines never submit again.
     pub poisoned_executors: u64,
-    /// Buffer allocation capacity deliberately retained after fatal submission failure.
+    /// Buffer capacity retained after a fatal submission or completion-drain failure.
     pub retained_buffer_bytes: u64,
     /// Descriptor ownership references retained (not necessarily distinct OS fds).
     pub retained_descriptors: u64,
@@ -1066,8 +1067,7 @@ mod tests {
                     pointer,
                     "the final allocation must be returned unchanged"
                 );
-                // The byte budget partitions the second file; a short CQE
-                // stops at its actual contiguous prefix, never skips bytes.
+                // The second read starts near EOF and returns a contiguous prefix.
                 let second = results[1].as_ref().unwrap();
                 assert!(b"89".starts_with(second));
                 if short.is_none() {
@@ -1094,7 +1094,7 @@ mod tests {
             let stats = telemetry.snapshot();
             assert_eq!((stats.copied_read_bytes, stats.scratch_growths), (0, 0));
             assert_eq!(stats.submissions, stats.completions);
-            assert!(stats.peak_bytes <= 16);
+            assert_eq!(stats.peak_bytes, 12);
             assert!(engine.scratch.is_empty());
             let mut borrowed = [99; 2];
             engine.short_completion = None;

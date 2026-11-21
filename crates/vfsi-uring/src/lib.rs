@@ -79,9 +79,8 @@ impl Options {
         self.queue_depth = depth;
         self
     }
-    /// Maximum aggregate transfer bytes per wave, also bounding scratch storage,
-    /// independent of caller-facing
-    /// read allocation limits. Shared read limits still default to 16 MiB.
+    /// Maximum aggregate transfer bytes per wave, also bounding scratch storage.
+    /// Caller-facing read allocation limits are separate and default to 16 MiB.
     /// Defaults to 2 MiB to limit copy working sets while preserving many-file
     /// concurrency; tune upward for storage that benefits from larger windows.
     pub fn with_max_batch_bytes(mut self, bytes: NonZeroUsize) -> Self {
@@ -103,10 +102,9 @@ pub fn connect(
 }
 
 /// Like [`connect`], retaining low-cost counters for actual submissions,
-/// completions, waves, ring entries, arena growths and peak scratch bytes.
-/// Ring counters do not include syscalls. Opt-in cache probes and descriptor
-/// syscall requests have separate counters; namespace/dependency fallbacks
-/// remain excluded.
+/// completions, waves, scratch arena growths and peak planned wave bytes.
+/// Direct read and write syscalls have separate counters. Namespace and
+/// dependency fallbacks are excluded from these counts.
 pub fn connect_with_telemetry(
     root: impl AsRef<Path>,
     options: Options,
