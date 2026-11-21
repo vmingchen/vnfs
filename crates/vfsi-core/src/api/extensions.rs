@@ -288,6 +288,24 @@ pub trait VfsiExt: Vfsi {
             }
             result
         };
+        let result = result.map(|mut outcomes| {
+            let mut remaining = options.max_total_bytes_or(self.limits().max_read_bytes());
+            for outcome in &mut outcomes {
+                if let Ok(read) = outcome {
+                    if let Some(bytes) = remaining.checked_sub(read.bytes_read()) {
+                        remaining = bytes;
+                    } else {
+                        *outcome = Err(crate::OpError::unknown(
+                            crate::internal::errors::invalid_reply(
+                                "read exceeds aggregate byte budget",
+                            ),
+                            None,
+                        ));
+                    }
+                }
+            }
+            outcomes
+        });
         crate::internal::collect_vec_result(result, count)
     }
 
@@ -503,7 +521,27 @@ pub trait VfsiExt: Vfsi {
         requests: &[crate::api::WriteOp<'a, Self::File>],
         options: crate::api::WriteOptions,
     ) -> std::result::Result<Vec<crate::api::WriteOutput>, crate::IndexedError> {
-        crate::internal::collect_vec_result(self.vwrite(requests, options), requests.len())
+        let result = self.vwrite(requests, options).map(|mut outcomes| {
+            for (outcome, request) in outcomes.iter_mut().zip(requests) {
+                if let Ok(write) = outcome
+                    && (write.bytes_written > request.data().len()
+                        || (options.write_all() && write.bytes_written != request.data().len())
+                        || write
+                            .offset
+                            .checked_add(write.bytes_written as u64)
+                            .is_none())
+                {
+                    *outcome = Err(crate::OpError::unknown(
+                        crate::internal::errors::invalid_reply(
+                            "invalid write byte count or offset",
+                        ),
+                        None,
+                    ));
+                }
+            }
+            outcomes
+        });
+        crate::internal::collect_vec_result(result, requests.len())
     }
 
     // Write files
@@ -852,31 +890,6 @@ pub trait VfsiExt: Vfsi {
             .map(|_| std::collections::HashMap::new())
             .collect();
         let completions = self.listdirs_all(paths, options, |index, page| {
-            let root = paths
-                .get(index)
-                .ok_or_else(|| {
-                    crate::internal::errors::invalid_reply("invalid visitor root index")
-                })?
-                .as_ref();
-            let valid_path = if options.recursive() {
-                page.path.strip_prefix(root).is_ok_and(|suffix| {
-                    suffix
-                        .components()
-                        .all(|component| matches!(component, std::path::Component::Normal(_)))
-                })
-            } else {
-                page.path == root
-            };
-            if !valid_path
-                || page.entries.iter().any(|entry| {
-                    entry.file_name().is_none()
-                        || entry.path().parent() != Some(page.path.as_path())
-                })
-            {
-                return Err(crate::internal::errors::invalid_reply(
-                    "invalid collected directory page",
-                ));
-            }
             let tree = &mut trees[index];
             let positions = &mut positions[index];
             if let Some(&slot) = positions.get(&page.path) {
@@ -912,9 +925,37 @@ pub trait VfsiExt: Vfsi {
         &self,
         paths: &[P],
         options: crate::api::ListDirOptions,
-        callback: impl FnMut(usize, DirectoryListing) -> Result<C>,
+        mut callback: impl FnMut(usize, DirectoryListing) -> Result<C>,
     ) -> std::result::Result<Vec<crate::api::TraversalCompletion>, crate::IndexedError> {
-        crate::internal::collect_vec_result(self.vlistdirs(paths, options, callback), paths.len())
+        let result = self.vlistdirs(paths, options, |index, page| {
+            let root = paths
+                .get(index)
+                .ok_or_else(|| {
+                    crate::internal::errors::invalid_reply("invalid visitor root index")
+                })?
+                .as_ref();
+            let valid_path = if options.recursive() {
+                page.path.strip_prefix(root).is_ok_and(|suffix| {
+                    suffix
+                        .components()
+                        .all(|component| matches!(component, std::path::Component::Normal(_)))
+                })
+            } else {
+                page.path == root
+            };
+            if !valid_path
+                || page.entries.iter().any(|entry| {
+                    entry.file_name().is_none()
+                        || entry.path().parent() != Some(page.path.as_path())
+                })
+            {
+                return Err(crate::internal::errors::invalid_reply(
+                    "invalid directory visitor page",
+                ));
+            }
+            callback(index, page)
+        });
+        crate::internal::collect_vec_result(result, paths.len())
     }
 
     /// Fetch one page vector and require every input to succeed. Successful

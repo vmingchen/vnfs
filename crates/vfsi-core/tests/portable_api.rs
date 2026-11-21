@@ -143,10 +143,25 @@ impl Vfsi for PortableFs {
     }
     fn vwrite<'a>(
         &self,
-        _: &[WriteOp<'a, TestFile>],
+        requests: &[WriteOp<'a, TestFile>],
         _: WriteOptions,
     ) -> vfsi_core::VecResult<WriteOutput> {
-        panic!("unexpected write")
+        let (offset, bytes_written) = match self.shape.get() {
+            17 => (5, 1),
+            18 => (5, 3),
+            19 => (u64::MAX, 1),
+            _ => panic!("unexpected write"),
+        };
+        Ok(requests
+            .iter()
+            .map(|_| {
+                Ok(WriteOutput {
+                    offset,
+                    bytes_written,
+                    stable: false,
+                })
+            })
+            .collect())
     }
     fn vclose(&self, files: &mut [TestFile]) -> vfsi_core::VecResult<()> {
         Ok(files.iter().map(|_| Ok(())).collect())
@@ -248,7 +263,9 @@ impl Vfsi for PortableFs {
                 if self.shape.get() == 15 {
                     return Ok(TraversalCompletion::Complete);
                 }
-                let pages = if self.tree.get() {
+                let pages = if self.shape.get() == 16 {
+                    vec![vec![tree_entry(&path.as_ref().join(".."), true)]]
+                } else if self.tree.get() {
                     match path.as_ref().to_str().unwrap() {
                         "/tree" => vec![
                             vec![
@@ -700,6 +717,59 @@ fn blanket_extensions_preserve_vector_dispatch_and_root_grouping() {
     assert_eq!(fs.listings.get(), 1);
     assert_eq!(trees[0][0].path, Path::new("/a"));
     assert_eq!(trees[1][0].path, Path::new("/b"));
+}
+
+#[test]
+fn directory_visitors_do_not_publish_malformed_entries() {
+    let fs = PortableFs::default();
+    fs.shape.set(16);
+    let error = fs
+        .listdirs_all(
+            &["/tree"],
+            ListDirOptions::new(),
+            |_, _| -> Result<ControlFlow<()>> {
+                panic!("malformed page must not reach the caller");
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.index(), Some(0));
+    assert_eq!(
+        vfsi_core::transport_kind(error.cause()),
+        Some(vfsi_core::TransportKind::InvalidReply)
+    );
+}
+
+#[test]
+fn strict_read_and_write_helpers_validate_backend_successes() {
+    let fs = PortableFs::default();
+    let error = fs
+        .read_files_with_options(
+            &["/a", "/b"],
+            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(1).unwrap()),
+        )
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(
+        vfsi_core::transport_kind(error.cause()),
+        Some(vfsi_core::TransportKind::InvalidReply)
+    );
+
+    let file = TestFile;
+    let writes = [WriteOp::at(&file, 0, b"ab")];
+    fs.shape.set(17);
+    let short = fs.write_batch(&writes, WriteOptions::new()).unwrap();
+    assert_eq!((short[0].offset, short[0].bytes_written), (5, 1));
+    for shape in [17, 18, 19] {
+        fs.shape.set(shape);
+        let error = fs
+            .write_batch(&writes, WriteOptions::new().with_write_all(true))
+            .unwrap_err();
+        assert_eq!(error.index(), Some(0));
+        assert_eq!(
+            vfsi_core::transport_kind(error.cause()),
+            Some(vfsi_core::TransportKind::InvalidReply)
+        );
+    }
 }
 
 #[test]
