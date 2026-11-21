@@ -3,10 +3,20 @@
 This project follows [Semantic Versioning](https://semver.org/) for the
 `nfs4fs` package. Rust crate and C ABI versions are tracked independently.
 
-## Unreleased
+## 2026-11-20 — transfer safety and reader recovery
 
-- The next `vnfs` release requires `vfsi-core` 0.5.1 for routed transfer
-  identity and COPY checks. Publish the core crate before the new facade.
+Rust releases: vnfs 0.0.40, vfsi-core and the sync, local, POSIX, io_uring,
+NFS, and SMB crates 0.5.1, and vfsi-c 0.3.24. Python releases: nfs4fs
+0.3.19, vfsi-fsspec 0.1.18, vsmb 0.1.13, and vsmbfs 0.1.12.
+The C ABI remains v3. nfsv41-sys and libntirpc-sys retain their versions.
+
+- Guard recursive transfers and file replacement across symlink ancestors,
+  bind mounts, and NFS subtree aliases. Preserve skip behavior and reuse
+  metadata for shared symlink ancestors.
+- Verify retained reader identities when reconnecting and keep stale
+  descriptor failures from retiring healthy siblings.
+- Preserve C stat projection and validate SMB reply commands before
+  applying operation-specific error handling.
 
 ## 2026-11-18 — pinned reads, recovery, and copy routing
 

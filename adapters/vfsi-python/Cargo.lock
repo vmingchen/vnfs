@@ -1040,7 +1040,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-python-native"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "libc",
  "pyo3",
@@ -1054,7 +1054,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-smb"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bitfields",
  "futures-util",

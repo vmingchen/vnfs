@@ -198,7 +198,7 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "nfs4fs-python"
-version = "0.3.18"
+version = "0.3.19"
 dependencies = [
  "libc",
  "libntirpc-sys",
@@ -505,7 +505,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-python-native"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "libc",
  "pyo3",

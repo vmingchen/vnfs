@@ -1018,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-smb"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bitfields",
  "futures-util",
@@ -1051,7 +1051,7 @@ dependencies = [
 
 [[package]]
 name = "vnfs"
-version = "0.0.39"
+version = "0.0.40"
 dependencies = [
  "bitfields",
  "libc",
