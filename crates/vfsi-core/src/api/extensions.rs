@@ -279,32 +279,52 @@ pub trait VfsiExt: Vfsi {
         ops: impl IntoIterator<Item = crate::api::ReadOp<'a, Self::File>>,
         options: crate::api::ReadOptions,
     ) -> std::result::Result<Vec<crate::api::ReadOutput>, crate::IndexedError> {
-        let mut count = 0usize;
-        let result = {
-            let mut ops = ops.into_iter().inspect(|_| count += 1);
-            let result = self.vread(&mut ops, options);
-            if result.is_ok() {
-                ops.for_each(drop);
-            }
-            result
-        };
-        let result = result.map(|mut outcomes| {
-            let mut remaining = options.max_total_bytes_or(self.limits().max_read_bytes());
-            for outcome in &mut outcomes {
-                if let Ok(read) = outcome {
-                    if let Some(bytes) = remaining.checked_sub(read.bytes_read()) {
-                        remaining = bytes;
-                    } else {
-                        *outcome = Err(crate::OpError::unknown(
-                            crate::internal::errors::invalid_reply(
-                                "read exceeds aggregate byte budget",
-                            ),
-                            None,
-                        ));
-                    }
+        let mut first = None;
+        let mut rest = Vec::new();
+        let mut requested = Some(0usize);
+        let (result, unconsumed) = {
+            let mut ops = ops.into_iter().fuse().inspect(|op| {
+                // Avoid a bounds allocation for a single request.
+                let bounds = op.bounds();
+                requested = requested.and_then(|bytes| bytes.checked_add(bounds.requested_len()));
+                if first.is_none() {
+                    first = Some(bounds);
+                } else {
+                    rest.push(bounds);
                 }
+            });
+            let result = self.vread(&mut ops, options);
+            let unconsumed = result.is_ok() && ops.next().is_some();
+            (result, unconsumed)
+        };
+        if unconsumed {
+            return Err(crate::IndexedError::unattributed(
+                crate::internal::errors::invalid_reply("read vector did not consume every request"),
+            ));
+        }
+        let count = usize::from(first.is_some()) + rest.len();
+        let result = result.and_then(|outcomes| {
+            if outcomes.len() != count {
+                return Ok(outcomes);
             }
-            outcomes
+            let budget = options.max_total_bytes_or(self.limits().max_read_bytes());
+            let mut remaining = budget;
+            let mut bounds = first.into_iter().chain(rest);
+            let outcomes: Vec<_> = outcomes
+                .into_iter()
+                .map(|outcome| {
+                    let bounds = bounds.next().expect("validated read outcome count");
+                    outcome.and_then(|read| bounds.check_success(read, &mut remaining))
+                })
+                .collect();
+            if requested.is_none_or(|bytes| bytes > budget)
+                && outcomes.iter().all(std::result::Result::is_ok)
+            {
+                return Err(crate::internal::errors::invalid_reply(
+                    "read requests exceed aggregate byte budget",
+                ));
+            }
+            Ok(outcomes)
         });
         crate::internal::collect_vec_result(result, count)
     }
@@ -331,30 +351,10 @@ pub trait VfsiExt: Vfsi {
                 .map(|path| crate::api::ReadOp::whole(path.as_ref())),
             options,
         )?;
-        results
+        Ok(results
             .into_iter()
-            .enumerate()
-            .map(|(index, result)| {
-                let complete = result.offset() == 0 && result.eof();
-                let data = result.into_data().ok_or_else(|| {
-                    crate::IndexedError::at(
-                        index,
-                        crate::internal::errors::invalid_reply(
-                            "whole-file vread_native omitted owned data",
-                        ),
-                    )
-                })?;
-                if !complete {
-                    return Err(crate::IndexedError::at(
-                        index,
-                        crate::internal::errors::invalid_reply(
-                            "whole-file vread_native returned incomplete or invalid data",
-                        ),
-                    ));
-                }
-                Ok(data)
-            })
-            .collect()
+            .map(|result| result.into_data().expect("validated whole-file read"))
+            .collect())
     }
 
     /// Single-target convenience. For multiple files, prefer [`Vfsi::vread`] with whole-file operations and decode each result as UTF-8.
@@ -521,27 +521,7 @@ pub trait VfsiExt: Vfsi {
         requests: &[crate::api::WriteOp<'a, Self::File>],
         options: crate::api::WriteOptions,
     ) -> std::result::Result<Vec<crate::api::WriteOutput>, crate::IndexedError> {
-        let result = self.vwrite(requests, options).map(|mut outcomes| {
-            for (outcome, request) in outcomes.iter_mut().zip(requests) {
-                if let Ok(write) = outcome
-                    && (write.bytes_written > request.data().len()
-                        || (options.write_all() && write.bytes_written != request.data().len())
-                        || write
-                            .offset
-                            .checked_add(write.bytes_written as u64)
-                            .is_none())
-                {
-                    *outcome = Err(crate::OpError::unknown(
-                        crate::internal::errors::invalid_reply(
-                            "invalid write byte count or offset",
-                        ),
-                        None,
-                    ));
-                }
-            }
-            outcomes
-        });
-        crate::internal::collect_vec_result(result, requests.len())
+        collect_write_results(self.vwrite(requests, options), requests, options, false)
     }
 
     // Write files
@@ -569,11 +549,9 @@ pub trait VfsiExt: Vfsi {
                 | crate::api::OpenFlags::CREATE
                 | crate::api::OpenFlags::TRUNCATE,
         ))?;
-        let result = self
-            .write_batch(
-                &[crate::api::WriteOp::at(&file, 0, data)],
-                crate::api::WriteOptions::new().with_write_all(true),
-            )
+        let writes = [crate::api::WriteOp::at(&file, 0, data)];
+        let options = crate::api::WriteOptions::new().with_write_all(true);
+        let result = collect_write_results(self.vwrite(&writes, options), &writes, options, true)
             .map_err(crate::IndexedError::into_cause);
         let close_result = file.close();
         result?;
@@ -631,10 +609,8 @@ pub trait VfsiExt: Vfsi {
             .zip(entries)
             .map(|(file, (_, data))| crate::api::WriteOp::at(file, 0, data.as_ref()))
             .collect();
-        let result = self.write_batch(
-            &writes,
-            crate::api::WriteOptions::new().with_write_all(true),
-        );
+        let options = crate::api::WriteOptions::new().with_write_all(true);
+        let result = collect_write_results(self.vwrite(&writes, options), &writes, options, true);
         drop(writes);
         let close_result = self.close_files(files);
         result?;
@@ -1634,6 +1610,36 @@ pub trait VfsiExt: Vfsi {
 }
 
 impl<C: Vfsi + ?Sized> VfsiExt for C {}
+
+fn collect_write_results<H>(
+    result: crate::VecResult<crate::api::WriteOutput>,
+    requests: &[crate::api::WriteOp<'_, H>],
+    options: crate::api::WriteOptions,
+    require_requested_offset: bool,
+) -> std::result::Result<Vec<crate::api::WriteOutput>, crate::IndexedError> {
+    let result = result.map(|mut outcomes| {
+        for (outcome, request) in outcomes.iter_mut().zip(requests) {
+            if let Ok(write) = outcome
+                && (write.bytes_written > request.data().len()
+                    || (options.write_all() && write.bytes_written != request.data().len())
+                    || (require_requested_offset
+                        && !request.data().is_empty()
+                        && write.offset != request.offset())
+                    || write
+                        .offset
+                        .checked_add(write.bytes_written as u64)
+                        .is_none())
+            {
+                *outcome = Err(crate::OpError::unknown(
+                    crate::internal::errors::invalid_reply("invalid write byte count or offset"),
+                    None,
+                ));
+            }
+        }
+        outcomes
+    });
+    crate::internal::collect_vec_result(result, requests.len())
+}
 
 fn single_completion<T>(mut values: Vec<T>, operation: &'static str) -> Result<T> {
     if values.len() != 1 {

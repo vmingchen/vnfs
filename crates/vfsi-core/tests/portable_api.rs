@@ -33,6 +33,7 @@ struct PortableFs {
     tree: Cell<bool>,
     metadata: Cell<usize>,
     page_calls: Cell<usize>,
+    closed: Cell<usize>,
     waves: RefCell<Vec<Vec<PathBuf>>>,
     directory_options: RefCell<Vec<ListDirOptions>>,
     removals: RefCell<Vec<(Vec<PathBuf>, RemoveOptions)>>,
@@ -117,12 +118,18 @@ impl Vfsi for PortableFs {
         }
         let mut results: Vec<_> = ops
             .into_iter()
-            .take(if self.shape.get() == 7 { 1 } else { usize::MAX })
+            .take(if matches!(self.shape.get(), 7 | 20) {
+                1
+            } else {
+                usize::MAX
+            })
             .enumerate()
             .map(|(index, mut op)| {
                 if let Some((_, offset, buffer)) = op.buffer_parts_mut() {
                     buffer.fill(index as u8);
                     ReadOutput::buffered(offset, buffer.len(), false)
+                } else if let Some((_, offset, length)) = op.range_parts() {
+                    ReadOutput::owned(offset, vec![index as u8; length.min(1)], false)
                 } else {
                     assert!(op.whole_file_path().is_some());
                     ReadOutput::owned(0, vec![index as u8], true)
@@ -137,6 +144,7 @@ impl Vfsi for PortableFs {
             3 => results[0] = ReadOutput::buffered(0, 1, true),
             4 => results[0] = ReadOutput::owned(1, vec![0], true),
             5 => results[0] = ReadOutput::owned(0, vec![0], false),
+            20 => results.push(ReadOutput::owned(0, vec![1], true)),
             _ => {}
         }
         Ok(results.into_iter().map(Ok).collect())
@@ -154,16 +162,21 @@ impl Vfsi for PortableFs {
         };
         Ok(requests
             .iter()
-            .map(|_| {
+            .map(|request| {
                 Ok(WriteOutput {
                     offset,
-                    bytes_written,
+                    bytes_written: if request.data().is_empty() {
+                        0
+                    } else {
+                        bytes_written
+                    },
                     stable: false,
                 })
             })
             .collect())
     }
     fn vclose(&self, files: &mut [TestFile]) -> vfsi_core::VecResult<()> {
+        self.closed.set(self.closed.get() + files.len());
         Ok(files.iter().map(|_| Ok(())).collect())
     }
     fn vmkdir<P: AsRef<Path>>(&self, _: &[vfsi_core::MkDirOp<P>]) -> vfsi_core::VecResult<()> {
@@ -775,6 +788,74 @@ fn strict_read_and_write_helpers_validate_backend_successes() {
 }
 
 #[test]
+fn read_batch_checks_buffer_and_range_successes() {
+    let fs = PortableFs::default();
+    let file = TestFile;
+    let mut buffer = [0; 2];
+    let results = fs
+        .read_batch(
+            [
+                ReadOp::range(&file, 7, 2),
+                ReadOp::into(&file, 9, &mut buffer),
+            ],
+            ReadOptions::new(),
+        )
+        .unwrap();
+    assert_eq!(results[0].data(), Some([0].as_slice()));
+    assert_eq!(results[1].bytes_read(), buffer.len());
+    assert_eq!(buffer, [1, 1]);
+
+    let error = fs
+        .read_batch(
+            [ReadOp::range(&file, 7, 2), ReadOp::range(&file, 9, 2)],
+            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(3).unwrap()),
+        )
+        .unwrap_err();
+    assert_eq!(error.index(), None);
+    assert_eq!(
+        vfsi_core::transport_kind(error.cause()),
+        Some(vfsi_core::TransportKind::InvalidReply)
+    );
+
+    let mut empty = [];
+    fs.shape.set(3);
+    let error = fs
+        .read_batch([ReadOp::into(&file, 0, &mut empty)], ReadOptions::new())
+        .unwrap_err();
+    assert_eq!(error.index(), Some(0));
+
+    fs.shape.set(4);
+    let error = fs
+        .read_batch([ReadOp::range(&file, 7, 2)], ReadOptions::new())
+        .unwrap_err();
+    assert_eq!(error.index(), Some(0));
+    assert_eq!(
+        vfsi_core::transport_kind(error.cause()),
+        Some(vfsi_core::TransportKind::InvalidReply)
+    );
+}
+
+#[test]
+fn file_replacement_rejects_a_success_at_the_wrong_offset() {
+    let fs = PortableFs::default();
+    fs.shape.set(17);
+    let error = fs.write("/file", b"x").unwrap_err();
+    assert_eq!(
+        vfsi_core::transport_kind(&error),
+        Some(vfsi_core::TransportKind::InvalidReply)
+    );
+    let error = fs
+        .write_files(&[("/empty", b"".as_slice()), ("/bad", b"x")])
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(
+        vfsi_core::transport_kind(error.cause()),
+        Some(vfsi_core::TransportKind::InvalidReply)
+    );
+    assert_eq!(fs.closed.get(), 2);
+}
+
+#[test]
 fn directory_collection_rejects_incomplete_or_misassociated_pages() {
     let fs = tree_fs();
     for shape in [10, 14, 15] {
@@ -1010,16 +1091,35 @@ fn default_portable_paging_collects_complete_roots_without_backend_types() {
 
 #[test]
 fn read_batch_checks_unconsumed_inputs_without_replaying_the_vector() {
+    for shape in [7, 20] {
+        let fs = PortableFs::default();
+        fs.shape.set(shape);
+        let error = fs
+            .read_batch(
+                [ReadOp::whole("/a"), ReadOp::whole("/b")],
+                Default::default(),
+            )
+            .unwrap_err();
+        assert_eq!(error.index(), None);
+        assert_eq!(
+            vfsi_core::transport_kind(error.cause()),
+            Some(vfsi_core::TransportKind::InvalidReply)
+        );
+        assert_eq!(fs.reads.get(), 1);
+    }
+}
+
+#[test]
+fn read_batch_treats_the_first_none_as_iterator_exhaustion() {
     let fs = PortableFs::default();
-    fs.shape.set(7);
-    let error = fs
+    let mut requests = [Some(ReadOp::whole("/a")), None, Some(ReadOp::whole("/b"))].into_iter();
+    let results = fs
         .read_batch(
-            [ReadOp::whole("/a"), ReadOp::whole("/b")],
-            Default::default(),
+            std::iter::from_fn(|| requests.next().flatten()),
+            ReadOptions::new(),
         )
-        .unwrap_err();
-    assert!(vfsi_core::transport_kind(error.cause()).is_some());
-    assert_eq!(fs.reads.get(), 1);
+        .unwrap();
+    assert_eq!(results.len(), 1);
 }
 
 #[test]

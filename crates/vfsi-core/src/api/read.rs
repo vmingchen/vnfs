@@ -13,6 +13,35 @@ enum OpSource<'a, H: crate::api::FileHandle + 'a> {
     Range(&'a H, u64, usize),
     Into(&'a H, u64, &'a mut [u8]),
 }
+
+pub(super) enum ReadBounds {
+    Whole,
+    Range(u64, usize),
+    Buffered(u64, usize),
+}
+
+impl ReadBounds {
+    pub(super) fn requested_len(&self) -> usize {
+        match self {
+            Self::Whole => 0,
+            Self::Range(_, length) | Self::Buffered(_, length) => *length,
+        }
+    }
+
+    pub(super) fn check_success(
+        self,
+        read: ReadOutput,
+        remaining: &mut usize,
+    ) -> OpResult<ReadOutput> {
+        let (buffered, bounds, whole) = match self {
+            Self::Whole => (false, None, true),
+            Self::Range(offset, length) => (false, Some((offset, length)), false),
+            Self::Buffered(offset, length) => (true, Some((offset, length)), false),
+        };
+        checked_read(Ok(read), buffered, bounds, whole, remaining)
+    }
+}
+
 impl<H: crate::api::FileHandle> std::fmt::Debug for ReadOp<'_, H> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.source {
@@ -58,6 +87,15 @@ impl<'a, H: crate::api::FileHandle + 'a> ReadOp<'a, H> {
             source: OpSource::Into(file, offset, buffer),
         }
     }
+
+    pub(super) fn bounds(&self) -> ReadBounds {
+        match &self.source {
+            OpSource::Whole(_) => ReadBounds::Whole,
+            OpSource::Range(_, offset, length) => ReadBounds::Range(*offset, *length),
+            OpSource::Into(_, offset, buffer) => ReadBounds::Buffered(*offset, buffer.len()),
+        }
+    }
+
     /// Inspect a complete-file path from an external `Vfsi` implementation.
     pub fn whole_file_path(&self) -> Option<&'a Path> {
         match &self.source {
