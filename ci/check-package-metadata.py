@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enforce VFSI package identity and protocol ownership in registry metadata."""
+"""Validate VFSI registry metadata and coordinated dependency floors."""
 
 import sys
 from pathlib import Path
@@ -43,6 +43,16 @@ def load(relative_path: str) -> dict:
 
 def main() -> int:
     errors: list[str] = []
+
+    # Cargo's workspace build uses the path, while a packaged consumer uses
+    # this version requirement. Keep the coordinated dependency floors in sync.
+    for name, dependency in load("Cargo.toml")["workspace"]["dependencies"].items():
+        if not isinstance(dependency, dict) or "path" not in dependency:
+            continue
+        version = load(f"{dependency['path']}/Cargo.toml")["package"]["version"]
+        if dependency.get("version") != version:
+            errors.append(f"Cargo.toml: {name} dependency floor must match {version}")
+
     for relative_path in PUBLIC_RUST_PACKAGES + PRIVATE_RUST_PACKAGES:
         package = load(relative_path)["package"]
         if package.get('repository') != CANONICAL:

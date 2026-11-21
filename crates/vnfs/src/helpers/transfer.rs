@@ -452,6 +452,7 @@ fn roots<P: AsRef<Path>>(
                 source: &task.source,
                 destination: &task.destination,
                 directory: task.metadata.is_dir(),
+                preserve_existing: task.metadata.is_file() && options.existing != Existing::Replace,
             })
             .collect();
         fs.check_transfer_mounts(&paths, max_path_bytes)?;
@@ -502,6 +503,7 @@ fn reject_aliased_overlap(
         return Err(invalid(task.root, &task.destination));
     }
     let mut resolved = HashMap::new();
+    let mut ancestry = TransferAncestry::default();
     let followed = if directories.is_empty() {
         HashMap::new()
     } else {
@@ -521,7 +523,6 @@ fn reject_aliased_overlap(
             HashMap::new(),
         )?;
         let mut projected_bytes = 0usize;
-        let mut link_targets = TransferLinkTargets::default();
         for (root, path) in operands() {
             if resolved.contains_key(path) {
                 continue;
@@ -532,7 +533,7 @@ fn reject_aliased_overlap(
                 path,
                 &nofollow,
                 max_path_bytes,
-                &mut link_targets,
+                &mut ancestry,
             )? {
                 projected_bytes = projected_bytes.saturating_add(projected.as_os_str().len());
                 if projected_bytes > max_path_bytes {
@@ -543,6 +544,13 @@ fn reject_aliased_overlap(
         }
         // A no-follow result for a non-link is also the followed result.
         nofollow.retain(|_, attrs| !attrs.as_ref().is_some_and(Attrs::is_symlink));
+        nofollow.extend(
+            ancestry
+                .attrs
+                .iter()
+                .filter(|(_, attrs)| !attrs.as_ref().is_some_and(Attrs::is_symlink))
+                .map(|(path, attrs)| (path.as_path(), attrs.clone())),
+        );
         read_transfer_ancestry(
             fs,
             operands().flat_map(|(root, path)| {
@@ -639,19 +647,55 @@ fn transfer_ancestors<'a>(
 const MAX_SYMLINK_HOPS: usize = 40;
 
 #[derive(Default)]
-struct TransferLinkTargets {
-    paths: VecDeque<(PathBuf, PathBuf)>,
-    bytes: usize,
+struct TransferAncestry {
+    links: VecDeque<(PathBuf, PathBuf)>,
+    link_bytes: usize,
+    attrs: HashMap<PathBuf, Option<Attrs>>,
+    attr_bytes: usize,
 }
 
-impl TransferLinkTargets {
+impl TransferAncestry {
+    fn read_attrs(
+        &mut self,
+        fs: &impl Vfsi,
+        path: &Path,
+        max_path_bytes: usize,
+    ) -> std::io::Result<Option<Attrs>> {
+        if let Some(attrs) = self.attrs.get(path) {
+            return Ok(attrs.clone());
+        }
+        let attrs = match fs.attrs_with_options(path, transfer_ancestry_options(false)) {
+            Ok(attrs) => Some(attrs),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        // Expanded prefixes can form many distinct paths. Bound the owned
+        // cache, including the entry storage, by the transfer path budget.
+        let bytes = path
+            .as_os_str()
+            .len()
+            .saturating_add(std::mem::size_of::<(PathBuf, Option<Attrs>)>());
+        if bytes <= max_path_bytes.saturating_sub(self.attr_bytes) {
+            self.attrs.insert(path.to_path_buf(), attrs.clone());
+            self.attr_bytes += bytes;
+        }
+        Ok(attrs)
+    }
+
     fn read_link(
         &mut self,
         fs: &impl Vfsi,
         link: &Path,
         max_path_bytes: usize,
     ) -> std::io::Result<PathBuf> {
-        if let Some((_, target)) = self.paths.iter().find(|(path, _)| path == link) {
+        if let Some((_, target)) = self.links.iter().find(|(path, _)| path == link) {
             return Ok(target.clone());
         }
         let target = fs.read_link(link)?;
@@ -660,12 +704,12 @@ impl TransferLinkTargets {
             .len()
             .saturating_add(target.as_os_str().len());
         if bytes <= max_path_bytes {
-            while self.paths.len() >= MAX_SYMLINK_HOPS || self.bytes > max_path_bytes - bytes {
-                let (old_link, old_target) = self.paths.pop_front().expect("nonempty cache");
-                self.bytes -= old_link.as_os_str().len() + old_target.as_os_str().len();
+            while self.links.len() >= MAX_SYMLINK_HOPS || self.link_bytes > max_path_bytes - bytes {
+                let (old_link, old_target) = self.links.pop_front().expect("nonempty cache");
+                self.link_bytes -= old_link.as_os_str().len() + old_target.as_os_str().len();
             }
-            self.paths.push_back((link.to_path_buf(), target.clone()));
-            self.bytes += bytes;
+            self.links.push_back((link.to_path_buf(), target.clone()));
+            self.link_bytes += bytes;
         }
         Ok(target)
     }
@@ -677,7 +721,7 @@ fn resolve_transfer_ancestor_alias(
     original: &Path,
     observed: &HashMap<&Path, Option<Attrs>>,
     max_path_bytes: usize,
-    link_targets: &mut TransferLinkTargets,
+    ancestry: &mut TransferAncestry,
 ) -> Result<Option<PathBuf>> {
     let Some(first) = original
         .ancestors()
@@ -697,7 +741,7 @@ fn resolve_transfer_ancestor_alias(
     let attributed =
         |error| IndexedError::at(root, error).with_context("transfer ancestry", original);
     for _ in 0..MAX_SYMLINK_HOPS {
-        let target = link_targets
+        let target = ancestry
             .read_link(fs, &link, max_path_bytes)
             .map_err(attributed)?;
         let mut resolved = if target.is_absolute() {
@@ -720,7 +764,9 @@ fn resolve_transfer_ancestor_alias(
                             .ancestors()
                             .take_while(|path| path.as_os_str().len() > checked_bytes)
                             .any(|prefix| {
-                                !fs.symlink_attrs(prefix).is_ok_and(|attrs| attrs.is_dir())
+                                !ancestry
+                                    .read_attrs(fs, prefix, max_path_bytes)
+                                    .is_ok_and(|attrs| attrs.is_some_and(|attrs| attrs.is_dir()))
                             })
                     {
                         return Err(attributed(std::io::Error::new(
@@ -758,17 +804,12 @@ fn resolve_transfer_ancestor_alias(
             let is_link = if let Some(attrs) = observed.get(prefix) {
                 attrs.as_ref().is_some_and(Attrs::is_symlink)
             } else {
-                match fs.symlink_attrs(prefix) {
-                    Ok(attrs) => attrs.is_symlink(),
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                        ) =>
-                    {
-                        break;
-                    }
-                    Err(error) => return Err(attributed(error)),
+                match ancestry
+                    .read_attrs(fs, prefix, max_path_bytes)
+                    .map_err(attributed)?
+                {
+                    Some(attrs) => attrs.is_symlink(),
+                    None => break,
                 }
             };
             if is_link {
@@ -784,6 +825,12 @@ fn resolve_transfer_ancestor_alias(
     Err(attributed(std::io::Error::from_raw_os_error(libc::ELOOP)))
 }
 
+fn transfer_ancestry_options(follow_final: bool) -> AttrsOptions {
+    AttrsOptions::new()
+        .with_fields(Attributes::MODE | Attributes::identity())
+        .with_follow_final_symlink(follow_final)
+}
+
 fn read_transfer_ancestry<'a>(
     fs: &impl Vfsi,
     paths: impl Iterator<Item = (usize, &'a Path)>,
@@ -792,9 +839,7 @@ fn read_transfer_ancestry<'a>(
     mut observed: HashMap<&'a Path, Option<Attrs>>,
 ) -> Result<HashMap<&'a Path, Option<Attrs>>> {
     let mut paths = paths;
-    let options = AttrsOptions::new()
-        .with_fields(Attributes::MODE | Attributes::identity())
-        .with_follow_final_symlink(follow_final);
+    let options = transfer_ancestry_options(follow_final);
     loop {
         let inputs: Vec<_> = paths
             .by_ref()

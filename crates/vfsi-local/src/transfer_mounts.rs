@@ -78,6 +78,7 @@ pub(super) fn check(
         view.project(
             root.source,
             root.directory,
+            false,
             &mut source_bytes,
             max_projection_bytes,
             &mut sources,
@@ -87,28 +88,30 @@ pub(super) fn check(
     let mut checked = HashSet::new();
     let mut destinations = Vec::new();
     for root in roots {
-        if !checked.insert((root.destination, root.directory)) {
+        let destination = root.destination;
+        if !checked.insert((destination, root.directory, root.preserve_existing)) {
             continue;
         }
         destinations.clear();
         let mut destination_bytes = 0;
         view.project(
-            root.destination,
+            destination,
             root.directory,
+            root.preserve_existing,
             &mut destination_bytes,
             max_projection_bytes,
             &mut destinations,
         )
-        .map_err(|error| attributed(root.index, root.destination, error))?;
-        for destination in &destinations {
+        .map_err(|error| attributed(root.index, destination, error))?;
+        for extent in &destinations {
             for source in &sources {
                 if view
-                    .overlaps_alias(destination, source)
-                    .map_err(|error| attributed(root.index, root.destination, error))?
+                    .overlaps_alias(extent, source)
+                    .map_err(|error| attributed(root.index, destination, error))?
                 {
                     return Err(attributed(
                         root.index,
-                        root.destination,
+                        destination,
                         io::Error::new(
                             ErrorKind::InvalidInput,
                             "transfer overlaps a source through a mount alias",
@@ -155,12 +158,18 @@ impl<'a> View<'a> {
         &self,
         path: &Path,
         directory: bool,
+        preserve_existing: bool,
         bytes: &mut usize,
         max_path_bytes: usize,
         extents: &mut Vec<Extent<'a>>,
     ) -> io::Result<()> {
         let (file, existing) = self.open_or_parent(path)?;
         let suffix = path.strip_prefix(existing).expect("existing ancestor");
+        // Exclusive creation protects an existing entry. A missing leaf can
+        // still create a file inside a source through its parent mount.
+        if preserve_existing && suffix.as_os_str().is_empty() {
+            return Ok(());
+        }
         let directory = directory && (!suffix.as_os_str().is_empty() || file.metadata()?.is_dir());
         let host = fs::read_link(fd_path(&file))?;
         let id = mount_id(&file)?;

@@ -2369,7 +2369,13 @@ fn shared_ancestor_alias_reads_each_link_once() {
     }
     let copied = copy_items(&fs, &sources, "/dest", TransferOptions::new()).unwrap();
     assert_eq!(copied.files_copied, 9);
-    assert_eq!(fs.calls.borrow().readlinks, 2);
+    let calls = fs.calls.borrow();
+    assert_eq!(calls.readlinks, 2);
+    assert!(
+        calls.metadata.len() <= 6,
+        "the alias chain is shared by all sources: {:?}",
+        calls.metadata
+    );
     assert_eq!(fs.fs.read("/dest/tree/child").unwrap(), b"tree");
     assert_eq!(fs.fs.read("/dest/file-7").unwrap(), b"regular");
 }
@@ -2393,6 +2399,42 @@ fn overlapping_bind_aliases_preserve_directory_and_regular_sources() {
     let original = fs.symlink_attrs("/base/folder/same").unwrap();
     assert!(alias.fs_obj_id().is_some());
     assert_eq!(alias.fs_obj_id(), original.fs_obj_id());
+
+    let copied = copy_items(
+        &fs,
+        &["/stranger", "/mirror/file"],
+        "/base/folder",
+        TransferOptions::new().with_existing(Existing::Skip),
+    )
+    .unwrap();
+    assert_eq!(copied.entries_skipped, 1);
+    assert_eq!(copied.files_copied, 1);
+    assert_eq!(
+        fs.read("/base/folder/stranger/folder/file").unwrap(),
+        b"replacement contents"
+    );
+    assert_eq!(
+        fs.read("/base/folder/file").unwrap(),
+        b"original regular file"
+    );
+
+    // The directory destination is a different mount, while the absent
+    // regular destination would create a file inside the directory source.
+    let error = copy_items(
+        &fs,
+        &["/inverse/source", "/inverse/other/new"],
+        "/inverse/mirror",
+        TransferOptions::new().with_existing(Existing::Skip),
+    )
+    .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(
+        fs.symlink_attrs("/inverse/source/sub/new")
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
 
     let options = TransferOptions::new().with_layout(CopyLayout::Contents);
     let error = move_items(&fs, &["/mirror/same"], "/base", options).unwrap_err();

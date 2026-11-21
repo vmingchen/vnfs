@@ -1361,7 +1361,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-local"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "libc",
  "proptest",
@@ -1371,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-nfs"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bitfields",
  "libc",
@@ -1384,7 +1384,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-posix"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "tempfile",
  "vfsi-core",
@@ -1408,7 +1408,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-sync"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "libc",
  "vfsi-core",
@@ -1416,7 +1416,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-uring"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bitfields",
  "io-uring",

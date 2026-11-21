@@ -18,6 +18,8 @@ pub struct TransferRoot<'a> {
     pub source: &'a std::path::Path,
     pub destination: &'a std::path::Path,
     pub directory: bool,
+    /// An existing destination entry is protected by exclusive creation.
+    pub preserve_existing: bool,
 }
 
 /// Reserve owned read storage without aborting if the caller's configured

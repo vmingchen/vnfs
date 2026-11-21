@@ -32,7 +32,7 @@ test-faults = [
 bitfields = { workspace = true }
 libc = { workspace = true }
 nfsv41-sys = { workspace = true, optional = true }
-vfsi-core = { path = "../vfsi-core", version = "0.5.1" }
+vfsi-core = { workspace = true }
 vfsi-local = { workspace = true, optional = true }
 vfsi-posix = { workspace = true, optional = true }
 vfsi-nfs = { workspace = true, optional = true }

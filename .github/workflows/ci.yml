@@ -717,7 +717,7 @@ jobs:
         run: |
           fixture=$(mktemp -d "${TMPDIR:-/tmp}/vnfs transfer.XXXXXXXX")
           cleanup() {
-            for point in occluded/source/child occluded/source/child/layer occluded/elsewhere inverse/mirror deep/dest/sub mirror; do
+            for point in occluded/source/child occluded/source/child/layer occluded/elsewhere inverse/mirror/source inverse/mirror deep/dest/sub mirror; do
               if mountpoint -q "$fixture/$point"; then
                 sudo umount "$fixture/$point" || return
               fi
@@ -739,6 +739,9 @@ jobs:
           printf 'top payload' > "$fixture/inverse/source/file"
           printf 'nested payload' > "$fixture/inverse/source/sub/file"
           sudo mount --bind "$fixture/inverse/source/sub" "$fixture/inverse/mirror"
+          mkdir -p "$fixture/inverse/mirror/source" "$fixture/inverse/outside" "$fixture/inverse/other"
+          printf 'new payload' > "$fixture/inverse/other/new"
+          sudo mount --bind "$fixture/inverse/outside" "$fixture/inverse/mirror/source"
           mkdir -p "$fixture/occluded/source/child/layer" "$fixture/occluded/elsewhere" "$fixture/occluded/replacement" "$fixture/occluded/lower"
           printf 'visible payload' > "$fixture/occluded/replacement/visible"
           sudo mount --bind "$fixture/occluded/source/child" "$fixture/occluded/elsewhere"
