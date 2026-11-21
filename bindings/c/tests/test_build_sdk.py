@@ -47,7 +47,7 @@ class SdkTests(unittest.TestCase):
             self.assertNotIn("vnfs", (prefix / "versions.json").read_text())
 
     def test_build_installs_only_unique_cargo_reported_root_library(self):
-        for outcome in ("reported", "missing", "ambiguous"):
+        for outcome in ("shared", "static", "legacy", "missing", "ambiguous"):
             with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
                 source, target, prefix = root / "source", root / "target", root / "sdk"
@@ -60,8 +60,20 @@ class SdkTests(unittest.TestCase):
                 current.parent.mkdir(parents=True)
                 stale.write_bytes(b"stale")
                 current.write_bytes(b"current")
-                (current.parent / "vfsi-libs").mkdir()
-                (current.parent / "vfsi-libs" / "libntirpc.so").write_bytes(b"runtime")
+                profile_runtimes = current.parent / "vfsi-libs"
+                profile_runtimes.mkdir()
+                runtime_name = "libntirpc.dylib" if sdk.sys.platform == "darwin" else "libntirpc.so"
+                (profile_runtimes / runtime_name).write_bytes(b"profile runtime")
+                build_out = current.parent / "build/vfsi-c-current/out"
+                build_out.mkdir(parents=True)
+                if outcome in ("shared", "static"):
+                    (build_out / "vfsi-libs").mkdir()
+                    if outcome == "shared":
+                        (build_out / "vfsi-libs" / runtime_name).write_bytes(b"current runtime")
+                if outcome in ("shared", "static", "legacy"):
+                    unrelated = prefix / "lib/vfsi-libs/unrelated"
+                    unrelated.parent.mkdir(parents=True)
+                    unrelated.write_bytes(b"preserved")
                 metadata = {
                     "resolve": {"root": "root", "nodes": [{"id": "root", "dependencies": []}]},
                     "packages": [{"id": "root", "name": "vfsi-c", "version": "0.3.18", "source": None}],
@@ -77,7 +89,19 @@ class SdkTests(unittest.TestCase):
                         "target": {"crate_types": ["cdylib", "staticlib"]},
                         "filenames": [str(p) for p in paths],
                     })
-                    messages = [artifact("dependency", [stale])]
+                    messages = [
+                        artifact("dependency", [stale]),
+                        json.dumps({
+                            "reason": "build-script-executed",
+                            "package_id": "dependency",
+                            "out_dir": str(stale.parent),
+                        }),
+                        json.dumps({
+                            "reason": "build-script-executed",
+                            "package_id": "root",
+                            "out_dir": str(build_out),
+                        }),
+                    ]
                     if outcome != "missing":
                         messages.append(artifact("root", [current, current.with_suffix(".a")]))
                     if outcome == "ambiguous":
@@ -89,10 +113,16 @@ class SdkTests(unittest.TestCase):
                     "--prefix", str(prefix), "--registry-only",
                 ]), patch.object(sdk.subprocess, "check_output", side_effect=cargo), \
                      patch.object(sdk.subprocess, "run"):
-                    if outcome == "reported":
+                    if outcome in ("shared", "static", "legacy"):
                         sdk.main()
                         self.assertEqual((prefix / "lib" / name).read_bytes(), b"current")
-                        self.assertEqual((prefix / "lib/vfsi-libs/libntirpc.so").read_bytes(), b"runtime")
+                        self.assertEqual(unrelated.read_bytes(), b"preserved")
+                        installed = prefix / "lib/vfsi-libs" / runtime_name
+                        if outcome == "static":
+                            self.assertFalse(installed.exists())
+                        else:
+                            expected = b"current runtime" if outcome == "shared" else b"profile runtime"
+                            self.assertEqual(installed.read_bytes(), expected)
                     else:
                         with self.assertRaisesRegex(ValueError, "exactly one"):
                             sdk.main()
