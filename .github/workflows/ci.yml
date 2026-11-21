@@ -722,9 +722,15 @@ jobs:
                 sudo umount "$fixture/$point" || return
               fi
             done
+            if mountpoint -q "$fixture"; then
+              sudo umount "$fixture" || return
+            fi
             rm -rf -- "$fixture"
           }
           trap cleanup EXIT
+          # Keep child mounts from propagating between the fixture's bind aliases.
+          sudo mount --bind "$fixture" "$fixture"
+          sudo mount --make-private "$fixture"
           mkdir -p "$fixture/base/folder/same/folder/same" "$fixture/mirror" "$fixture/stranger/folder"
           printf 'directory payload' > "$fixture/base/folder/same/folder/same/payload"
           printf 'original regular file' > "$fixture/base/folder/file"
