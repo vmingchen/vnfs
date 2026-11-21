@@ -83,6 +83,9 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Args> {
                 println!(
                     "Usage: cargo run --release -p vnfs --example large_file_read_benchmark --features nfs -- --host HOST --root EXPORT_ROOT --path FILE [--minor-version 1|2] [--rounds N] [--warmups N] [--chunk-sizes BYTES,...] [--worker-counts N,...]"
                 );
+                println!(
+                    "The CSV workers column reports the requested count. The read pool may use fewer workers under buffer limits or when the server omits object identity."
+                );
                 std::process::exit(0);
             }
             _ => {

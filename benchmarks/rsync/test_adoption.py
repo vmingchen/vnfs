@@ -11,7 +11,7 @@ import sys
 import gzip
 import audit_adoption
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("rsync_adoption", HERE / "adoption.py")
@@ -96,6 +96,43 @@ class AdoptionTests(unittest.TestCase):
                     if child.poll() is None:
                         child.kill()
                     child.wait()
+
+    def test_failed_transfer_reaps_capture_without_masking_failure(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp:
+            root = Path(temp)
+            args = argparse.Namespace(
+                output=root,
+                stock_binary="rsync",
+                library="",
+                user="benchmark",
+                interface="unused",
+                timeout=3,
+            )
+            account = argparse.Namespace(pw_dir=temp, pw_uid=1, pw_gid=1)
+            failure = RuntimeError("transfer failed")
+            timeout = subprocess.TimeoutExpired(["tcpdump"], 10)
+            with patch.object(adoption, "start_capture") as start_capture, patch.object(
+                adoption.subprocess, "Popen"
+            ) as popen, patch.object(adoption.os, "getgrouplist", return_value=[]):
+                capture = start_capture.return_value
+                capture.wait.side_effect = [timeout, 0]
+                popen.return_value.wait.side_effect = failure
+                popen.return_value.poll.return_value = 1
+                with self.assertRaises(RuntimeError) as result:
+                    adoption._transfer(
+                        args, account, root, "tree", root, "create", "stock"
+                    )
+            self.assertIs(result.exception, failure)
+            self.assertIn(str(timeout), failure.__notes__[0])
+            self.assertEqual(
+                capture.method_calls,
+                [
+                    call.send_signal(adoption.signal.SIGINT),
+                    call.wait(timeout=10),
+                    call.kill(),
+                    call.wait(),
+                ],
+            )
 
     def test_audit_requires_capture_for_completed_transfer(self):
         with tempfile.TemporaryDirectory() as temp:

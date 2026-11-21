@@ -348,9 +348,10 @@ def _transfer(
         source + "/",
         str(destination) + "/",
     ]
-    capture = None if interrupt else start_capture(args.interface, stem)
-    process = None
-    try:
+    capture = process = None
+    with scan.cleaning_up(lambda: scan.stop_worker_processes(process, capture)):
+        if not interrupt:
+            capture = start_capture(args.interface, stem)
         with Path(str(stem) + ".stdout").open("wb") as out, Path(
             str(stem) + ".stderr"
         ).open("wb") as err:
@@ -423,13 +424,6 @@ def _transfer(
             path.unlink()
         Path(str(stem) + ".json").write_text(json.dumps(result, indent=2) + "\n")
         return rows, result
-    finally:
-        if process and process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
-        if capture:
-            capture.send_signal(signal.SIGINT)
-            capture.wait(timeout=10)
 
 
 def transfer(

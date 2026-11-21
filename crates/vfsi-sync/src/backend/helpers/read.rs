@@ -493,28 +493,19 @@ pub fn native_read_file_impl_default<F: VectorBackend + ?Sized>(
     file: &FileOperand,
     max_bytes: usize,
 ) -> VfResult<Vec<u8>> {
-    backend
-        .vread_all_with_options_impl(
+    let mut results = vfsi_core::internal::collect_vec_result(
+        backend.vread_all_with_options_impl(
             std::slice::from_ref(file),
             ReadAllOptions::new().with_max_total_bytes(max_bytes),
-        )
-        .and_then(|outcomes| {
-            let count = outcomes.len();
-            crate::internal::collect_vec_result(Ok(outcomes), count)
-                .map_err(vfsi_core::IndexedError::into_cause)
-        })
-        .and_then(|mut results| {
-            if results.len() != 1 {
-                return Err(vfsi_core::internal::errors::invalid_reply(
-                    "read_file backend returned an invalid result count",
-                ));
-            }
-            let data = results.pop().expect("validated result count");
-            if data.len() > max_bytes {
-                return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
-            }
-            Ok(data)
-        })
+        ),
+        1,
+    )
+    .map_err(vfsi_core::IndexedError::into_cause)?;
+    let data = results.pop().expect("validated one result");
+    if data.len() > max_bytes {
+        return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
+    }
+    Ok(data)
 }
 
 #[cfg(test)]
