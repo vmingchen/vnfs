@@ -279,15 +279,23 @@ pub trait VfsiExt: Vfsi {
         ops: impl IntoIterator<Item = crate::api::ReadOp<'a, Self::File>>,
         options: crate::api::ReadOptions,
     ) -> std::result::Result<Vec<crate::api::ReadOutput>, crate::IndexedError> {
+        use super::read::ReadBounds;
+
+        let mut count = 0;
         let mut first = None;
         let mut rest = Vec::new();
         let mut requested = Some(0usize);
         let (result, unconsumed) = {
             let mut ops = ops.into_iter().fuse().inspect(|op| {
-                // Avoid a bounds allocation for a single request.
+                count += 1;
                 let bounds = op.bounds();
                 requested = requested.and_then(|bytes| bytes.checked_add(bounds.requested_len()));
-                if first.is_none() {
+                // One inline record covers a whole-file-only batch.
+                if let ReadBounds::Whole(_) = bounds
+                    && let Some(ReadBounds::Whole(run)) = rest.last_mut().or(first.as_mut())
+                {
+                    *run += 1;
+                } else if first.is_none() {
                     first = Some(bounds);
                 } else {
                     rest.push(bounds);
@@ -302,14 +310,16 @@ pub trait VfsiExt: Vfsi {
                 crate::internal::errors::invalid_reply("read vector did not consume every request"),
             ));
         }
-        let count = usize::from(first.is_some()) + rest.len();
         let result = result.and_then(|outcomes| {
             if outcomes.len() != count {
                 return Ok(outcomes);
             }
             let budget = options.max_total_bytes_or(self.limits().max_read_bytes());
             let mut remaining = budget;
-            let mut bounds = first.into_iter().chain(rest);
+            let mut bounds = first
+                .into_iter()
+                .chain(rest)
+                .flat_map(|run| std::iter::repeat_n(run, run.run_len()));
             let outcomes: Vec<_> = outcomes
                 .into_iter()
                 .map(|outcome| {

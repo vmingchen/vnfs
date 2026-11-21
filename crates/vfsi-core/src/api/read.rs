@@ -14,16 +14,24 @@ enum OpSource<'a, H: crate::api::FileHandle + 'a> {
     Into(&'a H, u64, &'a mut [u8]),
 }
 
+#[derive(Clone, Copy)]
 pub(super) enum ReadBounds {
-    Whole,
+    Whole(usize),
     Range(u64, usize),
     Buffered(u64, usize),
 }
 
 impl ReadBounds {
+    pub(super) fn run_len(self) -> usize {
+        match self {
+            Self::Whole(count) => count,
+            Self::Range(..) | Self::Buffered(..) => 1,
+        }
+    }
+
     pub(super) fn requested_len(&self) -> usize {
         match self {
-            Self::Whole => 0,
+            Self::Whole(_) => 0,
             Self::Range(_, length) | Self::Buffered(_, length) => *length,
         }
     }
@@ -34,7 +42,7 @@ impl ReadBounds {
         remaining: &mut usize,
     ) -> OpResult<ReadOutput> {
         let (buffered, bounds, whole) = match self {
-            Self::Whole => (false, None, true),
+            Self::Whole(_) => (false, None, true),
             Self::Range(offset, length) => (false, Some((offset, length)), false),
             Self::Buffered(offset, length) => (true, Some((offset, length)), false),
         };
@@ -90,7 +98,7 @@ impl<'a, H: crate::api::FileHandle + 'a> ReadOp<'a, H> {
 
     pub(super) fn bounds(&self) -> ReadBounds {
         match &self.source {
-            OpSource::Whole(_) => ReadBounds::Whole,
+            OpSource::Whole(_) => ReadBounds::Whole(1),
             OpSource::Range(_, offset, length) => ReadBounds::Range(*offset, *length),
             OpSource::Into(_, offset, buffer) => ReadBounds::Buffered(*offset, buffer.len()),
         }

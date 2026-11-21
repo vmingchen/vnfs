@@ -1,4 +1,8 @@
 //! This target depends only on vfsi-core: extensions must not require a backend.
+
+#[path = "support/allocation.rs"]
+mod allocation;
+
 use std::{
     cell::{Cell, RefCell},
     path::{Path, PathBuf},
@@ -807,6 +811,51 @@ fn strict_read_and_write_helpers_validate_backend_successes() {
             Some(vfsi_core::TransportKind::InvalidReply)
         );
     }
+}
+
+#[test]
+fn whole_file_batch_adds_no_allocations_for_validation() {
+    let fs = PortableFs::default();
+    let ops = || (0..4096).map(|_| ReadOp::whole("/file"));
+    let (_, backend_allocations, backend_bytes) =
+        allocation::measure(|| fs.vread(ops(), ReadOptions::new()).unwrap());
+    let (results, allocations, bytes) =
+        allocation::measure(|| fs.read_batch(ops(), ReadOptions::new()).unwrap());
+    assert_eq!(results.len(), 4096);
+    assert!(
+        results
+            .iter()
+            .all(|read| read.bytes_read() == 1 && read.eof())
+    );
+    assert_eq!((allocations, bytes), (backend_allocations, backend_bytes));
+}
+
+#[test]
+fn read_batch_keeps_bounds_aligned_across_whole_file_runs() {
+    let fs = PortableFs::default();
+    let mut buffer = [0; 2];
+    let results = fs
+        .read_batch(
+            [
+                ReadOp::whole("/a"),
+                ReadOp::whole("/b"),
+                ReadOp::range(&TestFile, 7, 2),
+                ReadOp::whole("/c"),
+                ReadOp::whole("/d"),
+                ReadOp::into(&TestFile, 9, &mut buffer),
+                ReadOp::whole("/e"),
+                ReadOp::whole("/f"),
+            ],
+            ReadOptions::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        results.iter().map(ReadOutput::offset).collect::<Vec<_>>(),
+        [0, 0, 7, 0, 0, 9, 0, 0],
+    );
+    assert_eq!(results[2].data(), Some([2].as_slice()));
+    assert_eq!(results[5].bytes_read(), 2);
+    assert_eq!(buffer, [5, 5]);
 }
 
 #[test]
