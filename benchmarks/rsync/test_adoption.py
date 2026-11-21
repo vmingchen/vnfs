@@ -50,12 +50,12 @@ class AdoptionTests(unittest.TestCase):
                     self.assertEqual(path.read_bytes(), b"headers")
                     raise PreparedHeaders
 
-                with patch.object(
-                    adoption.development, "snapshot", side_effect=snapshot
-                ), patch.object(
-                    adoption.subprocess, "run", side_effect=headers
-                ), patch.object(
-                    adoption.scan, "sha", side_effect=verify
+                with (
+                    patch.object(
+                        adoption.development, "snapshot", side_effect=snapshot
+                    ),
+                    patch.object(adoption.subprocess, "run", side_effect=headers),
+                    patch.object(adoption.scan, "sha", side_effect=verify),
                 ):
                     with self.assertRaises(PreparedHeaders):
                         adoption.prepare(
@@ -81,10 +81,11 @@ class AdoptionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             try:
-                with patch.object(
-                    adoption.subprocess, "Popen", side_effect=launch
-                ), patch.object(
-                    adoption.time, "sleep", side_effect=SystemExit("interrupted")
+                with (
+                    patch.object(adoption.subprocess, "Popen", side_effect=launch),
+                    patch.object(
+                        adoption.time, "sleep", side_effect=SystemExit("interrupted")
+                    ),
                 ):
                     with self.assertRaises(SystemExit):
                         adoption.start_capture("unused", Path(temp) / "trial")
@@ -111,9 +112,11 @@ class AdoptionTests(unittest.TestCase):
             account = argparse.Namespace(pw_dir=temp, pw_uid=1, pw_gid=1)
             failure = RuntimeError("transfer failed")
             timeout = subprocess.TimeoutExpired(["tcpdump"], 10)
-            with patch.object(adoption, "start_capture") as start_capture, patch.object(
-                adoption.subprocess, "Popen"
-            ) as popen, patch.object(adoption.os, "getgrouplist", return_value=[]):
+            with (
+                patch.object(adoption, "start_capture") as start_capture,
+                patch.object(adoption.subprocess, "Popen") as popen,
+                patch.object(adoption.os, "getgrouplist", return_value=[]),
+            ):
                 capture = start_capture.return_value
                 capture.wait.side_effect = [timeout, 0]
                 popen.return_value.wait.side_effect = failure
@@ -236,27 +239,44 @@ class AdoptionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             adoption.checked_trace(diagnostic + "\n" + child, "missing-library")
 
+    def test_mountinfo_matches_escaped_and_non_utf8_path_bytes(self):
+        path = Path(os.fsdecode(b"/tmp/space here/tab\t/newline\n/slash\\/\xff/mount"))
+        info = (
+            b"37 29 0:32 / /tmp/space\\040here/tab\\011/newline\\012/"
+            b"slash\\134/\xff/mount rw - nfs4 server:/export rw\n"
+        )
+        with patch.object(adoption.Path, "read_bytes", return_value=info):
+            self.assertTrue(adoption.mount_present(path))
+            self.assertFalse(adoption.mount_present(path.with_name("other")))
+
     def test_mount_prepares_cwd_before_capture_and_restores_before_unmount(self):
         original = Path.cwd()
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp) / "owned-mountpoint"
+            parent = Path(temp) / "real parent"
+            parent.mkdir()
+            alias = Path(temp) / "temporary parent"
+            alias.symlink_to(parent, target_is_directory=True)
+            root = parent / "owned-mountpoint"
             root.mkdir()
             attached = [False]
 
             def checked(command, **unused):
                 if command[0] == "mount":
+                    self.assertEqual(command[-1], root / "mount")
                     attached[0] = True
                 else:
                     self.assertEqual(Path.cwd(), original)
                     attached[0] = False
                 return ""
 
-            with patch.object(
-                adoption.tempfile, "mkdtemp", return_value=str(root)
-            ), patch.object(
-                adoption, "mount_present", side_effect=lambda path: attached[0]
-            ), patch.object(
-                adoption.scan, "checked", side_effect=checked
+            with (
+                patch.object(
+                    adoption.tempfile, "mkdtemp", return_value=str(alias / root.name)
+                ),
+                patch.object(
+                    adoption, "mount_present", side_effect=lambda path: attached[0]
+                ),
+                patch.object(adoption.scan, "checked", side_effect=checked),
             ):
                 with self.assertRaisesRegex(ValueError, "body failed"):
                     with adoption.private_mount("/fixture") as mount:
@@ -265,28 +285,36 @@ class AdoptionTests(unittest.TestCase):
             self.assertEqual(Path.cwd(), original)
             self.assertFalse(root.exists())
 
-    def test_failed_unmount_never_recurses_into_an_attached_source(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp) / "owned-mountpoint"
-            root.mkdir()
+    def test_failed_or_missed_unmount_never_recurses_into_an_attached_source(self):
+        for mount_visible in (True, False):
+            with (
+                self.subTest(mount_visible=mount_visible),
+                tempfile.TemporaryDirectory() as temp,
+            ):
+                root = Path(temp) / "owned-mountpoint"
+                root.mkdir()
 
-            def checked(command, **unused):
-                if command[0] == "umount":
-                    raise RuntimeError("cannot detach")
-                return ""
+                def checked(command, **unused):
+                    if command[0] == "umount":
+                        raise RuntimeError("cannot detach")
+                    return ""
 
-            with patch.object(
-                adoption.tempfile, "mkdtemp", return_value=str(root)
-            ), patch.object(adoption, "mount_present", return_value=True), patch.object(
-                adoption.scan, "checked", side_effect=checked
-            ), patch.object(
-                adoption.shutil, "rmtree"
-            ) as remove:
-                with self.assertRaises(RuntimeError):
-                    with adoption.private_mount("/fixture") as mount:
-                        (mount / "source-data").write_bytes(b"preserve me")
-                remove.assert_not_called()
-            self.assertEqual((root / "mount/source-data").read_bytes(), b"preserve me")
+                with (
+                    patch.object(adoption.tempfile, "mkdtemp", return_value=str(root)),
+                    patch.object(adoption, "mount_present", return_value=mount_visible),
+                    patch.object(adoption.scan, "checked", side_effect=checked),
+                    patch.object(adoption.shutil, "rmtree") as remove,
+                ):
+                    with self.assertRaisesRegex(ValueError, "workload failed") as error:
+                        with adoption.private_mount("/fixture") as mount:
+                            (mount / "source-data").write_bytes(b"preserve me")
+                            raise ValueError("workload failed")
+                    remove.assert_not_called()
+                note = "cannot detach" if mount_visible else str(root)
+                self.assertIn(note, error.exception.__notes__[0])
+                self.assertEqual(
+                    (root / "mount/source-data").read_bytes(), b"preserve me"
+                )
 
     def test_manifest_covers_bytes_modes_and_symlinks_without_following(self):
         with tempfile.TemporaryDirectory() as temp:
