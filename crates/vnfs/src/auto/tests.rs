@@ -1141,7 +1141,18 @@ fn live_cross_device_transfer_replaces_file_through_open_handles() {
             TransferOptions::new().with_existing(Existing::Replace),
         )
         .unwrap_err();
-        assert_eq!(error.cause().kind(), io::ErrorKind::Unsupported);
+        // The mount guard recognizes the same NFS object through the
+        // read-only kernel route before replacement can remove a name.
+        assert_eq!(error.index(), Some(0));
+        assert_eq!(error.cause().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            vfsi_core::internal::errors::operation(error.cause()),
+            Some("transfer mount ancestry")
+        );
+        assert_eq!(
+            vfsi_core::internal::errors::path(error.cause()),
+            Some(target.as_path())
+        );
         assert_eq!(fs::read(direct).unwrap(), b"new payload");
     }
 }
