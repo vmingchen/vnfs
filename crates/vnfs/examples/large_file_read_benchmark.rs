@@ -121,9 +121,16 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Args> {
     Ok(parsed)
 }
 
+// `usize::is_multiple_of` is newer than the crate's Rust 1.88 MSRV.
+#[allow(clippy::manual_is_multiple_of)]
 fn median(mut values: Vec<f64>) -> f64 {
     values.sort_by(f64::total_cmp);
-    values[values.len() / 2]
+    let middle = values.len() / 2;
+    if values.len() % 2 == 0 {
+        (values[middle - 1] + values[middle]) / 2.0
+    } else {
+        values[middle]
+    }
 }
 
 fn read_once(
@@ -189,7 +196,7 @@ fn main() -> Result<()> {
         let chunks = median(samples.iter().map(|sample| sample.2 as f64).collect());
         let mib_per_sec = bytes as f64 / (1024.0 * 1024.0) / elapsed;
         println!(
-            "sequential,1,{chunk_size},{bytes},0,{:.3},{mib_per_sec:.2},{chunks:.0}",
+            "sequential,1,{chunk_size},{bytes},0,{:.3},{mib_per_sec:.2},{chunks}",
             elapsed * 1000.0
         );
 
@@ -233,7 +240,7 @@ fn main() -> Result<()> {
             let chunks = median(samples.iter().map(|sample| sample.2 as f64).collect());
             let mib_per_sec = bytes as f64 / (1024.0 * 1024.0) / elapsed;
             println!(
-                "pipeline,{worker_count},{chunk_size},{bytes},{setup_ms:.3},{:.3},{mib_per_sec:.2},{chunks:.0}",
+                "pipeline,{worker_count},{chunk_size},{bytes},{setup_ms:.3},{:.3},{mib_per_sec:.2},{chunks}",
                 elapsed * 1000.0
             );
         }
@@ -244,6 +251,12 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn median_uses_the_midpoint_for_even_samples() {
+        assert_eq!(median(vec![8.0, 1.0, 5.0, 2.0]), 3.5);
+        assert_eq!(median(vec![8.0, 1.0, 5.0]), 5.0);
+    }
 
     #[test]
     fn rejects_worker_counts_that_cannot_form_a_read_window() {

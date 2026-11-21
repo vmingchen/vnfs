@@ -22,6 +22,64 @@ def row(src, sport, dport, kind, xid, programs='', procs='', ops=''):
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_failed_unmount_preserves_source_and_reports_the_primary_error(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as scratch:
+            mount = Path(scratch) / "mount"
+            mount.mkdir()
+            source = mount / "source-file"
+            source.write_text("must be preserved")
+            failure = subprocess.CalledProcessError(1, ["umount", str(mount)])
+            with mock.patch.object(runner.tempfile, 'mkdtemp', return_value=mount), \
+                 mock.patch.object(runner.os, 'chdir'), \
+                 mock.patch.object(runner, 'checked', side_effect=[None, failure]) as checked:
+                with self.assertRaisesRegex(ValueError, "benchmark failed") as primary:
+                    with runner.mounted_fixture("/fixture", "mock-mount-"):
+                        raise ValueError("benchmark failed")
+            self.assertEqual(source.read_text(), "must be preserved")
+            self.assertIn(str(mount), primary.exception.__notes__[0])
+            self.assertIn("umount", primary.exception.__notes__[0])
+            self.assertEqual(checked.call_args_list[-1], mock.call(["umount", mount]))
+
+    def test_capture_shutdown_failure_still_unmounts(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as scratch:
+            mount = Path(scratch) / "mount"
+            mount.mkdir()
+            capture = mock.Mock()
+            capture.wait.side_effect = RuntimeError("capture shutdown failed")
+            with mock.patch.object(runner.tempfile, 'mkdtemp', return_value=mount), \
+                 mock.patch.object(runner.os, 'chdir'), \
+                 mock.patch.object(runner, 'checked') as checked:
+                with self.assertRaisesRegex(RuntimeError, "capture shutdown failed"):
+                    with runner.mounted_fixture("/fixture", "mock-mount-"):
+                        with runner.cleaning_up(lambda: runner.stop_worker_processes(None, capture)):
+                            pass
+            self.assertFalse(mount.exists())
+            self.assertEqual(checked.call_args_list[-1], mock.call(["umount", mount]))
+
+    def test_timed_out_capture_is_killed_and_reaped(self):
+        for fail_workload in (False, True):
+            with self.subTest(fail_workload=fail_workload):
+                capture = mock.Mock()
+                timeout = subprocess.TimeoutExpired(["tcpdump"], 10)
+                capture.wait.side_effect = [timeout, 0]
+                primary = ValueError("benchmark failed")
+                expected = type(primary) if fail_workload else type(timeout)
+                with self.assertRaises(expected) as result:
+                    with runner.cleaning_up(lambda: runner.stop_worker_processes(None, capture)):
+                        if fail_workload:
+                            raise primary
+                if fail_workload:
+                    self.assertIs(result.exception, primary)
+                    self.assertIn(str(timeout), primary.__notes__[0])
+                else:
+                    self.assertIs(result.exception, timeout)
+                self.assertEqual(capture.method_calls, [
+                    mock.call.send_signal(runner.signal.SIGINT),
+                    mock.call.wait(timeout=10),
+                    mock.call.kill(),
+                    mock.call.wait(),
+                ])
+
     def test_comparison_reaches_every_trial_after_building_and_checks_parity(self):
         import compare
         with tempfile.TemporaryDirectory() as temp:

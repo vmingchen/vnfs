@@ -22,7 +22,16 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'du'))
 from generate import fingerprint
-from run import SERVER, Link, capture_summary, checked, sha
+from run import (
+    SERVER as SERVER,
+    Link,
+    capture_summary,
+    checked,
+    mounted_fixture,
+    sha,
+    stop_worker_processes,
+    cleaning_up,
+)
 
 HERE = Path(__file__).resolve().parent
 
@@ -52,15 +61,14 @@ def worker(args, trace_check=checked_trace):
     account = pwd.getpwnam(args.user)
     stem = args.output.resolve()
     checked(['mount', '--make-rprivate', '/'])
-    with tempfile.TemporaryDirectory(prefix='vfsi-rsync-') as temp:
-        mount, destination = Path(temp)/'mount', Path(temp)/'destination'
-        mount.mkdir()
+    with tempfile.TemporaryDirectory(prefix='vfsi-rsync-') as temp, \
+         mounted_fixture(args.export, 'vfsi-rsync-mount-') as mount:
+        destination = Path(temp)/'destination'
         destination.mkdir()
         os.chmod(temp, 0o755)
         os.chown(destination, account.pw_uid, account.pw_gid)
-        checked(['mount', '-t', 'nfs4', '-o', 'vers=4.2,proto=tcp,sec=sys,nosharecache', SERVER+':'+args.export, mount])
         capture = process = None
-        try:
+        with cleaning_up(lambda: stop_worker_processes(process, capture)):
             options = checked(['findmnt', '-n', '-o', 'OPTIONS', '--target', mount]).strip()
             os.chdir(mount)
             if args.capture:
@@ -116,15 +124,6 @@ def worker(args, trace_check=checked_trace):
                     target.write(path.read_bytes())
                 path.unlink()
             Path(str(stem)+'.json').write_text(json.dumps(result, indent=2)+'\n')
-        finally:
-            if process and process.poll() is None:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-            if capture:
-                capture.send_signal(signal.SIGINT)
-                capture.wait(timeout=10)
-            os.chdir('/')
-            checked(['umount', mount])
 
 
 def build(checkout, output):

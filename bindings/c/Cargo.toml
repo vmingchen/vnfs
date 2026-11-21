@@ -2,6 +2,7 @@
 name = "vfsi-c"
 version = "0.3.24"
 edition = "2021"
+rust-version = "1.90"
 license = "MIT OR Apache-2.0"
 description = "C API for VFSI vectorized filesystem interfaces"
 repository = "https://github.com/vmingchen/vnfs"

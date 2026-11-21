@@ -191,6 +191,8 @@ vnfs dependency does not change the C wrapper's exported symbols.
 
 ### Building an SDK
 
+The current SDK build requires Rust 1.90 or later.
+
 Run `python3 build-sdk.py --registry-only --prefix /path/to/sdk` from a
 published `vfsi-c` crate checkout. The recipe uses the locked dependency graph,
 rejects non-registry dependencies, installs headers and the shared library with

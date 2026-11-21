@@ -2,6 +2,7 @@
 name = "vfsi-smb"
 version = "0.5.1"
 edition = "2024"
+rust-version = "1.90"
 license = "MIT OR Apache-2.0"
 description = "SMB2/3 backend for VFSI vectorized filesystem interfaces"
 repository = "https://github.com/vmingchen/vnfs"
