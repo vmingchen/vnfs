@@ -133,7 +133,9 @@ pub(super) fn write_complete(
     data: &[u8],
     mut write: impl FnMut(&[u8], u64) -> io::Result<usize>,
 ) -> OpResult<usize> {
-    if offset.checked_add(data.len() as u64).is_none() {
+    if (!data.is_empty() && i64::try_from(offset).is_err())
+        || offset.checked_add(data.len() as u64).is_none()
+    {
         return Err(OpError::not_attempted(std::io::Error::from_raw_os_error(
             libc::EOVERFLOW,
         )));
