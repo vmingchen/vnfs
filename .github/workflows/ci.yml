@@ -169,6 +169,12 @@ jobs:
             # Cargo archives normalize source mtimes. Refresh them so a cached
             # same-version archive build cannot hide a changed peer API.
             tar -xmzf "target/package/$package-$version.crate" -C target/package
+            if [ "$package" = vfsi-core ]; then
+              for license in LICENSE-MIT LICENSE-APACHE; do
+                tar -xOzf "target/package/$package-$version.crate" "$package-$version/$license" \
+                  | cmp "$license" -
+              done
+            fi
             patches+=(--config \
               "patch.crates-io.$package.path=\"$GITHUB_WORKSPACE/target/package/$package-$version\"")
           done <"$package_list"
