@@ -108,6 +108,28 @@ fn rpc_transport_categories_do_not_change_when_remapping_indices() {
 }
 
 #[test]
+fn rpc_io_conversion_preserves_typed_transport_classification() {
+    use vfsi_core::{RpcError, internal::errors};
+
+    for kind in [
+        TransportKind::Auth,
+        TransportKind::InvalidReply,
+        TransportKind::Connection,
+    ] {
+        let cause = errors::with_context(
+            errors::transport(kind, "transport detail"),
+            "vread",
+            "/file",
+        );
+        let category = cause.kind();
+        let converted = errors::from_rpc(RpcError::from_io(cause));
+        assert_eq!(vfsi_core::transport_kind(&converted), Some(kind));
+        assert_eq!(converted.kind(), category);
+        assert!(converted.to_string().contains("transport detail"));
+    }
+}
+
+#[test]
 fn opaque_nonclone_source_is_retained_until_its_final_owner_drops() {
     use std::{
         error::Error,
