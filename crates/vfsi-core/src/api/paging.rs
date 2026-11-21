@@ -260,17 +260,7 @@ pub(super) fn fallback_pages<F: Vfsi + ?Sized, P: AsRef<Path>>(
         return Ok(output.into_iter().map(Option::unwrap).collect());
     }
     let pending: Vec<_> = indices.iter().map(|&index| paths[index]).collect();
-    let mut pages: Vec<_> = pending
-        .iter()
-        .map(|path| DirectoryPage {
-            listing: DirectoryListing {
-                path: path.to_path_buf(),
-                entries: Vec::new(),
-            },
-            continuation: None,
-            children: Vec::new(),
-        })
-        .collect();
+    let mut pages: Vec<Option<DirectoryListing>> = (0..pending.len()).map(|_| None).collect();
     let mut errors: Vec<Option<OpError>> = (0..pending.len()).map(|_| None).collect();
     let mut invalid_index = false;
     let options = options.resolve(fs.limits());
@@ -286,7 +276,7 @@ pub(super) fn fallback_pages<F: Vfsi + ?Sized, P: AsRef<Path>>(
             ));
         };
         let valid = (|| -> Result<usize> {
-            if page.listing.path != listing.path
+            if pending[index] != listing.path
                 || listing.entries.iter().any(|entry| {
                     entry.file_name().is_none()
                         || entry.path().parent() != Some(listing.path.as_path())
@@ -312,7 +302,14 @@ pub(super) fn fallback_pages<F: Vfsi + ?Sized, P: AsRef<Path>>(
             Ok(bytes) => {
                 remaining_entries -= listing.entries.len();
                 remaining_bytes -= bytes;
-                page.listing.entries.append(&mut listing.entries);
+                if let Some(page) = page {
+                    page.entries.append(&mut listing.entries);
+                } else {
+                    if listing.path.as_os_str() != pending[index].as_os_str() {
+                        listing.path = pending[index].to_path_buf();
+                    }
+                    *page = Some(listing);
+                }
                 Ok(std::ops::ControlFlow::Continue(()))
             }
             Err(cause) => {
@@ -350,8 +347,12 @@ pub(super) fn fallback_pages<F: Vfsi + ?Sized, P: AsRef<Path>>(
             Err(error)
         } else {
             result.and_then(|completion| {
-                if completion == TraversalCompletion::Complete {
-                    Ok(page)
+                if let (TraversalCompletion::Complete, Some(listing)) = (completion, page) {
+                    Ok(DirectoryPage {
+                        listing,
+                        continuation: None,
+                        children: Vec::new(),
+                    })
                 } else {
                     Err(OpError::unknown(
                         crate::internal::errors::invalid_reply("incomplete fallback page"),

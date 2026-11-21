@@ -260,7 +260,7 @@ impl Vfsi for PortableFs {
                 if self.shape.get() == 14 {
                     return Ok(TraversalCompletion::Stopped);
                 }
-                if self.shape.get() == 15 {
+                if self.shape.get() == 15 && index == 0 {
                     return Ok(TraversalCompletion::Complete);
                 }
                 let pages = if self.shape.get() == 16 {
@@ -297,6 +297,8 @@ impl Vfsi for PortableFs {
                         DirectoryListing {
                             path: if self.tree.get() && self.shape.get() == 10 {
                                 "/wrong-parent".into()
+                            } else if self.shape.get() == 15 {
+                                path.as_ref().components().collect()
                             } else {
                                 path.as_ref().to_owned()
                             },
@@ -789,6 +791,40 @@ fn directory_collection_rejects_incomplete_or_misassociated_pages() {
 }
 
 #[test]
+fn directory_collection_bounds_entries_and_retained_paths() {
+    let fs = tree_fs();
+    let error = fs
+        .read_dirs_with_options(&["/one", "/two"], ListDirOptions::new().with_max_entries(1))
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(error.cause().raw_os_error(), Some(libc::EFBIG));
+
+    let fs = tree_fs();
+    let options = ListDirOptions::new().with_recursive(true);
+    let trees = fs.read_dirs_with_options(&["/tree"], options).unwrap();
+    let listing = &trees[0][0];
+    let path_bytes = listing.path.as_os_str().len()
+        + listing
+            .entries
+            .iter()
+            .map(|entry| entry.path().as_os_str().len())
+            .sum::<usize>();
+    assert_eq!(
+        fs.read_dirs_with_options(&["/tree"], options.with_max_path_bytes(path_bytes))
+            .unwrap()[0][0]
+            .entries
+            .len(),
+        6,
+        "count the directory path only once across its two pages",
+    );
+    let error = fs
+        .read_dirs_with_options(&["/tree"], options.with_max_path_bytes(path_bytes - 1))
+        .unwrap_err();
+    assert_eq!(error.index(), Some(0));
+    assert_eq!(error.cause().raw_os_error(), Some(libc::EFBIG));
+}
+
+#[test]
 fn extensions_reject_malformed_results_and_do_not_replay_transport_failures() {
     let fs = PortableFs::default();
     for shape in 1..=6 {
@@ -1005,6 +1041,34 @@ fn fallback_pages_quarantine_byte_progress_without_losing_healthy_roots() {
     assert!(error.progress().is_none());
     assert!(outcomes.next().unwrap().is_ok());
     assert_eq!(fs.listings.get(), 1, "one vector, without replay");
+}
+
+#[test]
+fn fallback_pages_require_a_listing_even_for_an_empty_directory() {
+    let fs = PortableFs::default();
+    fs.shape.set(15);
+    let mut outcomes = fs
+        .vlistdir_pages(
+            &["/missing-page", "/empty//"],
+            vec![None, None],
+            ListDirOptions::new(),
+            std::num::NonZeroUsize::new(1).unwrap(),
+        )
+        .unwrap()
+        .into_iter();
+    let error = outcomes.next().unwrap().unwrap_err();
+    assert_eq!(error.state(), vfsi_core::FailureState::Unknown);
+    assert_eq!(
+        vfsi_core::transport_kind(error.cause()),
+        Some(vfsi_core::TransportKind::InvalidReply)
+    );
+    let page = outcomes.next().unwrap().unwrap();
+    assert_eq!(
+        page.listing.path.as_os_str(),
+        Path::new("/empty//").as_os_str()
+    );
+    assert!(page.listing.entries.is_empty());
+    assert_eq!(fs.listings.get(), 1, "the missing page is not replayed");
 }
 
 #[test]

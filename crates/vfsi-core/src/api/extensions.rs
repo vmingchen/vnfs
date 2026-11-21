@@ -884,6 +884,11 @@ pub trait VfsiExt: Vfsi {
         paths: &[P],
         options: crate::api::ListDirOptions,
     ) -> std::result::Result<Vec<Vec<DirectoryListing>>, crate::IndexedError> {
+        let options = options.resolve(self.limits());
+        let mut budget = crate::internal::TraversalBudget::new(
+            options.max_entries().expect("resolved"),
+            options.max_path_bytes().expect("resolved"),
+        );
         let mut trees: Vec<Vec<DirectoryListing>> = (0..paths.len()).map(|_| Vec::new()).collect();
         let mut positions: Vec<std::collections::HashMap<std::path::PathBuf, usize>> = (0..paths
             .len())
@@ -892,7 +897,14 @@ pub trait VfsiExt: Vfsi {
         let completions = self.listdirs_all(paths, options, |index, page| {
             let tree = &mut trees[index];
             let positions = &mut positions[index];
-            if let Some(&slot) = positions.get(&page.path) {
+            let slot = positions.get(&page.path).copied();
+            if slot.is_none() && options.recursive() {
+                budget.charge_path(&page.path)?;
+            }
+            for entry in &page.entries {
+                budget.charge(entry.path())?;
+            }
+            if let Some(slot) = slot {
                 tree[slot].entries.extend(page.entries);
             } else {
                 positions.insert(page.path.clone(), tree.len());
