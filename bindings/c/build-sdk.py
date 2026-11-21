@@ -45,6 +45,10 @@ def install(source, output, prefix, metadata):
     for header in (source / "include").glob("*.h"):
         shutil.copy2(header, include / header.name)
     shutil.copy2(output / LIBRARY_NAME, library / LIBRARY_NAME)
+    for name in ("LICENSE-MIT", "LICENSE-APACHE"):
+        notice = source / name
+        if notice.is_file():
+            shutil.copy2(notice, prefix / name)
     if (output / "vfsi-libs").is_dir():
         shutil.copytree(output / "vfsi-libs", library / "vfsi-libs", dirs_exist_ok=True)
     versions = {p["name"]: p["version"] for p in dependencies(metadata)

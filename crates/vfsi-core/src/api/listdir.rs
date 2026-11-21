@@ -19,25 +19,14 @@ pub(super) fn listdir<F: Vfsi + ?Sized>(
     // Keep the native paging engine, including anchored child cursors, linear
     // deep-path traversal, sibling batching, recovery and aggregate budgets.
     let mut stopped = false;
+    let mut saw_root = false;
     let completions = fs
-        .listdirs_all(&[root], options, |index, page| {
-            if index != 0 {
-                return Err(crate::internal::errors::invalid_reply(
-                    "invalid listdir page index",
-                ));
-            }
+        .listdirs_all(&[root], options, |_, page| {
+            // listdirs_all checks the callback index and validates page paths.
+            saw_root |= page.path == root;
             let relative = page.path.strip_prefix(root).map_err(|_| {
                 crate::internal::errors::invalid_reply("invalid listdir page parent")
             })?;
-            if (!options.recursive() && page.path != root)
-                || relative
-                    .components()
-                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
-            {
-                return Err(crate::internal::errors::invalid_reply(
-                    "invalid listdir page parent",
-                ));
-            }
             let depth = relative.components().count() + 1;
             for entry in page.entries {
                 let event = WalkEvent {
@@ -70,6 +59,11 @@ pub(super) fn listdir<F: Vfsi + ?Sized>(
     if completions.as_slice() != [expected] {
         return Err(crate::internal::errors::invalid_reply(
             "invalid listdir completion count",
+        ));
+    }
+    if !stopped && !saw_root {
+        return Err(crate::internal::errors::invalid_reply(
+            "listdir completed without a root listing",
         ));
     }
     Ok(expected)

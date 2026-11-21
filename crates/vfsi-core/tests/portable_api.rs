@@ -454,6 +454,28 @@ fn listdir_default_stops_before_next_page_without_metadata_or_root_events() {
 }
 
 #[test]
+fn listdir_requires_a_root_page_even_for_an_empty_directory() {
+    let fs = tree_fs();
+    for recursive in [false, true] {
+        let options = ListDirOptions::new().with_recursive(recursive);
+        let visitor = |_: &WalkEvent| panic!("empty directory must not emit an entry");
+        fs.shape.set(0);
+        assert_eq!(
+            fs.listdir("/empty", options, visitor).unwrap(),
+            TraversalCompletion::Complete
+        );
+        fs.shape.set(15);
+        let error = fs.listdir("/empty", options, visitor).unwrap_err();
+        assert_eq!(
+            vfsi_core::transport_kind(&error),
+            Some(vfsi_core::TransportKind::InvalidReply)
+        );
+    }
+    assert_eq!(fs.listings.get(), 4);
+    assert_eq!(fs.page_calls.get(), 2);
+}
+
+#[test]
 fn listdir_preserves_callback_error_provenance_in_every_presentation_mode() {
     for sort in [false, true] {
         for lifecycle in [false, true] {

@@ -24,8 +24,8 @@ lists grow. Vectors remain for growing or reusable I/O/XDR/path buffers and
 for public byte-vector interfaces (including connect options and protocol
 request/result fields). Those public types retain their ownership and mutation
 behavior; bytes are boxed when they enter private fixed storage. Path
-normalization borrows immutable components from its input for the duration of the call,
-avoiding a separate allocation for every component.
+normalization scans the input twice from the end, first to size the output and
+then to fill it. A nonempty normalized path uses one allocation.
 
 Fixed private UTF-8 text uses `Box<str>` for NFS builder/reconnection endpoints,
 Auto's retained mount-spec endpoint, and owner/group identity-cache keys and

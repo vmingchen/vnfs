@@ -32,8 +32,9 @@ does not prevent access to its ordinary, non-DFS shares.
 NFSv4 referrals are discovered lazily: `NFS4ERR_MOVED` (which can also indicate
 filesystem migration) returns `ErrorKind::Unsupported` with a descriptive
 message. SMB `STATUS_PATH_NOT_COVERED` errors receive the same classification.
-Both retain the original protocol status and available request index. These are
-semantic errors, not transport failures, and do not authorize automatic replay.
+Both retain the original protocol status. A vector outcome identifies its input
+by position, and strict helpers attach that position to indexed errors.
+These semantic errors do not authorize automatic replay.
 Earlier operations or chunks may already have completed; a vector is not atomic.
 Connect directly to the destination NFS server/export to access a referred tree.
 
@@ -70,8 +71,9 @@ Recursive depth limits fail on deeper directories unless intentional truncation
 is enabled. Callbacks receive owned `DirectoryListing` pages, including pages for empty
 directories, run outside locks, and can cancel the entire vector. First pages
 and continuation pages use vector waves; pages may interleave across roots.
-Cancellation reports every started root, marking unfinished roots `Stopped`. A directory
-may produce several pages; each page retains its parent path. The visitor uses
+Cancellation returns one outcome per root. Unfinished and unvisited roots are
+`Stopped`, while known successes and failures are retained. A directory may
+produce several pages, each with the same parent path. The visitor uses
 bounded cohorts (up to 32 directories for NFS) and at most 128 delivered entries
 per page, starting with one entry to preserve early cancellation. Fallback
 backends consume one directory snapshot before starting another.
@@ -82,7 +84,8 @@ per-entry stat requests. Recursive traversal does not follow entry symlinks.
 Removal uses `vremove(paths, mode, options)`, with explicit
 `RemoveMode::Entry`, `Tree`, or `Contents`. Contents mode retains roots and
 delegates to native anchored removal, never a list-then-delete extension loop.
-The vector call preserves indexed failures and may leave partial mutations.
+Vector result positions identify failed inputs. The strict helper returns an
+indexed error and partial mutations may remain.
 
 `NfsClient`, `NfsFile`, `NfsDir`, and their borrowed vector requests are opaque
 application handles. `Posix` provides the corresponding local/kernel-backed

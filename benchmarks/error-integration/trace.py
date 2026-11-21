@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import pwd
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -29,6 +30,12 @@ def decode_commands(text, response):
         else:
             complete.update(commands)
     return complete, pending
+
+
+def require_lossless_capture(text):
+    counts = re.findall(r"^([0-9]+) packets dropped by kernel$", text, re.MULTILINE)
+    if counts != ["0"]:
+        raise ValueError("invalid tcpdump drop count:\n" + text)
 
 
 def main():
@@ -169,7 +176,7 @@ def main():
                         stderr=subprocess.DEVNULL,
                     )
                     capture.wait(timeout=10)
-            assert "0 packets dropped by kernel" in log.read_text(), log.read_text()
+            require_lossless_capture(log.read_text())
             counts = {}
             for response in ["0", "1"]:
                 text = subprocess.check_output(

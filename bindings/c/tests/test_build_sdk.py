@@ -28,6 +28,9 @@ class SdkTests(unittest.TestCase):
             source, output, prefix = root / "source", root / "output", root / "sdk"
             (source / "include").mkdir(parents=True)
             (source / "include" / "vfsi.h").write_text("header")
+            notices = {"LICENSE-MIT": b"MIT notice\n", "LICENSE-APACHE": b"Apache notice\n"}
+            for name, contents in notices.items():
+                (source / name).write_bytes(contents)
             (output / "vfsi-libs").mkdir(parents=True)
             (output / "vfsi-libs" / "libntirpc.so").write_bytes(b"native")
             name = "libvfsi_c.dylib" if sdk.sys.platform == "darwin" else "libvfsi_c.so"
@@ -38,6 +41,8 @@ class SdkTests(unittest.TestCase):
             self.assertEqual(Path(paths["library"]).read_bytes(), b"library")
             self.assertEqual((prefix / "lib/vfsi-libs/libntirpc.so").read_bytes(), b"native")
             self.assertEqual((prefix / "include/vfsi.h").read_text(), "header")
+            for name, contents in notices.items():
+                self.assertEqual((prefix / name).read_bytes(), contents)
             self.assertIn('"vfsi-c": "0.3.12"', (prefix / "versions.json").read_text())
             self.assertNotIn("vnfs", (prefix / "versions.json").read_text())
 

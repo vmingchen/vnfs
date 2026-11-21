@@ -46,9 +46,9 @@ fn value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> 
     })
 }
 
-fn parse() -> Result<Args> {
+fn parse(args: impl IntoIterator<Item = String>) -> Result<Args> {
     let mut parsed = Args::default();
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--host" => parsed.host = value(&mut args, "--host")?,
@@ -98,12 +98,23 @@ fn parse() -> Result<Args> {
         || parsed.rounds == 0
         || parsed.chunk_sizes.is_empty()
         || parsed.chunk_sizes.contains(&0)
-        || parsed.worker_counts.is_empty()
-        || parsed.worker_counts.contains(&0)
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "--path, --rounds, and non-zero --chunk-sizes are required",
+        )
+        .into());
+    }
+    let max_workers = usize::MAX / 2;
+    if parsed.worker_counts.is_empty()
+        || parsed
+            .worker_counts
+            .iter()
+            .any(|count| !(1..=max_workers).contains(count))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("--worker-counts must be between 1 and {max_workers}"),
         )
         .into());
     }
@@ -148,7 +159,7 @@ fn read_pipelined_once(pool: &mut NfsReadPool, path: &str) -> Result<(Duration, 
 }
 
 fn main() -> Result<()> {
-    let args = parse()?;
+    let args = parse(std::env::args().skip(1))?;
     let client = Nfs::builder(args.host.clone())
         .root(args.root.clone())
         .version(vnfs::nfs::NfsVersion::try_from(args.minor_version)?)
@@ -228,4 +239,30 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_worker_counts_that_cannot_form_a_read_window() {
+        let parse_worker_count = |count: usize| {
+            parse([
+                "--path".to_owned(),
+                "/file".to_owned(),
+                "--worker-counts".to_owned(),
+                count.to_string(),
+            ])
+        };
+        for count in [0, usize::MAX / 2 + 1, usize::MAX] {
+            let error = parse_worker_count(count).unwrap_err();
+            assert!(error.to_string().contains("--worker-counts"));
+        }
+        let largest = usize::MAX / 2;
+        assert_eq!(
+            parse_worker_count(largest).unwrap().worker_counts,
+            [largest]
+        );
+    }
 }

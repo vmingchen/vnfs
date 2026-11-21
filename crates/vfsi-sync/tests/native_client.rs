@@ -222,6 +222,7 @@ struct ScalarOnly {
     read_failure_call: Option<usize>,
     transport_failure: bool,
     vector_result_limit: Arc<Mutex<Option<usize>>>,
+    extra_io_failure: bool,
     wrong_result_file: bool,
     wrong_result_offset: bool,
     close_failures_remaining: usize,
@@ -373,7 +374,16 @@ impl VectorBackend for ScalarOnly {
             }
             Ok(results)
         };
-        result.map(|results| results.into_iter().map(Ok).collect())
+        result.map(|results| {
+            let mut outcomes: Vec<_> = results.into_iter().map(Ok).collect();
+            if self.extra_io_failure {
+                outcomes.push(Err(vfsi_core::OpError::failed(
+                    std::io::Error::from_raw_os_error(libc::EIO),
+                    None,
+                )));
+            }
+            outcomes
+        })
     }
 
     fn vread_into_impl(
@@ -433,6 +443,12 @@ impl VectorBackend for ScalarOnly {
             if self.wrong_result_offset {
                 result.offset = result.offset.saturating_add(1);
             }
+        }
+        if self.extra_io_failure {
+            results.push(Err(vfsi_core::OpError::failed(
+                std::io::Error::from_raw_os_error(libc::EIO),
+                None,
+            )));
         }
         Ok(results)
     }
@@ -3832,6 +3848,31 @@ fn native_read_into_dispatches_without_owned_read_results() {
     );
     assert_eq!((&first, &second), (b"abc", b"def"));
     assert_eq!(calls.load(Ordering::SeqCst), 5);
+}
+
+#[test]
+fn scalar_native_io_rejects_extra_outcomes_before_selecting_an_error() {
+    use vfsi_sync::backend::helpers::{native_read_impl_default, native_write_impl_default};
+
+    let mut backend = ScalarOnly {
+        data: b"abc".to_vec(),
+        extra_io_failure: true,
+        ..ScalarOnly::default()
+    };
+    let file = FileOperand::from_fd(1);
+    let read = ReadOp::at(file.clone(), 0, 1);
+    let write = WriteOp::new(&file, VfOffset::At(0), b"x".as_slice());
+    for error in [
+        native_read_impl_default(&mut backend, &read).unwrap_err(),
+        native_write_impl_default(&mut backend, write).unwrap_err(),
+    ] {
+        assert_eq!(
+            vfsi_core::transport_kind(&error),
+            Some(vfsi_core::TransportKind::InvalidReply)
+        );
+    }
+    assert_eq!(backend.read_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(backend.write_calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]

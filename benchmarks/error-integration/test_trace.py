@@ -1,5 +1,5 @@
 import unittest
-from trace import decode_commands
+from trace import decode_commands, require_lossless_capture
 
 
 class WireControls(unittest.TestCase):
@@ -25,6 +25,16 @@ class WireControls(unittest.TestCase):
     def test_missing_dissection_is_not_a_complete_capture(self):
         with self.assertRaises(AssertionError):
             decode_commands("0x0007,0x0007\t0x00000000", True)
+
+    def test_capture_requires_one_zero_drop_count(self):
+        require_lossless_capture("capture summary\n0 packets dropped by kernel\n")
+        for summary in (
+            "10 packets dropped by kernel",
+            "",
+            "0 packets dropped by kernel\n0 packets dropped by kernel",
+        ):
+            with self.subTest(summary=summary), self.assertRaises(ValueError):
+                require_lossless_capture(summary)
 
 
 if __name__ == "__main__":

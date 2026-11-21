@@ -1354,6 +1354,76 @@ class DevelopmentPortRunnerTests(unittest.TestCase):
                              [f"sdk {target}/debug/libvfsi_c.so"] * 3)
 
 
+class LivePortRunnerCleanupTests(unittest.TestCase):
+    def test_unmount_failure_keeps_mountpoint_and_fixture_without_masking_test_failure(self):
+        runner = Path(__file__).resolve().parent / "test-ports-nfs.sh"
+        for unmount_status in ("0", "1"):
+            with self.subTest(unmount_status=unmount_status), tempfile.TemporaryDirectory(
+                prefix="vfsi-live-port-cleanup-"
+            ) as directory:
+                temp = Path(directory)
+                ports = temp / "ports"
+                export = temp / "export"
+                export.mkdir()
+                library = temp / "libvfsi.so"
+                library.touch()
+                work = temp / "work"
+                bin_dir = temp / "bin"
+
+                def executable(path, body):
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("#!/bin/sh\nset -eu\n" + body)
+                    path.chmod(0o755)
+
+                for name in ("ls", "du", "cp", "rm", "rmdir"):
+                    executable(ports / "vfsi-port-coreutils/target/debug" / name, "exit 42\n")
+                for name in (
+                    "vfsi-port-findutils/target/debug/find",
+                    "vfsi-port-git/git",
+                    "vfsi-port-rsync/rsync",
+                ):
+                    executable(ports / name, "exit 42\n")
+                executable(
+                    bin_dir / "mktemp",
+                    'if [ "$2" = /tmp/vfsi-port-nfs.XXXXXX ]; then\n'
+                    '    mkdir "$TEST_WORK"\n'
+                    '    printf "%s\\n" "$TEST_WORK"\n'
+                    'else\n'
+                    '    exec "$REAL_MKTEMP" "$@"\n'
+                    'fi\n',
+                )
+                executable(bin_dir / "mountpoint", 'test -f "$2/mounted"\n')
+                executable(
+                    bin_dir / "sudo",
+                    'case "$1" in\n'
+                    '  mount) for mountdir do :; done; touch "$mountdir/mounted" ;;\n'
+                    '  umount) [ "$UNMOUNT_STATUS" = 0 ] || exit "$UNMOUNT_STATUS"; rm "$2/mounted" ;;\n'
+                    '  *) exit 99 ;;\n'
+                    'esac\n',
+                )
+                env = dict(
+                    os.environ,
+                    PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
+                    VFSI_PORTS_ROOT=str(ports),
+                    VFSI_NFS_EXPORT_DIR=str(export),
+                    VFSI_LIBRARY=str(library),
+                    REAL_MKTEMP=shutil.which("mktemp"),
+                    TEST_WORK=str(work),
+                    UNMOUNT_STATUS=unmount_status,
+                )
+                result = subprocess.run(
+                    ["bash", str(runner)], env=env, capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 42, result.stderr)
+                if unmount_status == "0":
+                    self.assertFalse(work.exists())
+                    self.assertEqual(list(export.iterdir()), [])
+                else:
+                    self.assertIn("Unmount failed", result.stderr)
+                    self.assertTrue((work / "mount/mounted").is_file())
+                    self.assertEqual(len(list(export.glob("vfsi-port-live.*/sub/file-2"))), 1)
+
+
 class PortWorkflowTriggerTests(unittest.TestCase):
     def test_relevant_pushes_are_not_limited_to_main(self):
         import fnmatch

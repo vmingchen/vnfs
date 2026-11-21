@@ -194,8 +194,9 @@ vnfs dependency does not change the C wrapper's exported symbols.
 Run `python3 build-sdk.py --registry-only --prefix /path/to/sdk` from a
 published `vfsi-c` crate checkout. The recipe uses the locked dependency graph,
 rejects non-registry dependencies, installs headers and the shared library with
-its optional native runtime directory, and writes `versions.json` with actual
-dependency versions. `--profile dev` selects a development build. For a workspace
+its optional native runtime directory, and copies the project license notices
+when present in the crate. It writes `versions.json` with actual dependency
+versions. `--profile dev` selects a development build. For a workspace
 checkout omit `--registry-only`; `--target-dir` can reuse an existing build cache.
 Ports can use `VFSI_SDK_SOURCE` to opt into this local recipe while retaining their
 published SDK pin for default builds.
