@@ -13,6 +13,8 @@ use vnfs::nfs::{Nfs, NfsReadPool, NfsReadPoolOptions};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+const PIPELINE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Debug)]
 struct Args {
     host: String,
@@ -97,14 +99,22 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Args> {
             }
         }
     }
-    if parsed.path.is_empty()
-        || parsed.rounds == 0
-        || parsed.chunk_sizes.is_empty()
-        || parsed.chunk_sizes.contains(&0)
+    if parsed.path.is_empty() || parsed.rounds == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a nonempty --path and positive --rounds are required",
+        )
+        .into());
+    }
+    if parsed.chunk_sizes.is_empty()
+        || parsed
+            .chunk_sizes
+            .iter()
+            .any(|size| !(1..=PIPELINE_BUFFER_BYTES).contains(size))
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "--path, --rounds, and non-zero --chunk-sizes are required",
+            format!("--chunk-sizes must be between 1 and {PIPELINE_BUFFER_BYTES} bytes"),
         )
         .into());
     }
@@ -124,12 +134,10 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Args> {
     Ok(parsed)
 }
 
-// `usize::is_multiple_of` is newer than the crate's Rust 1.88 MSRV.
-#[allow(clippy::manual_is_multiple_of)]
 fn median(mut values: Vec<f64>) -> f64 {
     values.sort_by(f64::total_cmp);
     let middle = values.len() / 2;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         (values[middle - 1] + values[middle]) / 2.0
     } else {
         values[middle]
@@ -221,7 +229,7 @@ fn main() -> Result<()> {
                             std::num::NonZeroUsize::new(worker_count * 2)
                                 .expect("nonzero tuning value"),
                         )
-                        .with_max_buffered_bytes(16 * 1024 * 1024),
+                        .with_max_buffered_bytes(PIPELINE_BUFFER_BYTES),
                 )?;
             let setup_ms = setup_started.elapsed().as_secs_f64() * 1000.0;
             for _ in 0..args.warmups {
@@ -259,6 +267,24 @@ mod tests {
     fn median_uses_the_midpoint_for_even_samples() {
         assert_eq!(median(vec![8.0, 1.0, 5.0, 2.0]), 3.5);
         assert_eq!(median(vec![8.0, 1.0, 5.0]), 5.0);
+    }
+
+    #[test]
+    fn rejects_chunk_sizes_that_do_not_fit_the_read_pool_budget() {
+        let parse_chunk_size = |size: usize| {
+            parse([
+                "--path".to_owned(),
+                "/file".to_owned(),
+                "--chunk-sizes".to_owned(),
+                size.to_string(),
+            ])
+        };
+        for size in [0, PIPELINE_BUFFER_BYTES + 1] {
+            let error = parse_chunk_size(size).unwrap_err();
+            assert!(error.to_string().contains("--chunk-sizes"));
+        }
+        let args = parse_chunk_size(PIPELINE_BUFFER_BYTES).unwrap();
+        assert_eq!(args.chunk_sizes, [PIPELINE_BUFFER_BYTES]);
     }
 
     #[test]
