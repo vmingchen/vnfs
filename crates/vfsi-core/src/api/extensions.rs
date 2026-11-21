@@ -851,10 +851,33 @@ pub trait VfsiExt: Vfsi {
             .len())
             .map(|_| std::collections::HashMap::new())
             .collect();
-        self.listdirs_all(paths, options, |index, page| {
-            let tree = trees.get_mut(index).ok_or_else(|| {
-                crate::internal::errors::invalid_reply("invalid visitor root index")
-            })?;
+        let completions = self.listdirs_all(paths, options, |index, page| {
+            let root = paths
+                .get(index)
+                .ok_or_else(|| {
+                    crate::internal::errors::invalid_reply("invalid visitor root index")
+                })?
+                .as_ref();
+            let valid_path = if options.recursive() {
+                page.path.strip_prefix(root).is_ok_and(|suffix| {
+                    suffix
+                        .components()
+                        .all(|component| matches!(component, std::path::Component::Normal(_)))
+                })
+            } else {
+                page.path == root
+            };
+            if !valid_path
+                || page.entries.iter().any(|entry| {
+                    entry.file_name().is_none()
+                        || entry.path().parent() != Some(page.path.as_path())
+                })
+            {
+                return Err(crate::internal::errors::invalid_reply(
+                    "invalid collected directory page",
+                ));
+            }
+            let tree = &mut trees[index];
             let positions = &mut positions[index];
             if let Some(&slot) = positions.get(&page.path) {
                 tree[slot].entries.extend(page.entries);
@@ -866,6 +889,19 @@ pub trait VfsiExt: Vfsi {
             }
             Ok(std::ops::ControlFlow::Continue(()))
         })?;
+        if let Some(index) = completions
+            .iter()
+            .enumerate()
+            .position(|(index, completion)| {
+                *completion != crate::api::TraversalCompletion::Complete
+                    || !positions[index].contains_key(paths[index].as_ref())
+            })
+        {
+            return Err(crate::IndexedError::at(
+                index,
+                crate::internal::errors::invalid_reply("incomplete collected directory traversal"),
+            ));
+        }
         Ok(trees)
     }
 

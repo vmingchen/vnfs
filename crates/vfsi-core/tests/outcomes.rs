@@ -499,3 +499,62 @@ fn opaque_error_display_and_transport_diagnostics_preserve_context() {
         assert_eq!(native_status(error.cause()), Some(StatusCode::Errno(2)));
     }
 }
+
+#[test]
+fn owned_native_reads_reject_foreign_results_and_misassociated_progress() {
+    use vfsi_core::{
+        FailureState, FileOperand, IoProgress, OpError, ReadIntoResult, ReadOp, VfOffset,
+    };
+    let reads = [
+        ReadOp::from_fd(10, VfOffset::At(1), 2),
+        ReadOp::from_fd(11, VfOffset::At(2), 2),
+        ReadOp::from_fd(12, VfOffset::At(3), 2),
+        ReadOp::from_fd(13, VfOffset::At(4), 2),
+        ReadOp::from_fd(14, VfOffset::Cur, 2),
+        ReadOp::from_fd(15, VfOffset::End, 2),
+    ];
+    let results = vfsi_core::internal::read_with_owned_buffers(&reads, |_, buffers| {
+        buffers[3][0] = b'x';
+        buffers[5][0] = b'y';
+        let ok = |fd, offset| {
+            Ok(ReadIntoResult {
+                file: FileOperand::from_fd(fd),
+                offset,
+                bytes_read: 1,
+                eof: false,
+            })
+        };
+        let failed = |offset| {
+            Err(OpError::failed(
+                std::io::Error::from_raw_os_error(libc::EIO),
+                Some(IoProgress::Read(vfsi_core::api::ReadOutput::buffered(
+                    offset, 1, false,
+                ))),
+            ))
+        };
+        Ok(vec![
+            ok(99, 1),
+            ok(11, 10),
+            failed(19),
+            ok(13, 4),
+            failed(u64::MAX),
+            failed(8),
+        ])
+    })
+    .unwrap();
+    for index in [0, 1, 2, 4] {
+        let error = results[index].as_ref().unwrap_err();
+        assert_eq!(error.state(), FailureState::Unknown);
+        assert_eq!(
+            transport_kind(error.cause()),
+            Some(TransportKind::InvalidReply)
+        );
+        assert!(error.progress().is_none());
+    }
+    assert_eq!(results[3].as_ref().unwrap().data, b"x");
+    let Some(IoProgress::Read(progress)) = results[5].as_ref().unwrap_err().progress() else {
+        panic!("missing valid relative read progress");
+    };
+    assert_eq!(progress.offset(), 8);
+    assert_eq!(progress.data(), Some(b"y".as_slice()));
+}

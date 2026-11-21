@@ -66,7 +66,9 @@ impl<F: VectorBackend> FsClient<F> {
                                 .path()
                                 .ok_or_else(|| malformed("directory entry has no path"))?
                                 .to_path_buf();
-                            if entry_path.parent() != Some(*path) {
+                            if entry_path.file_name().is_none()
+                                || entry_path.parent() != Some(*path)
+                            {
                                 return Err(malformed("directory entry is outside its parent"));
                             }
                             if let Some(child) = child {

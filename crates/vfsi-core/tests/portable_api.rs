@@ -242,6 +242,12 @@ impl Vfsi for PortableFs {
         }
         for (index, path) in paths.iter().enumerate() {
             let outcome = (|| -> vfsi_core::OpResult<TraversalCompletion> {
+                if self.shape.get() == 14 {
+                    return Ok(TraversalCompletion::Stopped);
+                }
+                if self.shape.get() == 15 {
+                    return Ok(TraversalCompletion::Complete);
+                }
                 let pages = if self.tree.get() {
                     match path.as_ref().to_str().unwrap() {
                         "/tree" => vec![
@@ -694,6 +700,22 @@ fn blanket_extensions_preserve_vector_dispatch_and_root_grouping() {
     assert_eq!(fs.listings.get(), 1);
     assert_eq!(trees[0][0].path, Path::new("/a"));
     assert_eq!(trees[1][0].path, Path::new("/b"));
+}
+
+#[test]
+fn directory_collection_rejects_incomplete_or_misassociated_pages() {
+    let fs = tree_fs();
+    for shape in [10, 14, 15] {
+        fs.shape.set(shape);
+        let error = fs
+            .read_dirs_with_options(&["/tree"], ListDirOptions::new())
+            .unwrap_err();
+        assert_eq!(error.index(), Some(0));
+        assert_eq!(
+            vfsi_core::transport_kind(error.cause()),
+            Some(vfsi_core::TransportKind::InvalidReply)
+        );
+    }
 }
 
 #[test]

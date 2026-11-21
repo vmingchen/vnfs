@@ -165,10 +165,9 @@ pub fn native_directory_pages<P: AsRef<Path>>(
                     if listing.path != path
                         || listing.entries.len() > size
                         || (listing.entries.is_empty() && next.is_some())
-                        || listing
-                            .entries
-                            .iter()
-                            .any(|entry| entry.path().parent() != Some(path))
+                        || listing.entries.iter().any(|entry| {
+                            entry.file_name().is_none() || entry.path().parent() != Some(path)
+                        })
                     {
                         return Err(invalid("invalid directory page parent or progress"));
                     }
@@ -288,10 +287,10 @@ pub(super) fn fallback_pages<F: Vfsi + ?Sized, P: AsRef<Path>>(
         };
         let valid = (|| -> Result<usize> {
             if page.listing.path != listing.path
-                || listing
-                    .entries
-                    .iter()
-                    .any(|entry| entry.path().parent() != Some(listing.path.as_path()))
+                || listing.entries.iter().any(|entry| {
+                    entry.file_name().is_none()
+                        || entry.path().parent() != Some(listing.path.as_path())
+                })
             {
                 return Err(crate::internal::errors::invalid_reply(
                     "invalid directory page parent",
@@ -390,6 +389,11 @@ pub(super) fn collect_directory<F: Vfsi + ?Sized>(
         let mut page = pages.pop().expect("validated page count");
         if page.listing.path != path
             || (page.listing.entries.is_empty() && page.continuation.is_some())
+            || page
+                .listing
+                .entries
+                .iter()
+                .any(|entry| entry.file_name().is_none() || entry.path().parent() != Some(path))
         {
             return Err(crate::internal::errors::invalid_reply(
                 "invalid directory page progress",
@@ -649,7 +653,7 @@ mod tests {
     #[test]
     fn invalid_progress_and_child_projection_are_rejected() {
         let owner = Arc::new(());
-        for invalid in 0..3 {
+        for invalid in 0..4 {
             let error = native_directory_pages(
                 &owner,
                 &[Path::new("/")],
@@ -674,6 +678,14 @@ mod tests {
                             },
                             None,
                             vec![("/unobserved".into(), NativeDirectoryCursor::new(()))],
+                        ),
+                        2 => (
+                            DirectoryListing {
+                                path: "/".into(),
+                                entries: vec![entry("/..")],
+                            },
+                            None,
+                            vec![],
                         ),
                         _ => (
                             DirectoryListing {

@@ -430,10 +430,9 @@ pub fn visit_directory_pages<P: AsRef<Path>, C: Into<ListDirControl>>(
                 };
                 if page.path != path
                     || (page.entries.is_empty() && next.is_some())
-                    || page
-                        .entries
-                        .iter()
-                        .any(|entry| entry.path().parent() != Some(path.as_path()))
+                    || page.entries.iter().any(|entry| {
+                        entry.file_name().is_none() || entry.path().parent() != Some(path.as_path())
+                    })
                 {
                     directory_error(
                         &mut completed[index],

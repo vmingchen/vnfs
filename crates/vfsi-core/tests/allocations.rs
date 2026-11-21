@@ -628,10 +628,7 @@ fn normalized_deep_paths_allocate_output_once_at_the_final_size() {
     let path = vec!["x".repeat(64); 64].join("/");
     let (normalized, allocations) = measured(|| vfsi_core::path::normalize_bytes(path.as_bytes()));
     assert_eq!(normalized, path.as_bytes());
-    assert!(
-        allocations <= 6,
-        "component bookkeeping plus one final allocation, got {allocations}"
-    );
+    assert_eq!(allocations, 1, "only the final path should allocate");
     assert_eq!(
         normalized.capacity(),
         normalized.len(),

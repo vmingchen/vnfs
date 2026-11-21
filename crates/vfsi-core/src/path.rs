@@ -57,26 +57,37 @@ pub fn join_path_bytes(dir: &[u8], name: &[u8]) -> Vec<u8> {
 
 /// Lexically normalize a root-relative byte path.
 pub fn normalize_bytes(path: &[u8]) -> Vec<u8> {
-    // Components only live for this call; borrow them from the input.
-    let mut parts: Vec<&[u8]> = Vec::new();
-    for comp in trim_slashes(path).split(|&b| b == b'/') {
-        match comp {
-            [] | b"." => {}
-            b".." => {
-                parts.pop();
-            }
-            c => parts.push(c),
+    let parts = || {
+        let mut parents = 0usize;
+        path.rsplit(|&byte| byte == b'/')
+            .filter(move |&part| match part {
+                [] | b"." => false,
+                b".." => {
+                    parents += 1;
+                    false
+                }
+                _ if parents != 0 => {
+                    parents -= 1;
+                    false
+                }
+                _ => true,
+            })
+    };
+    // Visit surviving components from right to left. This avoids a stack of
+    // component slices and lets us allocate just the final path.
+    let (bytes, components) = parts().fold((0, 0usize), |(bytes, count), part| {
+        (bytes + part.len(), count + 1)
+    });
+    let length = bytes + components.saturating_sub(1);
+    let mut out = vec![0; length];
+    let mut end = length;
+    for part in parts() {
+        end -= part.len();
+        out[end..end + part.len()].copy_from_slice(part);
+        if end != 0 {
+            end -= 1;
+            out[end] = b'/';
         }
-    }
-    // The normalized bytes and separators are bounded by the original input.
-    // Allocate exactly once and avoid retaining geometric growth slack.
-    let length = parts.iter().map(|part| part.len()).sum::<usize>() + parts.len().saturating_sub(1);
-    let mut out = Vec::with_capacity(length);
-    for (i, part) in parts.iter().enumerate() {
-        if i > 0 {
-            out.push(b'/');
-        }
-        out.extend_from_slice(part);
     }
     out
 }
