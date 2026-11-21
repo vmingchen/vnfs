@@ -171,8 +171,13 @@ EOF
 }
 
 start_smb() {
-  local port=${VFSI_LOCAL_CI_SMB_PORT:-14445}
-  [[ "$port" =~ ^[0-9]+$ ]] && ((port >= 1024 && port <= 65535)) || {
+  local requested_port=${VFSI_LOCAL_CI_SMB_PORT:-14445} port=0
+  # Bound significant digits before arithmetic and interpret leading zeros
+  # as decimal, matching the socket probe and Samba configuration.
+  if [[ "$requested_port" =~ ^0*([0-9]{1,5})$ ]]; then
+    port=$((10#${BASH_REMATCH[1]}))
+  fi
+  ((port >= 1024 && port <= 65535)) || {
     echo 'VFSI_LOCAL_CI_SMB_PORT must be a high TCP port' >&2; return 2;
   }
   if port_open "$port"; then

@@ -333,6 +333,43 @@ class RustRunnerTests(unittest.TestCase):
                 self.assertRegex(result.stdout, r"==> fast completed in \d+\.\d{3} seconds")
                 self.assertEqual(len(self.log.read_text().splitlines()), 1)
 
+    def test_managed_smb_ports_are_bounded_decimal_numbers(self):
+        # Simulate an occupied port to stop before any server starts.
+        probe = self.bin / "python3"
+        probe.write_text(
+            '#!/bin/sh\n'
+            'printf "port %s\\n" "$2" >> "$CALL_LOG"\n'
+        )
+        mktemp = self.bin / "mktemp"
+        mktemp.write_text(
+            '#!/bin/sh\n'
+            'mkdir "$MOCK_STATE_DIR" && printf "%s\\n" "$MOCK_STATE_DIR"\n'
+        )
+        mktemp.chmod(0o755)
+
+        for requested, normalized in (
+            ("", "14445"),
+            ("65535", "65535"),
+            ("01080", "1080"),
+            ("065536", None),
+            ("18446744073709552640", None),
+        ):
+            with self.subTest(requested=requested):
+                self.log.unlink(missing_ok=True)
+                result = self.run_script(
+                    "test-ci-local.sh", "--managed-smb", "smb",
+                    VFSI_LOCAL_CI_SMB_PORT=requested,
+                    MOCK_STATE_DIR=str(self.root / ("state-" + requested)),
+                )
+                if normalized is None:
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("must be a high TCP port", result.stderr)
+                    self.assertFalse(self.log.exists())
+                else:
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn(f"TCP/{normalized} is occupied", result.stderr)
+                    self.assertEqual(self.log.read_text().splitlines(), [f"port {normalized}"])
+
     def assert_full_coverage(self, calls):
         self.assertFalse(any("--skip" in call for call in calls))
         self.assertEqual(calls.count("scripts/test-ci-scripts.py"), 1)
