@@ -1102,10 +1102,48 @@ impl Compound {
         Ok(response)
     }
 
+    /// Check the acknowledgement of a successful SETATTR at its wire index.
+    pub(crate) fn check_setattr(
+        &self,
+        response: &CompoundRes,
+        index: usize,
+    ) -> vfsi_core::OpResult<()> {
+        let request = &self.ops[index];
+        assert_eq!(request.argop, nfs_opnum4_NFS4_OP_SETATTR);
+        let reply = response.expect_op(index, nfs_opnum4_NFS4_OP_SETATTR, "SETATTR");
+        // SAFETY: the request is locally built; expect_op checks the reply tag
+        // and status before its union is read.
+        let (requested, returned) = unsafe {
+            (
+                &request.nfs_argop4_u.opsetattr.obj_attributes.attrmask,
+                &reply.nfs_resop4_u.opsetattr.attrsset,
+            )
+        };
+        let requested = bitmap_words(requested);
+        if requested.is_some() && requested == bitmap_words(returned) {
+            return Ok(());
+        }
+        Err(vfsi_core::OpError::unknown(
+            vfsi_core::internal::errors::invalid_reply(
+                "NFS SETATTR reply did not acknowledge the requested attributes",
+            ),
+            None,
+        ))
+    }
+
     /// Access for Session to prepend a SEQUENCE op.
     pub(crate) fn prepend_sequence(&mut self, op: nfs_argop4) {
         self.insert0(op);
     }
+}
+
+fn bitmap_words(bitmap: &bitmap4) -> Option<&[u32]> {
+    let words = bitmap.map.get(..bitmap.bitmap4_len as usize)?;
+    let end = words
+        .iter()
+        .rposition(|&word| word != 0)
+        .map_or(0, |i| i + 1);
+    Some(&words[..end])
 }
 
 /// A decoded COMPOUND4res; frees its XDR-allocated storage on drop.
@@ -1592,6 +1630,37 @@ mod response_validation_tests {
         let mut value: nfs_resop4 = unsafe { std::mem::zeroed() };
         value.resop = op;
         value
+    }
+
+    #[test]
+    fn setattr_rejects_an_incomplete_ack_without_losing_a_sibling() {
+        let mut request = Compound::new();
+        request.setattr(Some(0o600), Some(2));
+        request.setattr(None, Some(3));
+        let mut operations = [
+            res(nfs_opnum4_NFS4_OP_SETATTR),
+            res(nfs_opnum4_NFS4_OP_SETATTR),
+        ];
+        for operation in &mut operations {
+            operation.nfs_resop4_u.opsetattr = SETATTR4res {
+                status: nfsstat4_NFS4_OK,
+                attrsset: bitmap4 {
+                    bitmap4_len: 3,
+                    map: [1 << FATTR4_SIZE, 0, 0],
+                },
+            };
+        }
+        let response = std::mem::ManuallyDrop::new(CompoundRes {
+            res: reply(nfsstat4_NFS4_OK, &mut operations),
+        });
+        validate_response_ops(&request.ops, &response.res).unwrap();
+        let incomplete = request.check_setattr(&response, 0).unwrap_err();
+        assert_eq!(incomplete.state(), vfsi_core::FailureState::Unknown);
+        assert_eq!(
+            vfsi_core::transport_kind(incomplete.cause()),
+            Some(vfsi_core::TransportKind::InvalidReply)
+        );
+        assert!(request.check_setattr(&response, 1).is_ok());
     }
 
     #[test]

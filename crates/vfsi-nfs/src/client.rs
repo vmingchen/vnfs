@@ -3284,7 +3284,13 @@ impl NfsClient {
                     .iter()
                     .filter(|(_, start, _)| *start < res.nops())
                 {
+                    let mut truncate_error = None;
                     for index in *start..(*end).min(res.nops()) {
+                        if res.op(index).resop == nfs_opnum4_NFS4_OP_SETATTR
+                            && res.op_status(index) == nfsstat4_NFS4_OK
+                        {
+                            truncate_error = c.check_setattr(&res, index).err();
+                        }
                         if res.op(index).resop != nfs_opnum4_NFS4_OP_WRITE
                             || res.op_status(index) != 0
                         {
@@ -3333,7 +3339,7 @@ impl NfsClient {
                             ));
                             continue;
                         }
-                        if received < requested {
+                        if received < requested && truncate_error.is_none() {
                             #[cfg(feature = "test-faults")]
                             if let Some(injector) = &self.fault_injector
                                 && let Err(cause) = injector
@@ -3371,6 +3377,11 @@ impl NfsClient {
                                 }
                             }
                         }
+                    }
+                    // Preserve confirmed writes, but never repair or report
+                    // completion of an input whose truncation was unconfirmed.
+                    if let Some(error) = truncate_error {
+                        errors[*caller] = Some(error);
                     }
                 }
                 if let Some((caller, status)) = range_failed
@@ -4824,7 +4835,8 @@ impl NfsClient {
         c.setattr(mode, size);
         let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
-        Ok(())
+        c.check_setattr(&res, 2)
+            .map_err(|error| RpcError::from_io(error.into_cause()))
     }
 
     /// SETATTR mode, size, and/or access/modify timestamps on `fh`.
@@ -4851,7 +4863,8 @@ impl NfsClient {
         );
         let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
-        Ok(())
+        c.check_setattr(&res, 2)
+            .map_err(|error| RpcError::from_io(error.into_cause()))
     }
 
     /// SETATTR including numeric owner/group IDs.
@@ -4880,7 +4893,8 @@ impl NfsClient {
         );
         let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
-        Ok(())
+        c.check_setattr(&res, 2)
+            .map_err(|error| RpcError::from_io(error.into_cause()))
     }
 
     /// Read one page from a directory. Use DirCookie::default() initially,

@@ -267,3 +267,89 @@ fn setattr_pre_dispatch_errors_keep_their_original_domain() {
         assert_eq!(crate::compound::thread_compound_stats().0, 0);
     }
 }
+
+#[test]
+fn missing_setattr_ack_isolated_in_descriptor_and_path_batches() {
+    use crate::rpc::{
+        RpcClient,
+        test_support::{accepted_reply, read_record, successful_sequence_reply},
+    };
+    use std::net::TcpListener;
+
+    let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+        assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+        return;
+    };
+    for paths in [false, true] {
+        let mut client = NfsClient::connect_minor(&server, 1).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let request = read_record(&mut socket).unwrap();
+            let mut payload = successful_sequence_reply(&request, 5);
+            for _ in 0..2 {
+                for word in [
+                    nfs_opnum4_NFS4_OP_PUTFH,
+                    nfsstat4_NFS4_OK,
+                    nfs_opnum4_NFS4_OP_SETATTR,
+                    nfsstat4_NFS4_OK,
+                    1,
+                    1 << FATTR4_SIZE,
+                ] {
+                    payload.extend_from_slice(&word.to_be_bytes());
+                }
+            }
+            accepted_reply(&mut socket, &request, &payload);
+        });
+        let rpc = RpcClient::connect_with_timeouts(
+            &address.to_string(),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let original = client.replace_test_rpc(rpc);
+        let root = client.root().clone();
+        let modes = [Some(0o600), None];
+        let results = if paths {
+            client
+                .setattr_path_compound(&modes.map(|mode| PathSetattrOp {
+                    file: FileRef::Handle(root.clone()),
+                    mode,
+                    size: Some(3),
+                    uid: None,
+                    gid: None,
+                    atime: None,
+                    mtime: None,
+                    check_type: false,
+                }))
+                .map(|results| results.into_iter().map(|item| item.map(|_| ())).collect())
+        } else {
+            client.setattr_many(&modes.map(|mode| SetattrOp {
+                fh: root.clone(),
+                mode,
+                size: Some(3),
+                uid: None,
+                gid: None,
+                atime: None,
+                mtime: None,
+            }))
+        };
+        client.replace_test_rpc(original);
+        peer.join().unwrap();
+        client.shutdown().unwrap();
+
+        let results = results.unwrap();
+        assert_eq!(results.len(), 2);
+        let error = results[0].as_ref().unwrap_err();
+        assert_eq!(error.state(), FailureState::Unknown);
+        assert_eq!(
+            vfsi_core::transport_kind(error.cause()),
+            Some(vfsi_core::TransportKind::InvalidReply)
+        );
+        assert!(results[1].is_ok());
+    }
+}

@@ -169,7 +169,14 @@ impl NfsClient {
                     ))
                 })?;
                 for &(input, start, end) in map.completed_ranges(&report) {
-                    slots[input] = Some(decode(&reply, start, end));
+                    let outcome = if tag == b"setattrv1" {
+                        compound
+                            .check_setattr(&reply, end - 1)
+                            .and_then(|()| decode(&reply, start, end))
+                    } else {
+                        decode(&reply, start, end)
+                    };
+                    slots[input] = Some(outcome);
                 }
                 max_items = usize::MAX;
                 if let Some(failure) = report.failure {

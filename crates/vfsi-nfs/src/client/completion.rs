@@ -324,7 +324,12 @@ impl super::NfsClient {
                 reply.nops(),
                 reply.status(),
                 |index| reply.op_status(index),
-                |local| extract(&reply, local, start + local),
+                |local| {
+                    if tag == b"setattrv" {
+                        compound.check_setattr(&reply, OPS * (local + 1))?;
+                    }
+                    extract(&reply, local, start + local)
+                },
             ) {
                 Ok(results) => {
                     if results.len() < end - start {
