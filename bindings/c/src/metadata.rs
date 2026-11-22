@@ -145,9 +145,13 @@ pub unsafe extern "C" fn vfsi_statv(
             Ok(backend) => backend,
             Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
         };
-        if let Err(error) =
-            vfsi_sync::internal::collect_vec_result(backend.vgetattrs_impl(&mut attrs), attrs.len())
-        {
+        let attrs_ref = &mut attrs;
+        let outcomes = match catch_submitted(results, move || backend.vgetattrs_impl(attrs_ref)) {
+            Ok(Ok(outcomes)) => outcomes,
+            Ok(Err(error)) => fail_batch!(results, vfsi_result::from_error(error), false),
+            Err(failure) => return failure,
+        };
+        if let Err(error) = vfsi_sync::internal::collect_vec_result(Ok(outcomes), attrs.len()) {
             fail_batch!(results, vfsi_result::from_indexed(error), true);
         }
         let mut first_failure = None;

@@ -178,6 +178,7 @@ enum MalformedReply {
     WriteReject,
     ReadPanic,
     RemovePanic,
+    StatReject,
     WriteMiddlePartial,
     ReadWrongFile,
     ReadWrongOffset,
@@ -286,6 +287,9 @@ impl vfsi_sync::backend::VectorBackend for ListingBackend {
     }
 
     fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_sync::VecResult<()> {
+        if self.malformed_reply == Some(MalformedReply::StatReject) {
+            return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
+        }
         let requested = attrs.len();
         for (index, attrs) in attrs.iter_mut().enumerate() {
             let missing = if index >= self.missing_after {
@@ -3879,6 +3883,28 @@ fn extended_vectors_keep_rejections_unattributed_after_invalid_handles() {
             vfsi_free(fs);
         }
     }
+}
+
+#[test]
+fn statv_backend_rejection_keeps_stats_unattempted() {
+    let fs = independent_io_fixture(MalformedReply::StatReject);
+    let mut ops = [c"/first", c"/second"].map(|path| vfsi_stat_op {
+        path: path.as_ptr(),
+        attrs: vfsi_attrs::from_vf(&VfAttrs {
+            size: 99,
+            ..VfAttrs::default()
+        }),
+    });
+    let mut results = [vfsi_result::panic(); 2];
+    let failure = unsafe { vfsi_statv(fs, ops.as_mut_ptr(), ops.len(), results.as_mut_ptr()) };
+    assert_eq!(failure.category, VFSI_ERROR_UNSUPPORTED);
+    assert_eq!(failure.index, C_INDEX_UNKNOWN);
+    for (index, result) in results.iter().enumerate() {
+        assert_eq!(ops[index].attrs.size, 99);
+        assert_eq!(result.index, index);
+        assert_eq!(result.category, VFSI_ERROR_NOT_ATTEMPTED);
+    }
+    unsafe { vfsi_free(fs) };
 }
 
 #[test]
