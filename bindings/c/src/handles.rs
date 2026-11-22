@@ -207,17 +207,19 @@ pub unsafe extern "C" fn vfsi_openv(
         let opened = {
             let mut backend = match lock_or_io(&fs.fs) {
                 Ok(backend) => backend,
-                Err(error) => fail_batch!(results, vfsi_result::from_error(error), true),
+                Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
             };
             if let Err(error) = backend.vopen_preflight_impl(&refs, &flags, &modes) {
                 let failure = vfsi_result::from_error(error);
                 fail_results(results, failure, false);
                 return failure;
             }
-            match vfsi_sync::backend::helpers::open_raw_batch(&mut **backend, &refs, &flags, &modes)
-            {
-                Ok(opened) => opened,
-                Err(error) => {
+            match catch_submitted(results, move || {
+                vfsi_sync::backend::helpers::open_raw_batch(&mut **backend, &refs, &flags, &modes)
+            }) {
+                Ok(Ok(opened)) => opened,
+                Err(failure) => return failure,
+                Ok(Err(error)) => {
                     let failure = vfsi_result::from_indexed(error);
                     fail_results(results, failure, true);
                     return failure;
@@ -333,7 +335,13 @@ pub unsafe extern "C" fn vfsi_closev(
             Ok(backend) => backend,
             Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
         };
-        let outcomes = backend.vclose_impl(&files);
+        let (_backend, outcomes) = match catch_submitted(results, move || {
+            let outcomes = backend.vclose_impl(&files);
+            (backend, outcomes)
+        }) {
+            Ok(completed) => completed,
+            Err(failure) => return failure,
+        };
         let mut table = fs.files.lock().ok();
         unit_results("close", results, outcomes, |index| {
             if let Some(table) = &mut table {

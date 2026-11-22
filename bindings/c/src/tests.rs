@@ -177,6 +177,7 @@ enum MalformedReply {
     ReadReject,
     WriteReject,
     ReadPanic,
+    RemovePanic,
     WriteMiddlePartial,
     ReadWrongFile,
     ReadWrongOffset,
@@ -277,6 +278,13 @@ impl vfsi_sync::backend::HandleBackend for ListingBackend {
 }
 
 impl vfsi_sync::backend::VectorBackend for ListingBackend {
+    fn vremove_impl(&mut self, _: &[FileOperand]) -> vfsi_sync::VecResult<()> {
+        if self.malformed_reply == Some(MalformedReply::RemovePanic) {
+            panic!("injected batch remove panic");
+        }
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
+
     fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_sync::VecResult<()> {
         let requested = attrs.len();
         for (index, attrs) in attrs.iter_mut().enumerate() {
@@ -3851,6 +3859,37 @@ fn extended_vectors_keep_rejections_unattributed_after_invalid_handles() {
             vfsi_free(fs);
         }
     }
+}
+
+#[test]
+fn submitted_vector_panic_marks_all_items_indeterminate() {
+    let fs = independent_io_fixture(MalformedReply::RemovePanic);
+    let a = CString::new("/a").unwrap();
+    let b = CString::new("/b").unwrap();
+    let paths = [a.as_ptr(), b.as_ptr()];
+    let mut results = [vfsi_result::panic(); 2];
+    let failure = unsafe { vfsi_removev(fs, paths.as_ptr(), paths.len(), results.as_mut_ptr()) };
+    assert_eq!(failure.category, VFSI_ERROR_TRANSPORT);
+    assert_eq!(failure.index, C_INDEX_UNKNOWN);
+    for (index, result) in results.iter().enumerate() {
+        assert_eq!(result.index, index);
+        assert_eq!(result.category, VFSI_ERROR_INDETERMINATE);
+    }
+    assert!(unsafe { &*fs }.fs.is_poisoned());
+
+    let mut ops = paths.map(|path| vfsi_open_op {
+        path,
+        flags: libc::O_RDWR | libc::O_CREAT,
+        mode: 0o600,
+        fd: -1,
+    });
+    let rejected = unsafe { vfsi_openv(fs, ops.as_mut_ptr(), ops.len(), results.as_mut_ptr()) };
+    assert_eq!(rejected.err_no, libc::EIO as u32);
+    assert_eq!(rejected.index, C_INDEX_UNKNOWN);
+    assert!(results
+        .iter()
+        .all(|r| r.category == VFSI_ERROR_NOT_ATTEMPTED));
+    unsafe { vfsi_free(fs) };
 }
 
 #[test]

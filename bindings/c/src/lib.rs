@@ -376,7 +376,7 @@ impl vfsi_result {
 
     fn panic() -> Self {
         Self::base(
-            0,
+            C_INDEX_UNKNOWN,
             VFSI_ERROR_TRANSPORT,
             libc::EIO as u32,
             "panic across FFI",
@@ -466,6 +466,36 @@ fn parse_c_bool(value: u8) -> Option<bool> {
         0 => Some(false),
         1 => Some(true),
         _ => None,
+    }
+}
+
+// Move a backend lock guard into the dispatch closure so an unwind drops
+// and poisons it before returning indeterminate results to the caller.
+#[allow(clippy::result_large_err)]
+fn catch_submitted<T>(
+    results: &mut [vfsi_result],
+    submit: impl FnOnce() -> T,
+) -> Result<T, vfsi_result> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(submit)).map_err(|_| {
+        let failure = vfsi_result::panic();
+        fail_results(results, failure, true);
+        failure
+    })
+}
+
+fn dispatch_unit_results(
+    fs: &vfsi_fs,
+    operation: &'static str,
+    results: &mut [vfsi_result],
+    submit: impl FnOnce(&mut dyn BindingBackend) -> vfsi_sync::VecResult<()>,
+) -> vfsi_result {
+    let mut backend = match lock_or_io(&fs.fs) {
+        Ok(backend) => backend,
+        Err(error) => return vfsi_result::from_error(error),
+    };
+    match catch_submitted(results, move || submit(&mut **backend)) {
+        Ok(outcomes) => unit_results(operation, results, outcomes, |_| {}),
+        Err(failure) => failure,
     }
 }
 

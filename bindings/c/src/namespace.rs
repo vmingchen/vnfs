@@ -205,11 +205,7 @@ pub unsafe extern "C" fn vfsi_mkdirv(
                 ..VfAttrs::default()
             });
         }
-        let mut backend = match lock_or_io(&fs.fs) {
-            Ok(backend) => backend,
-            Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
-        };
-        unit_results("mkdir", results, backend.vmkdir_impl(&dirs), |_| {})
+        dispatch_unit_results(fs, "mkdir", results, |backend| backend.vmkdir_impl(&dirs))
     })
 }
 
@@ -261,11 +257,9 @@ pub unsafe extern "C" fn vfsi_removev(
             };
             files.push(FileOperand::from_os_path(&path));
         }
-        let mut backend = match lock_or_io(&fs.fs) {
-            Ok(backend) => backend,
-            Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
-        };
-        unit_results("remove", results, backend.vremove_impl(&files), |_| {})
+        dispatch_unit_results(fs, "remove", results, |backend| {
+            backend.vremove_impl(&files)
+        })
     })
 }
 
@@ -326,11 +320,9 @@ pub unsafe extern "C" fn vfsi_renamev(
                 FileOperand::from_os_path(&newpath),
             ));
         }
-        let mut backend = match lock_or_io(&fs.fs) {
-            Ok(backend) => backend,
-            Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
-        };
-        unit_results("rename", results, backend.vrename_impl(&pairs), |_| {})
+        dispatch_unit_results(fs, "rename", results, |backend| {
+            backend.vrename_impl(&pairs)
+        })
     })
 }
 
@@ -406,15 +398,8 @@ pub unsafe extern "C" fn vfsi_copyv(
                 (!to_eof).then_some(op.length),
             ));
         }
-        let mut backend = match lock_or_io(&fs.fs) {
-            Ok(backend) => backend,
-            Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
-        };
-        unit_results(
-            "copy",
-            results,
-            backend.vcopy_impl(&pairs, vfsi_sync::CopyOptions::new()),
-            |_| {},
-        )
+        dispatch_unit_results(fs, "copy", results, |backend| {
+            backend.vcopy_impl(&pairs, vfsi_sync::CopyOptions::new())
+        })
     })
 }

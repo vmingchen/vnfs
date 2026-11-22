@@ -249,16 +249,9 @@ pub unsafe extern "C" fn vfsi_setattrv(
                 ..VfAttrs::default()
             });
         }
-        let mut backend = match lock_or_io(&fs.fs) {
-            Ok(backend) => backend,
-            Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
-        };
-        unit_results(
-            "setattrs",
-            results,
-            backend.vsetattrs_raw_impl(&attrs),
-            |_| {},
-        )
+        dispatch_unit_results(fs, "setattrs", results, |backend| {
+            backend.vsetattrs_raw_impl(&attrs)
+        })
     })
 }
 
