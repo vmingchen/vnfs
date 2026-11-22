@@ -1,6 +1,6 @@
 [package]
 name = "vfsi-c"
-version = "0.3.24"
+version = "0.3.25"
 edition = "2021"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"

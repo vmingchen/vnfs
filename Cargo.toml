@@ -18,13 +18,13 @@ bitfields = "3.1.0"
 libc = "0.2"
 libntirpc-sys = "0.3.6"
 nfsv41-sys = { path = "crates/nfsv41-sys", version = "0.1.17" }
-vfsi-core = { path = "crates/vfsi-core", version = "0.5.1" }
-vfsi-local = { path = "crates/vfsi-local", version = "0.5.1" }
-vfsi-posix = { path = "crates/vfsi-posix", version = "0.5.1" }
-vfsi-uring = { path = "crates/vfsi-uring", version = "0.5.1" }
-vfsi-nfs = { path = "crates/vfsi-nfs", version = "0.5.1" }
-vfsi-smb = { path = "crates/vfsi-smb", version = "0.5.1" }
-vfsi-sync = { path = "crates/vfsi-sync", version = "0.5.1" }
+vfsi-core = { path = "crates/vfsi-core", version = "0.5.2" }
+vfsi-local = { path = "crates/vfsi-local", version = "0.5.2" }
+vfsi-posix = { path = "crates/vfsi-posix", version = "0.5.2" }
+vfsi-uring = { path = "crates/vfsi-uring", version = "0.5.2" }
+vfsi-nfs = { path = "crates/vfsi-nfs", version = "0.5.2" }
+vfsi-smb = { path = "crates/vfsi-smb", version = "0.5.2" }
+vfsi-sync = { path = "crates/vfsi-sync", version = "0.5.2" }
 
 # Unsafe functions still require explicit blocks for their unsafe operations.
 # Production blocks/impls need SAFETY comments, including in unit-test builds.

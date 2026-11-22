@@ -3,6 +3,23 @@
 This project follows [Semantic Versioning](https://semver.org/) for the
 `nfs4fs` package. Rust crate and C ABI versions are tracked independently.
 
+## 2026-11-22 — metadata acknowledgements and cache recovery
+
+Rust releases: vnfs 0.0.41, vfsi-core and the sync, local, POSIX, io_uring,
+NFS, and SMB crates 0.5.2, and vfsi-c 0.3.25. Python releases: nfs4fs
+0.3.20, vfsi-fsspec 0.1.19, vsmb 0.1.14, and vsmbfs 0.1.13.
+The C ABI remains v3.
+
+- Verify NFS SETATTR acknowledgements and unstable server-side COPY writes.
+  Keep combined local and SMB metadata updates on the same open object.
+- Reject SMB copy aliases before writing, and invalidate directory listings
+  across SMB pathname aliases.
+- Recover persistent block caches with JSON metadata, preserve descriptor
+  ownership during interrupted reads, and stream downloads that outgrow
+  their batch budget.
+- Keep rejected C vector slots unattempted and report indeterminate results
+  after a submitted backend panics.
+
 ## 2026-11-20 — transfer safety and reader recovery
 
 Rust releases: vnfs 0.0.40, vfsi-core and the sync, local, POSIX, io_uring,
