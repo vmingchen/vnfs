@@ -4037,7 +4037,9 @@ class VfsiFileSystem(AbstractFileSystem):
         exact = set(exact)
         with self._dircache_lock:
             self._dircache_epoch += 1
-            if "/" in subtrees:
+            # SMB may resolve different spellings to the same directory.
+            # The client cannot match all server-side aliases lexically.
+            if "/" in subtrees or (namespace and self.backend == "smb"):
                 self.dircache.clear()
                 return
             if not subtrees and not identities and not uncertain:

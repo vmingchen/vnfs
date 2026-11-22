@@ -211,3 +211,25 @@ def test_persistent_blockcache_observes_smb_overwrite(smb_fs, tmp_path):
             assert file.read() == b"new!"
     finally:
         cached.clear_cache()
+
+
+def test_namespace_mutation_retires_cached_case_variant_listing(smb_fs):
+    fs = smb_fs
+    fs.dircache.use_listings_cache = True
+    fs.mkdir("/MiXeD")
+    try:
+        assert fs.isdir("/mixed")
+        assert fs.ls("/MiXeD", detail=False) == []
+        assert "/MiXeD" in fs.dircache
+
+        fs.pipe_file("/mixed/new", b"data")
+        entries = fs.ls("/MiXeD", detail=False)
+        assert [entry.rsplit("/", 1)[-1] for entry in entries] == ["new"]
+        assert fs.cat_file("/MiXeD/new") == b"data"
+
+        fs.rm("/mixed/new")
+        assert fs.ls("/MiXeD", detail=False) == []
+    finally:
+        if fs.exists("/mixed/new"):
+            fs.rm("/mixed/new")
+        fs.rmdir("/MiXeD")
