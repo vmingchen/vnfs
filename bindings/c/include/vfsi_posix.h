@@ -32,6 +32,18 @@
 #define VFSI_STAT_CTIME_NSEC st_ctim.tv_nsec
 #endif
 
+/* Strict POSIX mode can hide these names on Linux. The mask values are
+ * part of the Linux stat ABI even when the libc header omits the macros. */
+#if defined(__linux__) && !defined(S_IFREG)
+#define VFSI_STAT_REG 0100000
+#define VFSI_STAT_DIR 0040000
+#define VFSI_STAT_LNK 0120000
+#else
+#define VFSI_STAT_REG S_IFREG
+#define VFSI_STAT_DIR S_IFDIR
+#define VFSI_STAT_LNK S_IFLNK
+#endif
+
 /* Use the destination's actual field widths for both POSIX layouts. */
 #define VFSI_DEFINE_STAT_FIELDS(function, stat_type)                             \
 static inline int function(const vfsi_attrs *attrs, stat_type *out)              \
@@ -47,9 +59,9 @@ static inline int function(const vfsi_attrs *attrs, stat_type *out)             
         return EINVAL;                                                           \
     /* ABI-v3 file type codes: regular=1, directory=2, symlink=5. */             \
     switch (attrs->ftype) {                                                      \
-    case 1: type = S_IFREG; break;                                               \
-    case 2: type = S_IFDIR; break;                                               \
-    case 5: type = S_IFLNK; break;                                               \
+    case 1: type = VFSI_STAT_REG; break;                                               \
+    case 2: type = VFSI_STAT_DIR; break;                                               \
+    case 5: type = VFSI_STAT_LNK; break;                                               \
     default: return ENOTSUP;                                                     \
     }                                                                            \
     memset(out, 0, sizeof(*out));                                                \
@@ -85,6 +97,9 @@ VFSI_DEFINE_STAT_FIELDS(vfsi_attrs_stat_fields, struct stat)
 VFSI_DEFINE_STAT_FIELDS(vfsi_attrs_stat64_fields, struct stat64)
 #endif
 #undef VFSI_DEFINE_STAT_FIELDS
+#undef VFSI_STAT_REG
+#undef VFSI_STAT_DIR
+#undef VFSI_STAT_LNK
 #undef VFSI_STAT_ATIME_NSEC
 #undef VFSI_STAT_MTIME_NSEC
 #undef VFSI_STAT_CTIME_NSEC

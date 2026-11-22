@@ -23,6 +23,10 @@ for test in posix-fields dynamic-loader; do
         -I "$root/bindings/c/include" "$root/bindings/c/tests/$test.c" -o "$work/$test"
     "$work/$test"
 done
+# glibc hides the file type constants in a strict POSIX.1-2008 translation unit.
+"${CC:-cc}" -std=c11 -DVFSI_TEST_STRICT_POSIX -Wall -Wextra -Werror \
+    -I "$root/bindings/c/include" "$root/bindings/c/tests/posix-fields.c" -o "$work/strict-fields"
+"$work/strict-fields"
 # Darwin changes struct stat's timestamp members when strict POSIX is selected.
 # Exercise its extension layout as well as the strict layout tested above.
 "${CC:-cc}" -std=c11 -D_DARWIN_C_SOURCE -Wall -Wextra -Werror \

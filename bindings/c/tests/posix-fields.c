@@ -1,5 +1,7 @@
+#ifndef VFSI_TEST_STRICT_POSIX
 #define _DEFAULT_SOURCE 1
 #define _LARGEFILE64_SOURCE 1
+#endif
 #define _POSIX_C_SOURCE 200809L
 #include <vfsi_posix.h>
 #include <assert.h>
