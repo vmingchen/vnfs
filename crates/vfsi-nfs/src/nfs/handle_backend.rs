@@ -435,7 +435,8 @@ impl HandleBackend for NfsVecFs {
         files: &[FileOperand],
         _mode: vfsi_core::api::SyncMode,
     ) -> vfsi_core::VecResult<()> {
-        // Writes already request FILE_SYNC4 stability, so no COMMIT RPC is
+        // Writes require FILE_SYNC4 and COPY confirms weaker replies using
+        // COMMIT before reporting success, so no additional COMMIT RPC is
         // needed. Validate every descriptor without suppressing valid siblings.
         Ok(files
             .iter()

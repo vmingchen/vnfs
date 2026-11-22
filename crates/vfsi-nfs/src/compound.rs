@@ -603,6 +603,15 @@ impl Compound {
         self.push(op);
     }
 
+    pub(crate) fn commit(&mut self, offset: u64, count: u32) {
+        self.push(nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_COMMIT,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                opcommit: COMMIT4args { offset, count },
+            },
+        });
+    }
+
     /// NFSv4.2 COPY. The saved filehandle is the source and the current
     /// filehandle is the destination.
     pub fn copy(
@@ -1258,6 +1267,7 @@ fn response_op_status(ro: &nfs_resop4) -> u32 {
             nfs_opnum4_NFS4_OP_OPEN => ro.nfs_resop4_u.opopen.status,
             nfs_opnum4_NFS4_OP_READ => ro.nfs_resop4_u.opread.status,
             nfs_opnum4_NFS4_OP_WRITE => ro.nfs_resop4_u.opwrite.status,
+            nfs_opnum4_NFS4_OP_COMMIT => ro.nfs_resop4_u.opcommit.status,
             nfs_opnum4_NFS4_OP_COPY => ro.nfs_resop4_u.opcopy.cr_status,
             nfs_opnum4_NFS4_OP_CLOSE => ro.nfs_resop4_u.opclose.status,
             nfs_opnum4_NFS4_OP_EXCHANGE_ID => ro.nfs_resop4_u.opexchange_id.eir_status,
@@ -1449,6 +1459,12 @@ impl CompoundRes {
         // SAFETY: expect_op checks the operation tag and success status, so the selected
         // result union is initialized; its storage is owned by this reply.
         unsafe { &ro.nfs_resop4_u.opwrite.WRITE4res_u.resok4 }
+    }
+
+    pub(crate) fn commit_verifier(&self, i: usize) -> verifier4 {
+        let ro = self.expect_op(i, nfs_opnum4_NFS4_OP_COMMIT, "COMMIT");
+        // SAFETY: expect_op verifies the discriminator and success status.
+        unsafe { ro.nfs_resop4_u.opcommit.COMMIT4res_u.resok4.writeverf }
     }
 
     /// The successful NFSv4.2 COPY result at resop `i`.

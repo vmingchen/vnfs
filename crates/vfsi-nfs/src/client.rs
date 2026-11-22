@@ -420,6 +420,62 @@ fn validate_copy_result(op: &CopyOp, reply: &COPY4resok) -> vfsi_core::OpResult<
     Ok(count)
 }
 
+struct PendingCopyCommit<'a> {
+    input: usize,
+    destination: &'a NfsFh,
+    offset: u64,
+    count: u32,
+    verifier: verifier4,
+}
+
+impl<'a> PendingCopyCommit<'a> {
+    fn from_reply(input: usize, op: &'a CopyOp, reply: &COPY4resok, count: u64) -> Option<Self> {
+        (count != 0 && reply.cr_response.wr_committed != stable_how4_FILE_SYNC4).then(|| Self {
+            input,
+            destination: &op.dst_fh,
+            offset: op.dst_offset,
+            // COMMIT count zero flushes from offset through EOF. Use it for
+            // copied ranges too large for a single u32 count.
+            count: u32::try_from(count).unwrap_or(0),
+            verifier: reply.cr_response.wr_writeverf,
+        })
+    }
+}
+
+fn confirm_copy_commits(
+    results: &mut [vfsi_core::OpResult<u64>],
+    commits: &[PendingCopyCommit<'_>],
+    replies: vfsi_core::VecResult<verifier4>,
+) {
+    let replies = vfsi_core::internal::vec_result_slots(replies, commits.len());
+    for (commit, reply) in commits.iter().zip(replies) {
+        let cause = match reply {
+            Ok(verifier) if verifier == commit.verifier => continue,
+            Ok(_) => vfsi_core::internal::errors::invalid_reply(
+                "NFS COPY and COMMIT write verifiers differ",
+            ),
+            Err(error) => error.into_cause(),
+        };
+        // COPY already ran. Even an unsent COMMIT cannot prove the
+        // destination is unchanged or safe to copy again.
+        results[commit.input] = Err(vfsi_core::OpError::unknown(cause, None));
+    }
+}
+
+fn scalar_copy_result(results: vfsi_core::VecResult<u64>) -> RpcResult<u64> {
+    if let Ok(items) = &results
+        && let [Err(error)] = items.as_slice()
+        && error.state() == vfsi_core::FailureState::Unknown
+    {
+        let cause = error.cause();
+        return Err(RpcError::transport_with_kind(
+            vfsi_core::transport_kind(cause).unwrap_or(vfsi_core::TransportKind::Other),
+            format!("COPY completion is indeterminate: {cause}"),
+        ));
+    }
+    collect_rpc_results(results, 1).map(|mut results| results.remove(0))
+}
+
 fn readdir_response_limits(
     response_bytes: usize,
     operations: usize,
@@ -4521,9 +4577,10 @@ impl NfsClient {
 
     /// Copy bytes entirely on an NFSv4.2 server. The source filehandle is
     /// saved and the destination is current as required by RFC 7862.
+    /// An indeterminate COPY is reported as an RPC error even when the
+    /// underlying COMMIT supplied a status. The destination may have changed.
     pub fn copy(&mut self, op: &CopyOp) -> RpcResult<u64> {
-        collect_rpc_results(self.copy_many(std::slice::from_ref(op)), 1)
-            .map(|mut results| results.remove(0))
+        scalar_copy_result(self.copy_many(std::slice::from_ref(op)))
     }
 
     /// Issue multiple COPY operations in as few compounds as the negotiated
@@ -4548,7 +4605,8 @@ impl NfsClient {
                 prepared.push((index, op));
             }
         }
-        let result = self.fixed_results::<4, _, _>(
+        let mut commits = Vec::new();
+        let mut result = self.fixed_results::<4, _, _>(
             b"copyv",
             &prepared,
             usize::MAX,
@@ -4566,9 +4624,29 @@ impl NfsClient {
                 );
             },
             |reply, local, input| {
-                validate_copy_result(prepared[input].1, reply.copy(4 + 4 * local))
+                let op = prepared[input].1;
+                let reply = reply.copy(4 + 4 * local);
+                let count = validate_copy_result(op, reply)?;
+                commits.extend(PendingCopyCommit::from_reply(input, op, reply, count));
+                Ok(count)
             },
         );
+        if !commits.is_empty()
+            && let Ok(results) = &mut result
+        {
+            let replies = self.fixed_results::<2, _, _>(
+                b"copy_commit",
+                &commits,
+                usize::MAX,
+                |_| 0,
+                |compound, commit, _| {
+                    compound.putfh(&commit.destination.as_nfs_fh());
+                    compound.commit(commit.offset, commit.count);
+                },
+                |reply, local, _| Ok(reply.commit_verifier(2 + 2 * local)),
+            );
+            confirm_copy_commits(results, &commits, replies);
+        }
         if rejected.is_empty() {
             return result;
         }

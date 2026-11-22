@@ -22,9 +22,8 @@ fn copy_reply(count: u64) -> COPY4resok {
     }
 }
 
-#[test]
-fn copy_ack_validation_keeps_short_eof_and_rejects_untrackable_effects() {
-    let mut op = CopyOp {
+fn copy_op() -> CopyOp {
+    CopyOp {
         src_fh: NfsFh::test_from_bytes([1]),
         dst_fh: NfsFh::test_from_bytes([2]),
         src_stateid: stateid4 {
@@ -38,7 +37,12 @@ fn copy_ack_validation_keeps_short_eof_and_rejects_untrackable_effects() {
         src_offset: 4,
         dst_offset: 8,
         count: 3,
-    };
+    }
+}
+
+#[test]
+fn copy_ack_validation_keeps_short_eof_and_rejects_untrackable_effects() {
+    let mut op = copy_op();
     for count in [0, 2, 3] {
         for stable in [
             stable_how4_UNSTABLE4,
@@ -48,6 +52,16 @@ fn copy_ack_validation_keeps_short_eof_and_rejects_untrackable_effects() {
             let mut reply = copy_reply(count);
             reply.cr_response.wr_committed = stable;
             assert_eq!(validate_copy_result(&op, &reply).unwrap(), count);
+            let pending = PendingCopyCommit::from_reply(0, &op, &reply, count);
+            assert_eq!(
+                pending.is_some(),
+                count != 0 && stable != stable_how4_FILE_SYNC4
+            );
+            if let Some(pending) = pending {
+                assert_eq!(pending.offset, op.dst_offset);
+                assert_eq!(pending.destination, &op.dst_fh);
+                assert_eq!(u64::from(pending.count), count);
+            }
         }
     }
     for field in 0..6 {
@@ -91,6 +105,122 @@ fn copy_ack_validation_keeps_short_eof_and_rejects_untrackable_effects() {
             FailureState::Unknown
         );
     }
+}
+
+#[test]
+fn copy_commit_uses_the_server_verifier_and_preserves_stable_siblings() {
+    let op = copy_op();
+    let mut reply = copy_reply(2);
+    reply.cr_response.wr_committed = stable_how4_UNSTABLE4;
+    reply.cr_response.wr_writeverf = [7; 8];
+    let commits = [
+        PendingCopyCommit::from_reply(0, &op, &reply, u64::from(u32::MAX) + 1).unwrap(),
+        PendingCopyCommit::from_reply(2, &op, &reply, 2).unwrap(),
+        PendingCopyCommit::from_reply(3, &op, &reply, 2).unwrap(),
+    ];
+    assert_eq!(commits[0].count, 0); // A large copied range commits through EOF.
+    let mut result = vec![Ok(u64::from(u32::MAX) + 1), Ok(3), Ok(2), Ok(2)];
+    confirm_copy_commits(
+        &mut result,
+        &commits,
+        Ok(vec![
+            Ok([7; 8]),
+            Ok([9; 8]),
+            Err(vfsi_core::OpError::not_attempted(
+                std::io::Error::from_raw_os_error(libc::EIO),
+            )),
+        ]),
+    );
+    assert_eq!(*result[0].as_ref().unwrap(), u64::from(u32::MAX) + 1);
+    assert_eq!(*result[1].as_ref().unwrap(), 3);
+    let mismatch = result[2].as_ref().unwrap_err();
+    assert_eq!(mismatch.state(), FailureState::Unknown);
+    assert_eq!(
+        vfsi_core::transport_kind(mismatch.cause()),
+        Some(TransportKind::InvalidReply)
+    );
+    let unsent = result[3].as_ref().unwrap_err();
+    assert_eq!(unsent.state(), FailureState::Unknown);
+    assert_eq!(unsent.cause().raw_os_error(), Some(libc::EIO));
+}
+
+#[test]
+fn copy_commit_compound_encodes_destination_and_decodes_verifier() {
+    use crate::rpc::{
+        RpcClient,
+        test_support::{accepted_reply, compound_operations, read_record},
+    };
+    use std::{net::TcpListener, time::Duration};
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let peer = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let request = read_record(&mut socket).unwrap();
+        let expected = [
+            nfs_opnum4_NFS4_OP_PUTFH,
+            1,
+            0x02000000, // One-byte destination handle plus XDR padding.
+            nfs_opnum4_NFS4_OP_COMMIT,
+            1, // High word of the destination offset.
+            8,
+            2,
+        ]
+        .map(u32::to_be_bytes)
+        .concat();
+        assert_eq!(compound_operations(&request), expected);
+        let mut payload = [
+            0u32,
+            0,
+            2,
+            nfs_opnum4_NFS4_OP_PUTFH,
+            0,
+            nfs_opnum4_NFS4_OP_COMMIT,
+            0,
+        ]
+        .map(u32::to_be_bytes)
+        .concat();
+        payload.extend_from_slice(&[7; 8]);
+        accepted_reply(&mut socket, &request, &payload);
+    });
+    let rpc = RpcClient::connect_with_timeouts(
+        &address.to_string(),
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let op = copy_op();
+    let mut compound = Compound::new();
+    compound.putfh(&op.dst_fh.as_nfs_fh());
+    compound.commit((1 << 32) + 8, 2);
+    let reply = compound.call(&rpc).unwrap();
+    assert_eq!(reply.commit_verifier(1), [7; 8]);
+    peer.join().unwrap();
+}
+
+#[test]
+fn copy_rpc_error_keeps_commit_failure_distinct_from_definite_rejection() {
+    let unsupported = || {
+        vfsi_core::internal::errors::from_status(vfsi_core::StatusCode::Nfs(
+            nfsstat4_NFS4ERR_NOTSUPP,
+        ))
+    };
+    let error = scalar_copy_result(Ok(vec![Err(vfsi_core::OpError::unknown(
+        unsupported(),
+        None,
+    ))]))
+    .unwrap_err();
+    assert!(error.is_transport());
+    assert!(error.message.contains("indeterminate"));
+    let rejected = scalar_copy_result(Ok(vec![Err(vfsi_core::OpError::failed(
+        unsupported(),
+        None,
+    ))]))
+    .unwrap_err();
+    assert_eq!(rejected.status, nfsstat4_NFS4ERR_NOTSUPP);
 }
 
 // This test sends real COPYs; ordinary distro-Ganesha jobs need not support COPY.
