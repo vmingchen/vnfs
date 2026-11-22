@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 
 
 LIBRARY_NAME = "libvfsi_c.dylib" if sys.platform == "darwin" else "libvfsi_c.so"
@@ -36,6 +37,19 @@ def verify_sources(metadata):
             raise ValueError(f"non-registry dependency: {package['name']} {source}")
 
 
+def _replace_library(source, destination):
+    destination = Path(destination)
+    # Publish a new inode so processes with the previous library mapped
+    # can continue running while new loads see the complete replacement.
+    with tempfile.TemporaryDirectory(
+        prefix=".vfsi-install-", dir=destination.parent
+    ) as temporary:
+        staged = Path(temporary) / destination.name
+        shutil.copy2(source, staged)
+        os.replace(staged, destination)
+    return str(destination)
+
+
 def install(source, output, prefix, metadata, runtime_dir=None):
     include, library = prefix / "include", prefix / "lib"
     include.mkdir(parents=True, exist_ok=True)
@@ -44,7 +58,6 @@ def install(source, output, prefix, metadata, runtime_dir=None):
         raise ValueError("SDK source is missing include/vfsi.h")
     for header in (source / "include").glob("*.h"):
         shutil.copy2(header, include / header.name)
-    shutil.copy2(output / LIBRARY_NAME, library / LIBRARY_NAME)
     for name in ("LICENSE-MIT", "LICENSE-APACHE"):
         notice = source / name
         if notice.is_file():
@@ -52,7 +65,11 @@ def install(source, output, prefix, metadata, runtime_dir=None):
     if runtime_dir is None:
         runtime_dir = output / "vfsi-libs"
     if runtime_dir.is_dir() and any(runtime_dir.iterdir()):
-        shutil.copytree(runtime_dir, library / "vfsi-libs", dirs_exist_ok=True)
+        shutil.copytree(
+            runtime_dir, library / "vfsi-libs", dirs_exist_ok=True,
+            copy_function=_replace_library,
+        )
+    _replace_library(output / LIBRARY_NAME, library / LIBRARY_NAME)
     versions = {p["name"]: p["version"] for p in dependencies(metadata)
                 if p["name"].startswith(("vfsi-", "vnfs", "libntirpc", "nfsv41"))}
     (prefix / "versions.json").write_text(json.dumps(versions, indent=2, sort_keys=True) + "\n")

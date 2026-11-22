@@ -46,6 +46,34 @@ class SdkTests(unittest.TestCase):
             self.assertIn('"vfsi-c": "0.3.12"', (prefix / "versions.json").read_text())
             self.assertNotIn("vnfs", (prefix / "versions.json").read_text())
 
+    def test_reinstall_replaces_main_and_runtime_library_inodes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source, output, prefix = root / "source", root / "output", root / "sdk"
+            (source / "include").mkdir(parents=True)
+            (source / "include/vfsi.h").write_text("header")
+            (output / "vfsi-libs").mkdir(parents=True)
+            main = Path(sdk.LIBRARY_NAME)
+            runtime = Path("vfsi-libs") / "libntirpc.so"
+            for name in (main, runtime):
+                (output / name).write_bytes(b"old")
+            metadata = {
+                "resolve": {"root": "sdk", "nodes": [{"id": "sdk", "dependencies": []}]},
+                "packages": [{"id": "sdk", "name": "vfsi-c", "version": "0.3.12"}],
+            }
+            sdk.install(source, output, prefix, metadata)
+            library = prefix / "lib"
+            with (library / main).open("rb") as old_main, (library / runtime).open(
+                "rb"
+            ) as old_runtime:
+                for name in (main, runtime):
+                    (output / name).write_bytes(b"upgraded contents")
+                sdk.install(source, output, prefix, metadata)
+                self.assertEqual(old_main.read(), b"old")
+                self.assertEqual(old_runtime.read(), b"old")
+                for name in (main, runtime):
+                    self.assertEqual((library / name).read_bytes(), b"upgraded contents")
+
     def test_build_installs_only_unique_cargo_reported_root_library(self):
         for outcome in ("shared", "static", "legacy", "missing", "ambiguous"):
             with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as temp:
