@@ -412,7 +412,8 @@ impl NfsRecoveryPolicy {
     pub const fn max_backoff(self) -> Duration {
         self.max_backoff
     }
-    /// Set the retry window; zero still permits the first attempt.
+    /// Limit when another attempt can start. Zero still permits the first
+    /// attempt. An in-flight attempt uses the configured connect/RPC timeouts.
     pub fn with_max_elapsed(mut self, value: Duration) -> Self {
         self.max_elapsed = value;
         self

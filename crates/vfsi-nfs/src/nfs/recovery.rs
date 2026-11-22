@@ -2,6 +2,41 @@
 
 use super::*;
 
+fn retry_reconnect(
+    policy: NfsRecoveryPolicy,
+    elapsed: impl Fn() -> Duration,
+    mut sleep: impl FnMut(Duration),
+    mut attempt: impl FnMut() -> VfResult<()>,
+) -> VfResult<()> {
+    let mut remaining_attempts = policy.reconnect_attempts();
+    let mut backoff = policy.initial_backoff;
+    loop {
+        let Err(error) = attempt() else {
+            return Ok(());
+        };
+        remaining_attempts -= 1;
+        let remaining_time = policy.max_elapsed.saturating_sub(elapsed());
+        let identity_changed = vfsi_core::native_status(&error)
+            == Some(vfsi_core::StatusCode::Errno(libc::ESTALE as u32));
+        if remaining_attempts == 0 || remaining_time.is_zero() || identity_changed {
+            return Err(error);
+        }
+        let delay = backoff.min(policy.max_backoff).min(remaining_time);
+        if !delay.is_zero() {
+            sleep(delay);
+        }
+        // Sleeping to the deadline (or an oversleep) must not start a fresh
+        // session establishment with its own connection and RPC timeouts.
+        if elapsed() >= policy.max_elapsed {
+            return Err(error);
+        }
+        backoff = backoff
+            .checked_mul(2)
+            .unwrap_or(policy.max_backoff)
+            .min(policy.max_backoff);
+    }
+}
+
 impl Drop for NfsVecFs {
     /// `tc_deinit()`: close every open file so the client has no state left,
     /// allowing the session teardown to destroy the clientid on the server.
@@ -376,46 +411,19 @@ impl NfsVecFs {
             mount.check_credentials()?;
         }
         self.notify(NfsEvent::ReconnectStarted);
-        let attempts = self.recovery_policy.reconnect_attempts();
-        let mut backoff = self.recovery_policy.initial_backoff;
         let started = std::time::Instant::now();
-        let mut last = None;
-        for attempt in 0..attempts {
-            match self.reconnect_once() {
-                Ok(()) => {
-                    self.notify(NfsEvent::ReconnectSucceeded);
-                    return Ok(());
-                }
-                Err(error) => {
-                    let identity_changed = vfsi_core::native_status(&error)
-                        == Some(vfsi_core::StatusCode::Errno(libc::ESTALE as u32));
-                    last = Some(error);
-                    // A different object at the old pathname is permanent,
-                    // not a server restart/grace condition to back off over.
-                    if identity_changed {
-                        break;
-                    }
-                }
+        let mut error = match retry_reconnect(
+            self.recovery_policy,
+            || started.elapsed(),
+            std::thread::sleep,
+            || self.reconnect_once(),
+        ) {
+            Ok(()) => {
+                self.notify(NfsEvent::ReconnectSucceeded);
+                return Ok(());
             }
-            let elapsed = started.elapsed();
-            if attempt + 1 >= attempts || elapsed >= self.recovery_policy.max_elapsed {
-                break;
-            }
-            if !backoff.is_zero() {
-                let remaining = self.recovery_policy.max_elapsed.saturating_sub(elapsed);
-                std::thread::sleep(backoff.min(self.recovery_policy.max_backoff).min(remaining));
-                backoff = backoff
-                    .checked_mul(2)
-                    .unwrap_or(self.recovery_policy.max_backoff)
-                    .min(self.recovery_policy.max_backoff);
-            }
-        }
-        let mut error = last.unwrap_or_else(|| {
-            vfsi_core::internal::errors::transport(
-                vfsi_core::TransportKind::Other,
-                "NFS reconnect failed",
-            )
-        });
+            Err(error) => error,
+        };
         if self.observer.is_some() {
             let source = vfsi_core::internal::errors::share_in_place(&mut error);
             self.notify(NfsEvent::ReconnectFailed {
@@ -566,5 +574,39 @@ mod vector_recovery_tests {
                 .collect::<Vec<_>>(),
             [&(7), &(8), &(9), &(10)]
         );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn reconnect_retry_window_stops_before_starting_another_attempt() {
+    use std::cell::Cell;
+    let now = Cell::new(Duration::ZERO);
+    let attempt_count = Cell::new(0);
+
+    for (window, oversleep, expected_attempts) in [(0, 0, 1), (5, 0, 1), (10, 8, 1), (10, 0, 2)] {
+        now.set(Duration::ZERO);
+        attempt_count.set(0);
+        let policy = NfsRecoveryPolicy::new()
+            .with_initial_backoff(Duration::from_millis(5))
+            .with_max_elapsed(Duration::from_millis(window));
+        let result = retry_reconnect(
+            policy,
+            || now.get(),
+            |delay| now.set(now.get() + delay + Duration::from_millis(oversleep)),
+            || {
+                attempt_count.set(attempt_count.get() + 1);
+                if attempt_count.get() == 2 {
+                    return Ok(());
+                }
+                Err(std::io::Error::from_raw_os_error(libc::ETIMEDOUT))
+            },
+        );
+        assert_eq!(attempt_count.get(), expected_attempts);
+        if expected_attempts == 1 {
+            assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::ETIMEDOUT));
+        } else {
+            result.unwrap();
+        }
     }
 }
