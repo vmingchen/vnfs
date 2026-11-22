@@ -26,6 +26,7 @@ from fsspec.implementations.cached import CachingFileSystem, SimpleCacheFileSyst
 
 from ._caching import _Nfs4MMapCache
 from ._fs import (
+    _SCALAR_CACHE_SETUP,
     _close_reader_on_exit,
     _enter_individually,
     _handle_identity,
@@ -345,6 +346,14 @@ def _mark_compatible_cache(cache_fs, path, file):
         if changed:
             _save_writable_metadata(cache_fs)
         file._vfsi_cache_generation = _generation(detail)
+
+
+def _close_failed_scalar_setup(file, close, exc_type, error, traceback):
+    # fsspec can attach an mmap and replace close before metadata saving fails.
+    cache = getattr(file, "cache", None)
+    if type(cache) is MMapCache:
+        cache.__class__ = _Nfs4MMapCache
+    _close_reader_on_exit(file, exc_type, error, traceback, close=close)
 
 
 def _close_and_update_complete_blocks(cache_fs, file, close):
@@ -946,17 +955,27 @@ def _install_fsspec_blockcache_wrappers():
             normalized = _cache_path(cache_fs, path)
             detail = _reset_stale_generation(cache_fs, normalized)
             args, kwargs = _reuse_generation_blocksize(detail, args, kwargs)
-            file = original_open(cache_fs, path, *args, **kwargs)
-            try:
+            with ExitStack() as setup:
+                opened = None
+
+                def track_open(file):
+                    nonlocal opened
+                    opened = file
+                    setup.push(partial(_close_failed_scalar_setup, file, file.close))
+
+                token = _SCALAR_CACHE_SETUP.set((cache_fs.fs, normalized, track_open))
+                try:
+                    file = original_open(cache_fs, path, *args, **kwargs)
+                finally:
+                    _SCALAR_CACHE_SETUP.reset(token)
+                if file is not opened:
+                    setup.push(partial(_close_reader_on_exit, file))
                 if getattr(file, "_raw", None) is None:
-                    return _OwnedStream(file, file, fs=cache_fs.fs, path=normalized)
-                _mark_compatible_cache(cache_fs, normalized, file)
-            except BaseException as primary:
-                _close_reader_on_exit(
-                    file, type(primary), primary, primary.__traceback__
-                )
-                raise
-            return file
+                    file = _OwnedStream(file, file, fs=cache_fs.fs, path=normalized)
+                else:
+                    _mark_compatible_cache(cache_fs, normalized, file)
+                setup.pop_all()
+                return file
 
     def close_and_update_with_compat(cache_fs, file, close):
         if not _is_compatible_backend(cache_fs):

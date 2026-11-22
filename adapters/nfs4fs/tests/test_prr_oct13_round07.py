@@ -7,6 +7,7 @@ import weakref
 
 import fsspec
 import pytest
+from fsspec.caching import MMapCache
 from fsspec.core import OpenFile
 from vfsi_fsspec import _blockcache
 
@@ -162,3 +163,86 @@ def test_successful_cache_group_retains_resources_until_close(
     for file in files:
         file.close()
     assert not dummy_fs._client._fds
+
+
+@pytest.mark.parametrize("phase", ["mmap", "save"])
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_scalar_upstream_cache_setup_releases_pinned_descriptor(
+    dummy_fs, tmp_path, monkeypatch, phase, close_fails
+):
+    dummy_fs.pipe_file("/a", b"content")
+    cached = cached_fs(dummy_fs, tmp_path)
+    primary = OSError(errno.ENOSPC, "cache setup ran out of space")
+    cleanup = OSError(errno.EIO, "native CLOSE failed")
+    makefile = MMapCache._makefile
+    mappings = []
+
+    def make_mapping(cache):
+        if phase == "mmap":
+            raise primary
+        mapping = makefile(cache)
+        mappings.append(mapping)
+        return mapping
+
+    def fail_save(*args):
+        raise primary
+
+    def fail_close(*args):
+        raise cleanup
+
+    with monkeypatch.context() as patch:
+        patch.setattr(MMapCache, "_makefile", make_mapping)
+        if phase == "save":
+            patch.setattr(cached._metadata, "save", fail_save)
+        if close_fails:
+            patch.setattr(dummy_fs._client, "close", fail_close)
+        with pytest.raises(OSError) as error:
+            cached.open("/a", "rb")
+        assert error.value is primary
+        if mappings:
+            assert mappings[0].closed
+        if close_fails:
+            assert error.value.__cause__ is cleanup
+            assert dummy_fs._client._deferred_close
+        else:
+            assert not dummy_fs._client._fds
+
+    dummy_fs.info("/a")
+    assert not dummy_fs._client._fds
+    with cached.open("/a", "rb") as file:
+        assert file.read() == b"content"
+
+
+def test_scalar_cache_accepts_target_open_override_with_explicit_signature(
+    dummy_fs, tmp_path
+):
+    class CustomTarget(type(dummy_fs)):
+        def _open(
+            self,
+            path,
+            mode,
+            block_size,
+            autocommit,
+            cache_options,
+            cache_type,
+            size=None,
+        ):
+            return super()._open(
+                path,
+                mode=mode,
+                block_size=block_size,
+                autocommit=autocommit,
+                cache_options=cache_options,
+                cache_type=cache_type,
+                size=size,
+            )
+
+    with CustomTarget(
+        backend="dummy",
+        dummy_root=str(tmp_path / "custom"),
+        skip_instance_cache=True,
+    ) as target:
+        target.pipe_file("/a", b"content")
+        with cached_fs(target, tmp_path).open("/a", "rb") as file:
+            assert file.read() == b"content"
+        assert not target._client._fds

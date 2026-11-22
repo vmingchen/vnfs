@@ -38,6 +38,7 @@ __all__ = ["VfsiFile", "VfsiFileSystem"]
 
 _MEMORY_PATH = "<memory>"
 _OPERATION_WRITERS = ContextVar("vfsi_operation_writers", default=None)
+_SCALAR_CACHE_SETUP = ContextVar("vfsi_scalar_cache_setup", default=None)
 _ERR_SAME_FILE = 0xFFFF_FFFD
 _ERR_UNSUPPORTED = 0xFFFF_FFFE
 
@@ -290,12 +291,12 @@ def _stale_handle_error(path):
     return OSError(errno.ESTALE, "cannot safely restore the original file handle", path)
 
 
-def _close_reader_on_exit(reader, exc_type, primary_error, traceback):
+def _close_reader_on_exit(reader, exc_type, primary_error, traceback, *, close=None):
     """Preserve file failures and retain native cleanup ownership on exit."""
     raw = getattr(reader, "_raw", reader)
     fd = getattr(raw, "_fd", None)
     try:
-        reader.close()
+        (reader.close if close is None else close)()
     except BaseException as cleanup_error:
         if fd is not None:
             group = getattr(reader, "_buffer_group", None)
@@ -5890,6 +5891,14 @@ class VfsiFileSystem(AbstractFileSystem):
                 defer_cache=_defer_cache,
                 identity=identity,
             )
+            setup = _SCALAR_CACHE_SETUP.get()
+            if (
+                setup is not None
+                and setup[0] is self
+                and setup[1] == internal
+                and base_mode == "r"
+            ):
+                setup[2](file)
             return file
         except BaseException:
             if fd is not None:
