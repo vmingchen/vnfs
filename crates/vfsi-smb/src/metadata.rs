@@ -113,7 +113,10 @@ impl SmbVecFs {
                 Some(tree_id),
             ))
             .map_err(|e| smb_error(e, 0))?;
-        require_status(&frame, Command::SetInfo, 0)
+        require_status(&frame, Command::SetInfo, 0)?;
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::AfterSmbSetSize)?;
+        Ok(())
     }
 
     pub(super) fn filetime_value(seconds: i64, nanoseconds: u32, _index: usize) -> VfResult<u64> {
@@ -208,9 +211,13 @@ impl SmbVecFs {
         result.and(close)
     }
 
-    pub(super) fn set_size_encoded_path(&mut self, path: &str, size: u64) -> VfResult<()> {
+    pub(super) fn with_temporary_write_handle(
+        &mut self,
+        path: &str,
+        update: impl FnOnce(&mut Self, FileId) -> VfResult<()>,
+    ) -> VfResult<()> {
         let (file_id, _) = self.raw_open(path, libc::O_WRONLY)?;
-        let result = self.set_size_handle(file_id, size);
+        let result = update(self, file_id);
         let close = self.close_temporary_handle(file_id);
         result.and(close)
     }

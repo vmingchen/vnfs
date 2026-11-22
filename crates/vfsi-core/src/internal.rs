@@ -333,6 +333,7 @@ pub mod faults {
             continuation: bool,
         },
         BeforeSizeQuery,
+        AfterSmbSetSize,
         BeforeFollowSymlink {
             index: usize,
         },

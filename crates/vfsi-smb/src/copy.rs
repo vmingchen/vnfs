@@ -568,7 +568,10 @@ mod benchmarks {
                                             size,
                                         ))
                                         .map_err(|error| smb_error(error, None))?;
-                                    backend.set_size_encoded_path(&destination, copied)
+                                    backend
+                                        .with_temporary_write_handle(&destination, |backend, id| {
+                                            backend.set_size_handle(id, copied)
+                                        })
                                 })
                                 .collect()
                         };

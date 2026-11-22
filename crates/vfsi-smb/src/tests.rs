@@ -1919,6 +1919,59 @@ fn live_concurrent_write_results_isolate_rejections_and_preserve_wire_failures()
 
 #[cfg(feature = "test-faults")]
 #[test]
+fn live_setattrs_size_and_times_use_one_retained_object() {
+    use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
+
+    struct ReplacePath {
+        source: PathBuf,
+        saved: PathBuf,
+    }
+    impl FaultInjector for ReplacePath {
+        fn check(&self, point: &OpenFaultPoint) -> VfResult<()> {
+            if *point == OpenFaultPoint::AfterSmbSetSize {
+                std::fs::rename(&self.source, &self.saved).unwrap();
+                std::fs::write(&self.source, b"replacement").unwrap();
+            }
+            Ok(())
+        }
+    }
+
+    let Some(mut fs) = sync_test_backend() else {
+        return;
+    };
+    let Ok(backing) = std::env::var("VFSI_SMB_LOCAL_ROOT") else {
+        assert_ne!(std::env::var("VFSI_SMB_REQUIRED").as_deref(), Ok("1"));
+        return;
+    };
+    let path = PathBuf::from(format!("/setattrs-retained-{}", std::process::id()));
+    let source = Path::new(&backing).join(path.strip_prefix("/").unwrap());
+    let saved = source.with_extension("saved");
+    std::fs::write(&source, b"original").unwrap();
+    let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+    fs.set_fault_injector(Arc::new(ReplacePath {
+        source: source.clone(),
+        saved: saved.clone(),
+    }));
+
+    let updates = [SetAttrsOp::new(vfsi_core::Target::Path(&path))
+        .len(2)
+        .modified(modified)];
+    let result = fs.vsetattrs_impl(&updates).unwrap();
+    let source_data = std::fs::read(&source).unwrap();
+    let saved_data = std::fs::read(&saved).unwrap();
+    let source_modified = std::fs::metadata(&source).unwrap().modified().unwrap();
+    let saved_modified = std::fs::metadata(&saved).unwrap().modified().unwrap();
+    std::fs::remove_file(source).unwrap();
+    std::fs::remove_file(saved).unwrap();
+    assert!(result[0].is_ok(), "{:?}", result[0]);
+    assert_eq!(source_data, b"replacement");
+    assert_eq!(saved_data, b"or");
+    assert_eq!(saved_modified, modified);
+    assert_ne!(source_modified, modified);
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
 fn live_setattrs_isolates_unsupported_missing_and_closed_inputs() {
     use vfsi_core::FailureState;
     let Some(mut fs) = sync_test_backend() else {

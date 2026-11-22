@@ -438,47 +438,36 @@ impl VectorBackend for SmbVecFs {
                         vfsi_core::internal::errors::from_shared(cause),
                     ));
                 }
-                (|| {
-                    if attrs.masks.contains(AttrMask::SIZE) {
-                        match attrs.file {
-                            FileOperand::Fd(_) => {
-                                let id = retained.expect("descriptor validated before dispatch");
-                                self.set_size_handle(id, attrs.size)?;
-                            }
-                            _ => {
-                                self.set_size_encoded_path(
-                                    path.as_deref().expect("path preflighted"),
-                                    attrs.size,
-                                )?;
-                            }
-                        }
+                let size = attrs.masks.contains(AttrMask::SIZE).then_some(attrs.size);
+                let atime = attrs
+                    .masks
+                    .contains(AttrMask::ATIME)
+                    .then_some((attrs.atime_sec, attrs.atime_nsec));
+                let mtime = attrs
+                    .masks
+                    .contains(AttrMask::MTIME)
+                    .then_some((attrs.mtime_sec, attrs.mtime_nsec));
+                let update_handle = |backend: &mut Self, id| {
+                    if let Some(size) = size {
+                        backend.set_size_handle(id, size)?;
                     }
-                    if attrs.masks.intersects(AttrMask::ATIME | AttrMask::MTIME) {
-                        let atime = attrs
-                            .masks
-                            .contains(AttrMask::ATIME)
-                            .then_some((attrs.atime_sec, attrs.atime_nsec));
-                        let mtime = attrs
-                            .masks
-                            .contains(AttrMask::MTIME)
-                            .then_some((attrs.mtime_sec, attrs.mtime_nsec));
-                        match attrs.file {
-                            FileOperand::Fd(_) => {
-                                let id = retained.expect("descriptor validated before dispatch");
-                                self.set_times_handle(id, atime, mtime, index)?;
-                            }
-                            _ => {
-                                self.set_times_path(
-                                    path.as_deref().expect("path preflighted"),
-                                    atime,
-                                    mtime,
-                                    index,
-                                )?;
-                            }
-                        }
+                    if atime.is_some() || mtime.is_some() {
+                        backend.set_times_handle(id, atime, mtime, index)?;
                     }
                     Ok(())
-                })()
+                };
+                if let Some(id) = retained {
+                    update_handle(self, id)
+                } else {
+                    let path = path.as_deref().expect("path preflighted");
+                    if size.is_some() {
+                        // Keep size and timestamps on the same file even if
+                        // the pathname is replaced between SET_INFO calls.
+                        self.with_temporary_write_handle(path, update_handle)
+                    } else {
+                        self.set_times_path(path, atime, mtime, index)
+                    }
+                }
                 .map_err(|mut cause: std::io::Error| {
                     if vfsi_core::transport_kind(&(cause)).is_some() {
                         unavailable = Some(vfsi_core::internal::errors::share_in_place(&mut cause));
