@@ -466,7 +466,7 @@ class _OwnedStream(io.IOBase):
         self._check_open()
         return self._stream.fileno()
 
-    def _read_bounded(self, method, size):
+    def _read_bounded(self, method, size, *, advances=True):
         self._check_open()
         size = -1 if size is None else operator.index(size)
         fs = self._policy_fs
@@ -477,7 +477,16 @@ class _OwnedStream(io.IOBase):
         # decoded result. Never ask a codec to materialize unbounded output.
         bounded = limit + 1 if size < 0 else min(size, limit + 1)
         data = method(bounded)
-        fs._check_read_allocation(len(data), self._read_path)
+        try:
+            fs._check_read_allocation(len(data), self._read_path)
+        except OSError as error:
+            if advances:
+                try:
+                    if self._stream.seekable():
+                        self._stream.seek(self._stream.tell() - len(data))
+                except Exception as rewind_error:
+                    raise error from rewind_error
+            raise
         return data
 
     def read(self, size=-1):
@@ -489,7 +498,9 @@ class _OwnedStream(io.IOBase):
 
     def peek(self, size=0):
         # Codecs treat size as a hint and may return more; check actual bytes.
-        return self._read_bounded(self._stream.peek, operator.index(size))
+        return self._read_bounded(
+            self._stream.peek, operator.index(size), advances=False
+        )
 
     def readline(self, size=-1):
         return self._read_bounded(self._stream.readline, size)
