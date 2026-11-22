@@ -2,71 +2,86 @@ use super::*;
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 
-impl HandleBackend for SmbVecFs {
-    fn vclose_impl(&mut self, files: &[FileOperand]) -> vfsi_core::VecResult<()> {
+impl SmbVecFs {
+    fn close_results<T>(
+        &mut self,
+        files: &[FileOperand],
+        close: impl AsyncFn(usize, Arc<ShareSession>, FileId) -> (Option<T>, vfsi_core::OpResult<()>),
+        mut store_metadata: impl FnMut(usize, T),
+    ) -> vfsi_core::VecResult<()> {
         use vfsi_core::OpError;
         #[cfg(feature = "test-faults")]
         self.inject_open_fault(OpenFaultPoint::BeforeCloseDispatch { index: 0 })?;
         let jobs = files.iter().enumerate().map(|(index, file)| {
+            let close = &close;
             let prepared = file
                 .fd()
                 .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))
                 .and_then(|fd| {
                     self.open_files
                         .get(&fd)
-                        .map(|open| (fd, open.file_id, open.tree.clone()))
+                        .map(|open| (open.file_id, open.tree.clone()))
                         .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))
                 });
-            #[cfg(not(feature = "test-faults"))]
-            let _ = index;
             #[cfg(feature = "test-faults")]
             let injector = self.fault_injector.clone();
             async move {
-                let (fd, file_id, tree) = prepared.map_err(OpError::not_attempted)?;
-                #[cfg(feature = "test-faults")]
-                if let Some(injector) = &injector {
-                    injector
-                        .check(&OpenFaultPoint::BeforeCloseItem { index })
-                        .map_err(OpError::not_attempted)?;
+                let mut metadata = None;
+                let result: vfsi_core::OpResult<()> = async {
+                    let (file_id, tree) = prepared.map_err(OpError::not_attempted)?;
+                    #[cfg(feature = "test-faults")]
+                    if let Some(injector) = &injector {
+                        injector
+                            .check(&OpenFaultPoint::BeforeCloseItem { index })
+                            .map_err(OpError::not_attempted)?;
+                    }
+                    let (captured, closed) = close(index, tree, file_id).await;
+                    metadata = captured;
+                    closed?;
+                    #[cfg(feature = "test-faults")]
+                    if let Some(injector) = &injector {
+                        injector
+                            .check(&OpenFaultPoint::AfterCloseReply { index })
+                            .map_err(|error| OpError::unknown(error, None))?;
+                    }
+                    Ok(())
                 }
-                tree.close_file(file_id).await?;
-                #[cfg(feature = "test-faults")]
-                if let Some(injector) = &injector {
-                    injector
-                        .check(&OpenFaultPoint::AfterCloseReply { index })
-                        .map_err(|error| OpError::unknown(error, None))?;
-                }
-                Ok::<_, vfsi_core::OpError>(fd)
+                .await;
+                (result, metadata)
             }
         });
         let outcomes = self.runtime.block_on(join_all(jobs));
         Ok(outcomes
             .into_iter()
             .zip(files)
-            .map(|(outcome, file)| {
-                match &outcome {
-                    Ok(fd) => {
-                        self.open_files.remove(fd);
-                    }
-                    Err(error) if error.state() != vfsi_core::FailureState::NotAttempted => {
-                        // No further I/O may use an ID whose CLOSE was attempted.
-                        // The backend retains ownership until original-tree teardown.
-                        if let Some(open) = file.fd().and_then(|fd| self.open_files.remove(&fd)) {
-                            self.deferred_closes.push(DeferredClose::new(
-                                open.tree,
-                                CloseState::NoReplay(open.file_id),
-                            ));
-                        }
-                    }
-                    Err(_) => {}
+            .enumerate()
+            .map(|(index, ((outcome, metadata), file))| {
+                if let Some(metadata) = metadata {
+                    store_metadata(index, metadata);
                 }
-                outcome.map(|_| ())
+                if let Some(fd) = file.fd() {
+                    match &outcome {
+                        Ok(()) => {
+                            self.open_files.remove(&fd);
+                        }
+                        Err(error) if error.state() != vfsi_core::FailureState::NotAttempted => {
+                            // Submitted closes retain ownership until original-tree teardown.
+                            if let Some(open) = self.open_files.remove(&fd) {
+                                self.deferred_closes.push(DeferredClose::new(
+                                    open.tree,
+                                    CloseState::NoReplay(open.file_id),
+                                ));
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+                outcome
             })
             .collect())
     }
 
-    fn vclose_owned_impl(&mut self, files: Vec<FileOperand>) -> vfsi_core::VecResult<()> {
-        let outcomes = self.vclose_impl(&files);
+    fn retain_unsent_closes(&mut self, files: Vec<FileOperand>) {
         // Submitted failures have already moved to NoReplay. Keep cleanup
         // ownership of unsent slots without issuing another CLOSE here.
         for file in files {
@@ -77,6 +92,43 @@ impl HandleBackend for SmbVecFs {
                 ));
             }
         }
+    }
+
+    pub(super) fn close_copy_sources(
+        &mut self,
+        files: Vec<FileOperand>,
+        reads: &[vfsi_core::OpResult<Vec<u8>>],
+        store_identity: impl FnMut(usize, VfResult<vfsi_core::FsObjId>),
+    ) -> vfsi_core::VecResult<()> {
+        let outcomes = self.close_results(
+            &files,
+            async |index, tree, file_id| {
+                if reads[index].is_ok() {
+                    let (identity, close) = tree.close_copy_source(file_id).await;
+                    (Some(identity), close)
+                } else {
+                    (None, tree.close_file(file_id).await)
+                }
+            },
+            store_identity,
+        );
+        self.retain_unsent_closes(files);
+        outcomes
+    }
+}
+
+impl HandleBackend for SmbVecFs {
+    fn vclose_impl(&mut self, files: &[FileOperand]) -> vfsi_core::VecResult<()> {
+        self.close_results(
+            files,
+            async |_, tree, file_id| (None, tree.close_file(file_id).await),
+            |_, ()| {},
+        )
+    }
+
+    fn vclose_owned_impl(&mut self, files: Vec<FileOperand>) -> vfsi_core::VecResult<()> {
+        let outcomes = self.vclose_impl(&files);
+        self.retain_unsent_closes(files);
         outcomes
     }
 

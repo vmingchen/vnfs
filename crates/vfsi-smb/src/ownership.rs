@@ -75,6 +75,29 @@ impl ShareSession {
         }
     }
 
+    pub(super) async fn close_copy_source(
+        &self,
+        file_id: FileId,
+    ) -> (VfResult<vfsi_core::FsObjId>, OpResult<()>) {
+        if !self.is_current() {
+            // The source bytes are still valid, but the ended session's
+            // handle cannot be used to obtain identity or sent in a CLOSE.
+            return (Err(std::io::Error::from_raw_os_error(libc::EBADF)), Ok(()));
+        }
+        let (identity, close) =
+            super::copy::copy_identity_and_close(&self.connection, self, file_id).await;
+        (
+            identity,
+            close.or_else(|error| {
+                if self.is_current() {
+                    Err(error)
+                } else {
+                    Ok(())
+                }
+            }),
+        )
+    }
+
     pub(super) async fn disconnect(&self) -> VfRes {
         if !self.is_current() {
             return Ok(());

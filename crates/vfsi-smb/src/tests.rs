@@ -1152,6 +1152,101 @@ fn sync_test_files(fs: &mut SmbVecFs, name: &str) -> (PathBuf, Vec<FileOperand>)
     (path, vec![first, second, third])
 }
 
+#[test]
+fn live_copy_sources_collects_identity_in_the_close_request() {
+    use std::sync::atomic::Ordering;
+    let Some(mut fs) = sync_test_backend() else {
+        eprintln!("skipping SMB integration test: VFSI_SMB_SERVER/SHARE not set");
+        return;
+    };
+    let (path, files) = sync_test_files(&mut fs, "copy-source-close");
+    fs.write_raw_impl(&files[0], 0, b"copy").unwrap();
+    assert!(
+        fs.vclose_owned_impl(files)
+            .unwrap()
+            .iter()
+            .all(Result::is_ok)
+    );
+    // Cover two bounded read cohorts using independent opens of one source.
+    let inputs = vec![FileOperand::from_os_path(&path); 33];
+    let mut identities = (0..inputs.len()).map(|_| None).collect::<Vec<_>>();
+    let before = fs.tree.close_submissions.load(Ordering::Relaxed);
+    let reads = fs
+        .read_copy_sources(&inputs, ReadAllOptions::default(), &mut identities)
+        .unwrap();
+    let after = fs.tree.close_submissions.load(Ordering::Relaxed);
+    assert!(fs.open_files.is_empty());
+    assert!(fs.deferred_closes.is_empty());
+    fs.unlink_impl(&path).unwrap();
+
+    assert!(reads.into_iter().all(|read| read.unwrap() == b"copy"));
+    let expected = identities[0].as_ref().unwrap().as_ref().unwrap();
+    assert!(
+        identities
+            .iter()
+            .all(|identity| identity.as_ref().unwrap().as_ref().unwrap() == expected)
+    );
+    assert_eq!(
+        after, before,
+        "copy-source reads should not send standalone CLOSE requests"
+    );
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn live_copy_source_close_lost_reply_keeps_read_progress_and_sibling() {
+    use std::sync::atomic::Ordering;
+    use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+    use vfsi_core::{FailureState, IoProgress, TransportKind};
+
+    let Some(mut fs) = sync_test_backend() else {
+        eprintln!("skipping SMB integration test: VFSI_SMB_SERVER/SHARE not set");
+        return;
+    };
+    let (path, files) = sync_test_files(&mut fs, "copy-source-close-lost");
+    fs.write_raw_impl(&files[0], 0, b"copy").unwrap();
+    assert!(
+        fs.vclose_owned_impl(files)
+            .unwrap()
+            .iter()
+            .all(Result::is_ok)
+    );
+
+    let fault = Arc::new(FaultScript::one(
+        OpenFaultPoint::AfterCloseReply { index: 0 },
+        vfsi_core::internal::errors::transport(
+            TransportKind::Timeout,
+            "copy source CLOSE reply lost",
+        ),
+    ));
+    fs.set_fault_injector(fault.clone());
+    let inputs: [_; 2] = std::array::from_fn(|_| FileOperand::from_os_path(&path));
+    let mut identities = [None, None];
+    let before = fs.tree.close_submissions.load(Ordering::Relaxed);
+    let reads = fs
+        .read_copy_sources(&inputs, ReadAllOptions::default(), &mut identities)
+        .unwrap();
+    assert!(fault.is_consumed());
+    let error = reads[0].as_ref().unwrap_err();
+    assert_eq!(error.state(), FailureState::Unknown);
+    assert_eq!(
+        vfsi_core::transport_kind(error.cause()),
+        Some(TransportKind::Timeout)
+    );
+    let Some(IoProgress::Read(read)) = error.progress() else {
+        panic!("missing confirmed read progress");
+    };
+    assert_eq!(read.data(), Some(b"copy".as_slice()));
+    assert_eq!(reads[1].as_ref().unwrap(), b"copy");
+    assert!(identities[1].as_ref().unwrap().is_ok());
+    assert!(fs.open_files.is_empty());
+    assert_eq!(fs.deferred_closes.len(), 1);
+    assert!(!fs.deferred_closes[0].can_attempt());
+    fs.drain_deferred_closes().unwrap();
+    assert_eq!(fs.tree.close_submissions.load(Ordering::Relaxed), before);
+    fs.unlink_impl(&path).unwrap();
+}
+
 #[cfg(feature = "test-faults")]
 #[test]
 fn live_sync_status_failure_preserves_successful_siblings() {

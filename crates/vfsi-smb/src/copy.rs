@@ -1,10 +1,13 @@
 use super::*;
+use smb2::client::Frame;
 use smb2::client::copy::{CopyChunk, CopyChunkOutcome, ServerSideCopyLimits};
 use smb2::msg::copychunk::{SrvCopychunk, SrvCopychunkCopy, SrvCopychunkResponse};
 use smb2::msg::create::CreateAction;
 use smb2::msg::ioctl::{FSCTL_SRV_COPYCHUNK, IoctlRequest, IoctlResponse, SMB2_0_IOCTL_IS_FSCTL};
 use smb2::pack::{Pack, WriteCursor};
-use vfsi_core::FsObjId;
+use vfsi_core::{FailureState, FsObjId, OpError, OpResult};
+
+const STATUS_INFO_LENGTH_MISMATCH: NtStatus = NtStatus(0xc000_0004);
 
 fn copy_chunks(
     pair: &ExtentPair,
@@ -152,13 +155,8 @@ fn copy_response(
     ))
 }
 
-pub(super) async fn copy_identity(
-    connection: &mut Connection,
-    tree: TreeId,
-    file_id: FileId,
-) -> VfResult<FsObjId> {
-    // Related compound operations share one handle on SMB servers.
-    let requests = [
+fn copy_identity_requests(file_id: FileId) -> [QueryInfoRequest; 2] {
+    [
         (InfoType::File, FILE_INTERNAL_INFORMATION, 8),
         (InfoType::Filesystem, 1, 128),
     ]
@@ -170,28 +168,145 @@ pub(super) async fn copy_identity(
         flags: 0,
         file_id,
         input_buffer: Vec::new(),
-    });
-    let operations = requests.each_ref().map(|request| CompoundOp {
+    })
+}
+
+fn identity_query(request: &QueryInfoRequest, tree: TreeId) -> CompoundOp<'_> {
+    CompoundOp {
         command: Command::QueryInfo,
         body: request,
         tree_id: Some(tree),
         credit_charge: CreditCharge(1),
-    });
+    }
+}
+
+async fn copy_identity(
+    connection: &Connection,
+    tree: TreeId,
+    file_id: FileId,
+) -> VfResult<FsObjId> {
+    // Related operations share a single handle on SMB servers.
+    let requests = copy_identity_requests(file_id);
+    let operations = requests
+        .each_ref()
+        .map(|request| identity_query(request, tree));
     let responses = connection
         .execute_compound(&operations)
         .await
         .map_err(|error| smb_error(error, 0))?;
-    let responses = collect_compound(responses, operations.len())?;
-    let buffers: Vec<_> = responses
-        .into_iter()
-        .map(|response| {
-            require_status(&response, Command::QueryInfo, 0)?;
-            QueryInfoResponse::unpack(&mut ReadCursor::new(&response.body))
-                .map(|response| response.output_buffer)
-                .map_err(|error| smb_error(error, 0))
-        })
-        .collect::<VfResult<_>>()?;
-    decode_copy_identity(&buffers[0], &buffers[1])
+    let [file, volume] = <[_; 2]>::try_from(responses)
+        .map_err(|responses| compound_cardinality_error(responses.len(), operations.len()))?;
+    decode_identity_replies(file, volume)
+}
+
+fn decode_identity_replies(
+    file: Result<Frame, SmbError>,
+    volume: Result<Frame, SmbError>,
+) -> VfResult<FsObjId> {
+    // Preserve waiter errors before interpreting either server status.
+    let file = file.map_err(|error| smb_error(error, 0))?;
+    let volume = volume.map_err(|error| smb_error(error, 0))?;
+    let decode = |response: Frame| {
+        require_status(&response, Command::QueryInfo, 0)?;
+        QueryInfoResponse::unpack(&mut ReadCursor::new(&response.body))
+            .map(|response| response.output_buffer)
+            .map_err(|error| smb_error(error, 0))
+    };
+    decode_copy_identity(&decode(file)?, &decode(volume)?)
+}
+
+pub(super) async fn copy_identity_and_close(
+    connection: &Connection,
+    tree: &ShareSession,
+    file_id: FileId,
+) -> (VfResult<FsObjId>, OpResult<()>) {
+    let [file, volume] = copy_identity_requests(file_id);
+    let close = CloseRequest { flags: 0, file_id };
+    let requests = [
+        identity_query(&file, tree.tree_id),
+        identity_query(&volume, tree.tree_id),
+        CompoundOp {
+            command: Command::Close,
+            body: &close,
+            tree_id: Some(tree.tree_id),
+            credit_charge: CreditCharge(1),
+        },
+    ];
+    let failed = |mut cause| {
+        let shared = vfsi_core::internal::errors::share_in_place(&mut cause);
+        let close = vfsi_core::internal::errors::from_shared(&shared);
+        (Err(cause), Err(OpError::unknown(close, None)))
+    };
+    let (identity, close) = match connection.execute_compound(&requests).await {
+        Ok(replies) => {
+            let [file, volume, close] = match <[_; 3]>::try_from(replies) {
+                Ok(replies) => replies,
+                Err(replies) => {
+                    return failed(compound_cardinality_error(replies.len(), requests.len()));
+                }
+            };
+            decode_copy_source_close(file, volume, close)
+        }
+        // The SDK returned this error before sending any operation in the
+        // chain. Preserve identity support on a server with only two credits.
+        Err(SmbError::CreditStarvation { .. }) => {
+            let identity = copy_identity(connection, tree.tree_id, file_id).await;
+            return (identity, tree.close_file(file_id).await);
+        }
+        Err(error) => return failed(smb_error(error, 0)),
+    };
+    let close = if close
+        .as_ref()
+        .is_err_and(|error| error.state() == FailureState::NotAttempted)
+    {
+        tree.close_file(file_id).await
+    } else {
+        close
+    };
+    (identity, close)
+}
+
+fn decode_copy_source_close(
+    file: Result<Frame, SmbError>,
+    volume: Result<Frame, SmbError>,
+    close: Result<Frame, SmbError>,
+) -> (VfResult<FsObjId>, OpResult<()>) {
+    // A related CLOSE can inherit an explicit rejection from the preceding
+    // QUERY_INFO. Only match explicit query rejections or buffer errors.
+    let query_rejection = volume
+        .as_ref()
+        .ok()
+        .filter(|frame| frame.header.command == Command::QueryInfo)
+        .map(|frame| frame.header.status)
+        .filter(|status| {
+            matches!(
+                *status,
+                NtStatus::NOT_SUPPORTED
+                    | NtStatus::NOT_IMPLEMENTED
+                    | NtStatus::INVALID_INFO_CLASS
+                    | NtStatus::INVALID_DEVICE_REQUEST
+                    | NtStatus::ACCESS_DENIED
+                    | STATUS_INFO_LENGTH_MISMATCH
+                    | NtStatus::BUFFER_TOO_SMALL
+                    | NtStatus::BUFFER_OVERFLOW
+            )
+        });
+    let close = match close {
+        Ok(frame) => {
+            let result = require_status(&frame, Command::Close, 0)
+                .map_err(|cause| wire_failure(cause, None));
+            if close_can_fallback(&result)
+                || frame.header.command == Command::Close
+                    && query_rejection == Some(frame.header.status)
+            {
+                result.map_err(|error| OpError::not_attempted(error.into_cause()))
+            } else {
+                result
+            }
+        }
+        Err(error) => Err(OpError::unknown(smb_error(error, 0), None)),
+    };
+    (decode_identity_replies(file, volume), close)
 }
 
 fn decode_copy_identity(file_index: &[u8], volume: &[u8]) -> VfResult<FsObjId> {
@@ -219,6 +334,83 @@ fn decode_copy_identity(file_index: &[u8], volume: &[u8]) -> VfResult<FsObjId> {
 }
 
 #[cfg(test)]
+fn copy_source_test_response(command: Command, status: NtStatus) -> Result<Frame, SmbError> {
+    let mut header = smb2::msg::header::Header::new_request(command);
+    header.status = status;
+    Ok(Frame {
+        header,
+        body: Vec::new(),
+        raw: Vec::new(),
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn copy_source_close_distinguishes_query_rejection_from_uncertain_close() {
+    let decode = |query_status, close| {
+        decode_copy_source_close(
+            copy_source_test_response(Command::QueryInfo, query_status),
+            copy_source_test_response(Command::QueryInfo, query_status),
+            close,
+        )
+    };
+
+    let (identity, close) = decode(
+        NtStatus::NOT_SUPPORTED,
+        copy_source_test_response(Command::Close, NtStatus::SUCCESS),
+    );
+    assert_eq!(
+        identity.unwrap_err().kind(),
+        std::io::ErrorKind::Unsupported
+    );
+    assert!(close.is_ok());
+
+    for status in [
+        NtStatus::NOT_SUPPORTED,
+        STATUS_INFO_LENGTH_MISMATCH,
+        NtStatus::BUFFER_TOO_SMALL,
+        NtStatus::BUFFER_OVERFLOW,
+    ] {
+        let (_, close) = decode(status, copy_source_test_response(Command::Close, status));
+        assert_eq!(
+            close.unwrap_err().state(),
+            FailureState::NotAttempted,
+            "{status:?}"
+        );
+    }
+
+    let (_, close) = decode(
+        NtStatus::NOT_SUPPORTED,
+        copy_source_test_response(Command::Close, NtStatus::ACCESS_DENIED),
+    );
+    assert_eq!(close.unwrap_err().state(), FailureState::Failed);
+
+    let (_, close) = decode(NtStatus::NOT_SUPPORTED, Err(SmbError::Disconnected));
+    assert_eq!(close.unwrap_err().state(), FailureState::Unknown);
+
+    let (_, close) = decode(
+        NtStatus::NOT_SUPPORTED,
+        copy_source_test_response(Command::QueryInfo, NtStatus::NOT_SUPPORTED),
+    );
+    assert_eq!(close.unwrap_err().state(), FailureState::Unknown);
+}
+
+#[cfg(test)]
+#[test]
+fn copy_source_identity_preserves_volume_waiter_failure() {
+    let (identity, close) = decode_copy_source_close(
+        copy_source_test_response(Command::QueryInfo, NtStatus::NOT_SUPPORTED),
+        Err(SmbError::Disconnected),
+        copy_source_test_response(Command::Close, NtStatus::SUCCESS),
+    );
+    assert!(close.is_ok());
+    assert_eq!(
+        vfsi_core::transport_kind(&identity.unwrap_err()),
+        Some(vfsi_core::TransportKind::Connection),
+    );
+}
+
+#[cfg(test)]
 #[test]
 fn copy_identity_rejects_unavailable_file_indices() {
     let mut volume = [0; 12];
@@ -236,7 +428,7 @@ fn copy_identity_rejects_unavailable_file_indices() {
 impl SmbVecFs {
     fn copy_file_identity(&mut self, file_id: FileId) -> VfResult<FsObjId> {
         self.runtime.block_on(copy_identity(
-            self.client.connection_mut(),
+            self.client.connection(),
             self.tree.tree_id,
             file_id,
         ))
