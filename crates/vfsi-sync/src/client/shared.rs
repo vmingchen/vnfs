@@ -76,7 +76,7 @@ impl<F: HandleBackend> SharedBackend<F> {
         // Ordinary I/O must not lose its result to an unrelated cleanup error.
         // Retain failures; drain_cleanup is the explicit reporting boundary.
         if self.has_pending.load(Ordering::Acquire) {
-            let _ = guard.drain_cleanup();
+            guard.drain_pending(None);
         }
         Ok(guard)
     }
@@ -180,24 +180,36 @@ impl<F: HandleBackend> BackendGuard<'_, F> {
     }
 
     pub(super) fn drain_cleanup_outcomes(&mut self) -> Vec<vfsi_core::OpResult<()>> {
+        let mut outcomes = Vec::new();
+        self.drain_pending(Some(&mut outcomes));
+        outcomes
+    }
+
+    fn drain_pending(&mut self, mut outcomes: Option<&mut Vec<vfsi_core::OpResult<()>>>) {
         if !self.has_pending.swap(false, Ordering::AcqRel) {
-            return Vec::new();
+            return;
         }
         let pending = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
+        if let Some(outcomes) = &mut outcomes {
+            outcomes.reserve(pending.len());
+        }
         let mut failed = Vec::new();
-        let mut outcomes = Vec::with_capacity(pending.len());
         for close in pending {
             match (close.close)(self, &close.target) {
-                Ok(()) => outcomes.push(Ok(())),
+                Ok(()) => {
+                    if let Some(outcomes) = &mut outcomes {
+                        outcomes.push(Ok(()));
+                    }
+                }
                 Err(mut error) => {
-                    // This bounded diagnostic history never owns cleanup targets.
-                    // Keep ownership in pending, and preserve the operation's primary error.
-                    let source = vfsi_core::internal::errors::share_in_place(&mut error);
-                    record_cleanup_error(
-                        self.diagnostics,
-                        vfsi_core::internal::errors::from_shared(&source),
-                    );
-                    outcomes.push(Err(vfsi_core::OpError::unknown(error, None)));
+                    // Keep cleanup ownership in pending. Share the error
+                    // only when both an explicit result and diagnostics need it.
+                    if let Some(outcomes) = &mut outcomes {
+                        let source = vfsi_core::internal::errors::share_in_place(&mut error);
+                        outcomes.push(Err(vfsi_core::OpError::unknown(error, None)));
+                        error = vfsi_core::internal::errors::from_shared(&source);
+                    }
+                    record_cleanup_error(self.diagnostics, error);
                     failed.push(close);
                 }
             }
@@ -209,7 +221,6 @@ impl<F: HandleBackend> BackendGuard<'_, F> {
                 .extend(failed);
             self.has_pending.store(true, Ordering::Release);
         }
-        outcomes
     }
 }
 impl<F: HandleBackend> Drop for BackendGuard<'_, F> {
