@@ -7,6 +7,7 @@ use vfsi_core::{FailureState, OpError};
 fn setattr_vectors_preserve_status_and_submission_boundaries_without_replay() {
     let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
         assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+        eprintln!("skipping live SETATTR test: VFSI_NFS_SERVER is not set");
         return;
     };
     let minor = std::env::var("VFSI_NFS_MINOR")
@@ -216,6 +217,7 @@ fn legacy_setattr_rpc_collection_preserves_status_and_transport_classification()
 fn setattr_pre_dispatch_errors_keep_their_original_domain() {
     let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
         assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+        eprintln!("skipping live SETATTR test: VFSI_NFS_SERVER is not set");
         return;
     };
     let minor = std::env::var("VFSI_NFS_MINOR")
@@ -278,6 +280,7 @@ fn missing_setattr_ack_isolated_in_descriptor_and_path_batches() {
 
     let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
         assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+        eprintln!("skipping live SETATTR test: VFSI_NFS_SERVER is not set");
         return;
     };
     for paths in [false, true] {
