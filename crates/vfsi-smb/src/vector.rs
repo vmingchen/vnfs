@@ -1,6 +1,71 @@
 use super::*;
 
 impl SmbVecFs {
+    fn read_whole_paths(
+        &mut self,
+        files: &[FileOperand],
+        options: ReadAllOptions,
+        observe: impl FnMut(&mut Self, usize, &[FileOperand], &[usize], &[vfsi_core::OpResult<Vec<u8>>]),
+    ) -> vfsi_core::VecResult<Vec<u8>> {
+        let memory = options
+            .max_total_bytes()
+            .clamp(1, DEFAULT_READ_ALLV_MAX_TOTAL_BYTES);
+        let negotiated = self
+            .client
+            .params()
+            .map_or(65_536, |params| params.max_read_size as usize)
+            .max(1);
+        let chunk = memory.min(1024 * 1024).min(negotiated);
+        vfsi_sync::backend::helpers::read_all_pinned_paths_with(
+            self,
+            files,
+            options,
+            |pending, remaining| {
+                let count = pending.min((memory / chunk).max(1)).min(remaining.max(1));
+                (count, chunk.min((remaining / count).max(1)))
+            },
+            observe,
+        )
+    }
+
+    /// Collect buffered copies and capture identity from the handles that
+    /// supplied their bytes, before those temporary handles are closed.
+    #[doc(hidden)]
+    pub fn read_copy_sources(
+        &mut self,
+        files: &[FileOperand],
+        options: ReadAllOptions,
+        identities: &mut [Option<VfResult<vfsi_core::FsObjId>>],
+    ) -> vfsi_core::VecResult<Vec<u8>> {
+        if files.len() != identities.len() {
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+        }
+        self.read_whole_paths(files, options, |backend, base, handles, indices, reads| {
+            let connection = backend.client.connection_mut().clone();
+            let jobs = handles.iter().zip(reads).map(|(handle, read)| {
+                let mut connection = connection.clone();
+                let opened = handle
+                    .fd()
+                    .and_then(|fd| backend.open_files.get(&fd))
+                    .map(|file| (file.tree.tree_id, file.file_id));
+                async move {
+                    if read.is_err() {
+                        return None;
+                    }
+                    let Some((tree, id)) = opened else {
+                        return Some(Err(vfsi_core::internal::errors::invalid_reply(
+                            "missing SMB source handle for copy identity",
+                        )));
+                    };
+                    Some(super::copy::copy_identity(&mut connection, tree, id).await)
+                }
+            });
+            for (&index, identity) in indices.iter().zip(backend.runtime.block_on(join_all(jobs))) {
+                identities[base + index] = identity;
+            }
+        })
+    }
+
     fn copy_extent_results(
         &mut self,
         pairs: &[ExtentPair],
@@ -50,24 +115,7 @@ impl VectorBackend for SmbVecFs {
         files: &[FileOperand],
         options: ReadAllOptions,
     ) -> vfsi_core::VecResult<Vec<u8>> {
-        let memory = options
-            .max_total_bytes()
-            .clamp(1, DEFAULT_READ_ALLV_MAX_TOTAL_BYTES);
-        let negotiated = self
-            .client
-            .params()
-            .map_or(65_536, |params| params.max_read_size as usize)
-            .max(1);
-        let chunk = memory.min(1024 * 1024).min(negotiated);
-        vfsi_sync::backend::helpers::read_all_pinned_paths(
-            self,
-            files,
-            options,
-            |pending, remaining| {
-                let count = pending.min((memory / chunk).max(1)).min(remaining.max(1));
-                (count, chunk.min((remaining / count).max(1)))
-            },
-        )
+        self.read_whole_paths(files, options, |_, _, _, _, _| {})
     }
 
     fn vopen_raw_impl(

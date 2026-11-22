@@ -367,6 +367,11 @@ impl SmbVecFs {
     }
 
     pub(super) fn raw_open(&mut self, path: &str, flags: i32) -> VfResult<(FileId, u64)> {
+        let response = self.raw_open_response(path, flags)?;
+        Ok((response.file_id, response.end_of_file))
+    }
+
+    pub(super) fn raw_open_response(&mut self, path: &str, flags: i32) -> VfResult<CreateResponse> {
         let request = self.open_request(path, flags)?;
         let tree_id = self.tree.tree_id;
         let frame = self
@@ -378,9 +383,7 @@ impl SmbVecFs {
             ))
             .map_err(|e| smb_error(e, 0))?;
         require_status(&frame, Command::Create, 0)?;
-        let response = CreateResponse::unpack(&mut ReadCursor::new(&frame.body))
-            .map_err(|e| smb_error(e, 0))?;
-        Ok((response.file_id, response.end_of_file))
+        CreateResponse::unpack(&mut ReadCursor::new(&frame.body)).map_err(|e| smb_error(e, 0))
     }
 
     #[cfg(all(test, feature = "test-faults"))]

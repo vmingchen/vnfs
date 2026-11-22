@@ -1,8 +1,10 @@
 use super::*;
 use smb2::client::copy::{CopyChunk, CopyChunkOutcome, ServerSideCopyLimits};
 use smb2::msg::copychunk::{SrvCopychunk, SrvCopychunkCopy, SrvCopychunkResponse};
+use smb2::msg::create::CreateAction;
 use smb2::msg::ioctl::{FSCTL_SRV_COPYCHUNK, IoctlRequest, IoctlResponse, SMB2_0_IOCTL_IS_FSCTL};
 use smb2::pack::{Pack, WriteCursor};
+use vfsi_core::FsObjId;
 
 fn copy_chunks(
     pair: &ExtentPair,
@@ -150,63 +152,99 @@ fn copy_response(
     ))
 }
 
+pub(super) async fn copy_identity(
+    connection: &mut Connection,
+    tree: TreeId,
+    file_id: FileId,
+) -> VfResult<FsObjId> {
+    // Related compound operations share one handle on SMB servers.
+    let requests = [
+        (InfoType::File, FILE_INTERNAL_INFORMATION, 8),
+        (InfoType::Filesystem, 1, 128),
+    ]
+    .map(|(info_type, class, length)| QueryInfoRequest {
+        info_type,
+        file_info_class: class,
+        output_buffer_length: length,
+        additional_information: 0,
+        flags: 0,
+        file_id,
+        input_buffer: Vec::new(),
+    });
+    let operations = requests.each_ref().map(|request| CompoundOp {
+        command: Command::QueryInfo,
+        body: request,
+        tree_id: Some(tree),
+        credit_charge: CreditCharge(1),
+    });
+    let responses = connection
+        .execute_compound(&operations)
+        .await
+        .map_err(|error| smb_error(error, 0))?;
+    let responses = collect_compound(responses, operations.len())?;
+    let buffers: Vec<_> = responses
+        .into_iter()
+        .map(|response| {
+            require_status(&response, Command::QueryInfo, 0)?;
+            QueryInfoResponse::unpack(&mut ReadCursor::new(&response.body))
+                .map(|response| response.output_buffer)
+                .map_err(|error| smb_error(error, 0))
+        })
+        .collect::<VfResult<_>>()?;
+    decode_copy_identity(&buffers[0], &buffers[1])
+}
+
+fn decode_copy_identity(file_index: &[u8], volume: &[u8]) -> VfResult<FsObjId> {
+    let index = file_index
+        .first_chunk()
+        .copied()
+        .map(u64::from_le_bytes)
+        .ok_or_else(|| {
+            vfsi_core::internal::errors::invalid_reply("short SMB copy file-index response")
+        })?;
+    let serial = volume
+        .get(8..)
+        .and_then(|serial| serial.first_chunk())
+        .copied()
+        .map(u32::from_le_bytes)
+        .ok_or_else(|| {
+            vfsi_core::internal::errors::invalid_reply("short SMB copy volume response")
+        })?;
+    // MS-FSCC 2.1.9 reserves both 0 and all ones for unavailable file IDs.
+    if index == 0 || index == u64::MAX || serial == 0 {
+        return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
+    }
+    // File indices are volume-local; a share can span several volumes.
+    Ok(FsObjId::new(u128::from(serial), index))
+}
+
+#[cfg(test)]
+#[test]
+fn copy_identity_rejects_unavailable_file_indices() {
+    let mut volume = [0; 12];
+    volume[8..].copy_from_slice(&7u32.to_le_bytes());
+    for index in [0, u64::MAX] {
+        let error = decode_copy_identity(&index.to_le_bytes(), &volume).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    }
+    assert_eq!(
+        decode_copy_identity(&11u64.to_le_bytes(), &volume).unwrap(),
+        FsObjId::new(7, 11)
+    );
+}
+
 impl SmbVecFs {
+    fn copy_file_identity(&mut self, file_id: FileId) -> VfResult<FsObjId> {
+        self.runtime.block_on(copy_identity(
+            self.client.connection_mut(),
+            self.tree.tree_id,
+            file_id,
+        ))
+    }
+
     /// Compare retained objects, including aliases across different path spellings.
-    /// Only potentially overlapping forward copies need these identity queries.
     pub(super) fn copy_handles_alias(&mut self, files: [FileId; 2]) -> VfResult<bool> {
-        let mut identities = [(0, 0); 2];
-        for (identity, file_id) in identities.iter_mut().zip(files) {
-            // Related compound operations share one handle on SMB servers.
-            // Query each retained handle in its own compound, never mix them.
-            let requests = [
-                (InfoType::File, FILE_INTERNAL_INFORMATION, 8),
-                (InfoType::Filesystem, 1, 128),
-            ]
-            .map(|(info_type, class, length)| QueryInfoRequest {
-                info_type,
-                file_info_class: class,
-                output_buffer_length: length,
-                additional_information: 0,
-                flags: 0,
-                file_id,
-                input_buffer: Vec::new(),
-            });
-            let operations = requests.each_ref().map(|request| CompoundOp {
-                command: Command::QueryInfo,
-                body: request,
-                tree_id: Some(self.tree.tree_id),
-                credit_charge: CreditCharge(1),
-            });
-            let responses = self
-                .runtime
-                .block_on(self.client.connection_mut().execute_compound(&operations))
-                .map_err(|error| smb_error(error, 0))?;
-            let responses = collect_compound(responses, operations.len())?;
-            let buffers: Vec<_> = responses
-                .into_iter()
-                .map(|response| {
-                    require_status(&response, Command::QueryInfo, 0)?;
-                    QueryInfoResponse::unpack(&mut ReadCursor::new(&response.body))
-                        .map(|response| response.output_buffer)
-                        .map_err(|error| smb_error(error, 0))
-                })
-                .collect::<VfResult<_>>()?;
-            let index = buffers[0].get(..8).ok_or_else(|| {
-                vfsi_core::internal::errors::invalid_reply("short SMB copy file-index response")
-            })?;
-            let volume = buffers[1].get(8..12).ok_or_else(|| {
-                vfsi_core::internal::errors::invalid_reply("short SMB copy volume response")
-            })?;
-            if index == [0; 8] || volume == [0; 4] {
-                return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
-            }
-            // File indices are volume-local; a share can span several volumes.
-            *identity = (
-                u64::from_le_bytes(index.try_into().expect("eight-byte slice")),
-                u32::from_le_bytes(volume.try_into().expect("four-byte slice")),
-            );
-        }
-        Ok(identities[0] == identities[1])
+        Ok(self.copy_file_identity(files[0])? == self.copy_file_identity(files[1])?)
     }
 
     pub(super) fn copy_extent_with_strategy(
@@ -214,6 +252,75 @@ impl SmbVecFs {
         pair: &ExtentPair,
         server: bool,
     ) -> VfResult<()> {
+        self.copy_retained(pair, server, false).map(|_| ())
+    }
+
+    /// Whole-file copy for the Python adapter. An identical source and
+    /// destination returns `None` without writing to either handle.
+    #[doc(hidden)]
+    pub fn copy_whole_file(
+        &mut self,
+        source: &Path,
+        destination: &Path,
+        buffered: Option<(&[u8], VfResult<FsObjId>)>,
+    ) -> VfResult<Option<u64>> {
+        if let Some((data, identity)) = buffered {
+            let mut collision = false;
+            let path = self.local_path_string(destination)?;
+            // An exclusive CREATE cannot open a source alias. Keep the small
+            // new-file CREATE/WRITE/FLUSH/CLOSE on the existing compound path.
+            match self.compound_write_with_flags(
+                &path,
+                0,
+                data,
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+                Some(&mut collision),
+            ) {
+                Ok(written) if written == data.len() => return Ok(Some(written as u64)),
+                Ok(_) => return Err(std::io::Error::from_raw_os_error(libc::EIO)),
+                Err(error) if collision && error.state() != vfsi_core::FailureState::Unknown => {}
+                Err(error) => return Err(error.into_cause()),
+            }
+            return self.copy_buffered_existing(&path, data, identity?);
+        }
+        let pair = ExtentPair::from_os_paths(source, 0, destination, 0, None);
+        self.copy_retained(&pair, self.server_copy_enabled, true)
+    }
+
+    fn copy_buffered_existing(
+        &mut self,
+        path: &str,
+        data: &[u8],
+        source_identity: FsObjId,
+    ) -> VfResult<Option<u64>> {
+        let _ = self.drain_deferred_closes();
+        let opened = self.raw_open_response(path, libc::O_WRONLY | libc::O_CREAT)?;
+        let id = opened.file_id;
+        let result: VfResult<Option<u64>> = (|| {
+            if opened.create_action != CreateAction::FileCreated
+                && self.copy_file_identity(id)? == source_identity
+            {
+                return Ok(None);
+            }
+            let written = self
+                .raw_write(id, 0, data)
+                .map_err(vfsi_core::OpError::into_cause)? as u64;
+            self.set_size_handle(id, written)?;
+            self.raw_flush(id)?;
+            Ok(Some(written))
+        })();
+        let close = self.copy_close_handle(id, true);
+        let copied = result?;
+        close?;
+        Ok(copied)
+    }
+
+    fn copy_retained(
+        &mut self,
+        pair: &ExtentPair,
+        server: bool,
+        reject_alias: bool,
+    ) -> VfResult<Option<u64>> {
         let source = self.local_path_string(&pair.src_path)?;
         let destination = self.local_path_string(&pair.dst_path)?;
         let _ = self.drain_deferred_closes();
@@ -230,18 +337,24 @@ impl SmbVecFs {
         // COPYCHUNK requires read and write access on the destination, as did
         // the SDK path helper. Client-only copies retain write-only access.
         let access = if server { libc::O_RDWR } else { libc::O_WRONLY };
-        let (dst_id, _) = match self.raw_open(&destination, access | libc::O_CREAT) {
+        let opened = match self.raw_open_response(&destination, access | libc::O_CREAT) {
             Ok(value) => value,
             Err(error) => {
                 let _ = self.copy_close_handle(src_id, false);
                 return Err(error);
             }
         };
+        let dst_id = opened.file_id;
         let result = (|| {
-            if pair.dst_offset > pair.src_offset
-                && pair.dst_offset - pair.src_offset < length
+            let check_overlap =
+                pair.dst_offset > pair.src_offset && pair.dst_offset - pair.src_offset < length;
+            if (reject_alias || check_overlap)
+                && opened.create_action != CreateAction::FileCreated
                 && self.copy_handles_alias([src_id, dst_id])?
             {
+                if reject_alias {
+                    return Ok(None);
+                }
                 return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
             }
             let server_result = if server {
@@ -259,11 +372,15 @@ impl SmbVecFs {
                 }
             };
             self.set_size_handle(dst_id, checked_offset(pair.dst_offset, copied, 0)?)?;
-            self.raw_flush(dst_id)
+            self.raw_flush(dst_id)?;
+            Ok(Some(copied))
         })();
         let dst_close = self.copy_close_handle(dst_id, true);
         let src_close = self.copy_close_handle(src_id, false);
-        result.and(dst_close).and(src_close)
+        let copied = result?;
+        dst_close?;
+        src_close?;
+        Ok(copied)
     }
 
     fn copy_close_handle(&mut self, id: FileId, _destination: bool) -> VfResult<()> {

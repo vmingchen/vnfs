@@ -279,19 +279,36 @@ impl SmbVecFs {
         creation: bool,
         truncate: bool,
     ) -> OpResult<usize> {
+        let flags = libc::O_WRONLY
+            | if creation { libc::O_CREAT } else { 0 }
+            | if truncate { libc::O_TRUNC } else { 0 };
+        self.compound_write_with_flags(path, offset, data, flags, None)
+    }
+
+    pub(super) fn compound_write_with_flags(
+        &mut self,
+        path: &str,
+        offset: u64,
+        data: &[u8],
+        flags: i32,
+        create_collision: Option<&mut bool>,
+    ) -> OpResult<usize> {
         checked_offset(offset, data.len() as u64, 0).map_err(OpError::not_attempted)?;
         let max_write = self
             .client
             .params()
             .map(|params| params.max_write_size as usize)
             .unwrap_or(65_536);
-        let flags = libc::O_WRONLY
-            | if creation { libc::O_CREAT } else { 0 }
-            | if truncate { libc::O_TRUNC } else { 0 };
         if data.is_empty() || data.len() > max_write || data.len() > u32::MAX as usize {
-            let (file_id, _) = self
-                .raw_open(path, flags)
-                .map_err(|cause| write_wire_error(cause, 0))?;
+            let (file_id, _) = self.raw_open(path, flags).map_err(|cause| {
+                if let Some(collision) = create_collision {
+                    *collision = vfsi_core::native_status(&cause)
+                        == Some(vfsi_core::StatusCode::Smb(
+                            NtStatus::OBJECT_NAME_COLLISION.0,
+                        ));
+                }
+                write_wire_error(cause, 0)
+            })?;
             let result = self.raw_write(file_id, offset, data).and_then(|written| {
                 self.raw_flush(file_id)
                     .map(|()| written)
@@ -312,6 +329,7 @@ impl SmbVecFs {
             offset,
             data.to_vec(),
             &mut deferred_close,
+            create_collision,
         ));
         self.deferred_closes
             .extend(deferred_close.map(|state| DeferredClose::new(self.tree.clone(), state)));

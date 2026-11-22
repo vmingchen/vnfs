@@ -806,9 +806,20 @@ fn read_all_outcomes_impl(
         &files,
         ReadAllOptions::new().with_max_total_bytes(max_total_bytes),
     )?;
-    if outcomes.len() != paths.len() {
-        return Ok(paths
-            .iter()
+    Ok(validate_read_all_outcomes(
+        outcomes,
+        paths.len(),
+        max_total_bytes,
+    ))
+}
+
+fn validate_read_all_outcomes(
+    outcomes: Vec<vfsi_core::OpResult<Vec<u8>>>,
+    count: usize,
+    max_total_bytes: usize,
+) -> Vec<vfsi_core::OpResult<Vec<u8>>> {
+    if outcomes.len() != count {
+        return (0..count)
             .map(|_| {
                 Err(vfsi_core::OpError::unknown(
                     vfsi_core::internal::errors::invalid_reply(
@@ -817,10 +828,10 @@ fn read_all_outcomes_impl(
                     None,
                 ))
             })
-            .collect());
+            .collect();
     }
     let mut remaining = max_total_bytes;
-    Ok(outcomes
+    outcomes
         .into_iter()
         .map(|outcome| {
             let bytes = match &outcome {
@@ -851,7 +862,7 @@ fn read_all_outcomes_impl(
                 ))
             }
         })
-        .collect())
+        .collect()
 }
 
 /// Read every file in full (offset 0 to EOF) in batched, no-stat reads.
@@ -863,7 +874,13 @@ fn read_allv_impl(
 ) -> Result<ReadManyResult, IndexedError> {
     let outcomes =
         read_all_outcomes_impl(fs, paths, max_total_bytes).map_err(IndexedError::unattributed)?;
-    let mut results = Vec::with_capacity(paths.len());
+    split_read_all_outcomes(outcomes)
+}
+
+fn split_read_all_outcomes(
+    outcomes: Vec<vfsi_core::OpResult<Vec<u8>>>,
+) -> Result<ReadManyResult, IndexedError> {
+    let mut results = Vec::with_capacity(outcomes.len());
     let mut errors = ErrorMap::new();
     for (index, outcome) in outcomes.into_iter().enumerate() {
         match outcome {
@@ -2571,6 +2588,12 @@ impl NfsClient {
         let max_directory_entries = self.directory_max_entries;
         let max_directory_path_bytes = self.directory_max_path_bytes;
         self.with_fs(py, move |fs| {
+            #[cfg(feature = "smb")]
+            if let Some(result) =
+                fs.copy_whole_files(&sources, &dests, copy_fast_path_budget(max_total_bytes))
+            {
+                return result;
+            }
             let mut copied: Vec<Option<u64>> = vec![None; n];
             let mut errors = ErrorMap::new();
 
@@ -2949,6 +2972,15 @@ trait BindingBackend: vfsi_sync::backend::VectorBackend {
     fn smb_dialect(&self) -> Option<u16> {
         None
     }
+    #[cfg(feature = "smb")]
+    fn copy_whole_files(
+        &mut self,
+        _sources: &[PathBuf],
+        _dests: &[PathBuf],
+        _max_total_bytes: usize,
+    ) -> Option<PyResult<CopyManyResult>> {
+        None
+    }
 }
 #[cfg(feature = "dummy")]
 impl BindingBackend for LocalBackend {}
@@ -2962,6 +2994,74 @@ impl BindingBackend for vfsi_nfs::NfsVecFs {
 impl BindingBackend for SmbVecFs {
     fn smb_dialect(&self) -> Option<u16> {
         Some(self.dialect() as u16)
+    }
+
+    fn copy_whole_files(
+        &mut self,
+        sources: &[PathBuf],
+        dests: &[PathBuf],
+        max_total_bytes: usize,
+    ) -> Option<PyResult<CopyManyResult>> {
+        Some((|| {
+            let files: Vec<_> = sources
+                .iter()
+                .map(|path| FileOperand::from_os_path(path))
+                .collect();
+            let mut identities: Vec<_> = (0..files.len()).map(|_| None).collect();
+            let outcomes = self
+                .read_copy_sources(
+                    &files,
+                    ReadAllOptions::new().with_max_total_bytes(max_total_bytes),
+                    &mut identities,
+                )
+                .map_err(|cause| to_py_err(cause, None, None))?;
+            let (data, mut errors) = split_read_all_outcomes(validate_read_all_outcomes(
+                outcomes,
+                sources.len(),
+                max_total_bytes,
+            ))
+            .map_err(|error| to_py_indexed(error, None))?;
+            let mut copied = vec![None; sources.len()];
+            // Finish the bounded snapshot copies before reading oversized slots.
+            let indices = (0..data.len())
+                .filter(|&index| data[index].is_some())
+                .chain((0..data.len()).filter(|&index| data[index].is_none()));
+            for index in indices {
+                let source = &sources[index];
+                let destination = &dests[index];
+                if let Some(error) = errors.get(&index) {
+                    if error.kind() != std::io::ErrorKind::FileTooLarge {
+                        continue;
+                    }
+                    errors.remove(&index);
+                }
+                if source == destination {
+                    errors.insert(index, same_file_error());
+                    continue;
+                }
+                let buffered = data[index].as_deref().map(|data| {
+                    let identity = identities[index].take().unwrap_or_else(|| {
+                        Err(vfsi_core::internal::errors::invalid_reply(
+                            "SMB buffered copy is missing source identity",
+                        ))
+                    });
+                    (data, identity)
+                });
+                match self.copy_whole_file(source, destination, buffered) {
+                    Ok(Some(bytes)) => copied[index] = Some(bytes),
+                    Ok(None) => {
+                        errors.insert(index, same_file_error());
+                    }
+                    Err(error) if vfsi_core::transport_kind(&error).is_some() => {
+                        return Err(to_py_err(error, None, Some(index)));
+                    }
+                    Err(error) => {
+                        errors.insert(index, error);
+                    }
+                }
+            }
+            Ok((copied, errors))
+        })())
     }
 }
 

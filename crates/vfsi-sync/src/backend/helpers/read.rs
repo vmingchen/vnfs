@@ -64,6 +64,19 @@ pub fn read_all_pinned_paths<F: VectorBackend + ?Sized>(
     options: ReadAllOptions,
     plan: impl Fn(usize, usize) -> (usize, usize),
 ) -> VecResult<Vec<u8>> {
+    read_all_pinned_paths_with(backend, files, options, plan, |_, _, _, _, _| {})
+}
+
+/// Inspect successful path reads while the same cohort still owns its handles.
+/// The observer sees the cohort's base index and each admitted input index.
+#[doc(hidden)]
+pub fn read_all_pinned_paths_with<F: VectorBackend + ?Sized>(
+    backend: &mut F,
+    files: &[FileOperand],
+    options: ReadAllOptions,
+    plan: impl Fn(usize, usize) -> (usize, usize),
+    mut observe: impl FnMut(&mut F, usize, &[FileOperand], &[usize], &[OpResult<Vec<u8>>]),
+) -> VecResult<Vec<u8>> {
     let is_path = |file: &FileOperand| {
         matches!(
             file,
@@ -83,7 +96,16 @@ pub fn read_all_pinned_paths<F: VectorBackend + ?Sized>(
         for files in group.chunks(capacity) {
             let options = options.with_max_total_bytes(remaining);
             let outcomes = if pinned {
-                read_all_path_cohort(backend, files, options, &plan)
+                let base = output.len();
+                read_all_path_cohort(
+                    backend,
+                    files,
+                    options,
+                    &plan,
+                    |backend, handles, indices, reads| {
+                        observe(backend, base, handles, indices, reads);
+                    },
+                )
             } else {
                 read_all_vectors(backend, files, options, &plan, false)?
             };
@@ -108,6 +130,7 @@ fn read_all_path_cohort<F: VectorBackend + ?Sized>(
     files: &[FileOperand],
     options: ReadAllOptions,
     plan: impl Fn(usize, usize) -> (usize, usize),
+    observe: impl FnOnce(&mut F, &[FileOperand], &[usize], &[OpResult<Vec<u8>>]),
 ) -> Vec<OpResult<Vec<u8>>> {
     use std::{collections::HashSet, path::Path};
     use vfsi_core::internal::{errors::invalid_reply, vec_result_slots};
@@ -173,6 +196,7 @@ fn read_all_path_cohort<F: VectorBackend + ?Sized>(
             read_all_vectors(backend, &handles, options, plan, false),
             handles.len(),
         );
+        observe(backend, &handles, &admitted, &reads);
         let closes = vec_result_slots(backend.vclose_owned_impl(handles), admitted.len());
         for ((index, read), close) in admitted.into_iter().zip(reads).zip(closes) {
             let result = match (read, close) {

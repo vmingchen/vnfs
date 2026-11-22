@@ -1634,6 +1634,78 @@ fn client_extent_copy_rejects_forward_aliases_before_mutation() {
 }
 
 #[test]
+fn buffered_copy_checks_the_original_source_identity_after_rename() {
+    let Some(mut backend) = connect() else {
+        eprintln!("skipping SMB integration test: VFSI_SMB_SERVER/SHARE not set");
+        return;
+    };
+    let root = PathBuf::from(format!("/vfsi-copy-snapshot-{}", std::process::id()));
+    backend.ensure_dir_impl(&root, 0o777).unwrap();
+    let path = root.join("source");
+    let destination = root.join("moved");
+    let source = FileOperand::from_os_path(&path);
+    let moved = FileOperand::from_os_path(&destination);
+    let write = |backend: &mut SmbVecFs, file: FileOperand, data: &[u8]| {
+        let op = WriteOp::at(file, 0, data).with_creation().with_truncate();
+        assert_eq!(
+            backend.vwrite_impl(&[op.borrowed()]).unwrap()[0]
+                .as_ref()
+                .unwrap()
+                .bytes_written,
+            data.len(),
+        );
+    };
+    write(&mut backend, source.clone(), b"snapshot");
+    let mut identities = [None, None];
+    let mut reads = backend
+        .read_copy_sources(
+            &[
+                FileOperand::from_os_path(&root.join("missing")),
+                source.clone(),
+            ],
+            ReadAllOptions::default(),
+            &mut identities,
+        )
+        .unwrap();
+    assert!(identities[0].is_none());
+    assert!(reads[0].is_err());
+    let data = reads.pop().unwrap().unwrap();
+    assert_eq!(data, b"snapshot");
+
+    vfsi_core::internal::collect_vec_result(
+        backend.vrename_impl(&[(source.clone(), moved.clone())]),
+        1,
+    )
+    .unwrap();
+    write(&mut backend, source, b"new source");
+    write(&mut backend, moved.clone(), b"new content on original file");
+
+    let snapshot = (&data[..], identities[1].take().unwrap());
+    assert_eq!(
+        backend
+            .copy_whole_file(&path, &destination, Some(snapshot))
+            .unwrap(),
+        None,
+    );
+    assert_eq!(
+        backend
+            .copy_whole_file(&destination, &destination, None)
+            .unwrap(),
+        None,
+    );
+    let read = backend
+        .vread_all_impl(&[moved])
+        .unwrap()
+        .pop()
+        .unwrap()
+        .unwrap();
+    assert_eq!(read, b"new content on original file");
+    backend.unlink_impl(&destination).unwrap();
+    backend.unlink_impl(&path).unwrap();
+    backend.unlink_impl(&root).unwrap();
+}
+
+#[test]
 fn client_extent_copy_preserves_safe_shifted_ranges() {
     let Some(mut backend) = connect() else { return };
     let root = PathBuf::from(format!("/vfsi-copy-safe-{}", std::process::id()));

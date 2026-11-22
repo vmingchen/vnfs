@@ -722,6 +722,7 @@ pub(super) async fn concurrent_compound_write(
         offset,
         data,
         &mut deferred_close,
+        None,
     )
     .await;
     CompoundOutcome {
@@ -737,6 +738,7 @@ pub(super) async fn concurrent_compound_write_inner(
     offset: u64,
     data: Vec<u8>,
     deferred_close: &mut Option<CloseState>,
+    create_collision: Option<&mut bool>,
 ) -> OpResult<usize> {
     let tree_id = tree.tree_id;
     checked_offset(offset, data.len() as u64, 0).map_err(OpError::not_attempted)?;
@@ -798,6 +800,10 @@ pub(super) async fn concurrent_compound_write_inner(
         responses,
         operations.len(),
         |response| {
+            if let Some(collision) = create_collision {
+                *collision = response.header.command == Command::Create
+                    && response.header.status == NtStatus::OBJECT_NAME_COLLISION;
+            }
             require_status(response, Command::Create, 0)?;
             CreateResponse::unpack(&mut ReadCursor::new(&response.body))
                 .map(|opened| opened.file_id)

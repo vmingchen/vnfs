@@ -80,3 +80,65 @@ def test_live_vector_client_round_trip():
             # the two known children before removing their empty directory.
             client.remove_many(paths)
             client.remove_many([root])
+
+
+def test_live_copy_rejects_case_alias_and_copies_distinct_siblings():
+    server = os.environ.get("VFSI_SMB_SERVER")
+    share = os.environ.get("VFSI_SMB_SHARE")
+    if not server or not share:
+        if os.environ.get("VFSI_SMB_REQUIRED") == "1":
+            pytest.fail("required SMB server/share is not configured")
+        pytest.skip("SMB integration server is not configured")
+    root = f"/vsmb-copy-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    with vsmb.SmbClient(
+        server,
+        share,
+        username=os.environ.get("VFSI_SMB_USERNAME", ""),
+        password=os.environ.get("VFSI_SMB_PASSWORD", ""),
+        domain=os.environ.get("VFSI_SMB_DOMAIN", ""),
+    ) as client:
+        client.ensure_dir(root, 0o777)
+        source = f"{root}/MiXeD"
+        alias = f"{root}/mixed"
+        existing = f"{root}/existing"
+        created = f"{root}/created"
+        try:
+            assert client.write_many([source, existing], [b"alpha", b"stale-tail"]) == [
+                5,
+                10,
+            ]
+            # Confirm the fixture's ordinary case-insensitive lookup semantics.
+            assert client.read_all_many([alias]) == ([b"alpha"], {})
+            copied, errors = client.copy_many([(source, alias)])
+            assert copied == [None]
+            assert set(errors) == {0}
+            assert "same file" in str(errors[0])
+
+            copied, errors = client.copy_many(
+                [(source, existing), (source, alias), (source, created)]
+            )
+            assert copied == [5, None, 5]
+            assert set(errors) == {1}
+            assert "same file" in str(errors[1])
+            assert errors[1].index == 1
+            assert client.read_all_many([source, existing, created]) == (
+                [b"alpha", b"alpha", b"alpha"],
+                {},
+            )
+
+            # All small sources were read before any of the writes, including
+            # when a destination in this batch is also a later source.
+            assert client.write_many([existing], [b"original b"]) == [10]
+            assert client.copy_many([(source, existing), (existing, created)]) == (
+                [5, 10],
+                {},
+            )
+            assert client.read_all_many([existing, created]) == (
+                [b"alpha", b"original b"],
+                {},
+            )
+        finally:
+            for path in [source, existing, created]:
+                if client.exists(path):
+                    client.remove_many([path])
+            client.remove_many([root])
