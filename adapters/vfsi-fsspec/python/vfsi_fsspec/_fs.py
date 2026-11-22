@@ -5623,10 +5623,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 with callback.branched(remote_path, local_path) as child:
                     if buf is None:
                         error = _oserror(errors[i], remote_path, index=public_index)
-                        if (
-                            _errno(error) != errno.EFBIG
-                            or read_batch_bytes >= self.read_all_max_total_bytes
-                        ):
+                        if _errno(error) != errno.EFBIG or read_batch_bytes == 0:
                             raise error
                         # The source outgrew the batching threshold. Stream
                         # this input without replaying buffered siblings.

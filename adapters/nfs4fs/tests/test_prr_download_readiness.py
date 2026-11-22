@@ -173,11 +173,13 @@ def test_batched_get_callback_setup_failure_preserves_local_destination(
         assert not target.parent.exists()
 
 
+@pytest.mark.parametrize("read_limit", [4, 16])
 def test_batched_get_streams_source_that_outgrows_batch_threshold(
-    dummy_fs, tmp_path, monkeypatch
+    dummy_fs, tmp_path, monkeypatch, read_limit
 ):
     fs = dummy_fs
     fs.max_batch_bytes = 4
+    fs.read_all_max_total_bytes = read_limit
     fs.pipe({"/first": b"a", "/growing": b"bc", "/last": b"d"})
     original = fs._client.stat_many
     grew = False
