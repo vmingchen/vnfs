@@ -561,7 +561,10 @@ pub trait Vfsi {
     /// pages keep their cursors across sibling failures. Zero-entry pages have
     /// no continuation. Structural rejection occurs before input dispatch.
     /// Options set aggregate entry/path budgets and metadata fields; recursive
-    /// options are rejected. Page size is a hint, capped at 128 for native clients.
+    /// options are rejected. A continuation may keep or narrow the requested
+    /// fields from its previous page. Adding fields makes that input NotAttempted
+    /// with InvalidInput. Child seeds start a new listing and can select any
+    /// fields. Page size is a hint, capped at 128 for native clients.
     ///
     /// Native implementations retain anchored identity across pages and child
     /// descent. The default supports path-only implementations by collecting a

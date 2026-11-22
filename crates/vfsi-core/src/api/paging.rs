@@ -1,5 +1,7 @@
 //! Owned, connection-scoped directory paging for application frontiers.
-use super::{DirectoryListing, ListDirOptions, Result, TraversalCompletion, Vfsi, VfsiExt};
+use super::{
+    Attributes, DirectoryListing, ListDirOptions, Result, TraversalCompletion, Vfsi, VfsiExt,
+};
 use crate::VfResult;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -31,7 +33,8 @@ impl NativeDirectoryCursor {
 
 /// An owned continuation or child seed from this client's directory pages.
 ///
-/// Continuations retain the opened directory's identity when supported. Child
+/// Continuations retain the opened directory's identity when supported and
+/// can keep or narrow the previous page's requested metadata fields. Child
 /// seeds resolve a name relative to its observed parent; replacing that name
 /// can change the child opened. Paths identify the original operand and do not
 /// redirect an anchored seed.
@@ -41,6 +44,7 @@ pub struct DirectoryCursor {
     path: PathBuf,
     state: NativeDirectoryCursor,
     owner: Arc<()>,
+    fields: Option<Attributes>,
 }
 
 impl DirectoryCursor {
@@ -101,6 +105,7 @@ pub fn native_directory_pages<P: AsRef<Path>>(
     if options.recursive() {
         return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
     }
+    let fields = options.fields();
     let paths: Vec<_> = paths.iter().map(AsRef::as_ref).collect();
     let mut output: Vec<_> = (0..paths.len()).map(|_| None).collect();
     let mut pending = std::collections::VecDeque::new();
@@ -109,6 +114,16 @@ pub fn native_directory_pages<P: AsRef<Path>>(
             Some(cursor) if cursor.path != *path || !Arc::ptr_eq(&cursor.owner, owner) => {
                 output[index] = Some(Err(OpError::not_attempted(
                     std::io::Error::from_raw_os_error(libc::EBADF),
+                )
+                .with_context("vlistdir_pages", path)));
+            }
+            Some(cursor)
+                if cursor
+                    .fields
+                    .is_some_and(|previous| !previous.contains(fields)) =>
+            {
+                output[index] = Some(Err(OpError::not_attempted(
+                    std::io::Error::from_raw_os_error(libc::EINVAL),
                 )
                 .with_context("vlistdir_pages", path)));
             }
@@ -203,16 +218,18 @@ pub fn native_directory_pages<P: AsRef<Path>>(
                     // page does not consume a sibling's returned-data allowance.
                     remaining_entries -= listing.entries.len();
                     remaining_bytes -= bytes;
-                    let seed = |path, state| DirectoryCursor {
+                    let cursor = |path, state, fields| DirectoryCursor {
                         path,
                         state,
                         owner: owner.clone(),
+                        fields,
                     };
                     Ok(DirectoryPage {
-                        continuation: next.map(|state| seed(path.to_owned(), state)),
+                        continuation: next
+                            .map(|state| cursor(path.to_owned(), state, Some(fields))),
                         children: children
                             .into_iter()
-                            .map(|(path, state)| seed(path, state))
+                            .map(|(path, state)| cursor(path, state, None))
                             .collect(),
                         listing,
                     })
@@ -574,6 +591,7 @@ mod tests {
                 path: "/original".into(),
                 state: NativeDirectoryCursor::new(()),
                 owner: owner.clone(),
+                fields: None,
             };
             let results = native_directory_pages(
                 actual_owner,
@@ -608,6 +626,93 @@ mod tests {
                 Some(crate::StatusCode::Errno(libc::EBADF as u32))
             );
         }
+    }
+
+    #[test]
+    fn continuations_cannot_expand_fields_but_child_seeds_can() {
+        let owner = Arc::new(());
+        let page_size = NonZeroUsize::MIN;
+        let mut first = native_directory_pages(
+            &owner,
+            &["/a", "/b"],
+            vec![None, None],
+            ListDirOptions::new().with_fields(Attributes::SIZE),
+            page_size,
+            |_| Ok(32),
+            |_, _, _, _| {
+                Ok(vec![
+                    Ok((
+                        DirectoryListing {
+                            path: "/a".into(),
+                            entries: vec![entry("/a/child")],
+                        },
+                        Some(NativeDirectoryCursor::new(())),
+                        vec![("/a/child".into(), NativeDirectoryCursor::new(()))],
+                    )),
+                    Ok((
+                        DirectoryListing {
+                            path: "/b".into(),
+                            entries: vec![entry("/b/child")],
+                        },
+                        Some(NativeDirectoryCursor::new(())),
+                        vec![],
+                    )),
+                ])
+            },
+        )
+        .unwrap()
+        .into_iter();
+        let a = first.next().unwrap().unwrap();
+        let b = first.next().unwrap().unwrap();
+        let results = native_directory_pages(
+            &owner,
+            &["/a", "/a/child"],
+            vec![a.continuation, a.children.into_iter().next()],
+            ListDirOptions::new().with_fields(Attributes::SIZE | Attributes::FILEID),
+            page_size,
+            |paths| {
+                assert_eq!(paths, [Path::new("/a/child")]);
+                Ok(32)
+            },
+            |paths, cursors, _, _| {
+                assert_eq!(paths, [Path::new("/a/child")]);
+                assert!(cursors[0].is_some());
+                Ok(vec![Ok((
+                    DirectoryListing {
+                        path: "/a/child".into(),
+                        entries: vec![],
+                    },
+                    None,
+                    vec![],
+                ))])
+            },
+        )
+        .unwrap();
+        let error = results[0].as_ref().unwrap_err();
+        assert_eq!(error.state(), crate::FailureState::NotAttempted);
+        assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
+        assert!(results[1].is_ok());
+
+        let narrowed = native_directory_pages(
+            &owner,
+            &["/b"],
+            vec![b.continuation],
+            ListDirOptions::new().with_fields(Attributes::MODE),
+            page_size,
+            |_| Ok(32),
+            |_, _, _, _| {
+                Ok(vec![Ok((
+                    DirectoryListing {
+                        path: "/b".into(),
+                        entries: vec![],
+                    },
+                    None,
+                    vec![],
+                ))])
+            },
+        )
+        .unwrap();
+        assert!(narrowed[0].is_ok());
     }
 
     #[test]
