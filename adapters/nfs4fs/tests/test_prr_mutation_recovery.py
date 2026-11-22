@@ -284,3 +284,42 @@ def test_grouped_spool_failure_preserves_healthy_sibling(dummy_fs, monkeypatch, 
     assert fs.cat_file("/failed") == b""
     assert fs.cat_file("/healthy") == b"retain"
     assert not fs._client._fds
+
+
+@pytest.mark.parametrize("whole", [False, True])
+def test_speculative_read_timeout_keeps_the_writer_session(
+    dummy_fs, monkeypatch, whole
+):
+    from fsspec.core import OpenFile
+
+    fs = dummy_fs
+    fs.block_size = 128
+    fs.pipe({"/current": b"a" * 128, "/sibling": b"b" * 128})
+    files = fs.open_many(
+        [OpenFile(fs, path, "rb") for path in ["/current", "/sibling"]]
+    )
+    current, sibling = files
+    expected_fds = (current._fd, sibling._fd)
+    pool = fs._client
+    generation = pool.generation
+    original = pool.preadv
+    calls = []
+
+    def timed_out_sibling(fds, offsets, lengths):
+        calls.append(tuple(fds))
+        outcomes = original(fds, offsets, lengths)
+        if len(calls) == 1:
+            outcomes[1] = TimeoutError(errno.ETIMEDOUT, "speculative read timed out")
+        return outcomes
+
+    monkeypatch.setattr(pool, "preadv", timed_out_sibling)
+    try:
+        with fs.open("/writer", "wb") as writer:
+            assert current.read(-1 if whole else 1) == b"a" * (128 if whole else 1)
+            assert calls == [expected_fds]
+            assert pool.generation == generation
+            writer.write(b"finished")
+        assert sibling.read() == b"b" * 128
+        assert fs.cat_file("/writer") == b"finished"
+    finally:
+        fs.commit_many(files)

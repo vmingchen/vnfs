@@ -171,7 +171,7 @@ def test_group_read_keeps_prefix_on_attributable_call_failure(
             error.filename = sibling_path
         calls = []
 
-        def pread_many_once(inputs, offsets, lengths):
+        def pread_many_once(inputs, offsets, lengths, *, required=None):
             calls.append((list(offsets), list(lengths)))
             if len(calls) == 1:
                 return [b"a", b"abcd"], {}

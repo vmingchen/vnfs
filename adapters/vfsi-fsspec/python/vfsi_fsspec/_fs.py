@@ -2517,7 +2517,7 @@ class _BufferGroup:
         )
 
     def _pread_many(self, files, offsets, lengths, *, required=None):
-        data, errors = self._pread_many_once(files, offsets, lengths)
+        data, errors = self._pread_many_once(files, offsets, lengths, required=required)
         # Speculation gets one wave. Complete only required cache fills;
         # internal callers without a selected file require every result.
         partial = {
@@ -2576,7 +2576,7 @@ class _BufferGroup:
                 method, files, offsets, lengths, reconnect=not retired
             )
 
-    def _pread_many_once(self, files, offsets, lengths):
+    def _pread_many_once(self, files, offsets, lengths, *, required=None):
         if getattr(self.fs._client, "_native_has_vector_outcomes", False):
             outcomes = self._read_vector_with_recovery(
                 "preadv", files, offsets, lengths
@@ -2587,6 +2587,7 @@ class _BufferGroup:
                 index
                 for index, result in enumerate(outcomes)
                 if isinstance(result, OSError)
+                and (required is None or files[index] is required)
                 and self.fs.auto_reconnect
                 and _can_reconnect(result)
                 and not files[index]._raw.writable()
