@@ -244,10 +244,9 @@ fn copy_to_writers_round_robin<P: AsRef<Path>, W: Write>(
             let mut pending = Vec::with_capacity(active.len());
             while !active.is_empty() {
                 pending.clear();
-                let requests: Vec<_> = active
+                let requests = active
                     .iter()
-                    .map(|&i| ReadOp::range(&files[i], written[base + i], chunk))
-                    .collect();
+                    .map(|&i| ReadOp::range(&files[i], written[base + i], chunk));
                 let results = source.read_batch(requests, reads).map_err(|error| {
                     writer_stream_error(error, base, |i| active.get(i).copied())
                 })?;

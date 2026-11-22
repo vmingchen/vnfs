@@ -1554,8 +1554,10 @@ fn copy_batch(
         }
         let mut offsets = vec![0u64; selected.len()];
         let mut done = vec![false; selected.len()];
+        let mut active = Vec::with_capacity(selected.len());
         while done.iter().any(|v| !v) {
-            let active: Vec<_> = (0..selected.len()).filter(|i| !done[*i]).collect();
+            active.clear();
+            active.extend((0..selected.len()).filter(|i| !done[*i]));
             let reads: Vec<_> = buffers
                 .iter_mut()
                 .enumerate()
