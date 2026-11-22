@@ -413,6 +413,8 @@ fn roots<P: AsRef<Path>>(
                 ));
             }
             if options.layout == CopyLayout::Contents && metadata.is_file() && !exact {
+                // The new path is below the destination already checked
+                // against every source during root construction.
                 let mapped = destination.join(
                     task.source
                         .file_name()
@@ -428,16 +430,6 @@ fn roots<P: AsRef<Path>>(
                 task.destination = mapped;
             }
             task.metadata = metadata;
-        }
-    }
-    // Contents mode remaps regular files after discovering their type.
-    for task in &tasks {
-        for other in &tasks {
-            if task.destination.starts_with(&other.source)
-                || other.source.starts_with(&task.destination)
-            {
-                return Err(invalid(task.root, &task.source));
-            }
         }
     }
     reject_aliased_overlap(fs, &tasks, options, max_path_bytes)?;
@@ -1558,7 +1550,7 @@ fn copy_batch(
         while done.iter().any(|v| !v) {
             active.clear();
             active.extend((0..selected.len()).filter(|i| !done[*i]));
-            let reads: Vec<_> = buffers
+            let reads = buffers
                 .iter_mut()
                 .enumerate()
                 .filter(|(i, _)| !done[*i])
@@ -1568,8 +1560,7 @@ fn copy_batch(
                         .len()
                         .min(usize::try_from(remaining).unwrap_or(usize::MAX));
                     ReadOp::into(&sources[selected[i]], offsets[i], &mut buffer[..length])
-                })
-                .collect();
+                });
             let read = fs
                 .read_batch(reads, ReadOptions::new())
                 .map_err(|e| active_error(e, &active, &selected, tasks))?;
