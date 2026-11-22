@@ -192,14 +192,11 @@ class _WalkBudget:
     def sync(self):
         epoch = self.fs._dircache_epoch_snapshot()
         if epoch != self.epoch:
-            for infos in self.prefetched.values():
-                self.account(infos, direction=-1)
-            self.prefetched.clear()
+            self.release_prefetched()
             self.epoch = epoch
 
-    def account(self, infos, direction=1):
-        self.entries -= direction * len(infos)
-        self.path_bytes -= direction * sum(
+    def _path_cost(self, infos):
+        return sum(
             len(
                 os.fsencode(
                     self.fs._native_path(self.fs._checked_strip_protocol(info["name"]))
@@ -207,8 +204,37 @@ class _WalkBudget:
             )
             for info in infos
         )
-        if self.entries < 0 or self.path_bytes < 0:
-            raise _oserror(errno.EFBIG, self.fs._fullpath(self.root))
+
+    def release_prefetched(self):
+        if not self.prefetched:
+            return False
+        for infos in self.prefetched.values():
+            self.entries += len(infos)
+            self.path_bytes += self._path_cost(infos)
+        self.prefetched.clear()
+        return True
+
+    def account(self, infos, *, prefetch=False):
+        entries = len(infos)
+        path_bytes = self._path_cost(infos)
+        if entries > self.entries or path_bytes > self.path_bytes:
+            if prefetch:
+                return False
+            # Prefer the current visit over reservations for later siblings.
+            self.release_prefetched()
+            if entries > self.entries or path_bytes > self.path_bytes:
+                raise _oserror(errno.EFBIG, self.fs._fullpath(self.root))
+        self.entries -= entries
+        self.path_bytes -= path_bytes
+        return True
+
+    def listdir(self, native_path):
+        try:
+            return self.fs._client.listdir(native_path, **self.native_options())
+        except OSError as error:
+            if error.errno != errno.EFBIG or not self.release_prefetched():
+                raise
+        return self.fs._client.listdir(native_path, **self.native_options())
 
 
 def _normalize_range(start, end, size=None):
@@ -4284,13 +4310,11 @@ class VfsiFileSystem(AbstractFileSystem):
                     recursive=False,
                     **budget.native_options(),
                 )
-            except (FileNotFoundError, OSError) as error:
-                if getattr(error, "errno", None) == errno.EFBIG:
-                    budget.sync()
-                    if fill_epoch != budget.epoch:
-                        continue
-                    raise
-                # Normal traversal attributes semantic errors to each child.
+            except OSError as error:
+                # Normal traversal reports errors in visit order. Leave an
+                # over-budget cohort for scalar visits with the actual budget.
+                if error.errno == errno.EFBIG:
+                    return
                 continue
             budget.sync()
             if fill_epoch != budget.epoch:
@@ -4299,7 +4323,8 @@ class VfsiFileSystem(AbstractFileSystem):
                 continue
             for child, entries in zip(cohort, groups):
                 infos = self._infos_from_native_entries(entries)
-                budget.account(infos)
+                if not budget.account(infos, prefetch=True):
+                    return
                 budget.prefetched[child] = infos
                 self._store_listing(child, infos, fill_epoch)
 
@@ -4546,10 +4571,12 @@ class VfsiFileSystem(AbstractFileSystem):
         else:
             self._evict_dircache(exact={internal})
         fill_epoch = self._dircache_epoch_snapshot()
+        native_path = self._native_path(internal)
         try:
-            entries = self._client.listdir(
-                self._native_path(internal),
-                **({} if budget is None else budget.native_options()),
+            entries = (
+                self._client.listdir(native_path)
+                if budget is None
+                else budget.listdir(native_path)
             )
         except NotADirectoryError:
             # The path is a file (or symlink to one): report it directly.

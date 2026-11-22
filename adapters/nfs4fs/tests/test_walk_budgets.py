@@ -362,3 +362,45 @@ def test_withdirs_reuses_the_root_metadata(dummy_fs, monkeypatch, operation):
         == expected
     )
     assert calls.count("/root") == 1
+
+
+@pytest.mark.parametrize("limit", ["entries", "paths"])
+@pytest.mark.parametrize("nested,cached", [(False, False), (True, False), (True, True)])
+def test_walk_prefetch_keeps_depth_first_budget_order(tmp_path, limit, nested, cached):
+    # With a nested directory the sibling cohort fits, but its reservation
+    # must not prevent a preceding descendant from using the same budget.
+    if limit == "entries":
+        limits = {"directory_max_entries": 5 if nested else 3}
+    else:
+        limits = {"directory_max_path_bytes": 16 if nested else 8}
+    fs = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path),
+        use_listings_cache=cached,
+        skip_instance_cache=True,
+        **limits,
+    )
+    try:
+        fs.mkdir("/a")
+        fs.mkdir("/b")
+        if nested:
+            fs.mkdir("/a/d")
+            fs.pipe_file("/a/d/x", b"x")
+            fs.pipe_file("/b/y", b"y")
+        else:
+            fs.pipe_file("/a/x", b"x")
+        fs.pipe_file("/b/x", b"x")
+
+        if cached:
+            fs.ls("/a/d")
+        iterator = fs.walk("/")
+        assert next(iterator)[0] == "/"
+        assert next(iterator)[0] == "/a"
+        if nested:
+            assert next(iterator)[0] == "/a/d"
+        with pytest.raises(OSError) as error:
+            next(iterator)
+        assert error.value.errno == errno.EFBIG
+    finally:
+        fs.close()
