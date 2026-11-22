@@ -1760,16 +1760,18 @@ def test_deferred_cleanup_preserves_legacy_native_close_signature(
     assert not pool._deferred_close
 
 
-@pytest.mark.parametrize("batch_size,max_batch_bytes", [(1, 256), (128, 4)])
+@pytest.mark.parametrize(
+    "batch_size,max_batch_bytes,block_size", [(1, 256, 1), (128, 4, 1), (128, 5, 3)]
+)
 def test_grouped_writes_only_read_payloads_for_admitted_wave(
-    tmp_path, monkeypatch, batch_size, max_batch_bytes
+    tmp_path, monkeypatch, batch_size, max_batch_bytes, block_size
 ):
     with fsspec.filesystem(
         "nfs4",
         backend="dummy",
         dummy_root=str(tmp_path / "admitted-writes"),
         write_buffering=True,
-        block_size=1,
+        block_size=block_size,
         batch_size=batch_size,
         max_batch_bytes=max_batch_bytes,
         skip_instance_cache=True,
@@ -1779,7 +1781,7 @@ def test_grouped_writes_only_read_payloads_for_admitted_wave(
         calls = _record_calls(monkeypatch, fs._client, "pwritev")
         with _open_files(fs, paths, "wb") as files:
             for index, file in enumerate(files):
-                file.write(bytes([index]))
+                file.write(bytes([index]) * block_size)
                 # Preserve real spooled-file seek/rollover behavior; count only
                 # payload reads, including reads discarded before native dispatch.
                 original = file._write_spool.read
@@ -1790,9 +1792,9 @@ def test_grouped_writes_only_read_payloads_for_admitted_wave(
 
                 monkeypatch.setattr(file._write_spool, "read", read)
         assert [fs.cat_file(path) for path in paths] == [
-            bytes([index]) for index in range(128)
+            bytes([index]) * block_size for index in range(128)
         ]
-        width = min(batch_size, max_batch_bytes)
+        width = min(batch_size, max_batch_bytes // block_size)
         assert len(calls) == (len(paths) + width - 1) // width
         assert all(len(args[0]) <= batch_size for args, _ in calls)
         assert all(sum(map(len, args[2])) <= max_batch_bytes for args, _ in calls)

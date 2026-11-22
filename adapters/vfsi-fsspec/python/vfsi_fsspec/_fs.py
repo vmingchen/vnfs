@@ -2799,15 +2799,16 @@ class _BufferGroup:
                     break
                 if wave and (file._base_mode == "a") != (wave[0]._base_mode == "a"):
                     continue
+                length = min(
+                    file.blocksize,
+                    self.fs.max_batch_bytes,
+                    end - file._spool_read_offset,
+                )
+                if total + length > self.fs.max_batch_bytes:
+                    continue
                 try:
                     file._write_spool.seek(file._spool_read_offset)
-                    data = file._write_spool.read(
-                        min(
-                            file.blocksize,
-                            self.fs.max_batch_bytes,
-                            end - file._spool_read_offset,
-                        )
-                    )
+                    data = file._write_spool.read(length)
                 except OSError as error:
                     file._mark_write_failure(error)
                     first_error = first_error or _oserror(
@@ -2822,8 +2823,6 @@ class _BufferGroup:
                     first_error = first_error or _oserror(
                         error, file.path, index=self.files.index(file)
                     )
-                    continue
-                if wave and total + len(data) > self.fs.max_batch_bytes:
                     continue
                 wave.append(file)
                 datas.append(data)
