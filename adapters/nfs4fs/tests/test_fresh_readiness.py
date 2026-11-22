@@ -176,6 +176,22 @@ def test_line_reads_obey_aggregate_budget(fs, cache, grouped, data, method):
             assert getattr(file, method)() == data
 
 
+@pytest.mark.parametrize("cache", ["none", "readahead", "mmap"])
+@pytest.mark.parametrize("line", [b"abcd\n", b"abcdef\n"])
+@pytest.mark.parametrize("method", ["readline", "readuntil"])
+def test_over_budget_line_read_retains_cursor(fs, cache, line, method):
+    fs.read_all_max_total_bytes = 4
+    fs.block_size = 2
+    fs.pipe_file("/line", b"!" + line)
+    with fs.open("/line", "rb", cache_type=cache) as file:
+        file.seek(1)
+        with pytest.raises(OSError) as error:
+            getattr(file, method)()
+        assert error.value.errno == errno.EFBIG
+        assert file.tell() == 1
+        assert file.read(2) == b"ab"
+
+
 @pytest.mark.parametrize("cache", ["none", "readahead"])
 def test_readuntil_cross_block_delimiter_and_nonzero_offset(fs, cache):
     fs.read_all_max_total_bytes = 8

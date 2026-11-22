@@ -1863,25 +1863,30 @@ class VfsiFile(AbstractBufferedFile):
             self.fs._check_read_allocation(int(remaining), self.path)
             return b""
         data = bytearray()
-        while True:
-            previous = len(data)
-            start = self.tell()
-            requested = min(block_size, limit - previous + 1, limit)
-            if size >= 0:
-                requested = min(requested, size - previous)
-            part = self.read(requested)
-            if not part:
-                return bytes(data)
-            data.extend(part)
-            found = data.find(char, max(0, previous - len(char) + 1))
-            if found >= 0:
-                end = found + len(char)
-                self.fs._check_read_allocation(end, self.path)
-                self.seek(start + end - previous)
-                return bytes(data[:end])
-            self.fs._check_read_allocation(len(data), self.path)
-            if size >= 0 and len(data) == size:
-                return bytes(data)
+        start = self.tell()
+        try:
+            while True:
+                previous = len(data)
+                requested = min(block_size, limit - previous + 1, limit)
+                if size >= 0:
+                    requested = min(requested, size - previous)
+                part = self.read(requested)
+                if not part:
+                    return bytes(data)
+                data.extend(part)
+                found = data.find(char, max(0, previous - len(char) + 1))
+                if found >= 0:
+                    end = found + len(char)
+                    self.fs._check_read_allocation(end, self.path)
+                    self.seek(start + end)
+                    return bytes(data[:end])
+                self.fs._check_read_allocation(len(data), self.path)
+                if size >= 0 and len(data) == size:
+                    return bytes(data)
+        except OSError as error:
+            if error.errno == errno.EFBIG:
+                self.seek(start)
+            raise
 
     def readline(self, size=-1):
         size = -1 if size is None else operator.index(size)
