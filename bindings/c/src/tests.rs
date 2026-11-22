@@ -3862,6 +3862,50 @@ fn extended_vectors_keep_rejections_unattributed_after_invalid_handles() {
 }
 
 #[test]
+fn legacy_io_preserves_not_attempted_for_outer_backend_rejections() {
+    for mode in [MalformedReply::ReadReject, MalformedReply::WriteReject] {
+        let fs = independent_io_fixture(mode);
+        let mut results = [vfsi_result::panic(); 2];
+        let mut buffers = [[0xa5_u8; 2]; 2];
+        let aggregate = if mode == MalformedReply::ReadReject {
+            let mut ops: Vec<_> = buffers
+                .iter_mut()
+                .enumerate()
+                .map(|(index, buffer)| vfsi_pread_op {
+                    fd: 10 + index as i32,
+                    buf: buffer.as_mut_ptr().cast(),
+                    len: 2,
+                    offset: 0,
+                    got: 99,
+                })
+                .collect();
+            let result = unsafe { vfsi_preadv(fs, ops.as_mut_ptr(), 2, results.as_mut_ptr()) };
+            assert!(ops.iter().all(|op| op.got == 0));
+            assert_eq!(buffers, [[0xa5; 2]; 2]);
+            result
+        } else {
+            let mut ops = [10, 11].map(|fd| vfsi_pwrite_op {
+                fd,
+                buf: b"ab".as_ptr().cast(),
+                len: 2,
+                offset: 0,
+                wrote: 99,
+            });
+            let result = unsafe { vfsi_pwritev(fs, ops.as_mut_ptr(), 2, results.as_mut_ptr()) };
+            assert!(ops.iter().all(|op| op.wrote == 0));
+            result
+        };
+        assert_eq!(aggregate.category, VFSI_ERROR_UNSUPPORTED);
+        assert_eq!(aggregate.index, C_INDEX_UNKNOWN);
+        for (index, result) in results.iter().enumerate() {
+            assert_eq!(result.index, index);
+            assert_eq!(result.category, VFSI_ERROR_NOT_ATTEMPTED);
+        }
+        unsafe { vfsi_free(fs) };
+    }
+}
+
+#[test]
 fn submitted_vector_panic_marks_all_items_indeterminate() {
     let fs = independent_io_fixture(MalformedReply::RemovePanic);
     let a = CString::new("/a").unwrap();

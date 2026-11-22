@@ -264,10 +264,11 @@ pub unsafe extern "C" fn vfsi_preadv(
         };
         let read_ops = &reads;
         let outcomes = match catch_submitted(item_results, move || backend.vread_impl(read_ops)) {
-            Ok(outcomes) => outcomes,
+            Ok(Ok(outcomes)) => outcomes,
+            Ok(Err(error)) => fail_batch!(item_results, vfsi_result::from_error(error), false),
             Err(failure) => return failure,
         };
-        let results = match vfsi_sync::internal::collect_vec_result(outcomes, reads.len()) {
+        let results = match vfsi_sync::internal::collect_vec_result(Ok(outcomes), reads.len()) {
             Ok(results) => results,
             Err(error) => {
                 fail_batch!(item_results, vfsi_result::from_indexed(error), true)
@@ -407,10 +408,11 @@ pub unsafe extern "C" fn vfsi_pwritev(
         };
         let write_ops = &writes;
         let outcomes = match catch_submitted(item_results, move || backend.vwrite_impl(write_ops)) {
-            Ok(outcomes) => outcomes,
+            Ok(Ok(outcomes)) => outcomes,
+            Ok(Err(error)) => fail_batch!(item_results, vfsi_result::from_error(error), false),
             Err(failure) => return failure,
         };
-        let results = match vfsi_sync::internal::collect_vec_result(outcomes, writes.len()) {
+        let results = match vfsi_sync::internal::collect_vec_result(Ok(outcomes), writes.len()) {
             Ok(results) => results,
             Err(error) => {
                 fail_batch!(item_results, vfsi_result::from_indexed(error), true)
