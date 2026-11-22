@@ -267,3 +267,62 @@ def test_transaction_cleanup_failure_still_surfaces_without_body_error(
     assert not fs._client._fds
     assert not fs._intrans
     assert fs._transaction is None
+
+
+@pytest.mark.parametrize("operation", ["write", "truncate", "flush"])
+def test_caught_spool_failure_aborts_transaction(dummy_fs, monkeypatch, operation):
+    fs = dummy_fs
+    previous = {"/existing": b"original", "/sibling": b"healthy"}
+    fs.pipe(previous)
+    failure = OSError(errno.ENOSPC, "local spool full")
+
+    with pytest.raises(OSError) as aborted:
+        with fs.transaction:
+            with fs.open("/sibling", "wb") as sibling:
+                sibling.write(b"new sibling")
+
+            with fs.open("/existing", "wb") as file:
+                spool = file._spool
+                write_prefix = spool.write
+                truncate = spool.truncate
+                args = ()
+                if operation == "write":
+                    args = (b"replacement",)
+                else:
+                    file.write(b"replacement")
+                    if operation == "truncate":
+                        args = (2,)
+
+                def fail(*args):
+                    if operation == "write":
+                        write_prefix(args[0][:2])
+                    elif operation == "truncate":
+                        truncate(*args)
+                    raise failure
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(spool, operation, fail)
+                    with pytest.raises(OSError) as caught:
+                        getattr(file, operation)(*args)
+                    assert caught.value is failure
+
+    assert aborted.value is failure
+    assert fs.cat(list(previous)) == previous
+    assert len(fs.ls("/", detail=False)) == 2
+    assert file._spool.closed
+    assert sibling._spool.closed
+
+
+@pytest.mark.parametrize("operation", ["seek", "truncate"])
+def test_caught_invalid_spool_request_keeps_transaction_usable(dummy_fs, operation):
+    fs = dummy_fs
+    fs.transaction_spool_threshold = 1
+    with fs.transaction:
+        with fs.open("/out", "wb") as file:
+            file.write(b"hello")
+            assert file._spool._rolled
+            with pytest.raises(OSError) as caught:
+                getattr(file, operation)(-1)
+            assert caught.value.errno == errno.EINVAL
+            file.write(b"!")
+    assert fs.cat_file("/out") == b"hello!"

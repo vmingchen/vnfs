@@ -3048,6 +3048,7 @@ class _DeferredWriteFile:
             self._committed = False
             self._prepared = False
             self._stage_owned = False
+            self._staging_error = None
             self._published = False
             parent = posixpath.dirname(path) or "/"
             # Keep the staging component independent of the destination length;
@@ -3072,6 +3073,21 @@ class _DeferredWriteFile:
                 del error.index
             raise
 
+    def _update_spool(self, operation, *args, allow_invalid=False):
+        if self._staging_error is not None:
+            raise self._staging_error
+        try:
+            return operation(*args)
+        except (OSError, KeyboardInterrupt, SystemExit) as error:
+            # Rolled spools report invalid seeks/truncations as EINVAL.
+            if not (
+                allow_invalid
+                and isinstance(error, OSError)
+                and error.errno == errno.EINVAL
+            ):
+                self._staging_error = error
+            raise
+
     def writable(self):
         return True
 
@@ -3087,13 +3103,13 @@ class _DeferredWriteFile:
         if isinstance(data, str):
             raise TypeError("a bytes-like object is required, not 'str'")
         if "a" in self.mode:
-            self._spool.seek(0, io.SEEK_END)
-        return self._spool.write(data)
+            self._update_spool(self._spool.seek, 0, io.SEEK_END)
+        return self._update_spool(self._spool.write, data)
 
     def seek(self, offset, whence=0):
         if self._closed:
             raise ValueError("I/O operation on closed file")
-        return self._spool.seek(offset, whence)
+        return self._update_spool(self._spool.seek, offset, whence, allow_invalid=True)
 
     def tell(self):
         if self._closed:
@@ -3103,12 +3119,12 @@ class _DeferredWriteFile:
     def truncate(self, size=None):
         if self._closed:
             raise ValueError("I/O operation on closed file")
-        return self._spool.truncate(size)
+        return self._update_spool(self._spool.truncate, size, allow_invalid=True)
 
     def flush(self):
         if self._closed:
             raise ValueError("I/O operation on closed file")
-        self._spool.flush()
+        self._update_spool(self._spool.flush)
 
     def __enter__(self):
         if self._closed:
@@ -3135,6 +3151,8 @@ class _DeferredWriteFile:
 
     def prepare(self):
         """Upload to a same-directory temporary file without exposing target."""
+        if self._staging_error is not None:
+            raise self._staging_error
         if self._prepared or self._committed:
             return
         if "x" in self.mode and self._run_scalar(self.fs.exists, self.path):
@@ -3240,6 +3258,7 @@ class _DeferredWriteFile:
             self._spool.close()
             self._closed = True
         self._committed = True
+        self._staging_error = None
 
     @property
     def closed(self):
