@@ -224,26 +224,30 @@ def _publish_generations(cache_fs, records, previous):
 
 
 def _reset_stale_generation(cache_fs, path):
+    selected = None
     raw = cache_fs._metadata.check_file(path, None)
-    if not raw:
-        return
-    raw_detail, filename = raw
-    _record_backing_path(cache_fs, path, raw_detail, filename)
-    valid = cache_fs._check_file(path)
-    if valid:
-        detail, filename = valid
-        _record_backing_path(cache_fs, path, detail, filename)
+    if raw:
+        _record_backing_path(cache_fs, path, *raw)
+        valid = cache_fs._check_file(path)
+        if valid:
+            selected = _record_backing_path(cache_fs, path, *valid)
+
     writable_detail = cache_fs._metadata.cached_files[-1].get(path)
-    if writable_detail is None or writable_detail.get("fn") != raw_detail.get("fn"):
+    if writable_detail is None:
         return
-
     backing_file = _backing_path(cache_fs, writable_detail)
-    compatible = writable_detail.get(
-        _CACHE_FORMAT_KEY
-    ) == _CACHE_FORMAT and os.path.getsize(backing_file) == writable_detail.get("size")
-    if valid and compatible:
-        return
+    if selected is not None:
+        if selected != backing_file:
+            return  # A usable read-only generation takes precedence.
+        if writable_detail.get(_CACHE_FORMAT_KEY) == _CACHE_FORMAT:
+            try:
+                if os.path.getsize(backing_file) == writable_detail.get("size"):
+                    return
+            except FileNotFoundError:
+                pass
 
+    # Rotate existing metadata even if its backing is gone. Reusing fsspec's
+    # default filename can merge completed blocks from an older generation.
     info = cache_fs.fs.info(path)
     replacement = writable_detail.copy()
     replacement.update(

@@ -315,3 +315,35 @@ def test_cache_invalidation_preserves_load_cache_override_signature(dummy_fs, tm
     assert _read(cached, "/data", grouped=False) == OLD
     dummy_fs.pipe_file("/data", NEW)
     assert _read(cached, "/data", grouped=False) == NEW
+
+
+def test_scalar_cache_repairs_truncated_writable_entry_after_expired_seed(
+    dummy_fs, tmp_path
+):
+    dummy_fs.pipe_file("/data", OLD)
+    seed = tmp_path / "seed"
+    writable = tmp_path / "writable"
+    seed_cache = _seed(dummy_fs, seed, {})
+    writable_cache = _seed(dummy_fs, writable, {})
+    assert _read(seed_cache, "/data", grouped=True) == OLD
+    assert _read(writable_cache, "/data", grouped=True) == OLD
+
+    metadata = seed / "cache"
+    records = json.loads(metadata.read_text(encoding="utf-8"))
+    records["/data"]["time"] = 0
+    metadata.write_text(json.dumps(records), encoding="utf-8")
+    stale_file = writable / writable_cache._metadata.cached_files[-1]["/data"]["fn"]
+    stale_file.write_bytes(OLD[:2])
+    seed_before = _snapshot(seed)
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=dummy_fs,
+        cache_storage=[str(seed), str(writable)],
+        check_files=False,
+        expiry_time=3600,
+        skip_instance_cache=True,
+    )
+
+    assert _read(cached, "/data", grouped=False) == OLD
+    assert not stale_file.exists()
+    assert _snapshot(seed) == seed_before
