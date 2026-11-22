@@ -88,11 +88,11 @@ pub unsafe extern "C" fn vfsi_preadv_ex(
             Ok(t) => t,
             Err(e) => return vfsi_result::from_error(e),
         };
-        let mut files = Vec::new();
+        let mut requests = Vec::new();
         let mut indices = Vec::new();
         for (index, op) in ops.iter().enumerate() {
             if let Some(file) = table.get(&op.fd) {
-                files.push(file.clone());
+                requests.push(ReadOp::at(file.file.clone(), op.offset, op.len));
                 indices.push(index);
             } else {
                 results[index] = failed(
@@ -102,17 +102,9 @@ pub unsafe extern "C" fn vfsi_preadv_ex(
             }
         }
         drop(table);
-        if files.is_empty() {
+        if requests.is_empty() {
             return vfsi_result::success(count);
         }
-        let requests: Vec<_> = files
-            .iter()
-            .zip(&indices)
-            .map(|(file, &index)| {
-                let op = &ops[index];
-                ReadOp::at(file.file.clone(), op.offset, op.len)
-            })
-            .collect();
         let mut backend = match lock_or_io(&fs.fs) {
             Ok(b) => b,
             Err(e) => return vfsi_result::from_error(e),
