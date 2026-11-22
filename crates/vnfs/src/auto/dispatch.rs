@@ -249,14 +249,16 @@ impl Auto {
         if inputs.is_empty() {
             return Ok(Vec::new());
         }
-        let mounts = read_mounts(false);
+        let mut mounts = None;
         let mut targets = Vec::with_capacity(inputs.len());
         let mut resolved = Vec::with_capacity(inputs.len());
         let mut indices = Vec::with_capacity(inputs.len());
         for (index, input) in inputs.iter().enumerate() {
             let target = input.as_target();
             let route = match target {
-                Target::Path(path) => self.resolve(path, &mounts),
+                Target::Path(path) => {
+                    self.resolve(path, mounts.get_or_insert_with(|| read_mounts(false)))
+                }
                 Target::File(file) => {
                     let valid = self.check_owner(file, index).and_then(|()| {
                         if file.is_closed() {
@@ -340,26 +342,17 @@ impl Auto {
         updates: &[crate::SetAttrsOp<P>],
     ) -> vfsi_core::VecResult<()> {
         use vfsi_core::{OpError, Target};
-        let updates: Vec<_> = updates
-            .iter()
-            .map(|op| op.with_target(op.target().as_target()))
-            .collect();
         if updates.is_empty() {
             return Ok(Vec::new());
         }
-        let mounts = read_mounts(false);
+        let mut mounts = None;
         let mut slots = (0..updates.len()).map(|_| None).collect::<Vec<_>>();
         let mut resolved = Vec::with_capacity(updates.len());
+        let mut admitted = Vec::with_capacity(updates.len());
         for (index, op) in updates.iter().enumerate() {
-            let route = match *op.target() {
-                Target::Path(path) => self.resolve(path, &mounts),
-                Target::File(file) => Resolved {
-                    route: file.route.clone(),
-                    path: file.path.clone(),
-                },
-            };
+            let target = op.target().as_target();
             let valid = (|| {
-                if let Target::File(file) = *op.target() {
+                if let Target::File(file) = target {
                     self.check_owner(file, index)?;
                     if file.is_closed() {
                         return Err(std::io::Error::from_raw_os_error(libc::EBADF));
@@ -368,53 +361,60 @@ impl Auto {
                 vfsi_core::internal::validate_setattrs(op).map(|_| ())
             })();
             if let Err(cause) = valid {
+                let path = match target {
+                    Target::Path(path) => path,
+                    Target::File(file) => file.path.as_path(),
+                };
                 slots[index] = Some(Err(
-                    OpError::not_attempted(cause).with_context("vsetattrs", &route.path)
+                    OpError::not_attempted(cause).with_context("vsetattrs", path)
                 ));
+                continue;
             }
+            let route = match target {
+                Target::Path(path) => {
+                    self.resolve(path, mounts.get_or_insert_with(|| read_mounts(false)))
+                }
+                Target::File(file) => Resolved {
+                    route: file.route.clone(),
+                    path: file.path.clone(),
+                },
+            };
             resolved.push(route);
+            admitted.push((index, op.with_target(target)));
         }
         let mut start = 0;
-        while start < updates.len() {
+        while start < admitted.len() {
             let end = cohort_end(&resolved, start);
-            let indices: Vec<_> = (start..end)
-                .filter(|&index| slots[index].is_none())
-                .collect();
             macro_rules! batch {
                 ($variant:ident) => {{
-                    indices
-                        .iter()
-                        .map(|&index| {
-                            let target = match *updates[index].target() {
+                    (start..end)
+                        .map(|index| {
+                            let op = &admitted[index].1;
+                            let target = match *op.target() {
                                 Target::Path(_) => Target::Path(resolved[index].path.as_path()),
                                 Target::File(file) => match &file.inner {
                                     AutoFileInner::$variant(inner) => Target::File(inner),
                                     _ => unreachable!("validated route"),
                                 },
                             };
-                            updates[index].with_target(target)
+                            op.with_target(target)
                         })
                         .collect::<Vec<_>>()
                 }};
             }
-            let result = if indices.is_empty() {
-                Ok(Vec::new())
-            } else {
-                match &resolved[start].route {
-                    Route::Posix => self.mounted.vsetattrs(&batch!(Posix)),
-                    Route::Nfs(connection) => connection.client.vsetattrs(&batch!(Nfs)),
-                }
+            let result = match &resolved[start].route {
+                Route::Posix => self.mounted.vsetattrs(&batch!(Posix)),
+                Route::Nfs(connection) => connection.client.vsetattrs(&batch!(Nfs)),
             };
-            for (index, result) in indices
+            for ((index, op), result) in admitted[start..end]
                 .iter()
-                .copied()
-                .zip(route_results(result, indices.len()))
+                .zip(route_results(result, end - start))
             {
-                let path = match *updates[index].target() {
+                let path = match *op.target() {
                     Target::Path(path) => path,
                     Target::File(file) => file.path.as_path(),
                 };
-                slots[index] = Some(result.map_err(|error| error.with_context("vsetattrs", path)));
+                slots[*index] = Some(result.map_err(|error| error.with_context("vsetattrs", path)));
             }
             start = end;
         }
@@ -435,14 +435,16 @@ impl Auto {
         if inputs.is_empty() {
             return Ok(Vec::new());
         }
-        let mounts = read_mounts(false);
+        let mut mounts = None;
         let mut targets = Vec::with_capacity(inputs.len());
         let mut resolved = Vec::with_capacity(inputs.len());
         let mut indices = Vec::with_capacity(inputs.len());
         for (index, input) in inputs.iter().enumerate() {
             let target = input.as_target();
             let route = match target {
-                Target::Path(path) => self.resolve(path, &mounts),
+                Target::Path(path) => {
+                    self.resolve(path, mounts.get_or_insert_with(|| read_mounts(false)))
+                }
                 Target::File(file) => {
                     let valid = self.check_owner(file, index).and_then(|()| {
                         if file.is_closed() {

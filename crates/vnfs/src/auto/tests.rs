@@ -7,6 +7,62 @@ use vfsi_nfs::mount::decode_mount_field;
 use vfsi_sync::DEFAULT_READ_ALLV_MAX_TOTAL_BYTES;
 
 #[test]
+fn auto_metadata_routes_only_admitted_path_operands() {
+    use crate::{AttrsOptions, SetAttrsOp, Target, VfsiExt};
+    use vfsi_core::FailureState;
+    let root = tempfile::tempdir().unwrap();
+    let client = Auto::new(root.path()).unwrap();
+    client.write("/file", b"contents").unwrap();
+    let file = client
+        .open_with(crate::files::OpenOp::new(
+            "/file",
+            crate::files::OpenFlags::WRITE,
+        ))
+        .unwrap();
+    let reads = &routing::MOUNT_INFO_READS;
+    let before = reads.get();
+
+    client
+        .vgetattrs(&[Target::file(&file)], AttrsOptions::new())
+        .unwrap()[0]
+        .as_ref()
+        .unwrap();
+    client.vstatfs(&[Target::file(&file)]).unwrap()[0]
+        .as_ref()
+        .unwrap();
+    client
+        .vsetattrs(&[SetAttrsOp::new(Target::file(&file)).len(5)])
+        .unwrap()[0]
+        .as_ref()
+        .unwrap();
+    let invalid = SetAttrsOp::new(Target::path(&"/invalid")).uid(u32::MAX);
+    let result = client.vsetattrs(&[invalid]).unwrap();
+    let error = result[0].as_ref().unwrap_err();
+    assert_eq!(error.state(), FailureState::NotAttempted);
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(
+        vfsi_core::internal::errors::path(error.cause()),
+        Some(Path::new("/invalid"))
+    );
+    assert_eq!(reads.get(), before);
+
+    let results = client
+        .vsetattrs(&[
+            SetAttrsOp::new(Target::path(&"/file")).len(3),
+            invalid,
+            SetAttrsOp::new(Target::file(&file)).len(2),
+        ])
+        .unwrap();
+    assert!(results[0].is_ok() && results[2].is_ok());
+    assert_eq!(
+        results[1].as_ref().unwrap_err().state(),
+        FailureState::NotAttempted
+    );
+    assert_eq!(reads.get(), before + 1);
+    assert_eq!(std::fs::read(root.path().join("file")).unwrap(), b"co");
+}
+
+#[test]
 fn allocation_auto_routes_retain_one_shared_pointer() {
     use super::routing::NfsConnectionState;
     use std::mem::size_of;

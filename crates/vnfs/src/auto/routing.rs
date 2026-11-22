@@ -797,7 +797,14 @@ fn read_mounts_for_identity() -> VfResult<MountTable> {
     read_mount_table(false, true)
 }
 
+#[cfg(test)]
+std::thread_local! {
+    pub(super) static MOUNT_INFO_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn read_mount_table(covering_mounts: bool, nfs_mounts: bool) -> VfResult<MountTable> {
+    #[cfg(test)]
+    MOUNT_INFO_READS.set(MOUNT_INFO_READS.get() + 1);
     let contents = fs::read("/proc/self/mountinfo")?;
     let mut table = MountTable::default();
     for line in contents.split(|byte| *byte == b'\n') {
