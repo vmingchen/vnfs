@@ -326,3 +326,55 @@ def test_caught_invalid_spool_request_keeps_transaction_usable(dummy_fs, operati
             assert caught.value.errno == errno.EINVAL
             file.write(b"!")
     assert fs.cat_file("/out") == b"hello!"
+
+
+def test_transaction_rename_failure_names_public_destination_and_index(dummy_fs):
+    fs = dummy_fs
+    fs.mkdir("/directory")
+    with pytest.raises(IsADirectoryError) as failure:
+        with fs.transaction:
+            for path, mode in (
+                ("/exclusive", "xb"),
+                ("/directory", "wb"),
+                ("/later", "wb"),
+            ):
+                with fs.open(path, mode) as file:
+                    file.write(b"staged")
+    assert failure.value.filename == "/directory"
+    assert failure.value.index == 1
+    assert fs.isdir("/directory")
+    assert fs.cat_file("/exclusive") == b"staged"
+    assert fs.cat_file("/later") == b"staged"
+    assert not any(".nfs4fs-txn-" in path for path in fs.ls("/", detail=False))
+
+
+def test_transaction_discard_preserves_remote_failure_if_spool_close_also_fails(
+    dummy_fs, monkeypatch
+):
+    fs = dummy_fs
+    file = fs.open("/out", "wb", autocommit=False)
+    file.write(b"staged")
+    file.prepare()
+    remove_error = PermissionError(errno.EACCES, "stage removal failed")
+    close_error = OSError(errno.EIO, "spool close failed")
+
+    def fail_remove(*args):
+        raise remove_error
+
+    def fail_close():
+        raise close_error
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(fs, "rm", fail_remove)
+            patch.setattr(file._spool, "close", fail_close)
+            with pytest.raises(PermissionError) as result:
+                file.discard()
+            assert result.value is remove_error
+            assert result.value.__cause__ is close_error
+            assert file._stage_owned
+            assert fs.exists(file.temp_path)
+    finally:
+        file.discard()
+    assert not fs.exists(file.temp_path)
+    assert file._spool.closed

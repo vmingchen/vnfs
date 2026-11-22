@@ -450,7 +450,7 @@ visible when the TTL expires or when the caller requests a refresh. Use
   rename. This prevents partial file contents from becoming visible. Like
   fsspec transactions generally, a multi-file commit is staged rather than a
   server-wide atomic transaction: a server failure during the final rename
-  batch can expose a prefix of the batch. Transactional `xb` writes and
+  batch can expose some destinations, including entries after the failure. Transactional `xb` writes and
   `touch(truncate=False)` of missing files publish through an atomic hard link
   from the staging file, so a concurrent creator causes `FileExistsError`
   instead of being overwritten. Backends without hard

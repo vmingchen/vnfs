@@ -126,7 +126,7 @@ def test_mixed_transactions_keep_rename_batches_and_exclusive_publication(
 
 
 def test_transaction_exclusive_collision_stops_later_publication(fs, monkeypatch):
-    with pytest.raises(FileExistsError):
+    with pytest.raises(FileExistsError) as failure:
         with fs.transaction:
             for path, mode in [
                 ("/before", "wb"),
@@ -143,6 +143,8 @@ def test_transaction_exclusive_collision_stops_later_publication(fs, monkeypatch
                         fs.pipe_file("/collision", b"competitor", mode="create")
 
                     monkeypatch.setattr(file, "prepare", race)
+    assert failure.value.filename == "/collision"
+    assert failure.value.index == 1
     assert fs.cat_file("/before") == b"data"
     assert fs.cat_file("/collision") == b"competitor"
     assert not fs.exists("/after")

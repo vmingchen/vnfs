@@ -3230,38 +3230,58 @@ class _DeferredWriteFile:
     def finalize(self):
         self._run_scalar(self.finalize_many, [self])
 
+    def _label_publication_error(self, error, index):
+        _oserror(error, self.path, index=index)
+        if isinstance(error, OSError):
+            error.filename = self.path
+
     @staticmethod
     def finalize_many(files):
-        pending = [file for file in files if not file._committed]
+        pending = [
+            (index, file) for index, file in enumerate(files) if not file._committed
+        ]
         if not pending:
             return
-        fs = pending[0].fs
-        with fs._cache_mutation((file.path for file in pending), namespace=True):
+        fs = pending[0][1].fs
+        with fs._cache_mutation((file.path for _, file in pending), namespace=True):
             # Preserve input order and vectorize contiguous overwriting renames.
             # LINK publishes a staged exclusive create atomically without replacing
             # an existing destination, including a dangling symlink.
-            for exclusive, run in groupby(pending, key=lambda file: "x" in file.mode):
-                batch = list(run)
+            for exclusive, run in groupby(
+                pending, key=lambda item: "x" in item[1].mode
+            ):
                 if exclusive:
-                    for file in batch:
+                    for index, file in run:
                         if not file._published:
-                            fs._client.hardlink(
-                                fs._native_path(file.temp_path),
-                                fs._native_path(file.path),
-                            )
+                            try:
+                                fs._client.hardlink(
+                                    fs._native_path(file.temp_path),
+                                    fs._native_path(file.path),
+                                )
+                            except (OSError, NotImplementedError) as error:
+                                file._label_publication_error(error, index)
+                                raise
                             file._published = True
                         file.discard()  # unlink only our staging name and close spool
                 else:
-                    fs._client.rename_many(
-                        [
-                            (
-                                fs._native_path(file.temp_path),
-                                fs._native_path(file.path),
-                            )
-                            for file in batch
-                        ]
-                    )
-                    for file in batch:
+                    batch = list(run)
+                    try:
+                        fs._client.rename_many(
+                            [
+                                (
+                                    fs._native_path(file.temp_path),
+                                    fs._native_path(file.path),
+                                )
+                                for _, file in batch
+                            ]
+                        )
+                    except (OSError, NotImplementedError) as error:
+                        position = getattr(error, "index", None)
+                        if type(position) is int and 0 <= position < len(batch):
+                            index, file = batch[position]
+                            file._label_publication_error(error, index)
+                        raise
+                    for _, file in batch:
                         file._prepared = False
                         file._stage_owned = False
                         file.discard()
@@ -3273,6 +3293,7 @@ class _DeferredWriteFile:
         self.finalize()
 
     def discard(self):
+        primary = None
         try:
             if self._stage_owned:
                 try:
@@ -3281,8 +3302,16 @@ class _DeferredWriteFile:
                     pass
                 self._stage_owned = False
                 self._prepared = False
+        except BaseException as error:
+            primary = error
+            raise
         finally:
-            self._spool.close()
+            try:
+                self._spool.close()
+            except BaseException as cleanup:
+                if primary is not None:
+                    raise primary from cleanup
+                raise
             self._closed = True
         self._committed = True
         self._staging_error = None
