@@ -1178,34 +1178,43 @@ impl LocalBackend {
         }
     }
 
+    fn setattr_file(
+        file: &File,
+        a: &VfAttrs,
+        i: usize,
+        before_permissions: impl FnOnce() -> VfResult<()>,
+    ) -> VfResult<()> {
+        if a.masks.contains(AttrMask::SIZE) {
+            file.set_len(a.size)?;
+        }
+        if a.masks.intersects(AttrMask::UID | AttrMask::GID) {
+            let (uid, gid) = Self::ownership_ids(a, i)?;
+            std::os::unix::fs::fchown(file, uid, gid)?;
+        }
+        if a.masks.contains(AttrMask::MODE) {
+            before_permissions()?;
+            file.set_permissions(std::fs::Permissions::from_mode(a.mode & 0o7777))?;
+        }
+        if a.masks.intersects(AttrMask::ATIME | AttrMask::MTIME) {
+            let mut times = FileTimes::new();
+            if a.masks.contains(AttrMask::ATIME) {
+                times = times.set_accessed(Self::system_time(a.atime_sec, a.atime_nsec, i)?);
+            }
+            if a.masks.contains(AttrMask::MTIME) {
+                times = times.set_modified(Self::system_time(a.mtime_sec, a.mtime_nsec, i)?);
+            }
+            file.set_times(times)?;
+        }
+        Ok(())
+    }
+
     fn setattr_one(&mut self, a: &VfAttrs, i: usize) -> VfResult<()> {
         if let FileOperand::Fd(fd) = &a.file {
             let open = self
                 .open_files
                 .get(fd)
                 .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?;
-            if a.masks.contains(AttrMask::SIZE) {
-                open.file.set_len(a.size)?;
-            }
-            if a.masks.intersects(AttrMask::UID | AttrMask::GID) {
-                let (uid, gid) = Self::ownership_ids(a, i)?;
-                std::os::unix::fs::fchown(open.file.as_ref(), uid, gid)?;
-            }
-            if a.masks.contains(AttrMask::MODE) {
-                open.file
-                    .set_permissions(std::fs::Permissions::from_mode(a.mode & 0o7777))?;
-            }
-            if a.masks.intersects(AttrMask::ATIME | AttrMask::MTIME) {
-                let mut times = FileTimes::new();
-                if a.masks.contains(AttrMask::ATIME) {
-                    times = times.set_accessed(Self::system_time(a.atime_sec, a.atime_nsec, i)?);
-                }
-                if a.masks.contains(AttrMask::MTIME) {
-                    times = times.set_modified(Self::system_time(a.mtime_sec, a.mtime_nsec, i)?);
-                }
-                open.file.set_times(times)?;
-            }
-            return Ok(());
+            return Self::setattr_file(open.file.as_ref(), a, i, || Ok(()));
         }
         let p = self.real_path(&self.tcfile_path(&a.file)?)?;
         self.setattr_path(a, i, &p, true)
@@ -1288,13 +1297,17 @@ impl LocalBackend {
                 };
             options.write(true).custom_flags(flags);
             let file = options.open(path)?;
-            file.set_len(a.size)?;
+            // Keep this descriptor for the whole update so a rename cannot
+            // separate the size change from the other requested attributes.
+            return Self::setattr_file(&file, a, i, || {
+                #[cfg(feature = "test-faults")]
+                self.inject_open_fault(OpenFaultPoint::BeforeSetPermissions { index: i })?;
+                Ok(())
+            });
         }
         if a.masks.intersects(AttrMask::UID | AttrMask::GID) {
             Self::chown_path(a, path, follow, i)?;
         }
-        // Apply permissions last so a combined truncate+chmod cannot revoke
-        // the write access needed by its own size update.
         if a.masks.contains(AttrMask::MODE) {
             #[cfg(feature = "test-faults")]
             self.inject_open_fault(OpenFaultPoint::BeforeSetPermissions { index: i })?;

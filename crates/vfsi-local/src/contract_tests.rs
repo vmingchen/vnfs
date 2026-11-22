@@ -4107,6 +4107,59 @@ mod tests {
 
     #[cfg(feature = "test-faults")]
     #[test]
+    fn nofollow_setattr_keeps_size_and_metadata_on_the_same_file() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::sync::Arc;
+        use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
+
+        struct ReplaceFile {
+            path: PathBuf,
+            saved: PathBuf,
+        }
+
+        impl FaultInjector for ReplaceFile {
+            fn check(&self, point: &OpenFaultPoint) -> VfResult<()> {
+                if matches!(point, OpenFaultPoint::BeforeSetPermissions { index: 0 }) {
+                    std::fs::rename(&self.path, &self.saved)?;
+                    std::fs::write(&self.path, b"replacement")?;
+                    std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o640))?;
+                }
+                Ok(())
+            }
+        }
+
+        let (root, mut backend) = fs("setattr-keep-file-identity");
+        let path = root.0.join("file");
+        let saved = root.0.join("saved");
+        std::fs::write(&path, b"original").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        backend.set_fault_injector(Arc::new(ReplaceFile {
+            path: path.clone(),
+            saved: saved.clone(),
+        }));
+        let mtime = 1_650_000_000;
+        let attrs = [VfAttrs {
+            file: FileOperand::from_path("/file"),
+            masks: AttrMask::SIZE | AttrMask::MODE | AttrMask::MTIME,
+            size: 2,
+            mode: 0o600,
+            mtime_sec: mtime,
+            ..VfAttrs::default()
+        }];
+        assert!(backend.vsetattrs_raw_nofollow_impl(&attrs).unwrap()[0].is_ok());
+
+        assert_eq!(std::fs::read(&saved).unwrap(), b"or");
+        let original = std::fs::metadata(&saved).unwrap();
+        assert_eq!(original.mode() & 0o7777, 0o600);
+        assert_eq!(original.mtime(), mtime);
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+        let replacement = std::fs::metadata(&path).unwrap();
+        assert_eq!(replacement.mode() & 0o7777, 0o640);
+        assert_ne!(replacement.mtime(), mtime);
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[test]
     fn setattr_unsupported_after_truncate_is_failed_in_both_follow_modes() {
         use std::sync::Arc;
         use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
