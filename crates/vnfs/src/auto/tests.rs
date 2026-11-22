@@ -7,6 +7,22 @@ use vfsi_nfs::mount::decode_mount_field;
 use vfsi_sync::DEFAULT_READ_ALLV_MAX_TOTAL_BYTES;
 
 #[test]
+fn auto_empty_batches_do_not_read_mounts() {
+    let root = tempfile::tempdir().unwrap();
+    let client = Auto::new(root.path()).unwrap();
+    let reads = &routing::MOUNT_INFO_READS;
+    let before = reads.get();
+    assert!(client.vopen(&[]).unwrap().is_empty());
+    assert!(
+        client
+            .vcopy::<&str, &str>(&[], vfsi_core::api::CopyOptions::new())
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(reads.get(), before);
+}
+
+#[test]
 fn auto_metadata_routes_only_admitted_path_operands() {
     use crate::{AttrsOptions, SetAttrsOp, Target, VfsiExt};
     use vfsi_core::FailureState;

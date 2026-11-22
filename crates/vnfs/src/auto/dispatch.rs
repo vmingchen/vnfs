@@ -713,6 +713,9 @@ impl Auto {
         pairs: &[(P, Q)],
         options: vfsi_core::api::CopyOptions,
     ) -> vfsi_core::VecResult<()> {
+        if pairs.is_empty() {
+            return Ok(Vec::new());
+        }
         let mounts = read_mounts(false);
         let mut sources: Vec<_> = pairs
             .iter()
@@ -1084,6 +1087,9 @@ impl Auto {
     }
 
     pub(crate) fn vopen_impl(&self, requests: &[OpenOp]) -> vfsi_core::VecResult<AutoFile> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
         vfsi_core::internal::validate_open_requests(requests)?;
         let mounts = read_mounts(true);
         let resolved = self.resolve_open_batch(requests, &mounts);
