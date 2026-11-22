@@ -481,13 +481,16 @@ class _OwnedStream(io.IOBase):
             fs._check_read_allocation(len(data), self._read_path)
         except OSError as error:
             if advances:
-                try:
-                    if self._stream.seekable():
-                        self._stream.seek(self._stream.tell() - len(data))
-                except Exception as rewind_error:
-                    raise error from rewind_error
+                self._rewind_rejected_read(len(data), error)
             raise
         return data
+
+    def _rewind_rejected_read(self, consumed, error):
+        try:
+            if self._stream.seekable():
+                self._stream.seek(self._stream.tell() - consumed)
+        except Exception as rewind_error:
+            raise error from rewind_error
 
     def read(self, size=-1):
         return self._read_bounded(self._stream.read, size)
@@ -507,7 +510,27 @@ class _OwnedStream(io.IOBase):
 
     def readlines(self, hint=-1):
         self._check_open()
-        return io.IOBase.readlines(self, hint)
+        fs = self._policy_fs
+        if fs is None:
+            return io.IOBase.readlines(self, hint)
+        hint = -1 if hint is None else operator.index(hint)
+        limit = fs.read_all_max_total_bytes
+        lines = []
+        consumed = 0
+        while True:
+            # Read one byte past the remaining budget to distinguish EOF from
+            # a line that would put the returned list over the limit.
+            line = self._stream.readline(limit - consumed + 1)
+            if not line:
+                return lines
+            consumed += len(line)
+            if consumed > limit:
+                error = _allocation_error(self._read_path, consumed, limit)
+                self._rewind_rejected_read(consumed, error)
+                raise error
+            lines.append(line)
+            if hint > 0 and consumed > hint:
+                return lines
 
 
 def _validate_text_options(options):

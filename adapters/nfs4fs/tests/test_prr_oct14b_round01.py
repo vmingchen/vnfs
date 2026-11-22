@@ -112,3 +112,20 @@ def test_nonseekable_reader_reports_budget_error(dummy_fs):
             file.read()
         assert error.value.errno == errno.EFBIG
         assert error.value.filename == "/data"
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+def test_complete_cache_readlines_budgets_total_bytes(dummy_fs, tmp_path, grouped):
+    cached = complete_cache(dummy_fs, tmp_path, b"a\nb\nc\nd")
+    dummy_fs.read_all_max_total_bytes = 4
+    with reader(cached, grouped) as file:
+        with pytest.raises(OSError) as error:
+            file.readlines()
+        assert error.value.errno == errno.EFBIG
+        assert error.value.filename == "/data"
+        assert file.tell() == 0
+
+        assert file.readlines(1) == [b"a\n"]
+        assert file.readlines(2) == [b"b\n", b"c\n"]
+        assert file.readlines(None) == [b"d"]
+        assert file.readlines() == []

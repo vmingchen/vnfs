@@ -427,9 +427,8 @@ visible when the TTL expires or when the caller requests a refresh. Use
   identity and connection, so size the pool deliberately.
 - APIs that materialize complete remote results have independent safety
   limits. `read_all_max_total_bytes` bounds every bytes-returning read,
-  including whole-file reads, buffered `read(-1)`, binary `readline`/`readuntil`,
-  `cat`, and `cat_ranges` (16
-  MiB); `directory_max_entries` (100,000), `directory_max_path_bytes` (16
+  including whole-file reads, buffered `read(-1)`, binary `readline`,
+  `readuntil`, `readlines`, `cat`, and `cat_ranges` (16 MiB); `directory_max_entries` (100,000), `directory_max_path_bytes` (16
   MiB), and `walk_max_depth` (128) bound listings and recursive walks. These
   limits are configurable per filesystem instance and survive reconnects.
 - `with fs.transaction:` stages scalar and grouped write/append/exclusive
