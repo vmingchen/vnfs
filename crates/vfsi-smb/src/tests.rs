@@ -2041,7 +2041,12 @@ fn live_setattrs_size_and_times_use_one_retained_object() {
     let path = PathBuf::from(format!("/setattrs-retained-{}", std::process::id()));
     let source = Path::new(&backing).join(path.strip_prefix("/").unwrap());
     let saved = source.with_extension("saved");
-    std::fs::write(&source, b"original").unwrap();
+    // Let Samba set the initial ownership for guest and authenticated shares.
+    let file = fs
+        .open_raw_impl(&path, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, 0o666)
+        .unwrap();
+    fs.write_raw_impl(&file, 0, b"original").unwrap();
+    fs.close_impl(&file).unwrap();
     let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
     fs.set_fault_injector(Arc::new(ReplacePath {
         source: source.clone(),
@@ -2052,13 +2057,13 @@ fn live_setattrs_size_and_times_use_one_retained_object() {
         .len(2)
         .modified(modified)];
     let result = fs.vsetattrs_impl(&updates).unwrap();
+    assert!(result[0].is_ok(), "{:?}", result[0]);
     let source_data = std::fs::read(&source).unwrap();
     let saved_data = std::fs::read(&saved).unwrap();
     let source_modified = std::fs::metadata(&source).unwrap().modified().unwrap();
     let saved_modified = std::fs::metadata(&saved).unwrap().modified().unwrap();
     std::fs::remove_file(source).unwrap();
     std::fs::remove_file(saved).unwrap();
-    assert!(result[0].is_ok(), "{:?}", result[0]);
     assert_eq!(source_data, b"replacement");
     assert_eq!(saved_data, b"or");
     assert_eq!(saved_modified, modified);
