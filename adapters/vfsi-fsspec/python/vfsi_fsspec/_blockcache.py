@@ -307,11 +307,15 @@ def _close_and_update_complete_blocks(cache_fs, file, close):
         file.closed = True
         return
     cache = getattr(file, "cache", None)
-    blocks = getattr(cache, "blocks", detail["blocks"])
-    detail["blocks"] = blocks
-    if blocks is not True:
+    persisted = detail["blocks"]
+    blocks = getattr(cache, "blocks", persisted)
+    # Other readers of this generation may have published blocks since OPEN.
+    if persisted is True or blocks is True:
+        detail["blocks"] = True
+    else:
+        persisted.update(blocks)
         block_count = (file.size + file.blocksize - 1) // file.blocksize
-        if all(block in blocks for block in range(block_count)):
+        if all(block in persisted for block in range(block_count)):
             detail["blocks"] = True
     try:
         # Preserve nfs4fs's size, format, and block-size metadata instead of

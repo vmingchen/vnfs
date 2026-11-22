@@ -31,6 +31,34 @@ def _cached_fs(tmp_path, check_files=True, **cache_options):
     return target, cached
 
 
+@pytest.mark.parametrize("complete", [False, True])
+def test_closing_readers_preserves_same_generation_block_coverage(tmp_path, complete):
+    target, cached = _cached_fs(tmp_path)
+    try:
+        target.pipe_file("/data", b"abcdefghijkl")
+        with cached.open("/data", "rb", block_size=4) as later:
+            with cached.open("/data", "rb", block_size=4) as earlier:
+                if complete:
+                    assert earlier.read() == b"abcdefghijkl"
+                else:
+                    earlier.seek(4)
+                    assert earlier.read(4) == b"efgh"
+            assert later.read(4) == b"abcd"
+        cached.load_cache()
+        blocks = cached._metadata.cached_files[-1]["/data"]["blocks"]
+        if complete:
+            assert blocks is True
+        else:
+            assert blocks == {0, 1}
+        with cached.open("/data", "rb", block_size=4) as reopened:
+            assert reopened.read(8) == b"abcdefgh"
+            if not complete:
+                assert reopened.cache.miss_count == 0
+    finally:
+        cached.clear_cache()
+        target.close()
+
+
 @pytest.mark.parametrize("grouped", [False, True])
 @pytest.mark.parametrize("check_files", [False, True])
 def test_cached_generation_rejects_replacement_during_open(
