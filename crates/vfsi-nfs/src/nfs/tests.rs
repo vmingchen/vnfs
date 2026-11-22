@@ -2442,6 +2442,7 @@ fn live_object_reference_preparation_rejects_failed_identity_slots_without_cachi
     for path in &paths {
         fs.unlink_impl(path).unwrap();
     }
+    assert!(fs.open_object_ids.is_empty());
     let error = result.expect_err("a failed metadata slot cannot establish a retained identity");
     let _: &std::io::Error = &error;
     assert!(

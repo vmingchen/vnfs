@@ -68,8 +68,7 @@ fn large_write_graphs_have_linear_edges_and_preserve_initial_readiness() {
             assert!(edges <= count + 120, "{shape}: {edges} edges");
             assert_eq!(ready, [0]);
         }
-        assert!(prior.prior.is_empty());
-        assert!(prior.frontier.is_some());
+        assert!(matches!(prior, WriteDependencies::Frontier(_)));
     }
 }
 
@@ -77,9 +76,12 @@ fn large_write_graphs_have_linear_edges_and_preserve_initial_readiness() {
 // only the latest writer of each disjoint byte interval. An overwritten writer
 // remains ordered through its successors, so redundant transitive edges vanish.
 #[derive(Default)]
-struct WriteDependencies {
-    prior: Vec<WriteRange>,
-    frontier: Option<Box<WriteFrontier>>,
+enum WriteDependencies {
+    #[default]
+    Empty,
+    One(WriteRange),
+    Few(Vec<WriteRange>),
+    Frontier(Box<WriteFrontier>),
 }
 
 #[derive(Default)]
@@ -138,34 +140,48 @@ fn add_write_dependencies(
     wave_indices: &mut Vec<usize>,
 ) {
     let (index, offset, end, append) = range;
-    let count = prior.prior.len();
-    let dense = prior
-        .prior
-        .last()
-        .is_some_and(|&(last, _, _, _)| remaining_dependencies[last] > count / 4);
-    // Dense graphs benefit early; a BTreeMap costs more than a few cheap
-    // comparisons in a sparse chain. Both thresholds bound the quadratic prefix.
-    if prior.frontier.is_none() && count >= 16 && (count >= 256 || dense) {
-        let mut frontier = Box::<WriteFrontier>::default();
-        for previous in prior.prior.drain(..) {
-            frontier.insert(previous, |_| {});
+    if let WriteDependencies::Few(previous) = prior {
+        let count = previous.len();
+        // Dense graphs benefit early. Both thresholds bound the quadratic prefix.
+        if count >= 16
+            && (count >= 256
+                || previous
+                    .last()
+                    .is_some_and(|&(last, _, _, _)| remaining_dependencies[last] > count / 4))
+        {
+            let mut frontier = Box::<WriteFrontier>::default();
+            for &previous in previous.iter() {
+                frontier.insert(previous, |_| {});
+            }
+            *prior = WriteDependencies::Frontier(frontier);
         }
-        prior.prior = Vec::new();
-        prior.frontier = Some(frontier);
     }
     let mut depend = |earlier: usize| {
         successors[earlier].push(index);
         remaining_dependencies[index] += 1;
     };
-    if let Some(frontier) = &mut prior.frontier {
-        frontier.insert(range, depend);
-    } else {
-        for &(earlier, start, earlier_end, earlier_append) in &prior.prior {
-            if earlier_append || append || (offset < earlier_end && start < end) {
-                depend(earlier);
+    let overlaps = |(_, start, earlier_end, earlier_append): WriteRange| {
+        earlier_append || append || (offset < earlier_end && start < end)
+    };
+    match prior {
+        WriteDependencies::Empty => *prior = WriteDependencies::One(range),
+        WriteDependencies::One(previous) => {
+            if overlaps(*previous) {
+                depend(previous.0);
             }
+            let mut ranges = Vec::with_capacity(4);
+            ranges.extend([*previous, range]);
+            *prior = WriteDependencies::Few(ranges);
         }
-        prior.prior.push(range);
+        WriteDependencies::Few(previous) => {
+            for &earlier in previous.iter() {
+                if overlaps(earlier) {
+                    depend(earlier.0);
+                }
+            }
+            previous.push(range);
+        }
+        WriteDependencies::Frontier(frontier) => frontier.insert(range, depend),
     }
     if remaining_dependencies[index] == 0 {
         wave_indices.push(index);
@@ -400,7 +416,7 @@ impl<F: VectorBackend> FsClient<F> {
                 if request.data().is_empty() || failures[index].is_some() {
                     continue;
                 }
-                let object = if all_unknown {
+                let object = if unknown || all_unknown {
                     None
                 } else {
                     backend

@@ -39,8 +39,6 @@ impl HandleBackend for NfsVecFs {
     }
 
     fn prepare_object_refs(&mut self, files: &[&FileOperand]) -> VfResult<()> {
-        self.open_object_ids
-            .retain(|fd, _| self.open_files.contains_key(fd));
         let mut first = None;
         let mut same = true;
         for file in files.iter() {
@@ -245,7 +243,7 @@ impl HandleBackend for NfsVecFs {
                     .map_err(|error| OpError::unknown(error, None))
             });
             if outcome.is_ok() {
-                self.open_files.remove(&fd);
+                self.remove_open_file(fd);
             }
             slots[index] = Some(outcome);
         }
@@ -412,8 +410,7 @@ impl HandleBackend for NfsVecFs {
         }
         let fd = tcf.fd().unwrap();
         let open = self
-            .open_files
-            .remove(&fd)
+            .remove_open_file(fd)
             .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))?;
         #[cfg(feature = "test-faults")]
         if let Err(error) = self.inject_open_fault(OpenFaultPoint::BeforeCloseDispatch { index: 0 })

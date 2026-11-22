@@ -68,6 +68,11 @@ impl NfsVecFs {
         Ok(fd)
     }
 
+    pub(super) fn remove_open_file(&mut self, fd: i32) -> Option<NfsOpenState> {
+        self.open_object_ids.remove(&fd);
+        self.open_files.remove(&fd)
+    }
+
     pub(super) fn drain_deferred_descriptor_closes(&mut self) -> VfResult<()> {
         if self.deferred_descriptor_closes.is_empty() {
             return Ok(());
@@ -277,7 +282,7 @@ impl NfsVecFs {
         let result = self.vclose_impl(&files);
         for file in files {
             if let Some(fd) = file.fd()
-                && let Some(open) = self.open_files.remove(&fd)
+                && let Some(open) = self.remove_open_file(fd)
             {
                 self.deferred_descriptor_closes.push(open);
             }
