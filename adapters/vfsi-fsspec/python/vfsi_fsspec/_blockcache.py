@@ -7,6 +7,8 @@ floor contains equivalent generation and mmap-boundary fixes.
 
 import fcntl
 import hashlib
+import inspect
+import json
 import os
 import shutil
 import threading
@@ -16,6 +18,7 @@ import weakref
 from contextlib import contextmanager
 from functools import partial
 
+from fsspec import registry
 from fsspec.caching import MMapCache
 from fsspec.exceptions import BlocksizeMismatchError
 from fsspec.implementations.cache_mapper import HashCacheMapper
@@ -89,6 +92,25 @@ if hasattr(os, "register_at_fork"):
 def _cache_path(cache_fs, path):
     path = cache_fs._strip_protocol(path)
     return cache_fs.fs._checked_strip_protocol(path)
+
+
+def _load_json_metadata(filename):
+    # fsspec versions that still support Python 3.9 can fall back to pickle.
+    try:
+        with open(filename, encoding="utf-8") as file:
+            records = json.load(file)
+        if not isinstance(records, dict) or not all(
+            isinstance(detail, dict) for detail in records.values()
+        ):
+            raise ValueError("Cache metadata must map paths to records")
+    except ValueError as error:
+        raise ValueError(
+            f"Invalid JSON metadata in persistent cache {filename!r}"
+        ) from error
+    for detail in records.values():
+        if isinstance(detail.get("blocks"), list):
+            detail["blocks"] = set(detail["blocks"])
+    return records
 
 
 def _save_writable_metadata(cache_fs):
@@ -814,6 +836,7 @@ def install_fsspec_blockcache_compat(target_type):
 
 def _install_fsspec_blockcache_wrappers():
     original_init = CachingFileSystem.__init__
+    init_signature = inspect.signature(original_init)
     original_open = CachingFileSystem._open
     original_public_open = CachingFileSystem.open
     original_close_and_update = CachingFileSystem.close_and_update
@@ -837,14 +860,26 @@ def _install_fsspec_blockcache_wrappers():
         _clear_expired_writable_cache(cache_fs, expiry_time)
 
     def load_cache_with_compat(cache_fs):
-        if not _is_compatible_backend(cache_fs):
+        fields = object.__getattribute__(cache_fs, "__dict__")
+        if not fields.get("_vfsi_metadata_is_json") and not _is_compatible_backend(
+            cache_fs
+        ):
             return original_load_cache(cache_fs)
         with _cache_lock(cache_fs):
+            cache_fs._metadata._load = _load_json_metadata
             result = original_load_cache(cache_fs)
             _filter_readonly_generations(cache_fs)
             return result
 
     def init_with_compat(cache_fs, *args, **kwargs):
+        arguments = init_signature.bind(cache_fs, *args, **kwargs).arguments
+        protocol = arguments.get("target_protocol")
+        protocol_type = registry.get(protocol) if isinstance(protocol, str) else None
+        if isinstance(arguments.get("fs"), _TARGET_TYPES) or (
+            protocol_type is not None and issubclass(protocol_type, _TARGET_TYPES)
+        ):
+            # fsspec loads metadata before assigning cache_fs.fs.
+            cache_fs._vfsi_metadata_is_json = True
         original_init(cache_fs, *args, **kwargs)
         if type(cache_fs) is CachingFileSystem and _is_compatible_backend(cache_fs):
             # fsspec installs an instance-level path stripper that discards

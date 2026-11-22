@@ -288,6 +288,9 @@ fsspec also provides a persistent sparse-file wrapper under the same
 `blockcache` name:
 
 ```python
+import fsspec
+import nfs4fs  # Register the adapter and its cache support before construction.
+
 cached = fsspec.filesystem(
     "blockcache",
     target_protocol="nfs4",
@@ -312,7 +315,11 @@ truncate an active mmap. Retired files are unlinked, with their storage released
 when existing handles close.
 `cache_check` controls how often local cache metadata is reloaded and does not
 validate the server. `invalidate_cache()` controls directory listings; use
-`pop_from_cache()` to evict persistent file data explicitly.
+`pop_from_cache()` to evict persistent file data explicitly. Persistent cache
+metadata must be JSON. If your cache contains legacy metadata, recreate the
+cache in a fresh directory. Import `nfs4fs` before constructing a cache by
+`target_protocol` so the adapter's metadata loader is active on the first open
+of the cache directory.
 
 Files opened together with `fsspec.open_files()` share a coordinator. A cache
 miss reads the same aligned range from a bounded group of sibling descriptors

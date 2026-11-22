@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import fsspec
 import nfs4fs
 import pytest
+from fsspec.implementations.cache_metadata import CacheMetadata
 from vfsi_fsspec import VfsiFileSystem, install_fsspec_blockcache_compat
 from vfsi_fsspec._blockcache import _cache_lock
 
@@ -463,5 +464,51 @@ def test_simplecache_clear_removes_same_name_entries(tmp_path):
 
         cached.clear_cache()
         assert not (storage / name).exists()
+    finally:
+        target.close()
+
+
+@pytest.mark.parametrize("target_by_protocol", [False, True])
+def test_blockcache_uses_json_on_initial_load_and_reload(
+    tmp_path, monkeypatch, target_by_protocol
+):
+    target, cached = _persistent_fs(tmp_path)
+    storage = tmp_path / "cache"
+    try:
+        target.pipe_file("/file", b"abcdefgh")
+        with cached.open("/file", "rb", block_size=4) as file:
+            assert file.read(4) == b"abcd"
+
+        def reject_upstream_loader(*args):
+            pytest.fail("VFSI cache invoked fsspec's metadata loader")
+
+        monkeypatch.setattr(CacheMetadata, "_load", reject_upstream_loader)
+        target_args = (
+            {
+                "target_protocol": "nfs4",
+                "target_options": {
+                    "backend": "dummy",
+                    "dummy_root": str(tmp_path / "remote"),
+                    "skip_instance_cache": True,
+                },
+            }
+            if target_by_protocol
+            else {"fs": target}
+        )
+        reopened = fsspec.filesystem(
+            "blockcache",
+            cache_storage=str(storage),
+            skip_instance_cache=True,
+            **target_args,
+        )
+        try:
+            assert reopened._metadata.cached_files[-1]["/file"]["blocks"] == {0}
+            for invalid in ("invalid JSON\n", "[]", '{"/file":null}'):
+                (storage / "cache").write_text(invalid, encoding="utf-8")
+                with pytest.raises(ValueError, match="Invalid JSON metadata"):
+                    reopened.load_cache()
+        finally:
+            if target_by_protocol:
+                reopened.fs.close()
     finally:
         target.close()
