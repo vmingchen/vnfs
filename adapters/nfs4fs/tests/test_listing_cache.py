@@ -107,6 +107,23 @@ def test_concurrent_mutation_cannot_be_overwritten_by_an_older_listing(
     assert fs.ls("/", detail=False) == ["nfs4:///created"]
 
 
+def test_listing_filled_after_initial_invalidation_is_retired(cached_fs, monkeypatch):
+    fs = cached_fs
+    original_invalidate = fs._invalidate_namespace
+
+    def refill_after_invalidation(paths, evict_listings=True):
+        original_invalidate(paths, evict_listings=evict_listings)
+        if evict_listings:
+            # Model a listing that finishes after the initial clear but before
+            # the write reaches the backend and changes the namespace.
+            assert fs.ls("/", detail=False) == []
+            assert "/" in fs.dircache
+
+    monkeypatch.setattr(fs, "_invalidate_namespace", refill_after_invalidation)
+    fs.pipe_file("/created", b"data")
+    assert fs.ls("/", detail=False) == ["nfs4:///created"]
+
+
 def test_listing_expiry_time_uses_fsspec_ttl(tmp_path, monkeypatch):
     now = [100.0]
     monkeypatch.setattr(fsspec.dircache.time, "time", lambda: now[0])

@@ -4177,14 +4177,16 @@ class VfsiFileSystem(AbstractFileSystem):
         if not paths:
             yield
             return
+        # Include listings completed while the initial invalidation is
+        # returning, before the mutation has reached the backend.
+        with self._dircache_lock:
+            fill_generation = self._dircache_fill_generation
         if namespace:
             self._invalidate_namespace(paths)
         else:
             self._invalidate_persistent_caches(paths, descriptors=descriptors)
             for path in paths:
                 self._invalidate_parent_listing(path)
-        with self._dircache_lock:
-            fill_generation = self._dircache_fill_generation
         primary = None
         try:
             yield
