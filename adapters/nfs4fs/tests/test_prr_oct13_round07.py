@@ -246,3 +246,47 @@ def test_scalar_cache_accepts_target_open_override_with_explicit_signature(
         with cached_fs(target, tmp_path).open("/a", "rb") as file:
             assert file.read() == b"content"
         assert not target._client._fds
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_metadata_reload_failure_during_close_releases_mapping_and_handle(
+    dummy_fs, tmp_path, monkeypatch, grouped, close_fails
+):
+    dummy_fs.pipe_file("/a", b"content")
+    cached = cached_fs(dummy_fs, tmp_path)
+    file = (
+        cached.open_many([OpenFile(cached, "/a", mode="rb")])[0]
+        if grouped
+        else cached.open("/a", "rb", block_size=4)
+    )
+    assert file.read(4) == b"cont"
+    mapping = file.cache.cache
+    primary = OSError(errno.EIO, "cache metadata reload failed")
+    cleanup = OSError(errno.EIO, "native CLOSE failed")
+
+    def fail_reload():
+        raise primary
+
+    def fail_close(*args):
+        raise cleanup
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cached._metadata, "load", fail_reload)
+        if close_fails:
+            method = "close_many" if grouped else "close"
+            patch.setattr(dummy_fs._client, method, fail_close)
+        with pytest.raises(OSError) as caught:
+            file.close()
+        assert caught.value is primary
+        assert mapping.closed
+        assert file.closed
+        if close_fails:
+            assert caught.value.__cause__ is cleanup
+            assert dummy_fs._client._fds
+            assert set(dummy_fs._client._fds) <= dummy_fs._client._deferred_close
+        else:
+            assert not dummy_fs._client._fds
+
+    dummy_fs.info("/a")
+    assert not dummy_fs._client._fds

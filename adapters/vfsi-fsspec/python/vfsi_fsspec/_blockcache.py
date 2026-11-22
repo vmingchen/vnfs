@@ -387,10 +387,8 @@ def _close_failed_scalar_setup(file, close, exc_type, error, traceback):
     _close_reader_on_exit(file, exc_type, error, traceback, close=close)
 
 
-def _close_and_update_complete_blocks(cache_fs, file, close):
+def _update_complete_blocks(cache_fs, file):
     """Persist a partial generation using inclusive final-block accounting."""
-    if file.closed:
-        return
     path = cache_fs._strip_protocol(file.path)
     cache_fs.load_cache()
     detail = cache_fs._metadata.cached_files[-1].get(path)
@@ -398,8 +396,6 @@ def _close_and_update_complete_blocks(cache_fs, file, close):
     if detail is None or generation != _generation(detail):
         # A different wrapper/process replaced this generation while the
         # handle was open. Never commit its old block set into the new record.
-        close()
-        file.closed = True
         return
     cache = getattr(file, "cache", None)
     persisted = detail["blocks"]
@@ -427,8 +423,6 @@ def _close_and_update_complete_blocks(cache_fs, file, close):
         except (NameError, OSError):
             # Persistence is best-effort during close.
             pass
-    close()
-    file.closed = True
 
 
 def _reuse_generation_blocksize(detail, args, kwargs):
@@ -1072,8 +1066,25 @@ def _install_fsspec_blockcache_wrappers():
         ):
             # A partial reader that filled no blocks has nothing to merge.
             return close()
-        with _cache_lock(cache_fs):
-            return _close_and_update_complete_blocks(cache_fs, file, close)
+        close_attempted = False
+        try:
+            with _cache_lock(cache_fs):
+                if file.closed:
+                    return
+                _update_complete_blocks(cache_fs, file)
+                close_attempted = True
+                close()
+                file.closed = True
+        except BaseException as error:
+            if not close_attempted and not file.closed:
+                try:
+                    _close_reader_on_exit(
+                        file, type(error), error, error.__traceback__, close=close
+                    )
+                finally:
+                    # Failed native cleanup now belongs to the descriptor pool.
+                    file.closed = True
+            raise
 
     def open_many_with_compat(cache_fs, open_files):
         if not _is_compatible_backend(cache_fs):
