@@ -396,3 +396,72 @@ def test_plain_per_open_cache_does_not_poison_fresh_handles_or_dircache(tmp_path
             assert _read(target, "/file") == b"new-value"
     finally:
         target.close()
+
+
+def test_cache_expiry_refreshes_shared_metadata_and_preserves_lock(tmp_path):
+    first_target, first = _persistent_fs(tmp_path)
+    second_target, second = _persistent_fs(tmp_path)
+    storage = tmp_path / "cache"
+    lock = storage / ".vfsi-cache.lock"
+    try:
+        first_target.pipe_file("/file", b"cached!")
+        assert _read(first, "/file") == b"cached!"
+        detail = first._metadata.cached_files[-1]["/file"]
+        backing = storage / detail["fn"]
+        lock_inode = lock.stat().st_ino
+
+        assert "/file" not in second._metadata.cached_files[-1]
+        second.clear_expired_cache(expiry_time=3600)
+        assert backing.read_bytes() == b"cached!"
+        assert lock.stat().st_ino == lock_inode
+
+        second.clear_expired_cache(expiry_time=-1)
+        assert not backing.exists()
+        first.load_cache()
+        assert "/file" not in first._metadata.cached_files[-1]
+        assert lock.stat().st_ino == lock_inode
+    finally:
+        first_target.close()
+        second_target.close()
+
+
+def test_clear_cache_keeps_shared_lock_and_open_reader(tmp_path):
+    target, cached = _persistent_fs(tmp_path)
+    storage = tmp_path / "cache"
+    try:
+        target.pipe_file("/file", b"abcdefgh")
+        with cached.open("/file", "rb", block_size=4) as file:
+            assert file.read(4) == b"abcd"
+            lock = storage / ".vfsi-cache.lock"
+            lock_inode = lock.stat().st_ino
+
+            cached.clear_cache()
+            assert list(storage.iterdir()) == [lock]
+            assert lock.stat().st_ino == lock_inode
+            assert file.read(4) == b"efgh"
+
+        assert "/file" not in cached._metadata.cached_files[-1]
+    finally:
+        target.close()
+
+
+def test_simplecache_clear_removes_same_name_entries(tmp_path):
+    target, _ = _persistent_fs(tmp_path)
+    storage = tmp_path / "simple"
+    cached = fsspec.filesystem(
+        "simplecache",
+        fs=target,
+        cache_storage=str(storage),
+        same_names=True,
+        skip_instance_cache=True,
+    )
+    name = ".vfsi-cache.lock"
+    try:
+        target.pipe_file("/" + name, b"ordinary data")
+        assert _read(cached, "/" + name) == b"ordinary data"
+        assert (storage / name).read_bytes() == b"ordinary data"
+
+        cached.clear_cache()
+        assert not (storage / name).exists()
+    finally:
+        target.close()

@@ -8,6 +8,7 @@ floor contains equivalent generation and mmap-boundary fixes.
 import fcntl
 import hashlib
 import os
+import shutil
 import threading
 import time
 import uuid
@@ -18,7 +19,7 @@ from functools import partial
 from fsspec.caching import MMapCache
 from fsspec.exceptions import BlocksizeMismatchError
 from fsspec.implementations.cache_mapper import HashCacheMapper
-from fsspec.implementations.cached import CachingFileSystem
+from fsspec.implementations.cached import CachingFileSystem, SimpleCacheFileSystem
 
 from ._caching import _Nfs4MMapCache
 from ._fs import (
@@ -35,6 +36,7 @@ from ._fs import (
 
 _CACHE_FORMAT_KEY = "nfs4fs_blockcache_format"
 _CACHE_FORMAT = 1
+_CACHE_LOCK_NAME = ".vfsi-cache.lock"
 _PATCH_MARKER = "_nfs4fs_blockcache_compat"
 _INSTALL_LOCK = threading.RLock()
 _TARGET_TYPES = ()
@@ -106,9 +108,16 @@ def _save_writable_metadata(cache_fs):
 def _backing_path(cache_fs, detail, storage=None):
     storage = os.path.realpath(cache_fs.storage[-1] if storage is None else storage)
     candidate = os.path.join(storage, detail["fn"])
+    resolved = os.path.realpath(candidate)
     if (
         os.path.islink(candidate)
-        or os.path.commonpath([storage, os.path.realpath(candidate)]) != storage
+        or os.path.commonpath([storage, resolved]) != storage
+        or resolved
+        in (
+            storage,
+            os.path.join(storage, "cache"),
+            os.path.join(storage, _CACHE_LOCK_NAME),
+        )
     ):
         raise ValueError("unsafe path in fsspec block-cache metadata")
     return candidate
@@ -376,7 +385,7 @@ def _cache_lock(cache_fs):
         os.makedirs(storage, exist_ok=True)
         with _LOCKS_GUARD:
             fd = os.open(
-                os.path.join(storage, ".vfsi-cache.lock"), os.O_CREAT | os.O_RDWR, 0o600
+                os.path.join(storage, _CACHE_LOCK_NAME), os.O_CREAT | os.O_RDWR, 0o600
             )
             _ACTIVE_LOCK_FDS.add(fd)
         acquired = False
@@ -476,6 +485,53 @@ def _pop_writable_cache_file(cache_fs, path):
         except FileNotFoundError:
             pass
         cache_fs._cache_size = None
+
+
+def _clear_writable_cache(cache_fs):
+    with _cache_lock(cache_fs):
+        with os.scandir(cache_fs.storage[-1]) as entries:
+            for entry in entries:
+                if entry.name == _CACHE_LOCK_NAME:
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    shutil.rmtree(entry.path)
+                else:
+                    os.unlink(entry.path)
+        cache_fs.load_cache()
+        cache_fs._cache_size = None
+
+
+def _clear_expired_writable_cache(cache_fs, expiry_time):
+    if not expiry_time:
+        expiry_time = cache_fs.expiry
+    if not expiry_time:
+        return
+    with _cache_lock(cache_fs):
+        cache_fs.load_cache()
+        writable = cache_fs._metadata.cached_files[-1]
+        cutoff = time.time() - expiry_time
+        expired = {
+            path: _backing_path(cache_fs, detail)
+            for path, detail in writable.items()
+            if detail["time"] < cutoff
+        }
+        if not expired:
+            return
+        # If two records share backing storage, keep it for surviving records.
+        retained = {
+            os.path.realpath(_backing_path(cache_fs, detail))
+            for path, detail in writable.items()
+            if path not in expired
+        }
+        for path in expired:
+            del writable[path]
+        _save_writable_metadata(cache_fs)
+        for filename in set(expired.values()):
+            if os.path.realpath(filename) not in retained:
+                try:
+                    os.remove(filename)
+                except FileNotFoundError:
+                    pass
 
 
 def _register_cache(cache_fs):
@@ -763,6 +819,22 @@ def _install_fsspec_blockcache_wrappers():
     original_close_and_update = CachingFileSystem.close_and_update
     original_pop_from_cache = CachingFileSystem.pop_from_cache
     original_load_cache = CachingFileSystem.load_cache
+    original_clear_cache = CachingFileSystem.clear_cache
+    original_clear_expired_cache = CachingFileSystem.clear_expired_cache
+
+    def clear_cache_with_compat(cache_fs):
+        if isinstance(cache_fs, SimpleCacheFileSystem) or not _is_compatible_backend(
+            cache_fs
+        ):
+            return original_clear_cache(cache_fs)
+        _clear_writable_cache(cache_fs)
+
+    def clear_expired_cache_with_compat(cache_fs, expiry_time=None):
+        if isinstance(cache_fs, SimpleCacheFileSystem) or not _is_compatible_backend(
+            cache_fs
+        ):
+            return original_clear_expired_cache(cache_fs, expiry_time)
+        _clear_expired_writable_cache(cache_fs, expiry_time)
 
     def load_cache_with_compat(cache_fs):
         if not _is_compatible_backend(cache_fs):
@@ -866,4 +938,6 @@ def _install_fsspec_blockcache_wrappers():
     CachingFileSystem.commit_many = _delegate_commit_many
     CachingFileSystem.pop_from_cache = pop_from_cache_with_compat
     CachingFileSystem.load_cache = load_cache_with_compat
+    CachingFileSystem.clear_cache = clear_cache_with_compat
+    CachingFileSystem.clear_expired_cache = clear_expired_cache_with_compat
     setattr(CachingFileSystem, _PATCH_MARKER, True)
