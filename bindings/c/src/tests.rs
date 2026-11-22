@@ -3906,16 +3906,23 @@ fn extended_rejections_clear_all_stale_counts_before_dispatch() {
             got: 99,
         })
         .collect();
-    let mut statuses = [std::mem::MaybeUninit::<vfsi_io_result>::uninit(); 3];
+    let mut statuses = [std::mem::MaybeUninit::<vfsi_io_result>::zeroed(); 3];
     assert_eq!(
         unsafe { vfsi_preadv_ex(fs, reads.as_mut_ptr(), 3, statuses.as_mut_ptr().cast()) }.category,
         VFSI_ERROR_INVALID_ARGUMENT
     );
     assert!(reads.iter().all(|r| r.got == 0));
     assert_eq!(buffers, [[0xa5; 2]; 3]);
-    assert!(statuses
-        .iter()
-        .all(|r| unsafe { r.assume_init() }.failure_state == VFSI_IO_NOT_ATTEMPTED));
+    let assert_cancelled = |statuses: &[std::mem::MaybeUninit<vfsi_io_result>]| {
+        for (index, status) in statuses.iter().enumerate() {
+            // SAFETY: each extended call initializes all output slots before rejection.
+            let result = unsafe { status.assume_init() };
+            assert_eq!(result.failure_state, VFSI_IO_NOT_ATTEMPTED);
+            assert_eq!(result.status.index, index);
+            assert_eq!(result.status.err_no, libc::ECANCELED as u32);
+        }
+    };
+    assert_cancelled(&statuses);
     let mut writes: Vec<_> = (0..3)
         .map(|i| vfsi_pwrite_op {
             fd: 10 + i,
@@ -3929,12 +3936,15 @@ fn extended_rejections_clear_all_stale_counts_before_dispatch() {
             wrote: 99,
         })
         .collect();
+    // Require the write call to initialize its own outputs.
+    statuses.fill(std::mem::MaybeUninit::zeroed());
     assert_eq!(
         unsafe { vfsi_pwritev_ex(fs, writes.as_mut_ptr(), 3, statuses.as_mut_ptr().cast()) }
             .category,
         VFSI_ERROR_INVALID_ARGUMENT
     );
     assert!(writes.iter().all(|r| r.wrote == 0));
+    assert_cancelled(&statuses);
     unsafe {
         vfsi_free(fs);
     }

@@ -26,6 +26,25 @@ fn success(index: usize, offset: u64, eof: bool) -> vfsi_io_result {
     }
 }
 
+/// Initialize output slots before validating or dispatching the operations.
+/// The cancellation cause is identical for every slot except its input index.
+unsafe fn initialize_io_results<'a>(
+    results: *mut vfsi_io_result,
+    count: usize,
+) -> &'a mut [vfsi_io_result] {
+    let mut result = failed(
+        0,
+        OpError::not_attempted(std::io::Error::from_raw_os_error(libc::ECANCELED)),
+    );
+    // SAFETY: callers provide count aligned, writable slots for the returned borrow.
+    unsafe {
+        initialized_output_slice(results, count, |index| {
+            result.status.index = index;
+            result
+        })
+    }
+}
+
 /// Independent positioned reads. A successful return means the batch was accepted:
 /// inspect every item, including siblings after failures. A return error rejects
 /// the batch before dispatch. got includes confirmed failed prefixes;
@@ -52,14 +71,7 @@ pub unsafe extern "C" fn vfsi_preadv_ex(
             return vfsi_result::invalid(0, "null vector array");
         }
         // SAFETY: the documented C pointer and lifetime contract holds for this synchronous call.
-        let results = unsafe {
-            initialized_output_slice(results, count, |index| {
-                failed(
-                    index,
-                    OpError::not_attempted(std::io::Error::from_raw_os_error(libc::ECANCELED)),
-                )
-            })
-        };
+        let results = unsafe { initialize_io_results(results, count) };
         // SAFETY: the non-null operation array has count live aligned exclusive elements by the C contract.
         let ops = unsafe { std::slice::from_raw_parts_mut(ops, count) };
         let mut invalid_payload = None;
@@ -235,14 +247,7 @@ pub unsafe extern "C" fn vfsi_pwritev_ex(
             return vfsi_result::invalid(0, "null vector array");
         }
         // SAFETY: the documented C pointer and lifetime contract holds for this synchronous call.
-        let results = unsafe {
-            initialized_output_slice(results, count, |index| {
-                failed(
-                    index,
-                    OpError::not_attempted(std::io::Error::from_raw_os_error(libc::ECANCELED)),
-                )
-            })
-        };
+        let results = unsafe { initialize_io_results(results, count) };
         // SAFETY: the non-null operation array has count live aligned exclusive elements by the C contract.
         let ops = unsafe { std::slice::from_raw_parts_mut(ops, count) };
         let mut invalid_payload = None;
