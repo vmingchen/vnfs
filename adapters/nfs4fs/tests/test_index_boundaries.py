@@ -373,3 +373,33 @@ def test_symlink_copy_creation_failure_has_original_index(dummy_fs):
     assert caught.value.index == 1
     assert dummy_fs.cat_file("/copy") == b"file"
     assert dummy_fs.cat_file("/exists") == b"untouched"
+
+
+@pytest.mark.parametrize("transport", [False, True])
+def test_remove_later_transport_takes_precedence_over_metadata_error(
+    dummy_fs, monkeypatch, transport
+):
+    dummy_fs.pipe_file("/active", b"still there")
+    failure = (
+        TimeoutError("lost REMOVE reply")
+        if transport
+        else PermissionError(errno.EACCES, "REMOVE denied")
+    )
+    failure.index = 0
+
+    def remove(paths):
+        assert paths == [dummy_fs._native_path("/active")]
+        raise failure
+
+    monkeypatch.setattr(dummy_fs._client, "remove_many", remove)
+    if transport:
+        with pytest.raises(TimeoutError) as caught:
+            dummy_fs.rm(["/missing", "/active"])
+        assert caught.value is failure
+        assert failure.index == 1
+        assert failure.filename == "/active"
+    else:
+        with pytest.raises(FileNotFoundError) as caught:
+            dummy_fs.rm(["/missing", "/active"])
+        assert caught.value.index == 0
+        assert caught.value.filename == "/missing"

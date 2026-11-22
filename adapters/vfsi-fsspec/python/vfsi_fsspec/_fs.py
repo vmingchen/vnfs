@@ -6328,10 +6328,15 @@ class VfsiFileSystem(AbstractFileSystem):
                         )
                 except Exception as error:
                     position = getattr(error, "index", None)
-                    if not isinstance(position, int) or not 0 <= position < len(active):
+                    if (
+                        not isinstance(position, int)
+                        or isinstance(position, bool)
+                        or not 0 <= position < len(active)
+                    ):
                         raise
                     index = active[position]
-                    if index < first_error[0]:
+                    # A lost REMOVE reply leaves mutation state uncertain.
+                    if _is_transport_error(error) or index < first_error[0]:
                         _oserror(error, paths[index], index=index)
                         raise
                 index, error = first_error
