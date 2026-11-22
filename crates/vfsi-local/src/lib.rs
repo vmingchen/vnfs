@@ -1221,29 +1221,29 @@ impl LocalBackend {
     }
 
     #[cfg(target_os = "linux")]
-    fn set_times_path(a: &VfAttrs, path: &AnchoredPath, index: usize) -> VfResult<()> {
-        // A resolved following path already pins its target. A no-follow
-        // path only pins its parent, so pin and inspect the leaf as well.
+    fn pin_setattr_leaf(path: &AnchoredPath) -> VfResult<AnchoredPath> {
         // O_PATH needs no read access and never waits for a FIFO peer.
-        let leaf = if path.nofollow_on_open {
-            let file = OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_PATH | libc::O_NOFOLLOW)
-                .open(path)?;
-            if file.metadata()?.file_type().is_symlink() {
-                return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
-            }
-            Some(file)
-        } else {
-            None
-        };
-        let descriptor_path;
-        let path = if let Some(file) = &leaf {
-            descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
-            descriptor_path.as_path()
-        } else {
-            path.as_ref()
-        };
+        let anchor = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_NOFOLLOW)
+            .open(path)?;
+        if anchor.metadata()?.file_type().is_symlink() {
+            return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
+        }
+        Ok(AnchoredPath {
+            path: PathBuf::from(format!("/proc/self/fd/{}", anchor.as_raw_fd())),
+            anchor: Some(anchor),
+            nofollow_on_open: false,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn set_times_path(a: &VfAttrs, path: &AnchoredPath, index: usize) -> VfResult<()> {
+        let leaf = path
+            .nofollow_on_open
+            .then(|| Self::pin_setattr_leaf(path))
+            .transpose()?;
+        let path = leaf.as_ref().unwrap_or(path).as_ref();
         let name = cstring_from_bytes(path_bytes(path))
             .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
         let mut times = [libc::timespec {
@@ -1305,6 +1305,18 @@ impl LocalBackend {
                 Ok(())
             });
         }
+        // A no-follow lookup pins the parent. Resolve the leaf once so all
+        // metadata syscalls address the same object through its procfs link.
+        // Ownership-only updates to a symlink take the lchown path instead.
+        #[cfg(target_os = "linux")]
+        let leaf;
+        #[cfg(target_os = "linux")]
+        let (path, follow) = if !follow && !a.masks.is_empty() {
+            leaf = Self::pin_setattr_leaf(path)?;
+            (&leaf, true)
+        } else {
+            (path, follow)
+        };
         if a.masks.intersects(AttrMask::UID | AttrMask::GID) {
             Self::chown_path(a, path, follow, i)?;
         }
@@ -1318,6 +1330,10 @@ impl LocalBackend {
             }
         }
         if a.masks.intersects(AttrMask::ATIME | AttrMask::MTIME) {
+            #[cfg(feature = "test-faults")]
+            if a.masks.contains(AttrMask::MODE) {
+                self.inject_open_fault(OpenFaultPoint::AfterSetPermissions { index: i })?;
+            }
             #[cfg(target_os = "linux")]
             Self::set_times_path(a, path, i)?;
             #[cfg(not(target_os = "linux"))]

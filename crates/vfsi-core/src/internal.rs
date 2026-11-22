@@ -340,6 +340,9 @@ pub mod faults {
         BeforeSetPermissions {
             index: usize,
         },
+        AfterSetPermissions {
+            index: usize,
+        },
         AfterNoFollowSetattrTypeCheck {
             index: usize,
         },
