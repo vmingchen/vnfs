@@ -347,3 +347,46 @@ def test_scalar_cache_repairs_truncated_writable_entry_after_expired_seed(
     assert _read(cached, "/data", grouped=False) == OLD
     assert not stale_file.exists()
     assert _snapshot(seed) == seed_before
+
+
+def test_scalar_cache_skips_physically_truncated_seed(dummy_fs, tmp_path):
+    dummy_fs.pipe_file("/data", OLD)
+    seed = tmp_path / "seed"
+    writable = tmp_path / "writable"
+    source = _seed(dummy_fs, seed, {"/data": OLD})
+    _seed(dummy_fs, writable, {"/data": OLD})
+    backing = seed / source._metadata.cached_files[-1]["/data"]["fn"]
+    backing.write_bytes(OLD[:2])
+    before = _snapshot(seed)
+
+    cached = _cache(dummy_fs, [seed], writable)
+    assert _read(cached, "/data", grouped=False) == OLD
+    assert _snapshot(seed) == before
+
+
+def test_scalar_cache_reuses_block_size_of_selected_layer(dummy_fs, tmp_path):
+    dummy_fs.pipe_file("/data", OLD)
+    seed = tmp_path / "seed"
+    writable = tmp_path / "writable"
+    source = _seed(dummy_fs, seed, {})
+    with source.open("/data", "rb", block_size=2) as file:
+        assert file.read() == OLD
+    latest = _seed(dummy_fs, writable, {})
+    with latest.open("/data", "rb", block_size=4) as file:
+        assert file.read(4) == OLD[:4]
+    metadata_path = seed / "cache"
+    records = json.loads(metadata_path.read_text(encoding="utf-8"))
+    records["/data"]["time"] = 0
+    metadata_path.write_text(json.dumps(records), encoding="utf-8")
+
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=dummy_fs,
+        cache_storage=[str(seed), str(writable)],
+        check_files=False,
+        expiry_time=3600,
+        skip_instance_cache=True,
+    )
+    with cached.open("/data", "rb", block_size=8) as file:
+        assert file.blocksize == 4
+        assert file.read() == OLD

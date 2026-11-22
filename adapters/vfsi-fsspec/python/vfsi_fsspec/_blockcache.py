@@ -146,15 +146,17 @@ def _backing_path(cache_fs, detail, storage=None):
 
 
 def _record_backing_path(cache_fs, path, detail, filename):
-    """Validate the cache location selected by fsspec, including read-only ones."""
-    for storage, records in zip(cache_fs.storage, cache_fs._metadata.cached_files):
+    """Validate the selected filename and identify its storage layer."""
+    for index, (storage, records) in enumerate(
+        zip(cache_fs.storage, cache_fs._metadata.cached_files)
+    ):
         selected = records.get(path)
         if (
             selected is not None
             and selected.get("fn") == detail["fn"]
             and os.path.join(storage, detail["fn"]) == filename
         ):
-            return _backing_path(cache_fs, detail, storage=storage)
+            return index, _backing_path(cache_fs, detail, storage=storage)
     raise ValueError("unsafe path in fsspec block-cache metadata")
 
 
@@ -180,6 +182,14 @@ def _filter_readonly_generations(cache_fs, *, include_partial_seeds=False):
         ]
         for path in stale:
             del records[path]
+
+
+def _invalidate_readonly_generation(cache_fs, layer, path):
+    storage = os.path.realpath(cache_fs.storage[layer])
+    detail = cache_fs._metadata.cached_files[layer].pop(path)
+    fields = object.__getattribute__(cache_fs, "__dict__")
+    invalidated = fields.setdefault("_vfsi_readonly_invalidated", {})
+    invalidated.setdefault(storage, {})[path] = _generation(detail)
 
 
 def _publish_generations(cache_fs, records, previous):
@@ -224,27 +234,36 @@ def _publish_generations(cache_fs, records, previous):
 
 
 def _reset_stale_generation(cache_fs, path):
-    selected = None
+    selected_writable = False
     raw = cache_fs._metadata.check_file(path, None)
     if raw:
         _record_backing_path(cache_fs, path, *raw)
-        valid = cache_fs._check_file(path)
-        if valid:
-            selected = _record_backing_path(cache_fs, path, *valid)
+        while valid := cache_fs._check_file(path):
+            layer, selected = _record_backing_path(cache_fs, path, *valid)
+            if layer == len(cache_fs.storage) - 1:
+                selected_writable = True
+                break
+
+            detail = valid[0]
+            size = detail.get("size")
+            try:
+                if size is None or os.path.getsize(selected) == size:
+                    return detail
+            except OSError:
+                pass
+            # Discard a damaged seed for this wrapper without writing its storage.
+            _invalidate_readonly_generation(cache_fs, layer, path)
 
     writable_detail = cache_fs._metadata.cached_files[-1].get(path)
     if writable_detail is None:
-        return
+        return None
     backing_file = _backing_path(cache_fs, writable_detail)
-    if selected is not None:
-        if selected != backing_file:
-            return  # A usable read-only generation takes precedence.
-        if writable_detail.get(_CACHE_FORMAT_KEY) == _CACHE_FORMAT:
-            try:
-                if os.path.getsize(backing_file) == writable_detail.get("size"):
-                    return
-            except FileNotFoundError:
-                pass
+    if selected_writable and writable_detail.get(_CACHE_FORMAT_KEY) == _CACHE_FORMAT:
+        try:
+            if os.path.getsize(backing_file) == writable_detail.get("size"):
+                return writable_detail
+        except FileNotFoundError:
+            pass
 
     # Rotate existing metadata even if its backing is gone. Reusing fsspec's
     # default filename can merge completed blocks from an older generation.
@@ -365,7 +384,7 @@ def _close_and_update_complete_blocks(cache_fs, file, close):
     file.closed = True
 
 
-def _reuse_generation_blocksize(cache_fs, path, args, kwargs):
+def _reuse_generation_blocksize(detail, args, kwargs):
     """Keep a partial generation's block size across scalar reopens.
 
     LocalFileSystem ignores a later ``block_size`` request because its opener
@@ -373,10 +392,9 @@ def _reuse_generation_blocksize(cache_fs, path, args, kwargs):
     preserving fsspec's requirement that a partial persistent-cache
     generation has exactly one block size.
     """
-    raw = cache_fs._metadata.check_file(path, None)
-    if not raw:
+    if detail is None or detail["blocks"] is True:
         return args, kwargs
-    blocksize = raw[0].get("blocksize")
+    blocksize = detail.get("blocksize")
     if blocksize is None:
         return args, kwargs
     args = list(args)
@@ -477,8 +495,7 @@ def _invalidate_registered_paths(
             return False
 
         changed = False
-        invalidated = fields.setdefault("_vfsi_readonly_invalidated", {})
-        for index, (storage, records) in enumerate(zip(cache_fs.storage, locations)):
+        for index, records in enumerate(locations):
             for path, detail in list(records.items()):
                 if not affected(path, detail):
                     continue
@@ -486,10 +503,7 @@ def _invalidate_registered_paths(
                     # Earlier locations are read-only. Their records precede
                     # writable replacements during lookup, so hide this exact
                     # generation locally and after subsequent metadata reloads.
-                    invalidated.setdefault(os.path.realpath(storage), {})[path] = (
-                        _generation(detail)
-                    )
-                    del records[path]
+                    _invalidate_readonly_generation(cache_fs, index, path)
                 elif detail.get(_CACHE_FORMAT_KEY) != _INVALID_CACHE_FORMAT:
                     detail[_CACHE_FORMAT_KEY] = _INVALID_CACHE_FORMAT
                     changed = True
@@ -930,15 +944,13 @@ def _install_fsspec_blockcache_wrappers():
         with _cache_lock(cache_fs):
             cache_fs.load_cache()
             normalized = _cache_path(cache_fs, path)
-            _reset_stale_generation(cache_fs, normalized)
-            args, kwargs = _reuse_generation_blocksize(
-                cache_fs, normalized, args, kwargs
-            )
+            detail = _reset_stale_generation(cache_fs, normalized)
+            args, kwargs = _reuse_generation_blocksize(detail, args, kwargs)
             file = original_open(cache_fs, path, *args, **kwargs)
             try:
-                _mark_compatible_cache(cache_fs, normalized, file)
                 if getattr(file, "_raw", None) is None:
                     return _OwnedStream(file, file, fs=cache_fs.fs, path=normalized)
+                _mark_compatible_cache(cache_fs, normalized, file)
             except BaseException as primary:
                 _close_reader_on_exit(
                     file, type(primary), primary, primary.__traceback__
