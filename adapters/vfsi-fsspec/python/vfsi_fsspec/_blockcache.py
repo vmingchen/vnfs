@@ -11,6 +11,7 @@ import inspect
 import json
 import os
 import shutil
+import tempfile
 import threading
 import time
 import uuid
@@ -24,7 +25,6 @@ from fsspec.caching import MMapCache
 from fsspec.exceptions import BlocksizeMismatchError
 from fsspec.implementations.cache_mapper import HashCacheMapper
 from fsspec.implementations.cached import CachingFileSystem, SimpleCacheFileSystem
-from fsspec.utils import atomic_write
 
 from ._caching import _Nfs4MMapCache
 from ._fs import (
@@ -121,20 +121,38 @@ def _load_json_metadata(filename):
 def _save_json_metadata(records, filename):
     """Encode ordinary cache entries whole and stream large block lists."""
     encoder = json.JSONEncoder(separators=(",", ":"))
-    with atomic_write(filename, mode="w") as file:
-        file.write("{")
-        separator = ""
-        for path, detail in records.items():
-            file.write(separator)
-            file.write(encoder.encode(path))
-            file.write(":")
-            blocks = detail.get("blocks")
-            if isinstance(blocks, list) and len(blocks) > _MAX_FAST_JSON_BLOCKS:
-                file.writelines(encoder.iterencode(detail))
-            else:
-                file.write(encoder.encode(detail))
-            separator = ","
-        file.write("}")
+    file = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=os.path.dirname(filename) or ".",
+        prefix=os.path.basename(filename) + "-",
+        delete=False,
+    )
+    try:
+        with ExitStack() as stack:
+            stack.push(partial(_close_reader_on_exit, file))
+            file.write("{")
+            separator = ""
+            for path, detail in records.items():
+                file.write(separator)
+                file.write(encoder.encode(path))
+                file.write(":")
+                blocks = detail.get("blocks")
+                if isinstance(blocks, list) and len(blocks) > _MAX_FAST_JSON_BLOCKS:
+                    file.writelines(encoder.iterencode(detail))
+                else:
+                    file.write(encoder.encode(detail))
+                separator = ","
+            file.write("}")
+        os.replace(file.name, filename)
+    except BaseException as primary:
+        try:
+            os.unlink(file.name)
+        except FileNotFoundError:
+            pass
+        except BaseException as cleanup:
+            raise primary from cleanup
+        raise
 
 
 def _save_writable_metadata(cache_fs):

@@ -3,6 +3,7 @@
 import json
 import multiprocessing
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import fsspec
@@ -599,3 +600,24 @@ def test_cache_metadata_streams_entries_with_large_block_lists(tmp_path, monkeyp
     assert json.loads(filename.read_text(encoding="utf-8")) == records
     assert any(value is small for value in encoded_whole)
     assert all(value is not large for value in encoded_whole)
+
+
+def test_cache_metadata_replace_failure_cleans_up_temporary_file(tmp_path, monkeypatch):
+    import errno
+
+    filename = tmp_path / "cache"
+    filename.write_text('{"old": {}}', encoding="utf-8")
+    failure = OSError(errno.ENOSPC, "metadata rename failed")
+
+    def fail_replace(source, destination):
+        assert list(tmp_path.glob("cache-*")) == [Path(source)]
+        assert Path(destination) == filename
+        raise failure
+
+    monkeypatch.setattr(_blockcache.os, "replace", fail_replace)
+    for _ in range(2):
+        with pytest.raises(OSError) as error:
+            _blockcache._save_json_metadata({"new": {}}, str(filename))
+        assert error.value is failure
+        assert list(tmp_path.iterdir()) == [filename]
+        assert json.loads(filename.read_text(encoding="utf-8")) == {"old": {}}
