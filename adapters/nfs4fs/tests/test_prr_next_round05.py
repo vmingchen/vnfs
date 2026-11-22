@@ -44,7 +44,7 @@ def test_unopened_whole_file_reader_honors_reduced_runtime_limit(fs, reader):
         file.close()
 
 
-def test_small_file_get_applies_active_batch_budget_after_source_growth(
+def test_small_file_get_streams_within_active_budget_after_source_growth(
     fs, tmp_path, monkeypatch
 ):
     remote = f"/prr-get-budget-{uuid.uuid4().hex}"
@@ -53,7 +53,11 @@ def test_small_file_get_applies_active_batch_budget_after_source_growth(
     fs.read_all_max_total_bytes = 4
     native = fs._native_path(remote)
     original_stat_many = fs._client.stat_many
+    original_read_all_many = fs._client.read_all_many
+    original_pread = fs._client.pread
     grew = []
+    batch_budgets = []
+    read_sizes = []
 
     def stat_then_grow(paths):
         result = original_stat_many(paths)
@@ -62,11 +66,21 @@ def test_small_file_get_applies_active_batch_budget_after_source_growth(
             fs.pipe_file(remote, b"12345678")
         return result
 
-    monkeypatch.setattr(fs._client, "stat_many", stat_then_grow)
-    with pytest.raises(OSError) as error:
-        fs.get([remote], [str(destination)])
+    def record_read_all_many(paths, limit):
+        batch_budgets.append(limit)
+        return original_read_all_many(paths, limit)
 
-    assert error.value.errno == errno.EFBIG
+    def record_pread(fd, size, offset):
+        read_sizes.append(size)
+        return original_pread(fd, size, offset)
+
+    monkeypatch.setattr(fs._client, "stat_many", stat_then_grow)
+    monkeypatch.setattr(fs._client, "read_all_many", record_read_all_many)
+    monkeypatch.setattr(fs._client, "pread", record_pread)
+
+    fs.get([remote], [str(destination)])
+
     assert grew
-    assert not destination.exists()
-    assert fs.info(remote)["size"] == 8
+    assert batch_budgets == [4]
+    assert read_sizes and all(0 < size <= 4 for size in read_sizes)
+    assert destination.read_bytes() == b"12345678"
