@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 import weakref
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from functools import partial
 
 from fsspec import registry
@@ -162,8 +162,8 @@ def _generation(detail):
     return detail.get("fn"), detail.get("time"), detail.get("uid")
 
 
-def _filter_readonly_generations(cache_fs):
-    """Keep same-target invalidations across reloads without writing seed caches."""
+def _filter_readonly_generations(cache_fs, *, include_partial_seeds=False):
+    """Skip seed records that we cannot use without updating the seed cache."""
     invalidated = object.__getattribute__(cache_fs, "__dict__").get(
         "_vfsi_readonly_invalidated", {}
     )
@@ -174,7 +174,8 @@ def _filter_readonly_generations(cache_fs):
         stale = [
             path
             for path, detail in records.items()
-            if detail.get(_CACHE_FORMAT_KEY) == _INVALID_CACHE_FORMAT
+            if (not include_partial_seeds and detail.get("blocks") is not True)
+            or detail.get(_CACHE_FORMAT_KEY) == _INVALID_CACHE_FORMAT
             or rejected.get(path) == _generation(detail)
         ]
         for path in stale:
@@ -434,11 +435,20 @@ def _invalidate_registered_paths(
     cache_fs, paths, subtrees=False, identities=(), uncertain=False
 ):
     """Invalidate future opens without disrupting already-open mmap handles."""
-    with _cache_lock(cache_fs):
+    with _cache_lock(cache_fs), ExitStack() as cleanup:
         # Multiple CachingFileSystem wrappers may share one writable storage
         # directory. cache_check=0 intentionally disables fsspec's automatic
         # reload, so refresh here before replacing shared generation metadata.
-        cache_fs.load_cache()
+        # A different wrapper may later complete a seed that is partial now.
+        fields = object.__getattribute__(cache_fs, "__dict__")
+        marker = "_vfsi_include_partial_seeds"
+        previous = fields.get(marker, False)
+        fields[marker] = True
+        cleanup.callback(_filter_readonly_generations, cache_fs)
+        try:
+            cache_fs.load_cache()
+        finally:
+            fields[marker] = previous
         locations = cache_fs._metadata.cached_files
         canonical = {}
         candidates = {path for records in locations for path in records}
@@ -463,9 +473,7 @@ def _invalidate_registered_paths(
             return False
 
         changed = False
-        invalidated = object.__getattribute__(cache_fs, "__dict__").setdefault(
-            "_vfsi_readonly_invalidated", {}
-        )
+        invalidated = fields.setdefault("_vfsi_readonly_invalidated", {})
         for index, (storage, records) in enumerate(zip(cache_fs.storage, locations)):
             for path, detail in list(records.items()):
                 if not affected(path, detail):
@@ -592,47 +600,40 @@ def _is_plain_read(open_file):
     return mode == "r" and open_file.compression is None
 
 
-def _raw_cache_records(cache_fs, paths):
+def _cached_generation(cache_fs, path, now, uid=None):
+    for storage, layer in zip(cache_fs.storage, cache_fs._metadata.cached_files):
+        detail = layer.get(path)
+        if (
+            detail is None
+            or detail.get(_CACHE_FORMAT_KEY) != _CACHE_FORMAT
+            or (cache_fs.expiry and now - detail.get("time", 0) > cache_fs.expiry)
+            or (uid is not None and detail.get("uid") != uid)
+        ):
+            continue
+        filename = _backing_path(cache_fs, detail, storage)
+        try:
+            if os.path.getsize(filename) == detail.get("size"):
+                return detail, filename
+        except OSError:
+            continue
+    return None, None
+
+
+def _prepare_cache_records(cache_fs, paths):
     cache_fs._mkcache()
     cache_fs._check_cache()
     records = []
     info_indices = []
     now = time.time()
     for index, path in enumerate(paths):
-        raw = cache_fs._metadata.check_file(path, None)
-        detail, filename = raw if raw else (None, None)
-        compatible = False
-        expired = False
-        if detail is not None:
-            filename = _record_backing_path(cache_fs, path, detail, filename)
-            try:
-                compatible = detail.get(
-                    _CACHE_FORMAT_KEY
-                ) == _CACHE_FORMAT and os.path.getsize(filename) == detail.get("size")
-            except OSError:
-                compatible = False
-            expired = bool(
-                cache_fs.expiry and now - detail.get("time", 0) > cache_fs.expiry
-            )
-        needs_info = (
-            detail is None or not compatible or expired or bool(cache_fs.check_files)
+        detail, filename = (
+            (None, None)
+            if cache_fs.check_files
+            else _cached_generation(cache_fs, path, now)
         )
-        if needs_info:
+        if detail is None:
             info_indices.append(index)
-        records.append(
-            {
-                "detail": detail,
-                "filename": filename,
-                "compatible": compatible,
-                "expired": expired,
-                "info": None,
-            }
-        )
-    return records, info_indices
-
-
-def _prepare_cache_records(cache_fs, paths):
-    records, info_indices = _raw_cache_records(cache_fs, paths)
+        records.append({"detail": detail, "filename": filename, "info": None})
     if info_indices:
         selected_paths = [paths[index] for index in info_indices]
         try:
@@ -653,26 +654,18 @@ def _prepare_cache_records(cache_fs, paths):
             record.update(prepared[path])
             continue
         prepared[path] = record
+        info = record["info"]
+        if cache_fs.check_files:
+            record["detail"], record["filename"] = _cached_generation(
+                cache_fs, path, now, cache_fs.fs._ukey_from_info(info)
+            )
         detail = record["detail"]
-        valid = detail is not None and record["compatible"] and not record["expired"]
-        if valid and cache_fs.check_files:
-            valid = detail.get("uid") == cache_fs.fs._ukey_from_info(record["info"])
-
-        if valid:
-            if detail["blocks"] is True:
-                continue
-            writable = writable_cache.get(path)
-            if writable is None or writable.get("fn") != detail.get("fn"):
-                # fsspec does not support filling a partial cache entry from a
-                # read-only cache location. Fall back to its scalar behavior.
-                return None
-            if not isinstance(writable.get("blocks"), set):
-                writable["blocks"] = set(writable.get("blocks", ()))
-            record["detail"] = writable
-            record["filename"] = _backing_path(cache_fs, writable)
+        if detail is not None:
+            # Partial seed records were filtered during metadata load.
+            if detail["blocks"] is not True and not isinstance(detail["blocks"], set):
+                detail["blocks"] = set(detail["blocks"])
             continue
 
-        info = record["info"]
         existing = writable_cache.get(path)
         if existing is not None:
             record["old_filename"] = _backing_path(cache_fs, existing)
@@ -722,8 +715,6 @@ def _open_many_with_cache(cache_fs, open_files):
     paths = [_cache_path(cache_fs, open_file.path) for open_file in open_files]
     cache_fs.load_cache()
     records = _prepare_cache_records(cache_fs, paths)
-    if records is None:
-        return _enter_individually(open_files)
 
     results = [None] * len(paths)
     remote_indices = []
@@ -868,7 +859,10 @@ def _install_fsspec_blockcache_wrappers():
         with _cache_lock(cache_fs):
             cache_fs._metadata._load = _load_json_metadata
             result = original_load_cache(cache_fs)
-            _filter_readonly_generations(cache_fs)
+            _filter_readonly_generations(
+                cache_fs,
+                include_partial_seeds=fields.get("_vfsi_include_partial_seeds", False),
+            )
             return result
 
     def init_with_compat(cache_fs, *args, **kwargs):
