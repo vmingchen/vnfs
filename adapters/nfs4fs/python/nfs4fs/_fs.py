@@ -4,9 +4,10 @@ import inspect
 import operator
 import os
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 from contextlib import ExitStack
 from functools import partial
+from threading import Lock
 
 from vfsi_fsspec import VfsiFile
 from vfsi_fsspec import VfsiFileSystem as _VfsiFileSystem
@@ -93,8 +94,9 @@ class Nfs4FileSystem(_VfsiFileSystem):
         """Deliver a large file in order while overlapping positional reads.
 
         The callback receives ``(offset, bytes)``. Its return value is ignored;
-        exceptions propagate after all outstanding reads are drained. At most
-        ``min(max_in_flight, workers) * chunk_size`` bytes are requested at a
+        exceptions normally propagate after outstanding reads are drained. If
+        that wait is interrupted, running reads retain their cleanup ownership.
+        At most ``min(max_in_flight, workers) * chunk_size`` bytes are requested at a
         time, with only one request in flight per worker-owned descriptor.
         Worker handles must pin the same filesystem object. In-place
         concurrent changes can still produce mixed data; this is not a content
@@ -140,6 +142,16 @@ class Nfs4FileSystem(_VfsiFileSystem):
         internal = self._checked_strip_protocol(path)
         native_path = self._native_path(internal)
         total = 0
+        lifecycle = Lock()
+        running = set()
+        closing = set()
+
+        def close_reader(reader, *exc):
+            with lifecycle:
+                closing.add(reader)
+                if reader in running:
+                    return
+            _close_reader_on_exit(reader, *exc)
 
         with ExitStack() as stack:
             fds = self._client.open_many_independent(
@@ -151,7 +163,7 @@ class Nfs4FileSystem(_VfsiFileSystem):
                     reader = _RawVfsiFile(self, internal, "rb", fd=fd)
                     readers.append(reader)
 
-                    stack.push(partial(_close_reader_on_exit, reader))
+                    stack.push(partial(close_reader, reader))
             except BaseException:
                 # Close handles not yet transferred to a reader; callbacks
                 # already registered on the ExitStack own the earlier ones.
@@ -216,6 +228,20 @@ class Nfs4FileSystem(_VfsiFileSystem):
                         chunk = reader._pread_at(offset + filled, length - filled)
                 return bytes(data)
 
+            def read_owned(reader, offset, length):
+                with lifecycle:
+                    if reader in closing:
+                        raise CancelledError()
+                    running.add(reader)
+                try:
+                    return read_exact(reader, offset, length)
+                finally:
+                    with lifecycle:
+                        running.remove(reader)
+                        close_pending = reader in closing
+                    if close_pending:
+                        _close_reader_on_exit(reader, None, None, None)
+
             pending = deque()
             next_offset = 0
             with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -230,7 +256,7 @@ class Nfs4FileSystem(_VfsiFileSystem):
                         pending.append(
                             (
                                 offset,
-                                executor.submit(read_exact, reader, offset, length),
+                                executor.submit(read_owned, reader, offset, length),
                             )
                         )
                         next_offset += length

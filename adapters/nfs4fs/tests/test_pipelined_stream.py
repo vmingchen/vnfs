@@ -3,6 +3,7 @@
 import threading
 import time
 import tracemalloc
+from concurrent.futures import ThreadPoolExecutor
 
 import fsspec
 import pytest
@@ -362,6 +363,66 @@ def test_pipelined_stream_closes_all_descriptors_on_callback_error(fs, monkeypat
         fs.read_stream_pipelined("/data", fail, workers=3, chunk_size=10)
     assert len(closed) == 3
     assert len(set(closed)) == 3
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_interrupted_executor_teardown_keeps_reader_cleanup(fs, monkeypatch, running):
+    from nfs4fs import _fs
+
+    fs.pipe_file("/data", b"abcdefgh")
+    worker_paused = threading.Event()
+    release_worker = threading.Event()
+    executors = []
+
+    def pause_worker():
+        worker_paused.set()
+        assert release_worker.wait(5), "test did not release worker"
+
+    class InterruptedExecutor(ThreadPoolExecutor):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            executors.append(self)
+
+        def submit(self, read, reader, offset, length):
+            def task():
+                if not running and offset == 4:
+                    pause_worker()
+                return read(reader, offset, length)
+
+            return super().submit(task)
+
+        def __exit__(self, *exc):
+            self.shutdown(wait=False)
+            raise KeyboardInterrupt("interrupted while joining")
+
+    original = _fs._RawVfsiFile._pread_at
+    worker_offsets = []
+
+    def short_read(reader, offset, length):
+        if offset >= 4:
+            worker_offsets.append(offset)
+            if running and offset == 4:
+                return original(reader, offset, 2)
+            if running and offset == 6:
+                pause_worker()
+        return original(reader, offset, length)
+
+    def fail(_offset, _data):
+        assert worker_paused.wait(5), "worker did not reach its pause"
+        raise RuntimeError("callback failed")
+
+    monkeypatch.setattr(_fs, "ThreadPoolExecutor", InterruptedExecutor)
+    monkeypatch.setattr(_fs._RawVfsiFile, "_pread_at", short_read)
+    try:
+        with pytest.raises(KeyboardInterrupt, match="interrupted while joining"):
+            fs.read_stream_pipelined("/data", fail, workers=2, chunk_size=4)
+        assert len(fs._client._fds) == int(running)
+    finally:
+        release_worker.set()
+        for executor in executors:
+            executor.shutdown(wait=True)
+    assert worker_offsets == ([4, 6] if running else [])
+    assert not fs._client._fds
 
 
 def test_pipelined_stream_validates_budget_and_closed_state(fs):
