@@ -233,3 +233,29 @@ def test_namespace_mutation_retires_cached_case_variant_listing(smb_fs):
         if fs.exists("/mixed/new"):
             fs.rm("/mixed/new")
         fs.rmdir("/MiXeD")
+
+
+def test_namespace_eviction_without_persistent_caches_needs_no_metadata(
+    smb_fs, monkeypatch
+):
+    fs = smb_fs
+    fs.dircache.use_listings_cache = True
+    fs.mkdir("/MiXeD")
+    try:
+        assert fs.ls("/MiXeD", detail=False) == []
+        assert "/MiXeD" in fs.dircache
+
+        def unexpected_probe(*args, **kwargs):
+            pytest.fail("SMB directory-cache clear issued a metadata probe")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(fs, "_canonical_namespace_paths", unexpected_probe)
+            patch.setattr(fs._client, "stat_many", unexpected_probe)
+            fs.mkdir("/mixed/new", create_parents=False)
+        assert fs.isdir("/MiXeD/new")
+        entries = fs.ls("/MiXeD", detail=False)
+        assert [entry.rsplit("/", 1)[-1] for entry in entries] == ["new"]
+    finally:
+        if fs.exists("/mixed/new"):
+            fs.rmdir("/mixed/new")
+        fs.rmdir("/MiXeD")

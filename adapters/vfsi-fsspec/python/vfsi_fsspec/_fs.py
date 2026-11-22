@@ -4229,8 +4229,14 @@ class VfsiFileSystem(AbstractFileSystem):
             registered = any(
                 cache_ref() is not None for cache_ref, _ in self._persistent_cache_refs
             )
-        if not evict_listings and not registered:
-            return
+        if not registered:
+            if not evict_listings:
+                return
+            if self.backend == "smb":
+                # SMB already retires all listings on namespace changes.
+                # Metadata probes only matter for persistent cache wrappers.
+                self.invalidate_cache()
+                return
         if registered or self.dircache:
             canonical, unknown = self._canonical_namespace_paths(internals)
             internals.update(canonical.values())
