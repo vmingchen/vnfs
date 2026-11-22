@@ -1,5 +1,6 @@
 """Cross-cache coherence tests anchored to fsspec's local filesystem behavior."""
 
+import json
 import multiprocessing
 import threading
 from types import SimpleNamespace
@@ -8,7 +9,7 @@ import fsspec
 import nfs4fs
 import pytest
 from fsspec.implementations.cache_metadata import CacheMetadata
-from vfsi_fsspec import VfsiFileSystem, install_fsspec_blockcache_compat
+from vfsi_fsspec import VfsiFileSystem, _blockcache, install_fsspec_blockcache_compat
 from vfsi_fsspec._blockcache import _cache_lock
 
 
@@ -512,3 +513,89 @@ def test_blockcache_uses_json_on_initial_load_and_reload(
                 reopened.fs.close()
     finally:
         target.close()
+
+
+def test_complete_scalar_cache_checks_source_identity_once(tmp_path, monkeypatch):
+    target, cached = _persistent_fs(tmp_path)
+    try:
+        target.pipe_file("/file", b"cached!")
+        assert _read(cached, "/file") == b"cached!"
+        cached.check_files = True
+        checks = []
+        ukey = target.ukey
+
+        def record(path):
+            checks.append(path)
+            return ukey(path)
+
+        monkeypatch.setattr(target, "ukey", record)
+        assert _read(cached, "/file") == b"cached!"
+        assert checks == ["/file"]
+    finally:
+        target.close()
+
+
+def test_warm_cached_reads_write_metadata_only_when_coverage_changes(
+    tmp_path, monkeypatch
+):
+    from fsspec.core import OpenFile
+
+    target, cached = _persistent_fs(tmp_path)
+    try:
+        target.pipe_file("/file", b"abcdefgh")
+        with cached.open("/file", "rb", block_size=4) as file:
+            assert file.read(4) == b"abcd"
+
+        writes = []
+        save = cached._metadata._save
+
+        def record(*args, **kwargs):
+            writes.append(True)
+            return save(*args, **kwargs)
+
+        loads = []
+        load = cached._metadata.load
+
+        def record_load():
+            loads.append(True)
+            return load()
+
+        monkeypatch.setattr(cached._metadata, "_save", record)
+        monkeypatch.setattr(cached._metadata, "load", record_load)
+        with cached.open("/file", "rb", block_size=4) as file:
+            assert file.read(4) == b"abcd"
+            loads.clear()
+        assert writes == []
+        assert loads == []
+
+        with cached.open("/file", "rb", block_size=4) as file:
+            file.seek(4)
+            assert file.read(4) == b"efgh"
+        assert writes == [True]
+        assert cached._metadata.cached_files[-1]["/file"]["blocks"] is True
+
+        with cached.open_many([OpenFile(cached, "/file", mode="rb")])[0] as file:
+            assert file.read() == b"abcdefgh"
+        assert writes == [True]
+    finally:
+        target.close()
+
+
+def test_cache_metadata_streams_entries_with_large_block_lists(tmp_path, monkeypatch):
+    small = {"blocks": [0, 2]}
+    large = {"blocks": list(range(_blockcache._MAX_FAST_JSON_BLOCKS + 1))}
+    records = {"/small": small, "/large": large, "/complete": {"blocks": True}}
+    encoded_whole = []
+
+    class RecordingEncoder(json.JSONEncoder):
+        def encode(self, value):
+            encoded_whole.append(value)
+            return super().encode(value)
+
+    monkeypatch.setattr(_blockcache.json, "JSONEncoder", RecordingEncoder)
+    filename = tmp_path / "cache"
+    _blockcache._save_json_metadata(records, str(filename))
+
+    assert json.loads(filename.read_text(encoding="utf-8")) == records
+    assert any(value is small for value in encoded_whole)
+    assert all(value is not large for value in encoded_whole)

@@ -98,3 +98,29 @@ and 812 ms with batches of 32. The larger batches hit this server's resource
 limit and fell back to extra work. These are tuning observations for this
 server, **not** general defaults or guaranteed speedups; rerun on the target
 server before changing application settings.
+
+## Facade and persistent-cache benchmark
+
+The facade driver exercises bulk cat, scalar and grouped opens, scalar
+readinto, and complete and partial persistent cache hits. The cache-fill case
+starts from empty persistent storage and measures a grouped read. It verifies every
+payload, excludes fixture setup and warm-ups from the reports, and records raw
+samples plus median elapsed and process CPU times. No speed threshold is
+asserted.
+
+```sh
+python adapters/nfs4fs/benchmarks/facade.py --files 64 --rounds 21 --warmups 4
+
+python adapters/nfs4fs/benchmarks/facade.py --host 127.0.0.1:2049 \
+  --remote-root git --files 64 --rounds 15 --warmups 3 \
+  --cases cached-scalar cached-checked cached-grouped cached-partial
+```
+
+The default uses the dummy backend to isolate Python, native binding, and
+local cache overhead. With a live server, use a writable fixture parent
+appropriate for temporary files. The driver creates its own child directory
+and also reports native data-path RPCs per sample. Complete unchecked hits
+should serve local files, while checked hits compare the source identity.
+Partial hits reuse the cached first block while leaving the rest incomplete.
+Use the same inputs and native extension for source-only comparisons, and
+alternate process order to estimate run-to-run noise.

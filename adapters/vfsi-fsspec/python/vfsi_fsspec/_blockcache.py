@@ -16,6 +16,7 @@ import time
 import uuid
 import weakref
 from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from functools import partial
 
 from fsspec import registry
@@ -23,6 +24,7 @@ from fsspec.caching import MMapCache
 from fsspec.exceptions import BlocksizeMismatchError
 from fsspec.implementations.cache_mapper import HashCacheMapper
 from fsspec.implementations.cached import CachingFileSystem, SimpleCacheFileSystem
+from fsspec.utils import atomic_write
 
 from ._caching import _Nfs4MMapCache
 from ._fs import (
@@ -40,6 +42,7 @@ from ._fs import (
 
 _CACHE_FORMAT_KEY = "nfs4fs_blockcache_format"
 _CACHE_FORMAT = 1
+_MAX_FAST_JSON_BLOCKS = 4096
 _CACHE_LOCK_NAME = ".vfsi-cache.lock"
 _PATCH_MARKER = "_nfs4fs_blockcache_compat"
 _INSTALL_LOCK = threading.RLock()
@@ -49,6 +52,7 @@ _LOCKS_GUARD = threading.RLock()
 _STORAGE_LOCKS = weakref.WeakValueDictionary()
 _ACTIVE_LOCK_FDS = set()
 _HELD_STORAGE = threading.local()
+_PARTIAL_CACHE_OPEN = ContextVar("vfsi_partial_cache_open", default=None)
 
 
 class _VfsiHashCacheMapper(HashCacheMapper):
@@ -112,6 +116,25 @@ def _load_json_metadata(filename):
         if isinstance(detail.get("blocks"), list):
             detail["blocks"] = set(detail["blocks"])
     return records
+
+
+def _save_json_metadata(records, filename):
+    """Encode ordinary cache entries whole and stream large block lists."""
+    encoder = json.JSONEncoder(separators=(",", ":"))
+    with atomic_write(filename, mode="w") as file:
+        file.write("{")
+        separator = ""
+        for path, detail in records.items():
+            file.write(separator)
+            file.write(encoder.encode(path))
+            file.write(":")
+            blocks = detail.get("blocks")
+            if isinstance(blocks, list) and len(blocks) > _MAX_FAST_JSON_BLOCKS:
+                file.writelines(encoder.iterencode(detail))
+            else:
+                file.write(encoder.encode(detail))
+            separator = ","
+        file.write("}")
 
 
 def _save_writable_metadata(cache_fs):
@@ -235,34 +258,39 @@ def _publish_generations(cache_fs, records, previous):
 
 
 def _reset_stale_generation(cache_fs, path):
-    selected_writable = False
+    selected_writable = None
     raw = cache_fs._metadata.check_file(path, None)
     if raw:
-        _record_backing_path(cache_fs, path, *raw)
-        while valid := cache_fs._check_file(path):
+        valid = cache_fs._check_file(path)
+        if not valid or valid[1] != raw[1]:
+            _record_backing_path(cache_fs, path, *raw)
+        while valid:
             layer, selected = _record_backing_path(cache_fs, path, *valid)
             if layer == len(cache_fs.storage) - 1:
-                selected_writable = True
+                selected_writable = selected
                 break
 
             detail = valid[0]
             size = detail.get("size")
             try:
                 if size is None or os.path.getsize(selected) == size:
-                    return detail
+                    return detail, selected
             except OSError:
                 pass
             # Discard a damaged seed for this wrapper without writing its storage.
             _invalidate_readonly_generation(cache_fs, layer, path)
+            valid = cache_fs._check_file(path)
 
     writable_detail = cache_fs._metadata.cached_files[-1].get(path)
     if writable_detail is None:
-        return None
-    backing_file = _backing_path(cache_fs, writable_detail)
-    if selected_writable and writable_detail.get(_CACHE_FORMAT_KEY) == _CACHE_FORMAT:
+        return None, None
+    backing_file = selected_writable or _backing_path(cache_fs, writable_detail)
+    if selected_writable is not None and (
+        writable_detail.get(_CACHE_FORMAT_KEY) == _CACHE_FORMAT
+    ):
         try:
             if os.path.getsize(backing_file) == writable_detail.get("size"):
-                return writable_detail
+                return writable_detail, backing_file
         except FileNotFoundError:
             pass
 
@@ -295,6 +323,7 @@ def _reset_stale_generation(cache_fs, path):
         ],
         previous,
     )
+    return None, None
 
 
 def _check_cache_identity(detail, file, path, *, index=None):
@@ -323,6 +352,8 @@ def _mark_compatible_cache(cache_fs, path, file):
         cache.__class__ = _Nfs4MMapCache
         block_count = (cache.size + cache.blocksize - 1) // cache.blocksize
         cache.blocks.intersection_update(range(block_count))
+    if isinstance(cache, _Nfs4MMapCache):
+        file._vfsi_cache_initial_blocks = len(cache.blocks)
 
     if detail is not None:
         changed = False
@@ -374,21 +405,28 @@ def _close_and_update_complete_blocks(cache_fs, file, close):
     persisted = detail["blocks"]
     blocks = getattr(cache, "blocks", persisted)
     # Other readers of this generation may have published blocks since OPEN.
-    if persisted is True or blocks is True:
-        detail["blocks"] = True
-    else:
-        persisted.update(blocks)
-        block_count = (file.size + file.blocksize - 1) // file.blocksize
-        if all(block in persisted for block in range(block_count)):
+    changed = False
+    if persisted is not True:
+        if blocks is True:
             detail["blocks"] = True
-    try:
-        # Preserve nfs4fs's size, format, and block-size metadata instead of
-        # fsspec's narrower merge-on-save fields.
-        _save_writable_metadata(cache_fs)
-    except (NameError, OSError):
-        # Match fsspec's close behavior during interpreter shutdown and when
-        # best-effort metadata persistence is unavailable.
-        pass
+            changed = True
+        else:
+            changed = not persisted.issuperset(blocks)
+            if changed:
+                persisted.update(blocks)
+            block_count = (file.size + file.blocksize - 1) // file.blocksize
+            if len(persisted) >= block_count and all(
+                block in persisted for block in range(block_count)
+            ):
+                detail["blocks"] = True
+                changed = True
+    if changed:
+        try:
+            # Preserve size, format, and block size across metadata updates.
+            _save_writable_metadata(cache_fs)
+        except (NameError, OSError):
+            # Persistence is best-effort during close.
+            pass
     close()
     file.closed = True
 
@@ -724,6 +762,15 @@ def _prepare_cache_records(cache_fs, paths):
     return records
 
 
+def _open_complete_generation(cache_fs, path, filename):
+    file = open(filename, "rb")
+    try:
+        return _OwnedStream(file, file, fs=cache_fs.fs, path=path)
+    except BaseException as error:
+        _close_reader_on_exit(file, type(error), error, error.__traceback__)
+        raise
+
+
 def _is_compatible_backend(cache_fs):
     return isinstance(getattr(cache_fs, "fs", None), _TARGET_TYPES)
 
@@ -746,17 +793,13 @@ def _open_many_with_cache(cache_fs, open_files):
     results = [None] * len(paths)
     remote_indices = []
     remote_files = []
+    metadata_changed = False
     try:
         for index, record in enumerate(records):
             if record["detail"]["blocks"] is True:
-                file = open(record["filename"], "rb")
-                try:
-                    results[index] = _OwnedStream(
-                        file, file, fs=cache_fs.fs, path=paths[index]
-                    )
-                except BaseException:
-                    file.close()
-                    raise
+                results[index] = _open_complete_generation(
+                    cache_fs, paths[index], record["filename"]
+                )
             else:
                 remote_indices.append(index)
 
@@ -795,7 +838,9 @@ def _open_many_with_cache(cache_fs, open_files):
                         "Cached file must be reopened with same block size as "
                         f"original (old: {old_blocksize}, new {file.blocksize})"
                     )
-                detail["blocksize"] = file.blocksize
+                if old_blocksize is None:
+                    detail["blocksize"] = file.blocksize
+                    metadata_changed = True
                 file._vfsi_cache_generation = _generation(detail)
                 file.cache = _Nfs4MMapCache(
                     file.blocksize,
@@ -805,16 +850,16 @@ def _open_many_with_cache(cache_fs, open_files):
                     detail["blocks"],
                 )
                 file.cache_type = "mmap"
+                file._vfsi_cache_initial_blocks = len(file.cache.blocks)
                 close = file.close
                 file.close = lambda file=file, close=close: cache_fs.close_and_update(
                     file, close
                 )
                 results[index] = file
 
-        # CacheMetadata.save() merges only blocks, time, and uid from an
-        # existing record. Replace the writable record so the block size just
-        # established by vectorized open survives the first save.
-        _save_writable_metadata(cache_fs)
+        if metadata_changed:
+            # Preserve the block size just established by vectorized open.
+            _save_writable_metadata(cache_fs)
         for open_file, file in zip(open_files, results):
             open_file.fobjects = [file]
         return results
@@ -860,6 +905,7 @@ def _install_fsspec_blockcache_wrappers():
     original_close_and_update = CachingFileSystem.close_and_update
     original_pop_from_cache = CachingFileSystem.pop_from_cache
     original_load_cache = CachingFileSystem.load_cache
+    original_save_cache = CachingFileSystem.save_cache
     original_clear_cache = CachingFileSystem.clear_cache
     original_clear_expired_cache = CachingFileSystem.clear_expired_cache
 
@@ -884,13 +930,29 @@ def _install_fsspec_blockcache_wrappers():
         ):
             return original_load_cache(cache_fs)
         with _cache_lock(cache_fs):
-            cache_fs._metadata._load = _load_json_metadata
+            metadata = cache_fs._metadata
+            if metadata._load is not _load_json_metadata:
+                metadata._load = _load_json_metadata
+                metadata._save = _save_json_metadata
             result = original_load_cache(cache_fs)
             _filter_readonly_generations(
                 cache_fs,
                 include_partial_seeds=fields.get("_vfsi_include_partial_seeds", False),
             )
             return result
+
+    def save_cache_with_compat(cache_fs):
+        opened = _PARTIAL_CACHE_OPEN.get()
+        if opened is not None:
+            owner, path, detail = opened
+            if (
+                cache_fs is owner
+                and cache_fs._metadata.cached_files[-1].get(path) is detail
+            ):
+                # fsspec saves after OPEN even for a partial hit with an
+                # established size and block size. Every field is unchanged.
+                return
+        return original_save_cache(cache_fs)
 
     def init_with_compat(cache_fs, *args, **kwargs):
         arguments = init_signature.bind(cache_fs, *args, **kwargs).arguments
@@ -953,7 +1015,15 @@ def _install_fsspec_blockcache_wrappers():
         with _cache_lock(cache_fs):
             cache_fs.load_cache()
             normalized = _cache_path(cache_fs, path)
-            detail = _reset_stale_generation(cache_fs, normalized)
+            detail, filename = _reset_stale_generation(cache_fs, normalized)
+            if (
+                type(cache_fs) is CachingFileSystem
+                and mode == "rb"
+                and detail is not None
+                and detail["blocks"] is True
+            ):
+                # Lookup and validation already selected this local file.
+                return _open_complete_generation(cache_fs, normalized, filename)
             args, kwargs = _reuse_generation_blocksize(detail, args, kwargs)
             with ExitStack() as setup:
                 opened = None
@@ -963,11 +1033,21 @@ def _install_fsspec_blockcache_wrappers():
                     opened = file
                     setup.push(partial(_close_failed_scalar_setup, file, file.close))
 
+                partial_hit = (
+                    (cache_fs, normalized, detail)
+                    if type(cache_fs) is CachingFileSystem
+                    and detail is not None
+                    and detail["blocks"] is not True
+                    and detail.get("blocksize") is not None
+                    else None
+                )
+                writeback = _PARTIAL_CACHE_OPEN.set(partial_hit)
                 token = _SCALAR_CACHE_SETUP.set((cache_fs.fs, normalized, track_open))
                 try:
                     file = original_open(cache_fs, path, *args, **kwargs)
                 finally:
                     _SCALAR_CACHE_SETUP.reset(token)
+                    _PARTIAL_CACHE_OPEN.reset(writeback)
                 if file is not opened:
                     setup.push(partial(_close_reader_on_exit, file))
                 if getattr(file, "_raw", None) is None:
@@ -980,6 +1060,18 @@ def _install_fsspec_blockcache_wrappers():
     def close_and_update_with_compat(cache_fs, file, close):
         if not _is_compatible_backend(cache_fs):
             return original_close_and_update(cache_fs, file, close)
+        if file.closed:
+            return
+        initial_blocks = getattr(file, "_vfsi_cache_initial_blocks", None)
+        cache = getattr(file, "cache", None)
+        if (
+            initial_blocks is not None
+            and cache is not None
+            and len(cache.blocks) == initial_blocks
+            and initial_blocks * cache.blocksize < cache.size
+        ):
+            # A partial reader that filled no blocks has nothing to merge.
+            return close()
         with _cache_lock(cache_fs):
             return _close_and_update_complete_blocks(cache_fs, file, close)
 
@@ -1002,6 +1094,7 @@ def _install_fsspec_blockcache_wrappers():
     CachingFileSystem.commit_many = _delegate_commit_many
     CachingFileSystem.pop_from_cache = pop_from_cache_with_compat
     CachingFileSystem.load_cache = load_cache_with_compat
+    CachingFileSystem.save_cache = save_cache_with_compat
     CachingFileSystem.clear_cache = clear_cache_with_compat
     CachingFileSystem.clear_expired_cache = clear_expired_cache_with_compat
     setattr(CachingFileSystem, _PATCH_MARKER, True)
