@@ -3875,6 +3875,8 @@ class VfsiFileSystem(AbstractFileSystem):
         # A native operation may have reconnected transparently. Clear cache
         # entries from the old session before retaining its fresh result.
         self._sync_dircache_generation()
+        if not self.dircache.use_listings_cache:
+            return False
         stored = self._copy_listing(infos)
         with self._dircache_lock:
             if fill_epoch != self._dircache_epoch:
@@ -4585,7 +4587,7 @@ class VfsiFileSystem(AbstractFileSystem):
         infos = self._infos_from_native_entries(entries)
         self._store_listing(internal, infos, fill_epoch)
         if detail:
-            return self._copy_listing(infos)
+            return infos
         return [d["name"] for d in infos]
 
     def exists(self, path, **kwargs):
