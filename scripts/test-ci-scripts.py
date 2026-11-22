@@ -1483,6 +1483,68 @@ class PortWorkflowTriggerTests(unittest.TestCase):
         self.assertFalse(any(fnmatch.fnmatchcase("docs/unrelated.md", pattern) for pattern in paths))
 
 
+class ReleaseCiGateTests(unittest.TestCase):
+    script = Path(__file__).resolve().parents[1] / "ci/verify-ci-run.sh"
+    tag = "nfs4fs-v0.3.19"
+
+    def run_gate(self, replies, *, event="push"):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = Path(temp)
+            gh = fixture / "gh"
+            gh.write_text(
+                "#!" + sys.executable + "\n"
+                "import json, os, sys\n"
+                "from pathlib import Path\n"
+                "if '--json' in sys.argv:\n"
+                "    counter = Path(os.environ['QUERY_COUNT'])\n"
+                "    index = int(counter.read_text()) if counter.exists() else 0\n"
+                "    counter.write_text(str(index + 1))\n"
+                "    replies = json.loads(os.environ['CI_REPLIES'])\n"
+                "    print(json.dumps(replies[index]))\n"
+            )
+            gh.chmod(0o755)
+            sleep = fixture / "sleep"
+            sleep.write_text("#!/bin/sh\nexit 0\n")
+            sleep.chmod(0o755)
+            count = fixture / "queries"
+            env = dict(os.environ, PATH=f"{fixture}:{os.environ['PATH']}",
+                       GH_TOKEN="fixture", GITHUB_EVENT_NAME=event,
+                       GITHUB_REF_TYPE="tag", GITHUB_REF_NAME=self.tag,
+                       QUERY_COUNT=str(count), CI_REPLIES=json.dumps(replies))
+            result = subprocess.run(
+                ["bash", str(self.script), "CI", "a" * 40, "10"],
+                env=env, text=True, capture_output=True, timeout=5,
+            )
+            return result, int(count.read_text())
+
+    def row(self, ref, conclusion, *, event="push"):
+        return dict(headBranch=ref, event=event, status="completed", conclusion=conclusion)
+
+    def test_tag_push_waits_for_delayed_ci_run(self):
+        historical = self.row("main", "failure")
+        result, queries = self.run_gate([
+            [historical, self.row(self.tag, "failure", event="workflow_dispatch")],
+            [historical, self.row(self.tag, "success")],
+        ])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(queries, 2)
+
+    def test_current_tag_failure_exits_without_waiting(self):
+        for ref in (self.tag, f"refs/tags/{self.tag}"):
+            with self.subTest(ref=ref):
+                result, queries = self.run_gate([[self.row(ref, "failure")]])
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("did not succeed", result.stderr)
+                self.assertEqual(queries, 1)
+
+    def test_manual_release_retains_terminal_failure(self):
+        result, queries = self.run_gate([[self.row("main", "failure")]],
+                                        event="workflow_dispatch")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("did not succeed", result.stderr)
+        self.assertEqual(queries, 1)
+
+
 class PromotionGateTests(unittest.TestCase):
     def setUp(self):
         import runpy

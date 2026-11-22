@@ -17,17 +17,25 @@ if [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
   exit 1
 fi
 
+tag=
+if [[ ${GITHUB_EVENT_NAME:-} == push && ${GITHUB_REF_TYPE:-} == tag ]]; then
+  tag=${GITHUB_REF_NAME:?GitHub tag name is required for a tag push}
+fi
+
 deadline=$(( $(date +%s) + timeout ))
 while true; do
   conclusion=$(gh run list \
     --workflow "$workflow" \
     --commit "$commit" \
     --limit 30 \
-    --json status,conclusion \
-    --jq 'if length == 0 then "pending"
-          elif any(.[]; .conclusion == "success") then "success"
-          elif any(.[]; .status != "completed") then "pending"
-          else "failure" end')
+    --json status,conclusion,event,headBranch |
+    jq -r --arg tag "$tag" '
+      if any(.[]; .status == "completed" and .conclusion == "success") then "success"
+      elif length == 0 or any(.[]; .status != "completed") then "pending"
+      # A release workflow can start before CI for the same tag is listed.
+      elif $tag != "" and all(.[]; .event != "push" or
+           (.headBranch != $tag and .headBranch != ("refs/tags/" + $tag))) then "pending"
+      else "failure" end')
   case "$conclusion" in
     success)
       echo "CI workflow '$workflow' succeeded for $commit"
