@@ -2326,6 +2326,26 @@ fn bounded_c_adapters_prune_before_io_and_preserve_error_limits() {
     }
 }
 
+#[test]
+fn smb_mount_rejects_non_utf8_share_root_before_connecting() {
+    let share_root = CString::new(b"/bad-\xff".as_slice()).unwrap();
+    let mut fs = std::ptr::null_mut();
+    let status = unsafe {
+        vfsi_smb_open_mount(
+            c"127.0.0.1:0".as_ptr(),
+            c"share".as_ptr(),
+            c"user".as_ptr(),
+            c"password".as_ptr(),
+            c"".as_ptr(),
+            share_root.as_ptr(),
+            c"/mount".as_ptr(),
+            &mut fs,
+        )
+    };
+    assert_eq!(status, libc::EILSEQ);
+    assert!(fs.is_null());
+}
+
 fn temp_root() -> (tempfile::TempDir, CString) {
     let root = tempfile::TempDir::new().unwrap();
     let path = CString::new(root.path().as_os_str().as_encoded_bytes()).unwrap();

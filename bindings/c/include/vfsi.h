@@ -670,7 +670,7 @@ int vfsi_smb_open(const char *server,
 /**
  * Connect to an SMB2/3 share and map a kernel-visible `mountpoint` onto
  * `share_root` within that share. Both paths must be absolute and may not
- * contain parent-directory components.
+ * contain parent-directory components. The share root must be valid UTF-8.
  *
  * # Safety
  * All pointers, buffers and callbacks must satisfy the module-level C

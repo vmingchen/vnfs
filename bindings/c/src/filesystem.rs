@@ -430,7 +430,7 @@ pub unsafe extern "C" fn vfsi_smb_open(
 
 /// Connect to an SMB2/3 share and map a kernel-visible `mountpoint` onto
 /// `share_root` within that share. Both paths must be absolute and may not
-/// contain parent-directory components.
+/// contain parent-directory components. The share root must be valid UTF-8.
 ///
 /// # Safety
 /// All pointers, buffers and callbacks must satisfy the module-level C
@@ -484,6 +484,9 @@ pub unsafe extern "C" fn vfsi_smb_open_mount(
                 .any(|component| matches!(component, Component::ParentDir))
         {
             return libc::EINVAL;
+        }
+        if share_root.to_str().is_none() {
+            return libc::EILSEQ;
         }
         match SmbVecFs::connect(&server, &share, &username, &password, &domain) {
             Ok(backend) => {
