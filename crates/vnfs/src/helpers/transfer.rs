@@ -1500,28 +1500,38 @@ fn copy_batch(
             return Err(contract("transfer: invalid source OPEN cardinality"));
         }
         if options.existing == Existing::Skip {
-            // A failed batch OPEN returns no handles but may have created a
-            // prefix. Singleton exclusive reservations are necessary to safely
-            // distinguish skipped files without guessing ownership of that prefix.
+            // Only a definite per-input conflict can be treated as a skip.
+            // Keep the outcome until we know whether the reservation succeeded.
             for (index, task) in tasks.iter().enumerate() {
                 let request =
                     OpenOp::new(&task.destination, OpenFlags::WRITE | OpenFlags::CREATE_NEW)
                         .mode(0o600);
-                match fs.open_batch(&[request]) {
-                    Ok(mut files) => {
-                        if files.len() != 1 {
-                            let _ = fs.close_files(files);
-                            return Err(contract("transfer: invalid destination OPEN cardinality"));
-                        }
-                        destinations.push(files.remove(0));
+                let outcomes = fs.vopen(&[request]).map_err(IndexedError::unattributed)?;
+                let [outcome] = <[_; 1]>::try_from(outcomes).map_err(|outcomes| {
+                    let mut files: Vec<_> = outcomes.into_iter().flatten().collect();
+                    if !files.is_empty() {
+                        let _ = fs.vclose(&mut files);
+                    }
+                    contract("transfer: invalid destination OPEN cardinality")
+                })?;
+                match outcome {
+                    Ok(file) => {
+                        destinations.push(file);
                         selected.push(index);
                     }
-                    Err(e) if e.cause().kind() == std::io::ErrorKind::AlreadyExists => {
+                    Err(error)
+                        if error.state() != vfsi_core::FailureState::Unknown
+                            && error.progress().is_none()
+                            && error.cause().kind() == std::io::ErrorKind::AlreadyExists =>
+                    {
                         summary.entries_skipped += 1;
                         state.skipped.insert(task.root);
                     }
-                    Err(e) => {
-                        return Err(mapped(e, std::slice::from_ref(task)));
+                    Err(error) => {
+                        return Err(mapped(
+                            IndexedError::at(0, error.into_cause()),
+                            std::slice::from_ref(task),
+                        ));
                     }
                 }
             }

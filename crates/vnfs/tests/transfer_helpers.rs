@@ -39,6 +39,8 @@ enum Fault {
     ReadAfterOpen(usize, usize),
     BadOpenCount,
     ExtraOpenOutcome,
+    UnknownExclusiveOpen,
+    RejectedExclusiveOpen,
     ExtraCloseOutcome,
     DirectoryBackendFirst,
     DirectoryCallbacksReverse,
@@ -225,6 +227,16 @@ impl Vfsi for Harness {
     fn vopen(&self, r: &[OpenOp]) -> vnfs::VecResult<Self::File> {
         self.calls.borrow_mut().opens += 1;
         self.calls.borrow_mut().open_batches.push(r.len());
+        if r.len() == 1 && r[0].flags().contains(OpenFlags::CREATE_NEW) {
+            let cause = || std::io::Error::from_raw_os_error(libc::EEXIST);
+            match self.fault.get() {
+                Fault::UnknownExclusiveOpen => {
+                    return Ok(vec![Err(OpError::unknown(cause(), None))]);
+                }
+                Fault::RejectedExclusiveOpen => return Err(cause()),
+                _ => {}
+            }
+        }
         let mut files = self.fs.vopen(r)?;
         if self.fault.get() == Fault::ExtraOpenOutcome {
             files.push(Ok(self.fs.open(r[0].path())?));
@@ -1442,6 +1454,34 @@ fn skip_preserves_an_existing_alias_and_copies_other_sources() {
         b"existing"
     );
     assert_eq!(std::fs::read(root.path().join("dst/b")).unwrap(), b"copy");
+}
+
+#[test]
+fn skip_requires_a_definite_per_file_destination_conflict() {
+    for (fault, index) in [
+        (Fault::UnknownExclusiveOpen, Some(0)),
+        (Fault::RejectedExclusiveOpen, None),
+    ] {
+        let (root, fs) = fixture();
+        std::fs::create_dir(root.path().join("out")).unwrap();
+        std::fs::write(root.path().join("source"), b"contents").unwrap();
+        fs.fault.set(fault);
+
+        let error = copy_items(
+            &fs,
+            &["/source"],
+            "/out",
+            TransferOptions::new().with_existing(Existing::Skip),
+        )
+        .unwrap_err();
+        assert_eq!(error.index(), index);
+        assert_eq!(error.cause().kind(), std::io::ErrorKind::AlreadyExists);
+        let calls = fs.calls.borrow();
+        assert_eq!(calls.opens, 2);
+        assert_eq!(calls.closes, 1);
+        assert_eq!(calls.writes, 0);
+        assert!(!root.path().join("out/source").exists());
+    }
 }
 
 #[test]
