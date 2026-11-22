@@ -134,3 +134,113 @@ def test_streamed_download_local_open_failure_closes_source(
     assert error.value is failure
     assert target.read_bytes() == b"original local contents"
     assert not dummy_fs._client._fds
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_batched_get_callback_setup_failure_preserves_local_destination(
+    dummy_fs, tmp_path, monkeypatch, existing
+):
+    from fsspec.callbacks import Callback
+
+    fs = dummy_fs
+    fs.pipe_file("/source", b"remote payload")
+    target = tmp_path / "local" / "destination"
+    if existing:
+        target.parent.mkdir()
+        target.write_bytes(b"original local contents")
+    calls = []
+    read_many = fs._client.read_all_many
+
+    def record_read(paths, limit):
+        calls.append(paths)
+        return read_many(paths, limit)
+
+    class FailingChild(Callback):
+        def set_size(self, size):
+            raise RuntimeError("child setup failed")
+
+    class Parent(Callback):
+        def branch(self, path1, path2, kwargs):
+            kwargs["callback"] = FailingChild()
+
+    monkeypatch.setattr(fs._client, "read_all_many", record_read)
+    with pytest.raises(RuntimeError, match="child setup failed"):
+        fs.get(["/source"], [str(target)], callback=Parent())
+    assert len(calls) == 1
+    if existing:
+        assert target.read_bytes() == b"original local contents"
+    else:
+        assert not target.parent.exists()
+
+
+def test_batched_get_streams_source_that_outgrows_batch_threshold(
+    dummy_fs, tmp_path, monkeypatch
+):
+    fs = dummy_fs
+    fs.max_batch_bytes = 4
+    fs.pipe({"/first": b"a", "/growing": b"bc", "/last": b"d"})
+    original = fs._client.stat_many
+    grew = False
+    growing = fs._native_path("/growing")
+
+    def stat_then_grow(paths):
+        nonlocal grew
+        outcome = original(paths)
+        if growing in paths and not grew:
+            grew = True
+            fs.pipe_file("/growing", b"growing!")
+        return outcome
+
+    monkeypatch.setattr(fs._client, "stat_many", stat_then_grow)
+    destinations = [tmp_path / name for name in ("first", "growing", "last")]
+    fs.get(["/first", "/growing", "/last"], [str(path) for path in destinations])
+    assert grew
+    assert [path.read_bytes() for path in destinations] == [b"a", b"growing!", b"d"]
+
+
+def test_batched_get_drops_previous_payload_before_next_native_read(
+    dummy_fs, tmp_path, monkeypatch
+):
+    import weakref
+
+    class Payload(bytearray):
+        pass
+
+    fs = dummy_fs
+    fs.batch_size = 1
+    fs.pipe({"/first": b"a", "/second": b"b"})
+    original = fs._client.read_all_many
+    payloads = []
+
+    def read_batch(paths, limit):
+        assert all(ref() is None for ref in payloads)
+        data, errors = original(paths, limit)
+        data = [Payload(value) for value in data]
+        payloads.extend(weakref.ref(value) for value in data)
+        return data, errors
+
+    monkeypatch.setattr(fs._client, "read_all_many", read_batch)
+    destinations = [tmp_path / name for name in ("first", "second")]
+    fs.get(["/first", "/second"], [str(path) for path in destinations])
+    assert len(payloads) == 2
+    assert [path.read_bytes() for path in destinations] == [b"a", b"b"]
+
+
+@pytest.mark.parametrize(
+    "native_error", [NotImplementedError("read unavailable"), 0xFFFF_FFFE]
+)
+def test_batched_get_preserves_unsupported_failure(
+    dummy_fs, tmp_path, monkeypatch, native_error
+):
+    fs = dummy_fs
+    fs.pipe_file("/source", b"remote payload")
+    target = tmp_path / "destination"
+    target.write_bytes(b"original local contents")
+    monkeypatch.setattr(
+        fs._client, "read_all_many", lambda *_: ([None], {0: native_error})
+    )
+
+    with pytest.raises(NotImplementedError) as error:
+        fs.get(["/source"], [str(target)])
+    assert error.value.index == 0
+    assert target.read_bytes() == b"original local contents"

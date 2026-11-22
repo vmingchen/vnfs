@@ -5584,13 +5584,30 @@ class VfsiFileSystem(AbstractFileSystem):
             ):
                 with callback.branched(remote_path, local_path) as child:
                     if buf is None:
-                        raise _oserror(errors[i], remote_path, index=public_index)
-                    local.makedirs(local._parent(local_path), exist_ok=True)
-                    with open(local_path, "wb") as out:
+                        error = _oserror(errors[i], remote_path, index=public_index)
+                        if (
+                            _errno(error) != errno.EFBIG
+                            or read_batch_bytes >= self.read_all_max_total_bytes
+                        ):
+                            raise error
+                        # The source outgrew the batching threshold. Stream
+                        # this input without replaying buffered siblings.
+                        self._download_file_streamed(
+                            self._checked_strip_protocol(remote_path),
+                            local_path,
+                            child,
+                            input_index=public_index,
+                        )
+                    else:
                         child.set_size(len(buf))
-                        out.write(buf)
-                        child.relative_update(len(buf))
+                        local.makedirs(local._parent(local_path), exist_ok=True)
+                        with open(local_path, "wb") as out:
+                            out.write(buf)
+                            child.relative_update(len(buf))
+                del buf
                 callback.relative_update()
+            # The next batch should not coexist with this batch's payloads.
+            del data
 
     def _upload_file_streamed(
         self,
