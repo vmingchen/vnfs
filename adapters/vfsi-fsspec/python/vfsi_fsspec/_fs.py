@@ -6753,8 +6753,8 @@ class VfsiFileSystem(AbstractFileSystem):
                 with self._cache_mutation([dst], namespace=True):
                     self._client.symlink(target, self._native_path(dst))
             except (OSError, NotImplementedError, shutil.SameFileError) as error:
-                _rebase_error(
-                    error, [index if positions is None else positions[index]], [dst]
+                _oserror(
+                    error, dst, index=index if positions is None else positions[index]
                 )
                 # Never suppress or replay an ambiguous link creation.
                 if _is_transport_error(error):
@@ -6793,12 +6793,39 @@ class VfsiFileSystem(AbstractFileSystem):
                     [source for source, _ in pairs],
                 )
                 raise
-            missing = sorted(
-                index for index, code in errors.items() if _errno(code) == errno.ENOENT
-            )
-            if missing and self.auto_mkdir:
-                # Successful pairs may have overwritten another source in this
-                # batch. Retry only ENOENT pairs; retain unrelated per-item errors.
+            missing = []
+            if self.auto_mkdir:
+                missing = sorted(
+                    index
+                    for index, code in errors.items()
+                    if _errno(code) == errno.ENOENT
+                )
+                if missing:
+                    # ENOENT may have come from the source rather than the
+                    # destination parent. Confirm only the failed sources.
+                    try:
+                        stats, _ = self._client.stat_many(
+                            [native_pairs[index][0] for index in missing]
+                        )
+                    except Exception as error:
+                        _rebase_error(
+                            error,
+                            (
+                                missing
+                                if positions is None
+                                else [positions[i] for i in missing]
+                            ),
+                            [pairs[index][0] for index in missing],
+                        )
+                        raise
+                    missing = [
+                        index
+                        for index, info in zip(missing, stats)
+                        if info is not None and info["type"] in ("file", "directory")
+                    ]
+            if missing:
+                # Retry only missing destination parents. Leave successes and
+                # unrelated failures from the original batch alone.
                 parents = {
                     posixpath.dirname(native_pairs[index][1]) for index in missing
                 }

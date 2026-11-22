@@ -56,6 +56,7 @@ def test_copy_parent_transport_failure_is_not_replayed_or_ignored(
     dummy_fs, monkeypatch
 ):
     dummy_fs.auto_mkdir = True
+    dummy_fs.pipe_file("/b", b"second")
     copies = []
     parents = []
 
@@ -113,3 +114,22 @@ def test_copy_parent_failure_preserves_policy_and_recovers_other_siblings(
     assert not fs.exists("/denied/a")
     assert callback.size == callback.value == 3
     assert not fs._client._fds
+
+
+@pytest.mark.parametrize("on_error", ["raise", "ignore"])
+def test_missing_copy_source_does_not_create_destination_parents(dummy_fs, on_error):
+    dummy_fs.auto_mkdir = True
+    dummy_fs.pipe_file("/good", b"contents")
+    callback = Callback()
+    sources = ["/missing", "/good"]
+    destinations = ["/unneeded/child", "/needed/child"]
+    if on_error == "raise":
+        with pytest.raises(FileNotFoundError) as error:
+            dummy_fs.copy(sources, destinations, on_error=on_error, callback=callback)
+        assert error.value.index == 0
+        assert error.value.filename == "/missing"
+    else:
+        dummy_fs.copy(sources, destinations, on_error=on_error, callback=callback)
+    assert not dummy_fs.exists("/unneeded")
+    assert dummy_fs.cat_file("/needed/child") == b"contents"
+    assert callback.size == callback.value == 2

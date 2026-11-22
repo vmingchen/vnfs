@@ -363,3 +363,13 @@ def test_deferred_manual_finalization_keeps_scalar_error_context(
     assert not fs._client._fds
     assert not fs._intrans
     assert fs._transaction is None
+
+
+def test_symlink_copy_creation_failure_has_original_index(dummy_fs):
+    dummy_fs.pipe({"/file": b"file", "/exists": b"untouched"})
+    dummy_fs.symlink("/file", "/link")
+    with pytest.raises(FileExistsError) as caught:
+        dummy_fs.copy(["/file", "/link"], ["/copy", "/exists"], symlinks=True)
+    assert caught.value.index == 1
+    assert dummy_fs.cat_file("/copy") == b"file"
+    assert dummy_fs.cat_file("/exists") == b"untouched"
