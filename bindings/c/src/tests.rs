@@ -3880,7 +3880,7 @@ fn legacy_io_preserves_not_attempted_for_outer_backend_rejections() {
                 })
                 .collect();
             let result = unsafe { vfsi_preadv(fs, ops.as_mut_ptr(), 2, results.as_mut_ptr()) };
-            assert!(ops.iter().all(|op| op.got == 0));
+            assert!(ops.iter().all(|op| op.got == 99));
             assert_eq!(buffers, [[0xa5; 2]; 2]);
             result
         } else {
@@ -3892,7 +3892,7 @@ fn legacy_io_preserves_not_attempted_for_outer_backend_rejections() {
                 wrote: 99,
             });
             let result = unsafe { vfsi_pwritev(fs, ops.as_mut_ptr(), 2, results.as_mut_ptr()) };
-            assert!(ops.iter().all(|op| op.wrote == 0));
+            assert!(ops.iter().all(|op| op.wrote == 99));
             result
         };
         assert_eq!(aggregate.category, VFSI_ERROR_UNSUPPORTED);
