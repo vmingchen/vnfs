@@ -2,6 +2,7 @@
 
 import errno
 
+import fsspec
 import pytest
 from fsspec.callbacks import Callback
 
@@ -106,3 +107,36 @@ def test_put_file_respects_transaction_publication(dummy_fs, tmp_path, commit):
     transaction.complete(commit=commit)
     assert dummy_fs.cat_file("/target") == (b"upload" if commit else b"original")
     assert not dummy_fs._client._fds
+
+
+@pytest.mark.parametrize("commit", [False, True])
+@pytest.mark.parametrize("compression", [None, "gzip"])
+def test_transaction_put_file_defers_parent_creation(
+    dummy_fs, tmp_path, commit, compression
+):
+    source = tmp_path / "source"
+    source.write_bytes(b"upload")
+    transaction = dummy_fs.start_transaction()
+    dummy_fs.put_file(source, "/new-parent/target", compression=compression)
+    assert not dummy_fs.exists("/new-parent")
+    transaction.complete(commit=commit)
+    if commit:
+        with dummy_fs.open("/new-parent/target", "rb", compression=compression) as file:
+            assert file.read() == b"upload"
+    else:
+        assert not dummy_fs.exists("/new-parent")
+    assert not dummy_fs._client._fds
+
+
+def test_put_file_creates_missing_configured_root(tmp_path):
+    source = tmp_path / "source"
+    source.write_bytes(b"upload")
+    with fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "backend"),
+        root="new-root",
+        skip_instance_cache=True,
+    ) as fs:
+        fs.put_file(source, "/target")
+        assert fs.cat_file("/target") == b"upload"

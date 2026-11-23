@@ -281,14 +281,21 @@ def test_transaction_append_preserves_existing_data(fs, commit):
     assert fs.cat_file("/append") == (b"original+new" if commit else b"original")
 
 
-def test_transaction_directory_upload_rejected_before_creation(fs, tmp_path):
+@pytest.mark.parametrize("upload", ["recursive", "scalar-overwrite", "scalar-create"])
+def test_transaction_directory_upload_rejected_before_creation(fs, tmp_path, upload):
     source = tmp_path / "tree"
     source.mkdir()
     (source / "child").write_bytes(b"data")
     with fs.transaction:
         with pytest.raises(NotImplementedError, match="directory"):
-            fs.put(str(source), "/new-tree", recursive=True)
+            if upload == "recursive":
+                fs.put(str(source), "/new-tree", recursive=True)
+            else:
+                fs.put_file(source, "/new-tree", mode=upload.removeprefix("scalar-"))
     assert not fs.exists("/new-tree")
+    if upload != "recursive":
+        fs.put_file(source, "/new-tree", mode=upload.removeprefix("scalar-"))
+        assert fs.isdir("/new-tree")
 
 
 def test_transaction_preparation_interrupt_removes_private_stage(fs, monkeypatch):

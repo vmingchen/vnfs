@@ -3055,7 +3055,7 @@ class _BufferGroup:
 class _DeferredWriteFile:
     """Disk-spooled transactional write staged beside its destination."""
 
-    def __init__(self, fs, path, mode="wb"):
+    def __init__(self, fs, path, mode="wb", *, create_parents=False):
         if not fs._native_has_create_permissions:
             raise ImportError(
                 "transactional writes require native private-create support; "
@@ -3072,6 +3072,7 @@ class _DeferredWriteFile:
         self.fs = fs
         self.path = path  # internal path
         self.mode = mode
+        self._create_parents = create_parents
         self._spool = tempfile.SpooledTemporaryFile(
             max_size=fs.transaction_spool_threshold, mode="w+b"
         )
@@ -3198,7 +3199,7 @@ class _DeferredWriteFile:
             )
         except FileNotFoundError:
             permissions = None  # New transactional files stay private.
-        if self.fs.auto_mkdir:
+        if self._create_parents or self.fs.auto_mkdir:
             self._run_scalar(
                 self.fs._ensure_dirs, [posixpath.dirname(self.temp_path) or "/"]
             )
@@ -3289,9 +3290,12 @@ class _DeferredWriteFile:
                             index, file = batch[position]
                             file._label_publication_error(error, index)
                         raise
+                    # Retire every acknowledged stage before closing any
+                    # spool, which can fail and enter transaction cleanup.
                     for _, file in batch:
                         file._prepared = False
                         file._stage_owned = False
+                    for _, file in batch:
                         file.discard()
 
     def commit(self):
@@ -5700,12 +5704,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 else source_size
             )
             if create_parents:
-                try:
-                    self._ensure_dirs([posixpath.dirname(internal) or "/"])
-                except Exception as error:
-                    if input_index is not None:
-                        _rebase_error(error, [input_index], [internal])
-                    raise
+                open_kwargs["_create_parents"] = True
             native_mode = "xb" if mode == "create" else "wb"
             if input_index is None:
                 remote = open_tracked(self.open, internal, native_mode, **open_kwargs)
@@ -5732,6 +5731,10 @@ class VfsiFileSystem(AbstractFileSystem):
         internal = self._checked_strip_protocol(rpath)
         callback = Callback.as_callback(callback)
         if os.path.isdir(lpath):
+            if self._intrans:
+                raise NotImplementedError(
+                    "transactional directory uploads are unsupported"
+                )
             if mode == "create" and self.exists(internal):
                 raise FileExistsError(errno.EEXIST, "File exists", internal)
             self.makedirs(internal, exist_ok=True)
@@ -5971,6 +5974,7 @@ class VfsiFileSystem(AbstractFileSystem):
         write_buffering=None,
         size=None,
         _defer_cache=False,
+        _create_parents=False,
         **kwargs,
     ):
         internal = self._checked_strip_protocol(path)
@@ -5979,7 +5983,9 @@ class VfsiFileSystem(AbstractFileSystem):
             raise NotImplementedError("transactional update modes are unsupported")
         if not autocommit and any(c in mode for c in "wax"):
             # fsspec transactions: defer the write until commit()/discard().
-            file = _DeferredWriteFile(self, internal, mode)
+            file = _DeferredWriteFile(
+                self, internal, mode, create_parents=_create_parents
+            )
             operation = _OPERATION_WRITERS.get()
             if operation is not None and operation[0] is self:
                 operation[1].append(file)
@@ -5987,10 +5993,10 @@ class VfsiFileSystem(AbstractFileSystem):
         block_size, cache_type, cache_options = self._file_options(
             block_size, cache_type, cache_options, reading=base_mode == "r"
         )
-        if self.auto_mkdir and any(c in mode for c in "wax"):
+        if (self.auto_mkdir or _create_parents) and any(c in mode for c in "wax"):
             parent = self._parent(path)
-            if parent not in ("", "/"):
-                self._ensure_dirs([parent])
+            if parent not in ("", "/") or (_create_parents and self._root):
+                self._ensure_dirs([parent or "/"])
         fd = None
         identity = None
         try:

@@ -125,3 +125,35 @@ def test_prepare_preserves_primary_when_stage_cleanup_also_fails(
     finally:
         if file is not None:
             file.discard()
+
+
+def test_renamed_stages_are_all_released_before_closing_spools(dummy_fs, monkeypatch):
+    failure = OSError(errno.EIO, "local spool close failed")
+    removed = []
+    remove = dummy_fs.rm
+
+    def record_remove(path, *args, **kwargs):
+        removed.append(path)
+        return remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(dummy_fs, "rm", record_remove)
+    with pytest.raises(OSError) as raised:
+        with dummy_fs.transaction:
+            with dummy_fs.open("/first", "wb") as first:
+                first.write(b"first")
+            with dummy_fs.open("/second", "wb") as second:
+                second.write(b"second")
+
+            close = first._spool.close
+
+            def fail_once():
+                monkeypatch.setattr(first._spool, "close", close)
+                raise failure
+
+            monkeypatch.setattr(first._spool, "close", fail_once)
+
+    assert raised.value is failure
+    assert not removed
+    assert first._spool.closed and second._spool.closed
+    assert dummy_fs.cat_file("/first") == b"first"
+    assert dummy_fs.cat_file("/second") == b"second"

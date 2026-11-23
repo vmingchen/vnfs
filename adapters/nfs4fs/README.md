@@ -432,7 +432,8 @@ visible when the TTL expires or when the caller requests a refresh. Use
   MiB), and `walk_max_depth` (128) bound listings and recursive walks. These
   limits are configurable per filesystem instance and survive reconnects.
 - `with fs.transaction:` stages scalar and grouped write/append/exclusive
-  opens, `pipe`, and file uploads through `put`, independently of file size.
+  opens, `pipe`, and file uploads through `put` and `put_file`, independently
+  of file size. `put_file` creates missing parents during commit preparation.
   A transactional append requires a single staged writer for its destination.
   If other destinations are staged in the same transaction, their parent
   aliases must resolve before publication. Update modes containing `+` and directory uploads are rejected within
