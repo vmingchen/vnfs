@@ -246,3 +246,63 @@ def test_batched_get_preserves_unsupported_failure(
         fs.get(["/source"], [str(target)])
     assert error.value.index == 0
     assert target.read_bytes() == b"original local contents"
+
+
+@pytest.mark.parametrize("paired", [False, True])
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("data", [b"", b"remote"])
+def test_zero_read_budget_checks_source_before_opening_destination(
+    dummy_fs, tmp_path, paired, existing, data
+):
+    fs = dummy_fs
+    fs.pipe_file("/source", data)
+    fs.read_all_max_total_bytes = 0
+    target = tmp_path / "destination"
+    if existing:
+        target.write_bytes(b"original")
+
+    def download():
+        if paired:
+            fs.get(["/source"], [str(target)])
+        else:
+            fs.get_file("/source", str(target))
+
+    if data:
+        with pytest.raises(OSError) as caught:
+            download()
+        assert caught.value.errno == errno.EFBIG
+        if existing:
+            assert target.read_bytes() == b"original"
+        else:
+            assert not target.exists()
+    else:
+        download()
+        assert target.read_bytes() == b""
+    assert not fs._client._fds
+
+
+@pytest.mark.parametrize("data", [b"abc", b"abcdefgh"])
+def test_get_with_omitted_size_uses_bounded_reads(
+    dummy_fs, tmp_path, monkeypatch, data
+):
+    fs = dummy_fs
+    fs.pipe_file("/source", data)
+    fs.read_all_max_total_bytes = 4
+    original = fs._client.stat_many
+
+    def stat_without_size(paths):
+        attrs, errors = original(paths)
+        return [
+            (
+                {key: value for key, value in info.items() if key != "size"}
+                if info
+                else info
+            )
+            for info in attrs
+        ], errors
+
+    monkeypatch.setattr(fs._client, "stat_many", stat_without_size)
+    target = tmp_path / "destination"
+    fs.get(["/source"], [str(target)])
+    assert target.read_bytes() == data
+    assert not fs._client._fds

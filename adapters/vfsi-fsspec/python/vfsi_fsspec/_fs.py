@@ -301,6 +301,15 @@ def _allocation_error(path, requested, limit):
     )
 
 
+def _require_empty_read(remote, path, limit, allocation_base=0):
+    # Use the pinned size when available, without allocating a data buffer.
+    size = getattr(remote, "size", None)
+    if size is None:
+        size = len(remote.read(1))
+    if size:
+        raise _allocation_error(path, allocation_base + 1, limit)
+
+
 def _handle_identity(attrs):
     """Object identity within this filesystem, not a file-version token.
 
@@ -5326,19 +5335,12 @@ class VfsiFileSystem(AbstractFileSystem):
             if max_bytes == 0 or (
                 max_bytes is None and self.read_all_max_total_bytes == 0
             ):
-                # A zero-byte budget still permits an EOF probe. The pinned
-                # handle's size distinguishes empty files without requesting
-                # a one-byte buffer that would exceed the limit.
-                size = getattr(remote, "size", None)
-                if size is None:
-                    size = len(remote.read(1))
-                if size:
-                    limit = (
-                        self.read_all_max_total_bytes
-                        if allocation_limit is None
-                        else allocation_limit
-                    )
-                    raise _allocation_error(path, allocation_base + 1, limit)
+                limit = (
+                    self.read_all_max_total_bytes
+                    if allocation_limit is None
+                    else allocation_limit
+                )
+                _require_empty_read(remote, path, limit, allocation_base)
                 return
             while True:
                 request = self._stream_read_size()
@@ -5441,13 +5443,20 @@ class VfsiFileSystem(AbstractFileSystem):
             if source_size is None:
                 source_size = getattr(remote, "size", None)
             callback.set_size(source_size)
+            empty_budget = self.read_all_max_total_bytes == 0
+            if empty_budget:
+                _require_empty_read(remote, internal, 0)
             if outfile is None:
                 local = LocalFileSystem(auto_mkdir=True)
                 local.makedirs(local._parent(lpath), exist_ok=True)
                 outfile = stack.enter_context(open(lpath, "wb"))
-            self._copy_remote_to_fileobj(
-                internal, outfile, on_progress=callback.relative_update, source=remote
-            )
+            if not empty_budget:
+                self._copy_remote_to_fileobj(
+                    internal,
+                    outfile,
+                    on_progress=callback.relative_update,
+                    source=remote,
+                )
 
     def get_file(
         self, rpath, lpath=None, callback=DEFAULT_CALLBACK, outfile=None, **kwargs
@@ -5569,7 +5578,7 @@ class VfsiFileSystem(AbstractFileSystem):
                     (
                         remote_path,
                         local_path,
-                        stats[i].get("size") if stats[i] else 0,
+                        stats[i].get("size", 0) if stats[i] else 0,
                         i,
                     )
                 )
