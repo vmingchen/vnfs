@@ -109,3 +109,62 @@ def test_auto_mkdir_retries_only_missing_sibling_after_race(
     assert fs.isdir(right)
     assert fs.cat_file(f"{left}/file") == b"left"
     assert fs.cat_file(f"{right}/file") == b"right"
+
+
+@pytest.mark.parametrize("collision", [None, "file", "directory"])
+@pytest.mark.parametrize("method", ["mkdir", "makedirs"])
+def test_mkdir_validates_leaf_found_in_second_probe(fs, monkeypatch, collision, method):
+    fs.mkdir("/parent")
+    path = "/parent/child"
+    native = fs._native_path(path)
+    exists_many = fs._client.exists_many
+    lstat_many = fs._client.lstat_many
+    stat_many = fs._client.stat_many
+    create_dir = getattr(fs, method)
+    probes = []
+    validations = []
+
+    def observe(present):
+        probes.append(present)
+        if len(probes) == 1:
+            if collision == "file":
+                fs._client.write_many([native], [b"concurrent data"])
+            elif collision == "directory":
+                fs._client.mkdir_many([native], 0o700)
+
+    def observe_existence(paths):
+        result = exists_many(paths)
+        if native in paths:
+            observe(result[paths.index(native)])
+        return result
+
+    def observe_lstat(paths):
+        attrs, errors = lstat_many(paths)
+        if native in paths:
+            observe(attrs[paths.index(native)] is not None)
+        return attrs, errors
+
+    def record_leaf_metadata(paths, **kwargs):
+        if native in paths:
+            validations.append(native)
+        return stat_many(paths, **kwargs)
+
+    monkeypatch.setattr(fs._client, "exists_many", observe_existence)
+    monkeypatch.setattr(fs._client, "lstat_many", observe_lstat)
+    with monkeypatch.context() as patch:
+        patch.setattr(fs._client, "stat_many", record_leaf_metadata)
+        if collision == "file":
+            with pytest.raises(FileExistsError) as caught:
+                create_dir(path)
+            assert caught.value.filename == path
+        else:
+            create_dir(path)
+
+    if collision == "file":
+        assert fs.cat_file(path) == b"concurrent data"
+    else:
+        assert fs.isdir(path)
+        if collision == "directory":
+            assert fs.info(path)["mode"] & 0o777 == 0o700
+    assert probes == [False, collision is not None]
+    assert validations == ([] if collision is None else [native])

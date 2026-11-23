@@ -4497,7 +4497,7 @@ class VfsiFileSystem(AbstractFileSystem):
             else:
                 del error.index
 
-    def _ensure_dirs(self, paths, mode=None):
+    def _ensure_dirs(self, paths, mode=None, *, verify_existing=False):
         """``mkdir -p`` a set of internal paths with as few compounds as
         possible: one batched existence probe, then one mkdirv batch per
         missing depth level."""
@@ -4517,6 +4517,28 @@ class VfsiFileSystem(AbstractFileSystem):
             self._rebase_directory_error(error, ordered, native_paths)
             raise
         missing = [p for p, ok in zip(ordered, exists) if not ok]
+        if verify_existing:
+            # The caller observed missing leaves before this probe. A name
+            # that appeared since then must resolve to a directory.
+            missing_paths = set(missing)
+            appeared = [path for path in native_paths if path not in missing_paths]
+            if appeared:
+                try:
+                    stats, errors = self._client.stat_many(appeared)
+                except Exception as error:
+                    self._rebase_directory_error(error, appeared, native_paths)
+                    raise
+                for index, (native, attrs) in enumerate(zip(appeared, stats)):
+                    if index in errors and _errno(errors[index]) == errno.ENOENT:
+                        missing.append(native)
+                        continue
+                    if index in errors or attrs is None or attrs["type"] != "directory":
+                        cause = errors.get(
+                            index, errno.EIO if attrs is None else errno.EEXIST
+                        )
+                        error = _oserror(cause, self._internalize(native), index=index)
+                        self._rebase_directory_error(error, appeared, native_paths)
+                        raise error
         by_depth = {}
         for p in missing:
             by_depth.setdefault(p.count("/"), []).append(p)
@@ -4628,7 +4650,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 raise FileExistsError(errno.EEXIST, f"File exists: {p!r}")
         if missing:
             try:
-                self._ensure_dirs(missing)
+                self._ensure_dirs(missing, verify_existing=True)
             except Exception as error:
                 positions = {path: index for index, path in enumerate(paths)}
                 _rebase_error(error, [positions[path] for path in missing], missing)
@@ -6463,7 +6485,7 @@ class VfsiFileSystem(AbstractFileSystem):
             if self.exists(internal):
                 raise FileExistsError(errno.EEXIST, "File exists", internal)
             if mode == self._default_dir_mode:
-                self._ensure_dirs([internal])
+                self._ensure_dirs([internal], verify_existing=True)
                 return
             self._ensure_dirs([posixpath.dirname(internal) or "/"])
         with self._cache_mutation([internal], namespace=True):
