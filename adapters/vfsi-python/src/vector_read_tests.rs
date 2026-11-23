@@ -373,6 +373,30 @@ fn whole_file_validation_charges_only_valid_returned_prefixes() {
 }
 
 #[test]
+fn open_ended_range_with_missing_size_keeps_bounded_sibling() {
+    Python::initialize();
+    let root = TestRoot::new();
+    std::fs::write(root.0.join("data"), b"abcdef").unwrap();
+    std::fs::create_dir(root.0.join("dir")).unwrap();
+    for (path, errno) in [("/data", libc::EIO), ("/dir", libc::EISDIR)] {
+        let mut backend = FaultBackend::new(&root.0, None);
+        backend.attrs_omit_size = Some(0);
+        Python::attach(|py| {
+            let (data, errors) = client(backend)
+                .read_many(
+                    py,
+                    vec!["/data".into(), path.into()],
+                    vec![1, 2],
+                    Some(vec![Some(4), None]),
+                )
+                .unwrap();
+            assert_eq!(data, [Some(b"bcd".to_vec()), None]);
+            assert_eq!(error_codes(&errors), HashMap::from([(1, errno as u32)]));
+        });
+    }
+}
+
+#[test]
 fn mixed_ranges_only_fetch_metadata_for_open_ends() {
     Python::initialize();
     let root = TestRoot::new();

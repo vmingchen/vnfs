@@ -401,3 +401,25 @@ def test_cat_ranges_reports_missing_required_size_per_input(dummy_fs, monkeypatc
     assert unknown.errno == errno.EIO
     assert unknown.index == 0
     assert bounded == b"234"
+
+
+@pytest.mark.parametrize("start,end", [(1, None), (-3, None), (0, -1)])
+def test_cat_file_reports_missing_size_for_eof_dependent_range(
+    dummy_fs, monkeypatch, start, end
+):
+    fs = dummy_fs
+    fs.pipe_file("/source", b"123456")
+    native_stat = fs._client.stat_many
+
+    def stat_without_size(paths):
+        attrs, errors = native_stat(paths)
+        attrs[0].pop("size")
+        return attrs, errors
+
+    monkeypatch.setattr(fs._client, "stat_many", stat_without_size)
+    with pytest.raises(OSError) as caught:
+        fs.cat_file("/source", start=start, end=end)
+    assert caught.value.errno == errno.EIO
+    assert caught.value.filename == "/source"
+    assert fs.cat_file("/source", start=1, end=4) == b"234"
+    assert fs.cat_file("/source") == b"123456"

@@ -1,5 +1,6 @@
 """Bounded ordered single-file read-ahead for nfs4fs."""
 
+import errno
 import threading
 import time
 import tracemalloc
@@ -457,3 +458,66 @@ def test_pipelined_stream_uses_existing_single_session_by_default(tmp_path):
             "/data", lambda _offset, data: received.append(data), chunk_size=4
         ) == len(b"one session")
         assert b"".join(received) == b"one session"
+
+
+@pytest.mark.parametrize("kind", ["missing_size", "empty_directory", "empty_file"])
+def test_pipelined_reads_validate_file_metadata_before_dispatch(fs, monkeypatch, kind):
+    if kind == "empty_directory":
+        fs.mkdir("/data")
+    else:
+        fs.pipe_file("/data", b"")
+    original = fs._client.fstat
+
+    def fstat(fd):
+        attrs = original(fd)
+        if kind == "missing_size":
+            attrs.pop("size")
+        else:
+            attrs["size"] = 0
+        return attrs
+
+    monkeypatch.setattr(fs._client, "fstat", fstat)
+
+    def rejected_callback(*args):
+        pytest.fail("no data should be delivered")
+
+    if kind == "empty_file":
+        assert fs.read_stream_pipelined("/data", rejected_callback) == 0
+    else:
+        with pytest.raises(OSError) as caught:
+            fs.read_stream_pipelined("/data", rejected_callback)
+        assert caught.value.errno == (
+            errno.EIO if kind == "missing_size" else errno.EISDIR
+        )
+        assert caught.value.filename == "/data"
+    assert not fs._client._fds
+
+
+def test_pipelined_stream_releases_chunk_before_next_read(fs, monkeypatch):
+    chunk_size = 1 << 20
+    with fs.open("/data", "wb") as file:
+        file.truncate(2 * chunk_size)
+    live_bytes = []
+
+    def pread(fd, length, offset):
+        live_bytes.append(tracemalloc.get_traced_memory()[0])
+        return bytes(length)
+
+    monkeypatch.setattr(fs._client, "pread", pread)
+    tracemalloc.start()
+    try:
+        assert (
+            fs.read_stream_pipelined(
+                "/data",
+                lambda *_: None,
+                workers=1,
+                chunk_size=chunk_size,
+                max_buffered_bytes=chunk_size,
+            )
+            == 2 * chunk_size
+        )
+    finally:
+        tracemalloc.stop()
+
+    assert len(live_bytes) == 2
+    assert live_bytes[1] - live_bytes[0] < chunk_size // 2

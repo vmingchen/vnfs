@@ -2088,11 +2088,17 @@ impl NfsClient {
                 for (slot, attrs) in attrs.into_iter().enumerate() {
                     let index = size_indices.get(slot).copied().unwrap_or(slot);
                     if let Some(attrs) = attrs {
-                        lengths[index] = attrs
-                            .size
-                            .saturating_sub(starts[index])
-                            .min(usize::MAX as u64)
-                            as usize;
+                        if attrs.ftype == VfType::Directory {
+                            errors.insert(index, std::io::Error::from_raw_os_error(libc::EISDIR));
+                        } else if attrs.returned.contains(AttrMask::SIZE) {
+                            lengths[index] = attrs
+                                .size
+                                .saturating_sub(starts[index])
+                                .min(usize::MAX as u64)
+                                as usize;
+                        } else {
+                            errors.insert(index, std::io::Error::from_raw_os_error(libc::EIO));
+                        }
                     }
                 }
             }

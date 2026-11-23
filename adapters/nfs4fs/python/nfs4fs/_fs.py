@@ -1,5 +1,6 @@
 """NFS-specific facade over the shared VFSI fsspec engine."""
 
+import errno
 import inspect
 import operator
 import os
@@ -200,7 +201,14 @@ class Nfs4FileSystem(_VfsiFileSystem):
                 reader._identity_required = True
                 attrs_by_reader.append(attrs)
             identity = readers[0]._identity
-            size = attrs_by_reader[0]["size"]
+            attrs = attrs_by_reader[0]
+            if attrs["type"] == "directory":
+                raise IsADirectoryError(errno.EISDIR, "Is a directory", internal)
+            size = attrs.get("size")
+            if size is None:
+                raise OSError(
+                    errno.EIO, "pipelined read requires file size metadata", internal
+                )
 
             def read_exact(reader, offset, length):
                 # Restore this worker's own pinned handle first. Then ensure
@@ -264,6 +272,9 @@ class Nfs4FileSystem(_VfsiFileSystem):
                     data = future.result()
                     on_chunk(offset, data)
                     total += len(data)
+                    # Both the future and its result retain the completed
+                    # chunk. Release them before scheduling another wave.
+                    del data, future
         return total
 
 

@@ -237,6 +237,15 @@ class _WalkBudget:
         return self.fs._client.listdir(native_path, **self.native_options())
 
 
+def _range_file_size(attrs, path):
+    if attrs is not None and attrs.get("type") == "directory":
+        raise IsADirectoryError(errno.EISDIR, "Is a directory", path)
+    size = attrs.get("size") if attrs is not None else None
+    if size is None:
+        raise OSError(errno.EIO, "range requires file size metadata", path)
+    return size
+
+
 def _normalize_range(start, end, size=None):
     """Normalize fsspec byte-range bounds and reject negative lengths."""
     start = 0 if start is None else start
@@ -4982,7 +4991,7 @@ class VfsiFileSystem(AbstractFileSystem):
         internal = self._checked_strip_protocol(path)
         size = None
         if (start is not None and start < 0) or (end is not None and end < 0):
-            size = self.size(internal)
+            size = _range_file_size(self.info(internal), internal)
         try:
             start, end = _normalize_range(start, end, size)
         except ValueError:
@@ -5003,7 +5012,8 @@ class VfsiFileSystem(AbstractFileSystem):
             _complete_callback(callback, len(result))
             return result
         if end is None:
-            size = self.size(internal) if size is None else size
+            if size is None:
+                size = _range_file_size(self.info(internal), internal)
             # Freeze EOF at the checked size; a second native size query
             # could otherwise enlarge this allocation after concurrent growth.
             end = max(start, size)
@@ -5069,14 +5079,10 @@ class VfsiFileSystem(AbstractFileSystem):
             for index, stat in zip(size_indices, stats):
                 if index in errors:
                     continue
-                if stat is not None and stat.get("size") is not None:
-                    sizes[index] = stat["size"]
-                elif stat is not None and stat.get("type") == "directory":
-                    errors[index] = errno.EISDIR
-                else:
-                    errors[index] = OSError(
-                        errno.EIO, "range requires file size metadata", internals[index]
-                    )
+                try:
+                    sizes[index] = _range_file_size(stat, internals[index])
+                except OSError as error:
+                    errors[index] = error
         normalized = []
         validation_errors = {}
         for i, (start, end) in enumerate(zip(starts, ends)):
