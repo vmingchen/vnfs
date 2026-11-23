@@ -187,6 +187,47 @@ fn small_copy_keeps_nonprefix_successes_without_replaying_truncating_writes() {
 }
 
 #[test]
+fn oversized_copy_stops_at_actual_eof_after_source_shrinks() {
+    Python::initialize();
+    let root = TestRoot::new();
+    let source = root.0.join("source");
+    std::fs::write(&source, b"payload").unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&source)
+        .unwrap()
+        .set_len((COPY_CHUNK_SIZE + 4096) as u64)
+        .unwrap();
+    std::fs::write(root.0.join("target"), b"old destination with a longer tail").unwrap();
+    std::fs::write(root.0.join("sibling"), vec![b's'; 2048]).unwrap();
+    let mut backend = FaultBackend::new(&root.0, None);
+    backend.truncate_before_extent = Some((source, 3));
+    let calls = backend.extent_calls.clone();
+    Python::attach(|py| {
+        let (copied, errors) = client(backend)
+            .copy_many(
+                py,
+                vec![
+                    ("/source".into(), "/target".into()),
+                    ("/sibling".into(), "/healthy".into()),
+                ],
+            )
+            .unwrap();
+        assert_eq!(copied, vec![Some(3), Some(2048)]);
+        assert!(errors.is_empty());
+    });
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![vec![PathBuf::from("/source"), PathBuf::from("/sibling")]]
+    );
+    assert_eq!(std::fs::read(root.0.join("target")).unwrap(), b"pay");
+    assert_eq!(
+        std::fs::read(root.0.join("healthy")).unwrap(),
+        vec![b's'; 2048]
+    );
+}
+
+#[test]
 fn oversized_copy_rejects_missing_size_without_truncating_destination() {
     Python::initialize();
     let root = TestRoot::new();

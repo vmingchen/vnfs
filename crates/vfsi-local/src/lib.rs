@@ -2081,7 +2081,19 @@ impl LocalBackend {
         Ok(())
     }
 
-    fn copy_extent(&mut self, p: &ExtentPair) -> VfResult<()> {
+    /// Copy extents and retain the actual byte count for each file.
+    #[doc(hidden)]
+    pub fn copy_data_with_counts(&mut self, pairs: &[ExtentPair]) -> vfsi_core::VecResult<u64> {
+        Ok(pairs
+            .iter()
+            .map(|pair| {
+                self.copy_extent(pair)
+                    .map_err(|cause| vfsi_core::OpError::failed(cause, None))
+            })
+            .collect())
+    }
+
+    fn copy_extent(&mut self, p: &ExtentPair) -> VfResult<u64> {
         let sp = self.real_path(&self.resolve(&p.src_path))?;
         let dp = self.real_path(&self.resolve(&p.dst_path))?;
         // A FIFO must not stall the whole copy vector waiting for a peer.
@@ -2171,7 +2183,7 @@ impl LocalBackend {
         }
         // Truncate any stale tail beyond what was copied (cp semantics).
         dst.set_len(doff)?;
-        Ok(())
+        Ok(copied)
     }
 }
 
@@ -3062,13 +3074,12 @@ impl VectorBackend for LocalBackend {
     }
 
     fn vcopy_data_impl(&mut self, pairs: &[ExtentPair]) -> vfsi_core::VecResult<()> {
-        Ok(pairs
-            .iter()
-            .map(|pair| {
-                self.copy_extent(pair)
-                    .map_err(|cause| vfsi_core::OpError::failed(cause, None))
-            })
-            .collect())
+        self.copy_data_with_counts(pairs).map(|results| {
+            results
+                .into_iter()
+                .map(|result| result.map(|_| ()))
+                .collect()
+        })
     }
 
     fn vcopy_impl(
@@ -3090,7 +3101,7 @@ impl VectorBackend for LocalBackend {
                         let destination = self.no_follow_path(&self.resolve(&p.dst_path))?;
                         symlink(&target, destination)
                     } else {
-                        self.copy_extent(p)
+                        self.copy_extent(p).map(|_| ())
                     }
                 })()
                 .map_err(|cause| vfsi_core::OpError::failed(cause, None))

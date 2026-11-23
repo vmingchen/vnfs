@@ -2611,6 +2611,56 @@ fn file_review_mixed_descriptor_end_writes_work_like_descriptor_only_writes() {
 }
 
 #[test]
+fn counted_copy_reports_short_and_empty_extents_after_finalization() {
+    let Some(mut fs) = connect() else {
+        eprintln!("skipping NFS integration test: VFSI_NFS_SERVER not set");
+        return;
+    };
+    let root = PathBuf::from(format!("/vfsi-counted-copy-{}", std::process::id()));
+    fs.ensure_dir_impl(&root, 0o700).unwrap();
+    let source = root.join("source");
+    let short = root.join("short");
+    let empty = root.join("empty");
+    for (path, contents) in [
+        (&source, b"pay".as_slice()),
+        (&short, b"xx-long-tail".as_slice()),
+        (&empty, b"q-long-tail".as_slice()),
+    ] {
+        let file = fs
+            .open_raw_impl(path, libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC, 0o600)
+            .unwrap();
+        assert_eq!(
+            fs.write_raw_impl(&file, 0, contents).unwrap(),
+            contents.len()
+        );
+        fs.close_impl(&file).unwrap();
+    }
+    let outputs = fs
+        .copy_data_with_counts(&[
+            ExtentPair::from_os_paths(&source, 1, &short, 2, Some(9)),
+            ExtentPair::from_os_paths(&source, 6, &empty, 1, Some(9)),
+        ])
+        .unwrap();
+    let short_data = fs
+        .read_file_impl(&FileOperand::from_os_path(&short), 64)
+        .unwrap();
+    let empty_data = fs
+        .read_file_impl(&FileOperand::from_os_path(&empty), 64)
+        .unwrap();
+    fs.unlink_impl(&short).unwrap();
+    fs.unlink_impl(&empty).unwrap();
+    fs.unlink_impl(&source).unwrap();
+    vfsi_core::internal::collect_vec_result(fs.remove_paths_impl(&[&root], false), 1).unwrap();
+
+    assert_eq!(
+        outputs.into_iter().collect::<Result<Vec<_>, _>>().unwrap(),
+        [2, 0]
+    );
+    assert_eq!(short_data, b"xxay");
+    assert_eq!(empty_data, b"q");
+}
+
+#[test]
 fn client_extent_copy_rejects_forward_aliases_without_mutating_source() {
     let Some(mut fs) = connect() else { return };
     let root = format!("/vfsi-client-copy-alias-{}", std::process::id());

@@ -2574,7 +2574,7 @@ impl NfsClient {
         })
     }
 
-    /// Copy whole files through `VectorBackend::vcopy_impl` in bounded 16 MiB extents.
+    /// Copy whole files in bounded 16 MiB extents.
     /// NFSv4.2 and SMB can use server-side copy, with client-copy fallback.
     /// Returns `(copied_bytes, errors)`.
     fn copy_many(
@@ -2854,7 +2854,7 @@ impl NfsClient {
                     })
                     .collect();
                 let outcomes = fs
-                    .vcopy_impl(&ops, vfsi_core::CopyOptions::new())
+                    .copy_extents_with_counts(&ops)
                     .map_err(|cause| to_py_err(cause, None, None))?;
                 if outcomes.len() != remaining.len() {
                     return Err(to_py_err(
@@ -2868,10 +2868,19 @@ impl NfsClient {
                 let mut next = Vec::new();
                 for ((&index, &length), result) in remaining.iter().zip(&chunks).zip(outcomes) {
                     match result {
-                        Ok(()) => {
-                            offsets[index] = offsets[index].saturating_add(length);
-                            if offsets[index] >= sizes[index].unwrap_or(0) {
-                                copied[index] = sizes[index];
+                        Ok(count) => {
+                            if count > length {
+                                return Err(to_py_err(
+                                    vfsi_core::internal::errors::invalid_reply(
+                                        "copy returned more bytes than requested",
+                                    ),
+                                    None,
+                                    Some(index),
+                                ));
+                            }
+                            offsets[index] += count;
+                            if count < length || offsets[index] == sizes[index].unwrap_or(0) {
+                                copied[index] = Some(offsets[index]);
                             } else {
                                 next.push(index);
                             }
@@ -2966,6 +2975,9 @@ pub fn register(m: &Bound<'_, PyModule>, version: &str) -> PyResult<()> {
 
 // Protocol inspection belongs to the bindings, outside the native operation contracts.
 trait BindingBackend: vfsi_sync::backend::VectorBackend {
+    fn copy_extents_with_counts(&mut self, _pairs: &[ExtentPair]) -> vfsi_core::VecResult<u64> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
     fn nfs_minorversion(&self) -> Option<u32> {
         None
     }
@@ -2983,9 +2995,17 @@ trait BindingBackend: vfsi_sync::backend::VectorBackend {
     }
 }
 #[cfg(feature = "dummy")]
-impl BindingBackend for LocalBackend {}
+impl BindingBackend for LocalBackend {
+    fn copy_extents_with_counts(&mut self, pairs: &[ExtentPair]) -> vfsi_core::VecResult<u64> {
+        self.copy_data_with_counts(pairs)
+    }
+}
 #[cfg(feature = "nfs")]
 impl BindingBackend for vfsi_nfs::NfsVecFs {
+    fn copy_extents_with_counts(&mut self, pairs: &[ExtentPair]) -> vfsi_core::VecResult<u64> {
+        self.copy_data_with_counts(pairs)
+    }
+
     fn nfs_minorversion(&self) -> Option<u32> {
         Some(self.minorversion())
     }

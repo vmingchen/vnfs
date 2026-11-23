@@ -956,31 +956,12 @@ impl VectorBackend for NfsVecFs {
     }
 
     fn vcopy_data_impl(&mut self, pairs: &[ExtentPair]) -> vfsi_core::VecResult<()> {
-        self.ensure_writable(pairs.len())?;
-        let mut fatal: Option<std::sync::Arc<std::io::Error>> = None;
-        Ok(pairs
-            .iter()
-            .map(|pair| {
-                if let Some(cause) = &fatal {
-                    return Err(vfsi_core::OpError::not_attempted(
-                        vfsi_core::internal::errors::from_shared(cause),
-                    ));
-                }
-                let result = (|| {
-                    let source = self.follow_target_path(&self.server_path(&pair.src_path))?;
-                    let destination = self.follow_target_path(&self.server_path(&pair.dst_path))?;
-                    self.copy_extent(&source, &destination, pair)
-                })();
-                result.map_err(|mut cause| {
-                    if crate::client::uncertain_completion(&cause) {
-                        fatal = Some(vfsi_core::internal::errors::share_in_place(&mut cause));
-                        vfsi_core::OpError::unknown(cause, None)
-                    } else {
-                        vfsi_core::OpError::failed(cause, None)
-                    }
-                })
-            })
-            .collect())
+        self.copy_data_client_side(pairs).map(|results| {
+            results
+                .into_iter()
+                .map(|result| result.map(|_| ()))
+                .collect()
+        })
     }
 
     fn vcopy_impl(

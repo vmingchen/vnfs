@@ -186,7 +186,7 @@ impl NfsVecFs {
         src_root_rel: &Path,
         dst_root_rel: &Path,
         p: &ExtentPair,
-    ) -> VfResult<()> {
+    ) -> VfResult<u64> {
         let (sdir, sname) = split_path_bytes(path_bytes(src_root_rel))
             .map_err(|_| std::io::Error::from_raw_os_error((ERR_NOENT) as i32))?;
         let (ddir, dname) = split_path_bytes(path_bytes(dst_root_rel))
@@ -230,7 +230,7 @@ impl NfsVecFs {
             .nfs
             .close_temporary_path(&dfh, &dsid)
             .map_err(vfsi_core::internal::errors::from_rpc);
-        result.and(source_close).and(destination_close)
+        result.and_then(|copied| source_close.and(destination_close).map(|()| copied))
     }
 
     fn copy_opened_extent(
@@ -240,7 +240,7 @@ impl NfsVecFs {
         dfh: &NfsFh,
         dsid: &stateid4,
         p: &ExtentPair,
-    ) -> VfResult<()> {
+    ) -> VfResult<u64> {
         let same_file = sfh == dfh;
         (|| {
             let length = if same_file && p.dst_offset > p.src_offset {
@@ -279,11 +279,43 @@ impl NfsVecFs {
             // Truncate any stale tail beyond what was copied (cp semantics).
             self.nfs
                 .setattr(dfh, None, Some(final_size))
-                .map_err(vfsi_core::internal::errors::from_rpc)
+                .map_err(vfsi_core::internal::errors::from_rpc)?;
+            Ok(final_size - p.dst_offset)
         })()
     }
 
-    fn copy_extents_server_side(&mut self, pairs: &[ExtentPair]) -> Vec<vfsi_core::OpResult<()>> {
+    pub(super) fn copy_data_client_side(
+        &mut self,
+        pairs: &[ExtentPair],
+    ) -> vfsi_core::VecResult<u64> {
+        self.ensure_writable(pairs.len())?;
+        let mut fatal: Option<std::sync::Arc<std::io::Error>> = None;
+        Ok(pairs
+            .iter()
+            .map(|pair| {
+                if let Some(cause) = &fatal {
+                    return Err(vfsi_core::OpError::not_attempted(
+                        vfsi_core::internal::errors::from_shared(cause),
+                    ));
+                }
+                let result = (|| {
+                    let source = self.follow_target_path(&self.server_path(&pair.src_path))?;
+                    let destination = self.follow_target_path(&self.server_path(&pair.dst_path))?;
+                    self.copy_extent(&source, &destination, pair)
+                })();
+                result.map_err(|mut cause| {
+                    if crate::client::uncertain_completion(&cause) {
+                        fatal = Some(vfsi_core::internal::errors::share_in_place(&mut cause));
+                        vfsi_core::OpError::unknown(cause, None)
+                    } else {
+                        vfsi_core::OpError::failed(cause, None)
+                    }
+                })
+            })
+            .collect())
+    }
+
+    fn copy_extents_server_side(&mut self, pairs: &[ExtentPair]) -> Vec<vfsi_core::OpResult<u64>> {
         use vfsi_core::{OpError, OpResult};
         let sources: Vec<_> = pairs.iter().map(|pair| pair.src_path.as_path()).collect();
         let opened = copy_slots(
@@ -294,7 +326,7 @@ impl NfsVecFs {
             ),
             pairs.len(),
         );
-        let mut output: Vec<Option<OpResult<()>>> = (0..pairs.len()).map(|_| None).collect();
+        let mut output: Vec<Option<OpResult<u64>>> = (0..pairs.len()).map(|_| None).collect();
         let mut src = (0..pairs.len()).map(|_| None).collect::<Vec<_>>();
         let mut dst = (0..pairs.len()).map(|_| None).collect::<Vec<_>>();
         let mut active = Vec::new();
@@ -329,12 +361,12 @@ impl NfsVecFs {
             let record_copy =
                 |fs: &Self,
                  index: usize,
-                 slot: &mut Option<OpResult<()>>,
+                 slot: &mut Option<OpResult<u64>>,
                  destination: Option<&FileOperand>,
                  failed: &mut Vec<_>,
                  replacements: &mut std::collections::HashMap<NfsFh, usize>| {
                     match slot.as_mut()? {
-                        Ok(()) => {
+                        Ok(_) => {
                             // Only a copy from destination offset zero replaces
                             // the full contents, including any failed older prefix.
                             if pairs[index].dst_offset == 0
@@ -474,7 +506,7 @@ impl NfsVecFs {
         src: &[Option<FileOperand>],
         dst: &mut [Option<FileOperand>],
         active: &[usize],
-        output: &mut [Option<vfsi_core::OpResult<()>>],
+        output: &mut [Option<vfsi_core::OpResult<u64>>],
     ) {
         if active.is_empty() {
             return;
@@ -524,7 +556,7 @@ impl NfsVecFs {
         sources: &[Option<FileOperand>],
         destinations: &[Option<FileOperand>],
         indices: &[usize],
-        output: &mut [Option<vfsi_core::OpResult<()>>],
+        output: &mut [Option<vfsi_core::OpResult<u64>>],
     ) {
         use vfsi_core::OpError;
         let explicit: Vec<_> = indices
@@ -720,11 +752,23 @@ impl NfsVecFs {
             .iter()
             .zip(copy_slots(self.nfs.setattr_many(&attrs), attrs.len()))
         {
-            output[indices[position]] = Some(result.map_err(copy_after_effect));
+            output[indices[position]] =
+                Some(result.map(|()| totals[position]).map_err(copy_after_effect));
         }
     }
 
     pub(super) fn vcopy_data_nfs(&mut self, pairs: &[ExtentPair]) -> vfsi_core::VecResult<()> {
+        self.copy_data_with_counts(pairs).map(|results| {
+            results
+                .into_iter()
+                .map(|result| result.map(|_| ()))
+                .collect()
+        })
+    }
+
+    /// Copy extents with the acknowledged byte count, including EOF-short copies.
+    #[doc(hidden)]
+    pub fn copy_data_with_counts(&mut self, pairs: &[ExtentPair]) -> vfsi_core::VecResult<u64> {
         self.ensure_writable(pairs.len())?;
         let mut output = Vec::with_capacity(pairs.len());
         // Admission recovery is scoped to an OPEN batch. Use separate calls
@@ -733,7 +777,7 @@ impl NfsVecFs {
             if self.server_copy_enabled {
                 output.extend(self.copy_extents_server_side(batch));
             } else {
-                output.extend(copy_slots(self.vcopy_data_impl(batch), batch.len()));
+                output.extend(copy_slots(self.copy_data_client_side(batch), batch.len()));
             }
         }
         Ok(output)

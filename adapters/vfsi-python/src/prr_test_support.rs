@@ -55,6 +55,7 @@ pub(crate) struct FaultBackend {
     pub(crate) extent_errors: std::collections::VecDeque<IndexedError>,
     pub(crate) extent_item_errors: Vec<(usize, vfsi_core::OpError)>,
     pub(crate) extent_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
+    pub(crate) truncate_before_extent: Option<(PathBuf, u64)>,
     pub(crate) write_item_errors: Vec<(usize, vfsi_core::OpError)>,
     pub(crate) read_error_on_call: usize,
     pub(crate) read_limit: Option<usize>,
@@ -91,6 +92,7 @@ impl FaultBackend {
             extent_errors: Default::default(),
             extent_item_errors: Default::default(),
             extent_calls: Default::default(),
+            truncate_before_extent: None,
             write_item_errors: Default::default(),
             read_error_on_call: 0,
             read_limit: None,
@@ -421,38 +423,16 @@ impl VectorBackend for FaultBackend {
         pairs: &[ExtentPair],
         options: vfsi_core::CopyOptions,
     ) -> vfsi_core::VecResult<()> {
-        self.extent_calls
-            .lock()
-            .unwrap()
-            .push(pairs.iter().map(|pair| pair.src_path.clone()).collect());
-        let mut rejected = std::mem::take(&mut self.extent_item_errors);
-        if let Some(error) = self.extent_errors.pop_front() {
-            let (index, cause) = error.into_parts();
-            let Some(index) = index else {
-                return Err(cause);
-            };
-            if index >= pairs.len() {
-                return Err(vfsi_core::internal::errors::invalid_reply(
-                    "invalid injected copy slot",
-                ));
-            }
-            rejected.push((index, vfsi_core::OpError::unknown(cause, None)));
+        if options.follow_source_symlinks() {
+            self.copy_extents_with_counts(pairs).map(|results| {
+                results
+                    .into_iter()
+                    .map(|result| result.map(|_| ()))
+                    .collect()
+            })
+        } else {
+            self.inner.vcopy_impl(pairs, options)
         }
-        let indices: Vec<_> = (0..pairs.len())
-            .filter(|index| !rejected.iter().any(|(failed, _)| failed == index))
-            .collect();
-        let pending: Vec<_> = indices.iter().map(|&index| pairs[index].clone()).collect();
-        let mut results: Vec<_> = (0..pairs.len()).map(|_| None).collect();
-        for (index, result) in indices
-            .into_iter()
-            .zip(self.inner.vcopy_impl(&pending, options)?)
-        {
-            results[index] = Some(result);
-        }
-        for (index, error) in rejected {
-            results[index] = Some(Err(error));
-        }
-        Ok(results.into_iter().map(Option::unwrap).collect())
     }
     fn vread_all_with_options_impl(
         &mut self,
@@ -495,7 +475,48 @@ impl VectorBackend for FaultBackend {
         Ok(outcomes)
     }
 }
-impl BindingBackend for FaultBackend {}
+impl BindingBackend for FaultBackend {
+    fn copy_extents_with_counts(&mut self, pairs: &[ExtentPair]) -> vfsi_core::VecResult<u64> {
+        self.extent_calls
+            .lock()
+            .unwrap()
+            .push(pairs.iter().map(|pair| pair.src_path.clone()).collect());
+        if let Some((path, length)) = self.truncate_before_extent.take() {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)?
+                .set_len(length)?;
+        }
+        let mut rejected = std::mem::take(&mut self.extent_item_errors);
+        if let Some(error) = self.extent_errors.pop_front() {
+            let (index, cause) = error.into_parts();
+            let Some(index) = index else {
+                return Err(cause);
+            };
+            if index >= pairs.len() {
+                return Err(vfsi_core::internal::errors::invalid_reply(
+                    "invalid injected copy slot",
+                ));
+            }
+            rejected.push((index, vfsi_core::OpError::unknown(cause, None)));
+        }
+        let indices: Vec<_> = (0..pairs.len())
+            .filter(|index| !rejected.iter().any(|(failed, _)| failed == index))
+            .collect();
+        let pending: Vec<_> = indices.iter().map(|&index| pairs[index].clone()).collect();
+        let mut results: Vec<_> = (0..pairs.len()).map(|_| None).collect();
+        for (index, result) in indices
+            .into_iter()
+            .zip(self.inner.copy_data_with_counts(&pending)?)
+        {
+            results[index] = Some(result);
+        }
+        for (index, error) in rejected {
+            results[index] = Some(Err(error));
+        }
+        Ok(results.into_iter().map(Option::unwrap).collect())
+    }
+}
 pub(crate) fn client(backend: impl BindingBackend + Send + 'static) -> NfsClient {
     NfsClient {
         fs: Mutex::new(Some(Box::new(backend))),
