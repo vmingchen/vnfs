@@ -1433,16 +1433,11 @@ impl NfsClient {
         })
     }
 
-    /// Forget an inherited session in a forked child without issuing any
-    /// protocol cleanup on the parent's connection. The operating system
-    /// still closes the child's duplicated descriptors when it exits.
-    fn _abandon_after_fork(&self, py: Python<'_>) -> PyResult<()> {
-        py.detach(|| {
-            if let Some(fs) = self.take_backend()? {
-                std::mem::forget(fs);
-            }
-            Ok(())
-        })
+    /// Preserve an inherited client until child exit without locking or
+    /// dropping it. Parent threads may have held its locks at fork, and
+    /// protocol cleanup would affect the parent's live connection.
+    fn _abandon_after_fork(slf: Py<Self>) {
+        std::mem::forget(slf);
     }
 
     /// Negotiated NFS minor version, or None for the dummy backend.
@@ -3796,3 +3791,48 @@ mod smb_connection_tests;
 
 #[cfg(test)]
 mod vector_read_tests;
+
+#[cfg(test)]
+mod fork_tests {
+    use super::*;
+
+    #[test]
+    fn abandoning_inherited_native_client_does_not_acquire_its_locks() {
+        Python::initialize();
+        Python::attach(|py| {
+            let client = Py::new(
+                py,
+                NfsClient {
+                    fs: Mutex::new(None),
+                    append_fds: Mutex::new(HashSet::new()),
+                    read_all_max_total_bytes: 1,
+                    directory_max_entries: 1,
+                    directory_max_path_bytes: 1,
+                    walk_max_depth: 1,
+                },
+            )
+            .unwrap();
+            let bound = client.bind(py);
+            let state = bound.borrow();
+            let backend = state.fs.lock().unwrap();
+            let append = state.append_fds.lock().unwrap();
+            let client = client.clone_ref(py);
+            let (done, completion) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                Python::attach(|py| {
+                    let result = client.bind(py).call_method0("_abandon_after_fork");
+                    done.send(result.is_ok()).unwrap();
+                });
+            });
+            let (completion, finished_while_locked) = py.detach(move || {
+                let finished = completion.recv_timeout(std::time::Duration::from_secs(2));
+                (completion, finished.unwrap_or(false))
+            });
+            drop(append);
+            drop(backend);
+            py.detach(|| worker.join().unwrap());
+            drop(completion);
+            assert!(finished_while_locked);
+        });
+    }
+}

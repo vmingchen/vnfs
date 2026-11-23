@@ -659,15 +659,17 @@ class _ResilientClient:
         if self.closed:
             raise ValueError("filesystem is closed")
         if self._pid != os.getpid():
-            self.reconnect(after_fork=True)
+            self.reconnect()
 
-    def reconnect(self, after_fork=False):
+    def reconnect(self):
         old = self._native
+        pid = os.getpid()
+        inherited = self._pid != pid
         self._native = self._native_module.NfsClient(*self._factory_args)
-        self._pid = os.getpid()
+        self._pid = pid
         self._generation += 1
         if old is not None:
-            if after_fork:
+            if inherited:
                 # Sending CLOSE/DESTROY_SESSION over the inherited connection
                 # would corrupt the parent's live protocol state.
                 old._abandon_after_fork()
@@ -972,7 +974,7 @@ class _ClientPool:
                 if self._pid != current_pid:
                     self._reconnect_all(after_fork=True)
 
-    def _reconnect_client(self, owner, after_fork=False):
+    def _reconnect_client(self, owner):
         """Replace one failed session without disrupting healthy pool members."""
         with self._client_locks[owner]:
             with self._lock:
@@ -982,7 +984,7 @@ class _ClientPool:
                 cwd = self._cwd
                 previous_generation = client.generation
             try:
-                client.reconnect(after_fork=after_fork)
+                client.reconnect()
                 if cwd != "/":
                     client.chdir(cwd)
             finally:
@@ -1015,7 +1017,7 @@ class _ClientPool:
         error = None
         for owner in owners:
             try:
-                self._reconnect_client(owner, after_fork=after_fork)
+                self._reconnect_client(owner)
             except BaseException as exc:
                 error = error or exc
         if error is not None:
