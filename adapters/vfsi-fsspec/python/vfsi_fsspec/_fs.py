@@ -41,6 +41,7 @@ _OPERATION_WRITERS = ContextVar("vfsi_operation_writers", default=None)
 _SCALAR_CACHE_SETUP = ContextVar("vfsi_scalar_cache_setup", default=None)
 _ERR_SAME_FILE = 0xFFFF_FFFD
 _ERR_UNSUPPORTED = 0xFFFF_FFFE
+_NFS_RETRY_UNCACHED_REP = 10068
 
 
 def _path_string(path):
@@ -79,6 +80,19 @@ def _is_transport_error(error):
     return (
         isinstance(error, (ConnectionError, TimeoutError))
         or getattr(error, "transport_kind", None) is not None
+    )
+
+
+def _is_uncertain_mutation(error):
+    # The original operation may have applied even though the reply could
+    # not be replayed from the NFS session cache.
+    return (
+        _is_transport_error(error)
+        or getattr(error, "failure_state", None) == "unknown"
+        or (
+            getattr(error, "status_domain", None) == "nfs"
+            and getattr(error, "status_code", None) == _NFS_RETRY_UNCACHED_REP
+        )
     )
 
 
@@ -1303,7 +1317,7 @@ class _RawVfsiFile(io.RawIOBase):
 
     def _ensure_open(self):
         if self._broken:
-            raise ConnectionError("write handle is unusable after a transport failure")
+            raise ConnectionError("write handle is unusable after a failed operation")
         self.fs._client.ensure_ready()
         if self._fd is not None and not self.fs._client.descriptor_valid(self._fd):
             self._fd = None
@@ -1492,7 +1506,7 @@ class _RawVfsiFile(io.RawIOBase):
                     n = self.fs._client.pwrite(fd, data, self._pos)
                     new_pos = self._pos + n
             except OSError as error:
-                if not _is_transport_error(error):
+                if not _is_uncertain_mutation(error):
                     raise
                 # A mutation may already have reached the server. Reconnect for
                 # future path operations, but never replay the write implicitly.
@@ -1554,7 +1568,7 @@ class _RawVfsiFile(io.RawIOBase):
             try:
                 self.fs._client.ftruncate(fd, size)
             except OSError as error:
-                if not _is_transport_error(error):
+                if not _is_uncertain_mutation(error):
                     raise
                 # The server may have applied the size change before the reply
                 # was lost. Never replay it on a potentially different handle.
@@ -6522,7 +6536,7 @@ class VfsiFileSystem(AbstractFileSystem):
                         raise
                     index = active[position]
                     # A lost REMOVE reply leaves mutation state uncertain.
-                    if _is_transport_error(error) or index < first_error[0]:
+                    if _is_uncertain_mutation(error) or index < first_error[0]:
                         _oserror(error, paths[index], index=index)
                         raise
                 index, error = first_error
@@ -6971,7 +6985,7 @@ class VfsiFileSystem(AbstractFileSystem):
                     error, dst, index=index if positions is None else positions[index]
                 )
                 # Never suppress or replay an ambiguous link creation.
-                if _is_transport_error(error):
+                if _is_uncertain_mutation(error):
                     raise
                 callback.relative_update()
                 if on_error == "raise":
@@ -6998,15 +7012,40 @@ class VfsiFileSystem(AbstractFileSystem):
             native_pairs = [
                 (self._native_path(a), self._native_path(b)) for a, b in pairs
             ]
-            try:
-                copied, errors = self._client.copy_many(native_pairs)
-            except Exception as error:
-                _rebase_error(
-                    error,
-                    range(len(pairs)) if positions is None else positions,
-                    [source for source, _ in pairs],
-                )
-                raise
+
+            def copy_batch(batch, indices):
+                try:
+                    copied, errors = self._client.copy_many(batch)
+                except Exception as error:
+                    _rebase_error(
+                        error,
+                        (
+                            indices
+                            if positions is None
+                            else [positions[i] for i in indices]
+                        ),
+                        [pairs[i][0] for i in indices],
+                    )
+                    raise
+                if errors:
+                    uncertain = min(
+                        (
+                            i
+                            for i, error in errors.items()
+                            if _is_uncertain_mutation(error)
+                        ),
+                        default=None,
+                    )
+                    if uncertain is not None:
+                        index = indices[uncertain]
+                        raise _oserror(
+                            errors[uncertain],
+                            pairs[index][0],
+                            index=index if positions is None else positions[index],
+                        )
+                return copied, errors
+
+            copied, errors = copy_batch(native_pairs, range(len(pairs)))
             missing = []
             if self.auto_mkdir:
                 missing = sorted(
@@ -7066,7 +7105,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 try:
                     self._ensure_dirs(internal_parents)
                 except OSError as error:
-                    if _is_transport_error(error) or error.errno is None:
+                    if _is_uncertain_mutation(error) or error.errno is None:
                         rebase_parent_error(error, internal_parents)
                         raise
                     # Only a semantic failure needs parent-by-parent recovery.
@@ -7076,7 +7115,7 @@ class VfsiFileSystem(AbstractFileSystem):
                         try:
                             self._ensure_dirs([parent])
                         except OSError as failure:
-                            if _is_transport_error(failure) or failure.errno is None:
+                            if _is_uncertain_mutation(failure) or failure.errno is None:
                                 rebase_parent_error(failure, [parent])
                                 raise
                             parent_errors[parent] = failure
@@ -7090,21 +7129,9 @@ class VfsiFileSystem(AbstractFileSystem):
                     else:
                         ready.append(index)
                 if ready:
-                    try:
-                        retried, retry_errors = self._client.copy_many(
-                            [native_pairs[index] for index in ready]
-                        )
-                    except Exception as error:
-                        _rebase_error(
-                            error,
-                            (
-                                ready
-                                if positions is None
-                                else [positions[index] for index in ready]
-                            ),
-                            [pairs[index][0] for index in ready],
-                        )
-                        raise
+                    retried, retry_errors = copy_batch(
+                        [native_pairs[index] for index in ready], ready
+                    )
                     for position, index in enumerate(ready):
                         copied[index] = retried[position]
                         errors.pop(index, None)

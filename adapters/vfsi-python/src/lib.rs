@@ -414,6 +414,34 @@ fn map_err_with_path(error: IndexedError, paths: &[PathBuf]) -> PyErr {
     to_py_err(cause, path, index)
 }
 
+fn check_remove_outcomes(paths: &[PathBuf], result: vfsi_core::VecResult<()>) -> PyResult<()> {
+    let outcomes = result.map_err(|cause| to_py_err(cause, None, None))?;
+    if outcomes.len() != paths.len() {
+        return Err(contract_error(
+            "remove_many",
+            "invalid vector outcome count",
+        ));
+    }
+    let mut first_known = None;
+    for (index, outcome) in outcomes.into_iter().enumerate() {
+        let Err(error) = outcome else { continue };
+        let unknown = error.state() == vfsi_core::FailureState::Unknown;
+        let cause = error.into_cause();
+        if unknown || vfsi_core::transport_kind(&cause).is_some() {
+            let error = to_py_err(cause, Some(&paths[index]), Some(index));
+            if unknown {
+                Python::attach(|py| error.value(py).setattr("failure_state", "unknown"))?;
+            }
+            return Err(error);
+        }
+        first_known.get_or_insert_with(|| IndexedError::at(index, cause));
+    }
+    match first_known {
+        Some(error) => Err(map_err_with_path(error, paths)),
+        None => Ok(()),
+    }
+}
+
 fn to_py_indexed(error: IndexedError, path: Option<&Path>) -> PyErr {
     let (index, cause) = error.into_parts();
     to_py_err(cause, path, index)
@@ -2550,9 +2578,7 @@ impl NfsClient {
             .map(|path| FileOperand::from_os_path(path.as_path()))
             .collect();
         self.with_fs(py, move |fs| {
-            vfsi_core::internal::collect_vec_result(fs.vremove_impl(&files), files.len())
-                .map(|_| ())
-                .map_err(|e| map_err_with_path(e, &paths))
+            check_remove_outcomes(&paths, fs.vremove_impl(&files))
         })
     }
 
@@ -3425,6 +3451,62 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn uncertain_remove_outcome_has_priority_over_earlier_known_failure() {
+        Python::initialize();
+        let paths = [PathBuf::from("/missing"), PathBuf::from("/uncertain")];
+        let missing = || {
+            Err(vfsi_core::OpError::failed(
+                std::io::Error::from_raw_os_error(libc::ENOENT),
+                None,
+            ))
+        };
+        Python::attach(|py| {
+            let known = check_remove_outcomes(&paths, Ok(vec![missing(), Ok(())])).unwrap_err();
+            assert_eq!(
+                known
+                    .value(py)
+                    .getattr("index")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                0
+            );
+            let error = check_remove_outcomes(
+                &paths,
+                Ok(vec![
+                    missing(),
+                    Err(vfsi_core::OpError::unknown(
+                        std::io::Error::from_raw_os_error(libc::EIO),
+                        None,
+                    )),
+                ]),
+            )
+            .unwrap_err();
+            let value = error.value(py);
+            assert_eq!(
+                value.getattr("index").unwrap().extract::<usize>().unwrap(),
+                1
+            );
+            assert_eq!(
+                value
+                    .getattr("filename")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "/uncertain"
+            );
+            assert_eq!(
+                value
+                    .getattr("failure_state")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "unknown"
+            );
+        });
     }
 
     #[test]
