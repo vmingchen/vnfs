@@ -4752,11 +4752,12 @@ class VfsiFileSystem(AbstractFileSystem):
         limit = self.read_all_max_total_bytes
         retained = 0
 
-        def read_streamed(index, size, budget):
+        def read_streamed(index, size, budget, *, growth_fallback=False):
             nonlocal retained
             # Callback setup/exit are application code, not per-file I/O errors.
             with callback.branched(paths[index], _MEMORY_PATH) as child:
-                child.set_size(size)
+                if size is not None:
+                    child.set_size(size)
                 callback_error = None
 
                 def progress(written):
@@ -4779,12 +4780,18 @@ class VfsiFileSystem(AbstractFileSystem):
                         raise _allocation_error(
                             paths[index], retained + len(value), limit
                         )
-                    data[index] = value
-                    retained += len(value)
                 except OSError as exc:
                     if exc is callback_error:
                         raise
-                    failures[index] = _oserror(exc, paths[index], index=index)
+                    error = _oserror(exc, paths[index], index=index)
+                    if growth_fallback and _is_transport_error(error):
+                        raise error
+                    failures[index] = error
+                else:
+                    if size != len(value):
+                        child.set_size(len(value))
+                    data[index] = value
+                    retained += len(value)
             callback.relative_update()
             reported.add(index)
 
@@ -4821,7 +4828,7 @@ class VfsiFileSystem(AbstractFileSystem):
             # probe, so a formerly empty file cannot silently bypass the cap.
             try:
                 dat, batch_errors = self._client.read_all_many(
-                    [native[index] for index, _ in batch], remaining
+                    [native[index] for index, _ in batch], byte_limit
                 )
             except Exception as error:
                 _rebase_error(
@@ -4830,11 +4837,14 @@ class VfsiFileSystem(AbstractFileSystem):
                     [paths[index] for index, _ in batch],
                 )
                 raise
-            for position, (index, _size) in enumerate(batch):
+            grew = []
+            for position, (index, _) in enumerate(batch):
                 if position in batch_errors:
-                    failures[index] = _oserror(
-                        batch_errors[position], paths[index], index=index
-                    )
+                    error = _oserror(batch_errors[position], paths[index], index=index)
+                    if byte_limit < remaining and _errno(error) == errno.EFBIG:
+                        grew.append(index)
+                    else:
+                        failures[index] = error
                     continue
                 value = dat[position] or b""
                 if retained + len(value) > limit:
@@ -4844,6 +4854,11 @@ class VfsiFileSystem(AbstractFileSystem):
                     continue
                 data[index] = value
                 retained += len(value)
+            # Reserve the admitted siblings before streaming files that
+            # outgrew the per-batch estimate.
+            del dat
+            for index in grew:
+                read_streamed(index, None, limit - retained, growth_fallback=True)
 
         out = {}
         for i, path in enumerate(paths):
@@ -5032,8 +5047,16 @@ class VfsiFileSystem(AbstractFileSystem):
                 for position, error in stat_errors.items()
             )
             for index, stat in zip(size_indices, stats):
-                if stat is not None:
+                if index in errors:
+                    continue
+                if stat is not None and stat.get("size") is not None:
                     sizes[index] = stat["size"]
+                elif stat is not None and stat.get("type") == "directory":
+                    errors[index] = errno.EISDIR
+                else:
+                    errors[index] = OSError(
+                        errno.EIO, "range requires file size metadata", internals[index]
+                    )
         normalized = []
         validation_errors = {}
         for i, (start, end) in enumerate(zip(starts, ends)):

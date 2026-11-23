@@ -306,3 +306,98 @@ def test_get_with_omitted_size_uses_bounded_reads(
     fs.get(["/source"], [str(target)])
     assert target.read_bytes() == data
     assert not fs._client._fds
+
+
+def test_cat_growth_keeps_the_vector_budget_and_buffered_siblings(
+    dummy_fs, monkeypatch
+):
+    from .test_callbacks import RecordingCallback
+
+    fs = dummy_fs
+    fs.max_batch_bytes = 4
+    fs.read_all_max_total_bytes = 7
+    fs.pipe({"/grows": b"", "/sibling": b"b"})
+    original_stat = fs._client.stat_many
+    original_read = fs._client.read_all_many
+    grew = False
+    batch_requests = []
+    streamed = []
+
+    def stat_then_grow(paths):
+        nonlocal grew
+        result = original_stat(paths)
+        if not grew:
+            grew = True
+            fs.pipe_file("/grows", b"123456")
+        return result
+
+    def bounded_read(paths, budget):
+        batch_requests.append((list(paths), budget))
+        # Model an admitted sibling returned alongside a budget rejection.
+        if budget == 4:
+            return [None, b"b"], {0: errno.EFBIG}
+        return original_read(paths, budget)
+
+    original_stream = fs._read_one_streamed
+
+    def record_stream(path, **kwargs):
+        streamed.append((path, kwargs["max_bytes"]))
+        return original_stream(path, **kwargs)
+
+    monkeypatch.setattr(fs._client, "stat_many", stat_then_grow)
+    monkeypatch.setattr(fs._client, "read_all_many", bounded_read)
+    monkeypatch.setattr(fs, "_read_one_streamed", record_stream)
+    progress = RecordingCallback()
+    assert fs.cat(["/grows", "/sibling"], callback=progress) == {
+        "/grows": b"123456",
+        "/sibling": b"b",
+    }
+    grown = next(child for child in progress.children if child.paths[0] == "/grows")
+    assert grown.events[-1] == (6, 6)
+    assert batch_requests == [
+        ([fs._native_path("/grows"), fs._native_path("/sibling")], 4)
+    ]
+    assert streamed == [("/grows", 6)]
+
+
+def test_cat_growth_preserves_transport_failure(dummy_fs, monkeypatch):
+    fs = dummy_fs
+    fs.pipe_file("/grows", b"a")
+    fs.max_batch_bytes = 4
+    fs.read_all_max_total_bytes = 8
+    monkeypatch.setattr(
+        fs._client, "read_all_many", lambda *_: ([None], {0: errno.EFBIG})
+    )
+    failure = ConnectionError("connection lost during streaming fallback")
+    failure.transport_kind = "connection"
+
+    def fail_read(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(fs, "_read_one_streamed", fail_read)
+    with pytest.raises(ConnectionError) as caught:
+        fs.cat(["/grows"], on_error="return")
+    assert caught.value is failure
+    assert caught.value.index == 0
+
+
+def test_cat_ranges_reports_missing_required_size_per_input(dummy_fs, monkeypatch):
+    fs = dummy_fs
+    fs.pipe_file("/source", b"123456")
+    original_stat = fs._client.stat_many
+
+    def stat_without_size(paths):
+        attrs, errors = original_stat(paths)
+        for info in attrs:
+            if info is not None:
+                info.pop("size", None)
+        return attrs, errors
+
+    monkeypatch.setattr(fs._client, "stat_many", stat_without_size)
+    unknown, bounded = fs.cat_ranges(
+        ["/source", "/source"], [0, 1], [None, 4], on_error="return"
+    )
+    assert isinstance(unknown, OSError)
+    assert unknown.errno == errno.EIO
+    assert unknown.index == 0
+    assert bounded == b"234"

@@ -779,7 +779,9 @@ def test_pipelined_reader_fails_closed_if_initial_identity_capture_fails(
     assert chunks == []
 
 
-def test_cat_passes_remaining_budget_to_native_batch_when_file_grows(fs, monkeypatch):
+def test_cat_preserves_remaining_budget_when_growth_switches_to_streaming(
+    fs, monkeypatch
+):
     fs.batch_size = 1
     fs.max_batch_bytes = 2
     fs.read_all_max_total_bytes = 8
@@ -787,7 +789,9 @@ def test_cat_passes_remaining_budget_to_native_batch_when_file_grows(fs, monkeyp
     stat_many = fs._client.stat_many
     read_all_many = fs._client.read_all_many
     grew = False
-    budgets = []
+    vector_budgets = []
+    stream_budgets = []
+    read_streamed = fs._read_one_streamed
 
     def stat_then_grow(paths):
         nonlocal grew
@@ -798,17 +802,23 @@ def test_cat_passes_remaining_budget_to_native_batch_when_file_grows(fs, monkeyp
         return stats
 
     def read_with_budget(paths, max_total_bytes=None):
-        budgets.append(max_total_bytes)
+        vector_budgets.append(max_total_bytes)
         if max_total_bytes is None:
             return read_all_many(paths)
         return read_all_many(paths, max_total_bytes)
 
+    def stream_with_budget(path, **kwargs):
+        stream_budgets.append(kwargs["max_bytes"])
+        return read_streamed(path, **kwargs)
+
+    monkeypatch.setattr(fs, "_read_one_streamed", stream_with_budget)
     monkeypatch.setattr(fs._client, "stat_many", stat_then_grow)
     monkeypatch.setattr(fs._client, "read_all_many", read_with_budget)
     with pytest.raises(OSError) as error:
         fs.cat(["/a", "/b"])
     assert error.value.errno == errno.EFBIG
-    assert budgets == [8, 6]
+    assert vector_budgets == [2, 2]
+    assert stream_budgets == [6]
 
 
 @pytest.mark.parametrize("mutation", ["append", "chmod"])
