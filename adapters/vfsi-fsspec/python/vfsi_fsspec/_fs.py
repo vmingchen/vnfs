@@ -4106,7 +4106,13 @@ class VfsiFileSystem(AbstractFileSystem):
             self._persistent_cache_refs = retained
 
     def _invalidate_persistent_caches(
-        self, paths, subtrees=False, descriptors=None, evict_listings=True
+        self,
+        paths,
+        subtrees=False,
+        descriptors=None,
+        evict_listings=True,
+        *,
+        follow_final=True,
     ):
         """Invalidate affected paths and every cached alias of their objects."""
         internals = {self._checked_strip_protocol(path) for path in paths}
@@ -4132,9 +4138,10 @@ class VfsiFileSystem(AbstractFileSystem):
                 attrs = self._client.fstat_many(descriptors)
                 errors = {}
             else:
-                attrs, errors = self._client.stat_many(
-                    [self._native_path(path) for path in internals]
+                stat = (
+                    self._client.stat_many if follow_final else self._client.lstat_many
                 )
+                attrs, errors = stat([self._native_path(path) for path in internals])
             identities = {
                 identity
                 for attr in attrs
@@ -4184,7 +4191,9 @@ class VfsiFileSystem(AbstractFileSystem):
         super().invalidate_cache(parent)
 
     @contextmanager
-    def _cache_mutation(self, paths, *, descriptors=None, namespace=False):
+    def _cache_mutation(
+        self, paths, *, descriptors=None, namespace=False, follow_final=True
+    ):
         """Invalidate before mutation and retire any fills made during it."""
         paths = list(paths)
         if not paths:
@@ -4195,7 +4204,7 @@ class VfsiFileSystem(AbstractFileSystem):
         with self._dircache_lock:
             fill_generation = self._dircache_fill_generation
         if namespace:
-            self._invalidate_namespace(paths)
+            self._invalidate_namespace(paths, follow_final=follow_final)
         else:
             self._invalidate_persistent_caches(paths, descriptors=descriptors)
             for path in paths:
@@ -4210,7 +4219,9 @@ class VfsiFileSystem(AbstractFileSystem):
             try:
                 try:
                     if namespace:
-                        self._invalidate_namespace(paths, evict_listings=False)
+                        self._invalidate_namespace(
+                            paths, evict_listings=False, follow_final=follow_final
+                        )
                     else:
                         with self._persistent_cache_lock:
                             registered = any(
@@ -4233,7 +4244,7 @@ class VfsiFileSystem(AbstractFileSystem):
                     raise primary from cleanup
                 raise
 
-    def _invalidate_namespace(self, paths, evict_listings=True):
+    def _invalidate_namespace(self, paths, evict_listings=True, *, follow_final=True):
         """Invalidate object subtrees, parents, and cached parent metadata."""
         internals = {self._checked_strip_protocol(path) for path in paths}
         if not internals:
@@ -4256,7 +4267,10 @@ class VfsiFileSystem(AbstractFileSystem):
             if unknown:
                 internals.add("/")
         identities, uncertain = self._invalidate_persistent_caches(
-            internals, subtrees=True, evict_listings=False
+            internals,
+            subtrees=True,
+            evict_listings=False,
+            follow_final=follow_final,
         )
         parents = {
             posixpath.dirname(internal.rstrip("/")) or "/" for internal in internals
@@ -7149,8 +7163,9 @@ class VfsiFileSystem(AbstractFileSystem):
         )
 
     def hardlink(self, src, dst):
-        with self._cache_mutation([dst], namespace=True):
-            self._invalidate_parent_listing(src)
+        # LINK updates the source inode, including the symlink inode when
+        # the source is a symlink.
+        with self._cache_mutation([src, dst], namespace=True, follow_final=False):
             self._client.hardlink(
                 self._native_path(self._checked_strip_protocol(src)),
                 self._native_path(self._checked_strip_protocol(dst)),

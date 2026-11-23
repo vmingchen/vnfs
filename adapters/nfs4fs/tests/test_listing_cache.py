@@ -111,8 +111,8 @@ def test_listing_filled_after_initial_invalidation_is_retired(cached_fs, monkeyp
     fs = cached_fs
     original_invalidate = fs._invalidate_namespace
 
-    def refill_after_invalidation(paths, evict_listings=True):
-        original_invalidate(paths, evict_listings=evict_listings)
+    def refill_after_invalidation(paths, evict_listings=True, **kwargs):
+        original_invalidate(paths, evict_listings=evict_listings, **kwargs)
         if evict_listings:
             # Model a listing that finishes after the initial clear but before
             # the write reaches the backend and changes the namespace.
@@ -297,6 +297,27 @@ def test_hardlink_creation_invalidates_cached_source_metadata(cached_fs):
     fs.hardlink("/source/file", "/dest/link")
 
     assert fs.ls("/source")[0]["nlink"] == 2
+
+
+@pytest.mark.parametrize("source_kind", ["file", "symlink", "dangling"])
+def test_hardlink_retires_cached_source_alias(cached_fs, source_kind):
+    fs = cached_fs
+    for directory in ("/source", "/dest", "/alias", "/unrelated"):
+        fs.makedirs(directory, exist_ok=True)
+    if source_kind == "file":
+        fs.pipe_file("/source/file", b"data")
+    else:
+        if source_kind == "symlink":
+            fs.pipe_file("/target", b"data")
+        fs.symlink("/target", "/source/file")
+    fs.hardlink("/source/file", "/alias/file")
+    assert fs.ls("/alias")[0]["nlink"] == 2
+    fs.ls("/unrelated")
+
+    fs.hardlink("/source/file", "/dest/link")
+
+    assert "/unrelated" in fs.dircache
+    assert fs.ls("/alias")[0]["nlink"] == 3
 
 
 def test_partial_writable_open_many_failure_invalidates_created_prefix(cached_fs):
