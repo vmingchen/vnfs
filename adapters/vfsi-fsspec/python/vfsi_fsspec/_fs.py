@@ -237,13 +237,21 @@ class _WalkBudget:
         return self.fs._client.listdir(native_path, **self.native_options())
 
 
+def _require_size(attrs, path, *, index=None):
+    size = attrs.get("size") if attrs is not None else None
+    if size is None:
+        raise _oserror(
+            OSError(errno.EIO, "file size metadata is unavailable", path),
+            path,
+            index=index,
+        )
+    return size
+
+
 def _range_file_size(attrs, path):
     if attrs is not None and attrs.get("type") == "directory":
         raise IsADirectoryError(errno.EISDIR, "Is a directory", path)
-    size = attrs.get("size") if attrs is not None else None
-    if size is None:
-        raise OSError(errno.EIO, "range requires file size metadata", path)
-    return size
+    return _require_size(attrs, path)
 
 
 def _normalize_range(start, end, size=None):
@@ -1327,6 +1335,8 @@ class _RawVfsiFile(io.RawIOBase):
                             identity is None or identity != self._identity
                         ):
                             raise _stale_handle_error(self.path)
+                    if self._base_mode.startswith("a"):
+                        self._pos = _require_size(attrs, self.path)
             except BaseException:
                 # Do not publish a reopened descriptor until its identity has
                 # been checked. A later call must retry this check, not trust a
@@ -1345,8 +1355,6 @@ class _RawVfsiFile(io.RawIOBase):
                     # An open reader is pinned even if the backend cannot
                     # supply enough identity to reopen it after retirement.
                     self._identity_required = True
-                if self._base_mode.startswith("a"):
-                    self._pos = attrs["size"]
         return self._fd
 
     def _pread_at(self, offset, length):
@@ -1384,12 +1392,13 @@ class _RawVfsiFile(io.RawIOBase):
         if not self.closed and self._uses_descriptor:
             fd = self._ensure_open()
             try:
-                return self.fs._client.fstat(fd)["size"]
+                attrs = self.fs._client.fstat(fd)
             except _RetiredDescriptorError:
                 if self._writable or not self.fs.auto_reconnect:
                     raise
-                return self.fs._client.fstat(self._ensure_open())["size"]
-        return self.fs.size(self.path)
+                attrs = self.fs._client.fstat(self._ensure_open())
+            return _require_size(attrs, self.path)
+        return _require_size(self.fs.info(self.path), self.path)
 
     # -- io.RawIOBase ------------------------------------------------------
 
@@ -2226,6 +2235,9 @@ class _WrappedFiles(list):
                     newline=open_file.newline,
                 )
                 open_file.fobjects.append(file)
+            # A slice or concatenation of the returned list can still commit
+            # this group through any member, including a wrapped stream.
+            file._buffer_group = self.group
             self.append(file)
         return self
 
@@ -4703,7 +4715,7 @@ class VfsiFileSystem(AbstractFileSystem):
         for i, p in enumerate(internals):
             if stats[i] is None:
                 raise _oserror(errors[i], p)
-            out.append(stats[i]["size"])
+            out.append(stats[i].get("size"))
         return out
 
     def created(self, path):
@@ -6034,7 +6046,7 @@ class VfsiFileSystem(AbstractFileSystem):
                     raise IsADirectoryError(errno.EISDIR, "Is a directory", internal)
                 identity = _handle_identity(attrs)
                 if size is None:
-                    size = attrs["size"]
+                    size = _require_size(attrs, internal)
             file = VfsiFile(
                 self,
                 internal,
@@ -6269,7 +6281,9 @@ class VfsiFileSystem(AbstractFileSystem):
                     # Append positions come from the opened handle because
                     # caller-supplied size hints may be stale.
                     if discovered_sizes[index] is None or modes[index] in ("ab", "a+b"):
-                        discovered_sizes[index] = attr["size"]
+                        discovered_sizes[index] = _require_size(
+                            attr, paths[index], index=index
+                        )
             for index, fd in descriptors.items():
                 opened_files[index] = VfsiFile(
                     self,
@@ -6366,7 +6380,9 @@ class VfsiFileSystem(AbstractFileSystem):
                 )
                 for index, attr in zip(mmap_discovered, attrs):
                     file = opened_files[index]
-                    size = min(file.size, attr["size"])
+                    size = min(
+                        file.size, _require_size(attr, paths[index], index=index)
+                    )
                     file.size = size
                     file.cache.size = size
             files = [opened_files[index] for index in range(len(paths))]

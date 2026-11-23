@@ -403,3 +403,92 @@ def test_remove_later_transport_takes_precedence_over_metadata_error(
             dummy_fs.rm(["/missing", "/active"])
         assert caught.value.index == 0
         assert caught.value.filename == "/missing"
+
+
+@pytest.mark.parametrize("mode", ["rb", "ab"])
+def test_grouped_open_reports_original_index_when_size_is_missing(
+    dummy_fs, monkeypatch, mode
+):
+    fs = dummy_fs
+    fs.pipe({"/first": b"first", "/second": b"second"})
+    native_fstat = fs._client.fstat_many
+
+    def without_size(descriptors):
+        attrs = native_fstat(descriptors)
+        attrs[1].pop("size")
+        return attrs
+
+    monkeypatch.setattr(fs._client, "fstat_many", without_size)
+    with pytest.raises(OSError) as caught:
+        fs.open_many([OpenFile(fs, "/first", "rb"), OpenFile(fs, "/second", mode)])
+    assert caught.value.errno == errno.EIO
+    assert caught.value.filename == "/second"
+    assert caught.value.index == 1
+    assert not fs._client._fds
+
+
+def test_missing_mmap_refresh_size_reports_reader_index(dummy_fs, monkeypatch):
+    fs = dummy_fs
+    fs.pipe_file("/target", b"before")
+    fs.hardlink("/target", "/alias")
+    native_fstat = fs._client.fstat_many
+    calls = 0
+
+    def without_refresh_size(descriptors):
+        nonlocal calls
+        calls += 1
+        attrs = native_fstat(descriptors)
+        if calls == 2:
+            attrs[0].pop("size")
+        return attrs
+
+    monkeypatch.setattr(fs._client, "fstat_many", without_refresh_size)
+    with pytest.raises(OSError) as caught:
+        fs.open_many(
+            [OpenFile(fs, "/target", "wb"), OpenFile(fs, "/alias", "rb")],
+            cache_type="mmap",
+        )
+    assert caught.value.errno == errno.EIO
+    assert caught.value.filename == "/alias"
+    assert caught.value.index == 1
+    assert not fs._client._fds
+
+
+@pytest.mark.parametrize("mode", ["rb", "ab", "seek"])
+def test_scalar_handle_reports_missing_required_size(dummy_fs, monkeypatch, mode):
+    fs = dummy_fs
+    fs.pipe_file("/data", b"existing")
+    native_fstat = fs._client.fstat
+
+    def without_size(descriptor):
+        attrs = native_fstat(descriptor)
+        attrs.pop("size")
+        return attrs
+
+    if mode == "seek":
+        with fs.open("/data", "rb", cache_type="none") as file:
+            monkeypatch.setattr(fs._client, "fstat", without_size)
+            with pytest.raises(OSError) as caught:
+                file.seek(0, 2)
+    else:
+        monkeypatch.setattr(fs._client, "fstat", without_size)
+        with pytest.raises(OSError) as caught:
+            fs.open("/data", mode)
+    assert caught.value.errno == errno.EIO
+    assert caught.value.filename == "/data"
+    assert not fs._client._fds
+
+
+def test_size_preserves_optional_metadata(dummy_fs, monkeypatch):
+    fs = dummy_fs
+    fs.pipe_file("/data", b"existing")
+    native_stat = fs._client.stat_many
+
+    def without_size(paths):
+        attrs, errors = native_stat(paths)
+        attrs[-1].pop("size")
+        return attrs, errors
+
+    monkeypatch.setattr(fs._client, "stat_many", without_size)
+    assert fs.size("/data") is None
+    assert fs.sizes(["/data", "/data"]) == [len(b"existing"), None]

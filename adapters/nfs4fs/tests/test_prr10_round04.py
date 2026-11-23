@@ -28,14 +28,25 @@ def writers(fs, paths):
     return files
 
 
-def test_commit_subset_flushes_all_siblings_before_group_close(fs):
-    files = writers(fs, ["/first", "/second"])
+@pytest.mark.parametrize(
+    "mode,compression", [("wb", None), ("wt", None), ("wb", "gzip"), ("wt", "gzip")]
+)
+def test_commit_subset_flushes_all_siblings_before_group_close(fs, mode, compression):
+    paths = ["/first", "/second"]
+    files = fs.open_many(
+        [OpenFile(fs, path, mode, compression=compression) for path in paths],
+        write_buffering=True,
+        block_size=128,
+    )
     try:
+        for file, path in zip(files, paths):
+            file.write(path.encode() if "b" in mode else path)
         fs.commit_many(files[:1])
         assert all(file.closed for file in files)
-        assert fs.cat_file("/first") == b"/first"
-        assert fs.cat_file("/second") == b"/second"
         assert not fs._client._fds
+        for path in paths:
+            with fs.open(path, "rb", compression=compression) as file:
+                assert file.read() == path.encode()
     finally:
         fs.commit_many(files)
 
