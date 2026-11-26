@@ -1511,8 +1511,12 @@ class _RawVfsiFile(io.RawIOBase):
             raise ValueError("I/O operation on closed file")
         if not self._writable:
             raise io.UnsupportedOperation("not writable")
-        if isinstance(data, str):
-            raise TypeError("a bytes-like object is required, not 'str'")
+        if not isinstance(data, (bytes, bytearray)):
+            if isinstance(data, str):
+                raise TypeError("a bytes-like object is required, not 'str'")
+            # PyO3's byte-vector conversion otherwise consumes typed views
+            # as a sequence of integers, one integer per element.
+            data = bytes(memoryview(data))
         fd = self._ensure_open()
         with self.fs._cache_mutation([self.path], descriptors=[fd]):
             try:

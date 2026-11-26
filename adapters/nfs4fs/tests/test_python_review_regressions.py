@@ -180,6 +180,20 @@ def test_blockcache_reports_missing_size_before_replacing_generations(
             assert file.read() == b"new"
 
 
+@pytest.mark.parametrize("mode", ["wb", "ab"])
+@pytest.mark.parametrize("values", [[1, 2], [0x1234, 0x5678]])
+def test_unbuffered_write_uses_typed_memoryview_bytes(dummy_fs, mode, values):
+    dummy_fs.pipe_file("/data", b"original")
+    view = memoryview(array("H", values))
+    expected = view.tobytes()
+    prefix = b"original" if mode == "ab" else b""
+    with dummy_fs.open("/data", mode, write_buffering=False) as file:
+        assert file.write(view) == len(expected)
+        assert file.tell() == len(prefix) + len(expected)
+    assert dummy_fs.cat_file("/data") == prefix + expected
+    assert not dummy_fs._client._fds
+
+
 @pytest.mark.parametrize("operation", ["pipe", "put", "transaction"])
 @pytest.mark.parametrize("progress", [2, 0])
 def test_streamed_uploads_complete_short_writes_or_reject_zero_progress(
