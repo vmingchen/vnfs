@@ -85,8 +85,14 @@ def comparison(ratios):
 
 
 def fixture_objects(root):
-    objects = []
-    for parent, directories, files in os.walk(root, followlinks=False):
+    def raise_walk_error(error):
+        raise error
+
+    metadata = root.lstat()
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise NotADirectoryError(root)
+    objects = [('.', metadata.st_dev, metadata.st_ino)]
+    for parent, directories, files in os.walk(root, onerror=raise_walk_error, followlinks=False):
         for name in sorted([*directories, *files]):
             path = Path(parent) / name
             metadata = path.lstat()
@@ -194,11 +200,13 @@ def perform(args):
         order = ('baseline', 'candidate') if pair % 2 == 0 else ('candidate', 'baseline')
         for label in order:
             stem = args.output / f'{pair:03}-{label}'
-            values['report'] = str(stem.with_suffix('.json'))
             if args.before_each:
-                run_command(command(args.before_each, values), args.output / f'{pair:03}-{label}-setup', args.timeout, args.cpu)
+                setup = args.output / f'{pair:03}-{label}-setup'
+                values['report'] = str(setup.with_suffix('.json'))
+                run_command(command(args.before_each, values), setup, args.timeout, args.cpu)
             if fixture_objects(args.fixture) != objects:
                 raise RuntimeError('fixture objects changed during setup')
+            values['report'] = str(stem.with_suffix('.json'))
             sample = run_command(command(templates[label], values), stem, args.timeout, args.cpu)
             if fixture_objects(args.fixture) != objects:
                 raise RuntimeError('fixture objects changed during measurement')

@@ -1213,6 +1213,43 @@ class PairedBenchmarkTests(unittest.TestCase):
         (self.fixture / 'input').write_bytes(b'unchanged')
         self.assertNotEqual(before, self.paired.fixture_objects(self.fixture))
 
+    def test_fixture_inventory_rejects_incomplete_walks(self):
+        from unittest.mock import patch
+
+        unreadable = self.fixture / 'unreadable'
+        unreadable.mkdir()
+        scandir = os.scandir
+
+        def fail_in_subdirectory(path):
+            if Path(path) == unreadable:
+                raise PermissionError(13, 'Permission denied', path)
+            return scandir(path)
+
+        with patch.object(os, 'scandir', side_effect=fail_in_subdirectory):
+            with self.assertRaises(PermissionError) as caught:
+                self.paired.fixture_objects(self.fixture)
+        self.assertEqual(Path(caught.exception.filename), unreadable)
+
+    def test_fixture_inventory_detects_replaced_empty_root(self):
+        (self.fixture / 'input').unlink()
+        before = self.paired.fixture_objects(self.fixture)
+        self.fixture.rename(self.root / 'old-fixture')
+        self.fixture.mkdir()
+        self.assertNotEqual(before, self.paired.fixture_objects(self.fixture))
+
+    def test_setup_reports_are_separate_from_measured_reports(self):
+        setup_report = self.root / 'setup report.json'
+        setup_report.write_text(json.dumps({'cases': []}))
+        result = self.run_cli('true', 'true', '--before-each',
+                              f'cp {shlex.quote(str(setup_report))} {{report}}')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads((self.output / 'comparison.json').read_text())
+        self.assertEqual(len(report['samples']), 6)
+        for sample in report['samples']:
+            self.assertIsNone(sample['report'])
+            setup = self.output / f"{sample['pair']:03}-{sample['label']}-setup.json"
+            self.assertEqual(setup.read_bytes(), setup_report.read_bytes())
+
     def test_structured_comparisons_require_matching_objects_and_geometry(self):
         case = {'backend': 'uring', 'case': 'read', 'rounds': 20, 'bytes_per_call': 8,
                 'requests_per_call': 2, 'request_bytes': 4, 'files': 2, 'cache': 'warm',

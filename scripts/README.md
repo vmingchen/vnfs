@@ -31,7 +31,8 @@ python3 scripts/benchmark-paired.py --cache-state warm --check-output \
   --candidate 'env VNFS_IMPL=nfs /path/vfsi-port-coreutils/ls -R {fixture}'
 ```
 
-Explicit `--before-each` setup runs outside timing. The runner never changes
+Explicit `--before-each` setup runs outside timing and gets a separate
+`{report}` path for its own output. The runner never changes
 shared mounts/network configuration. `--rtt-ms` only labels externally established
 RTT: use a dedicated namespace for latency experiments. Cache labels likewise
 describe caller setup, not guaranteed cold storage. Keep credentials out of
