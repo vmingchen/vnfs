@@ -27,7 +27,8 @@ pub enum SyncMode {
 /// reported before further I/O, on flush, or on seek. Re-establish that unresolved
 /// cursor with an explicit seek after observing the error. Nonempty write_all
 /// reports its saved failure even when the entire payload was acknowledged.
-/// Transport failures stop the loop without replaying the failed request.
+/// An uncertain write without a confirmed prefix also leaves the cursor
+/// unresolved. Reconcile the file and seek explicitly before resuming I/O.
 pub(super) struct StdIo<'a, C: Vfsi + ?Sized> {
     client: &'a C,
     file: &'a C::File,
@@ -71,7 +72,7 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
         match self.cursor {
             Cursor::At { position, .. } => Ok(position),
             Cursor::Unresolved(_) => Err(io::Error::other(
-                "write prefix has no resolved cursor; inspect the error and seek explicitly",
+                "failed write left the cursor unresolved; inspect the error and seek explicitly",
             )),
         }
     }
@@ -169,8 +170,8 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
                 }
                 // The standard write_all implementation retries Interrupted.
                 // Never let that replay an uncertain or acknowledged prefix.
-                let suppress =
-                    error.state() == crate::FailureState::Unknown || error.progress().is_some();
+                let uncertain = error.state() == crate::FailureState::Unknown;
+                let suppress = uncertain || error.progress().is_some();
                 let confirmed = match error.progress() {
                     Some(crate::IoProgress::Write { bytes_written }) => *bytes_written,
                     _ => 0,
@@ -188,6 +189,9 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
                     // a cursor even when this adapter's requested offset is known.
                     self.cursor = Cursor::Unresolved(Some(error));
                     return Ok(confirmed);
+                }
+                if uncertain {
+                    self.cursor = Cursor::Unresolved(None);
                 }
                 return Err(error);
             }

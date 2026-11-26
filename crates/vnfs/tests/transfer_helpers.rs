@@ -2020,6 +2020,33 @@ fn standard_io_adapter_uses_vectors_and_has_an_independent_retained_cursor() {
     assert_eq!(bad_io.stream_position().unwrap(), 0);
 }
 #[test]
+fn standard_io_requires_a_seek_after_an_uncertain_write_without_progress() {
+    use std::io::{Seek, SeekFrom, Write};
+    let root = tempfile::tempdir().unwrap();
+    let fs = Harness::new(root.path());
+    fs.fs.write("/io", b"before").unwrap();
+    let file = fs.open_options().append(true).open("/io").unwrap();
+    let mut writer = fs.std_io(&file);
+
+    fs.fault.set(Fault::LostWrite);
+    let error = writer.write_all(b"+once").unwrap_err();
+    assert_eq!(
+        vfsi_core::transport_kind(&error),
+        Some(TransportKind::InvalidReply)
+    );
+    assert_eq!(fs.fs.read("/io").unwrap(), b"before+once");
+
+    fs.fault.set(Fault::None);
+    assert!(writer.stream_position().is_err());
+    assert!(writer.write_all(b"+again").is_err());
+    assert_eq!(fs.calls.borrow().writes, 1);
+
+    assert_eq!(writer.seek(SeekFrom::End(0)).unwrap(), 11);
+    writer.write_all(b"+next").unwrap();
+    assert_eq!(fs.fs.read("/io").unwrap(), b"before+once+next");
+}
+
+#[test]
 fn absent_sizes_make_copy_and_tree_statistics_fail_instead_of_reporting_zero() {
     let root = tempfile::tempdir().unwrap();
     let fs = Harness::new(root.path());

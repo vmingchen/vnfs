@@ -6893,16 +6893,12 @@ fn standard_write_errors_preserve_progress_and_never_retry_uncertain_interruptio
             vfsi_core::internal::errors::path(&error),
             Some(std::path::Path::new("/file"))
         );
-        if count == 0 {
-            assert_eq!(io.stream_position().unwrap(), 0);
-        } else {
-            assert!(
-                io.stream_position().is_err(),
-                "a partial failed append has no resolved cursor"
-            );
-            io.seek(SeekFrom::Start(2)).unwrap();
-            assert_eq!(io.stream_position().unwrap(), 2);
-        }
+        assert!(
+            io.stream_position().is_err(),
+            "uncertain writes and failed writes with progress leave the cursor unresolved"
+        );
+        io.seek(SeekFrom::Start(2)).unwrap();
+        assert_eq!(io.stream_position().unwrap(), 2);
         assert_eq!(
             calls.lock().unwrap().len(),
             1,
