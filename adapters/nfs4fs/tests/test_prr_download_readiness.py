@@ -423,3 +423,76 @@ def test_cat_file_reports_missing_size_for_eof_dependent_range(
     assert caught.value.filename == "/source"
     assert fs.cat_file("/source", start=1, end=4) == b"234"
     assert fs.cat_file("/source") == b"123456"
+
+
+@pytest.mark.parametrize(
+    "start,end,error_type",
+    [
+        ("0", 1, TypeError),
+        (0, 1.5, TypeError),
+        (1 << 64, 1 << 64, OverflowError),
+        ((1 << 64) - 1, 1 << 64, OverflowError),
+    ],
+)
+def test_cat_ranges_isolates_bounds_rejected_by_native_conversion(
+    dummy_fs, monkeypatch, start, end, error_type
+):
+    fs = dummy_fs
+    fs.pipe({"/invalid": b"invalid", "/valid": b"data"})
+    native_read = fs._client.read_many
+    batches = []
+
+    def read(paths, starts, ends):
+        batches.append((paths, starts, ends))
+        return native_read(paths, starts, ends)
+
+    monkeypatch.setattr(fs._client, "read_many", read)
+    invalid, valid = fs.cat_ranges(["/invalid", "/valid"], [start, 1], [end, 3])
+    assert isinstance(invalid, error_type)
+    assert invalid.index == 0
+    assert valid == b"at"
+    assert batches == [([fs._native_path("/valid")], [1], [3])]
+
+    batches.clear()
+    with pytest.raises(error_type) as caught:
+        fs.cat_ranges(["/invalid", "/valid"], [start, 1], [end, 3], on_error="raise")
+    assert caught.value.index == 0
+    assert not batches
+
+
+def test_read_ranges_accept_index_protocol_bounds(dummy_fs):
+    class Index:
+        def __init__(self, value):
+            self.value = value
+
+        def __index__(self):
+            return self.value
+
+    fs = dummy_fs
+    fs.pipe_file("/file", b"data")
+    assert fs.cat_file("/file", Index(-3), Index(-1)) == b"at"
+    assert fs.cat_ranges(["/file"], [Index(-3)], [Index(-1)]) == [b"at"]
+
+
+def test_strict_range_checks_keep_allocation_error_precedence(dummy_fs):
+    fs = dummy_fs
+    fs.pipe_file("/file", b"data")
+    with pytest.raises(OSError) as scalar:
+        fs.cat_file("/file", 0, 1 << 64)
+    assert scalar.value.errno == errno.EFBIG
+
+    with pytest.raises(OSError) as strict:
+        fs.cat_ranges(["/file"], [0], [1 << 64], on_error="raise")
+    assert strict.value.errno == errno.EFBIG
+
+
+def test_strict_invalid_range_bound_precedes_sibling_metadata(dummy_fs, monkeypatch):
+    fs = dummy_fs
+
+    def no_metadata(*args):
+        pytest.fail("strict validation should happen before any metadata request")
+
+    monkeypatch.setattr(fs._client, "stat_many", no_metadata)
+    with pytest.raises(TypeError) as invalid:
+        fs.cat_ranges(["/invalid", "/sibling"], ["0", 0], [1, None], on_error="raise")
+    assert invalid.value.index == 0

@@ -268,9 +268,15 @@ def _range_file_size(attrs, path):
     return _require_size(attrs, path)
 
 
+def _range_indices(start, end):
+    return (
+        0 if start is None else operator.index(start),
+        None if end is None else operator.index(end),
+    )
+
+
 def _normalize_range(start, end, size=None):
-    """Normalize fsspec byte-range bounds and reject negative lengths."""
-    start = 0 if start is None else start
+    """Normalize fsspec byte-range bounds for the native unsigned offsets."""
     if start < 0:
         if size is None:
             raise ValueError("size is required for a negative start")
@@ -287,6 +293,11 @@ def _normalize_range(start, end, size=None):
     elif end is not None and end < start:
         raise ValueError("read length must be non-negative or -1")
     return start, end
+
+
+def _check_range_offsets(start, end):
+    if start >= 1 << 64 or end >= 1 << 64:
+        raise OverflowError("byte range exceeds unsigned 64-bit offsets")
 
 
 def _validate_write_mode(mode):
@@ -5037,8 +5048,9 @@ class VfsiFileSystem(AbstractFileSystem):
     def cat_file(self, path, start=None, end=None, callback=DEFAULT_CALLBACK, **kwargs):
         callback = Callback.as_callback(callback)
         internal = self._checked_strip_protocol(path)
+        start, end = _range_indices(start, end)
         size = None
-        if (start is not None and start < 0) or (end is not None and end < 0):
+        if start < 0 or (end is not None and end < 0):
             size = _range_file_size(self.info(internal), internal)
         try:
             start, end = _normalize_range(start, end, size)
@@ -5066,6 +5078,7 @@ class VfsiFileSystem(AbstractFileSystem):
             # could otherwise enlarge this allocation after concurrent growth.
             end = max(start, size)
         self._check_read_allocation(max(0, end - start), internal)
+        _check_range_offsets(start, end)
         data, errors = self._client.read_many(
             [self._native_path(internal)], [start], [end]
         )
@@ -5100,15 +5113,25 @@ class VfsiFileSystem(AbstractFileSystem):
         internals = [self._checked_strip_protocol(p) for p in paths]
         native = [self._native_path(p) for p in internals]
         errors = {}
+        validation_errors = {}
+        normalized = []
+        return_errors = on_error == "return"
         sizes = [None] * len(paths)
-        size_indices = [
-            index
-            for index, (start, end) in enumerate(zip(starts, ends))
-            if (start is not None and start < 0)
-            or end is None
-            or end < 0
-            or end == (0 if start is None else start) - 1
-        ]
+        size_indices = []
+        for index, (start, end) in enumerate(zip(starts, ends)):
+            try:
+                start, end = _range_indices(start, end)
+            except (TypeError, ValueError, OverflowError) as error:
+                validation_errors[index] = _oserror(
+                    error, internals[index], index=index
+                )
+                normalized.append((0, 0))
+                continue
+            normalized.append((start, end))
+            if start < 0 or end is None or end < 0 or end == start - 1:
+                size_indices.append(index)
+        if validation_errors and not return_errors:
+            raise validation_errors[min(validation_errors)]
         if size_indices:
             # Explicit bounded ranges do not depend on metadata permissions.
             try:
@@ -5131,17 +5154,19 @@ class VfsiFileSystem(AbstractFileSystem):
                     sizes[index] = _range_file_size(stat, internals[index])
                 except OSError as error:
                     errors[index] = error
-        normalized = []
-        validation_errors = {}
-        for i, (start, end) in enumerate(zip(starts, ends)):
-            if i in errors:
-                normalized.append((0, 0))
+        for i, (start, end) in enumerate(normalized):
+            if i in errors or i in validation_errors:
                 continue
             try:
                 start, end = _normalize_range(start, end, sizes[i])
                 # Use the same EOF for budgeting and execution, including
                 # fsspec's end=start-1 spelling of an open-ended read.
-                normalized.append((start, max(start, sizes[i]) if end is None else end))
+                end = max(start, sizes[i]) if end is None else end
+                if return_errors:
+                    _check_range_offsets(start, end)
+                normalized[i] = (start, end)
+            except OverflowError as exc:
+                validation_errors[i] = _oserror(exc, internals[i], index=i)
             except ValueError as exc:
                 try:
                     info = self.info(internals[i])
@@ -5154,8 +5179,7 @@ class VfsiFileSystem(AbstractFileSystem):
                     validation_errors[i] = path_error
                 else:
                     validation_errors[i] = exc
-                normalized.append((0, 0))
-        if validation_errors and on_error != "return":
+        if validation_errors and not return_errors:
             raise validation_errors[min(validation_errors)]
         valid = [
             i
@@ -5167,6 +5191,12 @@ class VfsiFileSystem(AbstractFileSystem):
         self._check_read_allocation(
             sum(lengths), internals[valid[0]] if valid else None
         )
+        if not return_errors:
+            for i in valid:
+                try:
+                    _check_range_offsets(*normalized[i])
+                except OverflowError as exc:
+                    raise _oserror(exc, internals[i], index=i)
         for positions in _bounded_batches(
             lengths, self.batch_size, self.max_batch_bytes
         ):
