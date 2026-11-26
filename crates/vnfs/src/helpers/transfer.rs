@@ -2,7 +2,7 @@ use crate::{
     Attributes, Attrs, AttrsOptions, ControlFlow, CopyOptions, DepthLimit, Error, ListDirOptions,
     OpenFlags, OpenOp, ReadOp, ReadOptions, SetAttrsOp, Vfsi, VfsiExt, WriteOp, WriteOptions,
 };
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use vfsi_core::IndexedError;
 use vfsi_core::internal::{ObservedObject, TraversalBudget};
@@ -320,6 +320,20 @@ fn mapped(error: IndexedError, tasks: &[impl std::borrow::Borrow<Task>]) -> Inde
     }
 }
 
+fn overlaps_path(paths: &BTreeSet<PathBuf>, path: &Path) -> bool {
+    use std::ops::Bound::{Excluded, Included, Unbounded};
+    // Each index is prefix-free. If an ancestor exists, it is the
+    // predecessor because every intervening path would descend from it.
+    paths
+        .range::<Path, _>((Unbounded, Excluded(path)))
+        .next_back()
+        .is_some_and(|previous| path.starts_with(previous))
+        || paths
+            .range::<Path, _>((Included(path), Unbounded))
+            .next()
+            .is_some_and(|next| next.starts_with(path))
+}
+
 fn roots<P: AsRef<Path>>(
     fs: &impl Vfsi,
     sources: &[P],
@@ -334,10 +348,13 @@ fn roots<P: AsRef<Path>>(
     }
     let destination = normalize(destination, max_path_bytes).map_err(IndexedError::unattributed)?;
     let mut tasks = Vec::with_capacity(sources.len());
+    let separate_destinations = options.layout != CopyLayout::Contents;
+    let mut seen_sources = BTreeSet::new();
+    let mut seen_destinations = BTreeSet::new();
     for (root, source) in sources.iter().enumerate() {
         let source =
             normalize(source.as_ref(), max_path_bytes).map_err(|e| IndexedError::at(root, e))?;
-        let dest = if exact || options.layout == CopyLayout::Contents {
+        let dest = if exact || !separate_destinations {
             destination.clone()
         } else {
             destination.join(source.file_name().ok_or_else(|| invalid(root, &source))?)
@@ -345,25 +362,23 @@ fn roots<P: AsRef<Path>>(
         if source.starts_with(&dest) || dest.starts_with(&source) {
             return Err(invalid(root, &source));
         }
-        for previous in &tasks {
-            let previous: &Task = previous;
-            if source.starts_with(&previous.source)
-                || previous.source.starts_with(&source)
-                || dest.starts_with(&previous.source)
-                || previous.source.starts_with(&dest)
-                || source.starts_with(&previous.destination)
-                || previous.destination.starts_with(&source)
-                || (options.layout != CopyLayout::Contents
-                    && (dest.starts_with(&previous.destination)
-                        || previous.destination.starts_with(&dest)))
-            {
-                return Err(invalid(root, &source));
-            }
+        if overlaps_path(&seen_sources, &source)
+            || overlaps_path(&seen_sources, &dest)
+            // Contents roots share the destination that each source already
+            // checks against above.
+            || (separate_destinations
+                && (overlaps_path(&seen_destinations, &source)
+                    || overlaps_path(&seen_destinations, &dest)))
+        {
+            return Err(invalid(root, &source));
         }
         budget
             .charge_paths([source.as_path(), dest.as_path()])
             .map_err(|_| limit(root, &source))?;
-        // Query one bounded root wave, without materializing a whole tree.
+        seen_sources.insert(source.clone());
+        if separate_destinations {
+            seen_destinations.insert(dest.clone());
+        }
         tasks.push(Task {
             source,
             destination: dest,
@@ -375,6 +390,8 @@ fn roots<P: AsRef<Path>>(
             descriptor_copy: false,
         });
     }
+    drop((seen_sources, seen_destinations));
+    // Query one bounded root wave, without materializing a whole tree.
     for batch in tasks.chunks_mut(options.batch_size) {
         let paths: Vec<_> = batch.iter().map(|t| &t.source).collect();
         let metadata = fs

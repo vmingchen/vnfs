@@ -897,6 +897,44 @@ fn layouts_permissions_and_stats() {
 }
 
 #[test]
+fn transfer_root_overlap_reports_the_first_conflict_without_io() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Harness::new(root.path());
+    let mut sources: Vec<_> = (0..4_096).map(|i| format!("/src/file-{i:04}")).collect();
+    sources.push("/src/file-2048/child".to_owned());
+    sources.push("/src".to_owned());
+    let error = copy_items(&fs, &sources, "/dst", TransferOptions::new()).unwrap_err();
+    assert_eq!(error.index(), Some(4_096));
+    assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
+    assert!(fs.calls.borrow().metadata.is_empty());
+
+    for (sources, index) in [
+        (["/a-b", "/a/inner", "/a"], 2),
+        (["/a-b", "/a", "/a/inner"], 2),
+        (["/src/file", "/dst/file/child", "/other"], 1),
+    ] {
+        let error = copy_items(&fs, &sources, "/dst", TransferOptions::new()).unwrap_err();
+        assert_eq!(error.index(), Some(index));
+        assert_eq!(error.cause().kind(), std::io::ErrorKind::InvalidInput);
+        assert!(fs.calls.borrow().metadata.is_empty());
+    }
+
+    fs.fs.create_dir_all("/a").unwrap();
+    fs.fs.write("/a/inner", b"inner").unwrap();
+    fs.fs.write("/a-b", b"sibling").unwrap();
+    let summary = copy_items(
+        &fs,
+        &["/a-b", "/a/inner"],
+        "/dst",
+        TransferOptions::new().with_layout(CopyLayout::Contents),
+    )
+    .unwrap();
+    assert_eq!(summary.files_copied, 2);
+    assert_eq!(fs.fs.read("/dst/a-b").unwrap(), b"sibling");
+    assert_eq!(fs.fs.read("/dst/inner").unwrap(), b"inner");
+}
+
+#[test]
 fn overlap_depth_and_budgets_are_explicit() {
     let (t, fs) = fixture();
     for options in [
