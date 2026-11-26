@@ -2,6 +2,7 @@
 
 use crate::{Error, Result};
 use std::collections::hash_map::Entry;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use vfsi_core::IndexedError;
 
@@ -33,6 +34,18 @@ fn validate_terminal(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn terminal(path: &Path) -> Result<(&Path, &OsStr)> {
+    validate_terminal(path)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    Ok((parent, name))
+}
+
 /// Standalone local-to-root-relative path mapping. It owns no filesystem and
 /// makes no claim that a client is rooted here. This maps namespace spellings;
 /// it is not race-free confinement or kernel/direct-client coherence.
@@ -62,30 +75,38 @@ impl PathMapper {
     /// use the process working directory; backend paths are always root-relative.
     pub fn map(&self, path: impl AsRef<Path>, policy: ResolvePath) -> Result<PathBuf> {
         let path = path.as_ref();
-        let absolute = match policy {
+        match policy {
             ResolvePath::Follow => {
-                std::fs::canonicalize(path).map_err(|error| io_error(path, error))?
+                let absolute =
+                    std::fs::canonicalize(path).map_err(|error| io_error(path, error))?;
+                Ok(Path::new("/").join(self.suffix(&absolute)?))
             }
             ResolvePath::NoFollow => {
-                // Reject dot/dot-dot terminal operands instead of normalizing
-                // destructive requests into a different object.
-                validate_terminal(path)?;
-                let name = path
-                    .file_name()
-                    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-                let parent = path
-                    .parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .unwrap_or(Path::new("."));
-                std::fs::canonicalize(parent)
-                    .map_err(|error| io_error(parent, error))?
-                    .join(name)
+                let (parent, name) = terminal(path)?;
+                let resolved =
+                    std::fs::canonicalize(parent).map_err(|error| io_error(parent, error))?;
+                self.map_terminal(&resolved, name)
             }
-        };
-        let suffix = absolute
+        }
+    }
+
+    fn suffix<'p>(&self, absolute: &'p Path) -> Result<&'p Path> {
+        absolute
             .strip_prefix(&self.local_root)
-            .map_err(|_| std::io::Error::from_raw_os_error(libc::EXDEV))?;
-        Ok(Path::new("/").join(suffix))
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EXDEV))
+    }
+
+    fn map_terminal(&self, resolved: &Path, name: &OsStr) -> Result<PathBuf> {
+        // A no-follow operand naming the root itself has a parent outside it.
+        if self.local_root.file_name() == Some(name) && self.local_root.parent() == Some(resolved) {
+            return Ok(PathBuf::from("/"));
+        }
+        let suffix = self.suffix(resolved)?;
+        let mut result = PathBuf::with_capacity(suffix.as_os_str().len() + name.len() + 2);
+        result.push("/");
+        result.push(suffix);
+        result.push(name);
+        Ok(result)
     }
     /// Map a cohort, resolving each distinct parent once for no-follow operands.
     /// Follow mode retains ordinary per-operand canonicalization. This is a
@@ -105,25 +126,14 @@ impl PathMapper {
                     if policy == ResolvePath::Follow {
                         return self.map(path, policy);
                     }
-                    validate_terminal(path)?;
-                    let name = path
-                        .file_name()
-                        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-                    let parent = path
-                        .parent()
-                        .filter(|p| !p.as_os_str().is_empty())
-                        .unwrap_or(Path::new("."));
+                    let (parent, name) = terminal(path)?;
                     let resolved = match parents.entry(parent) {
                         Entry::Occupied(entry) => entry.into_mut(),
                         Entry::Vacant(entry) => entry.insert(
                             std::fs::canonicalize(parent).map_err(|e| io_error(parent, e))?,
                         ),
                     };
-                    let absolute = resolved.join(name);
-                    let suffix = absolute
-                        .strip_prefix(&self.local_root)
-                        .map_err(|_| std::io::Error::from_raw_os_error(libc::EXDEV))?;
-                    Ok(Path::new("/").join(suffix))
+                    self.map_terminal(resolved, name)
                 })();
                 result.map_err(|error: Error| IndexedError::at(index, error))
             })

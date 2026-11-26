@@ -460,6 +460,15 @@ fn cohort_mapping_matches_scalar_mapping_and_rejects_links_escapes_and_dot_opera
         mapper.map_many(&paths, ResolvePath::NoFollow).unwrap(),
         expected
     );
+    let roots = [root.path().to_path_buf(), root.path().join("escape")];
+    assert_eq!(
+        mapper.map_many(&roots, ResolvePath::NoFollow).unwrap(),
+        [PathBuf::from("/"), PathBuf::from("/escape")]
+    );
+    assert_eq!(
+        mapper.map(root.path(), ResolvePath::NoFollow).unwrap(),
+        Path::new("/")
+    );
     for bad in [root.path().join("escape/child"), root.path().join("file/.")] {
         let error = mapper
             .map_many(&[paths[0].clone(), bad], ResolvePath::NoFollow)
