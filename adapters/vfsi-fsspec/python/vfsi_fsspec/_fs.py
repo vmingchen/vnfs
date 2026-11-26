@@ -1520,11 +1520,14 @@ class _RawVfsiFile(io.RawIOBase):
                 else:
                     n = self.fs._client.pwrite(fd, data, self._pos)
                     new_pos = self._pos + n
-            except OSError as error:
-                if not _is_uncertain_mutation(error):
+            except (OSError, NotImplementedError) as error:
+                if not (
+                    _is_uncertain_mutation(error) or getattr(error, "bytes_written", 0)
+                ):
                     raise
-                # A mutation may already have reached the server. Reconnect for
-                # future path operations, but never replay the write implicitly.
+                # A failed write may already have changed the file, even with a
+                # definite partial result. The caller can close this handle, but
+                # must reconcile the file before attempting more writes.
                 self._broken = True
                 try:
                     if (

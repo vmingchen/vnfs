@@ -437,3 +437,64 @@ fn malformed_scalar_write_completions_are_nonretryable_invalid_replies() {
         assert_eq!(std::fs::read(root.0.join("data")).unwrap(), b"abc");
     }
 }
+
+#[test]
+fn scalar_write_errors_preserve_mutation_certainty_and_prefix() {
+    use vfsi_core::{IoProgress, OpError};
+    Python::initialize();
+    for operation in ["write", "pwrite", "write_positioned"] {
+        for has_prefix in [false, true] {
+            let root = prr_test_support::TestRoot::new();
+            let mut backend = prr_test_support::FaultBackend::new(&root.0, None);
+            let cause = std::io::Error::from_raw_os_error(libc::ENOSPC);
+            let error = if has_prefix {
+                OpError::failed(cause, Some(IoProgress::Write { bytes_written: 2 }))
+            } else {
+                OpError::unknown(cause, None)
+            };
+            backend.write_item_errors.push((0, error));
+            let file = vfsi_sync::backend::HandleBackend::open_raw_impl(
+                &mut backend.inner,
+                Path::new("/data"),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+                0o600,
+            )
+            .unwrap();
+            let fd = i64::from(file.fd().unwrap());
+            let client = prr_test_support::client(backend);
+            Python::attach(|py| {
+                let data = b"abc".to_vec();
+                let error = match operation {
+                    "write" => client.write(py, fd, data).unwrap_err(),
+                    "pwrite" => client.pwrite(py, fd, data, 0).unwrap_err(),
+                    _ => client.write_positioned(py, fd, data).unwrap_err(),
+                };
+                let value = error.value(py);
+                assert_eq!(
+                    value.getattr("errno").unwrap().extract::<i32>().unwrap(),
+                    libc::ENOSPC
+                );
+                assert_eq!(
+                    value
+                        .getattr("failure_state")
+                        .unwrap()
+                        .extract::<String>()
+                        .unwrap(),
+                    if has_prefix { "failed" } else { "unknown" }
+                );
+                if has_prefix {
+                    assert_eq!(
+                        value
+                            .getattr("bytes_written")
+                            .unwrap()
+                            .extract::<usize>()
+                            .unwrap(),
+                        2
+                    );
+                }
+                assert!(!value.hasattr("index").unwrap());
+                client.close(py, fd).unwrap();
+            });
+        }
+    }
+}

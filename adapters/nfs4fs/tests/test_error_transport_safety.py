@@ -217,3 +217,50 @@ def test_uncertain_copy_reply_stops_missing_parent_recovery(dummy_fs, monkeypatc
     assert len(batches) == 1
     assert fs.cat_file("/first") == b"one"
     assert not fs.exists("/new-parent")
+
+
+@pytest.mark.parametrize("error_type", [OSError, NotImplementedError])
+@pytest.mark.parametrize("mode", ["ab", "r+b"])
+@pytest.mark.parametrize("state", ["failed_with_prefix", "unknown", "not_attempted"])
+def test_scalar_write_failure_prevents_replaying_possible_progress(
+    dummy_fs, monkeypatch, mode, state, error_type
+):
+    path = "/partial"
+    dummy_fs.pipe_file(path, b"original")
+    method = "write_positioned" if mode == "ab" else "pwrite"
+    write = getattr(dummy_fs._client, method)
+    calls = []
+    failure = (
+        OSError(errno.ENOSPC, "injected scalar write failure")
+        if error_type is OSError
+        else NotImplementedError("injected unsupported write")
+    )
+    failure.failure_state = "failed" if state == "failed_with_prefix" else state
+    if state == "failed_with_prefix":
+        failure.bytes_written = 2
+
+    def write_with_error(fd, data, *args):
+        calls.append(data)
+        if len(calls) > 1:
+            return write(fd, data, *args)
+        if state != "not_attempted":
+            write(fd, data[:2], *args)
+        raise failure
+
+    with dummy_fs.open(path, mode, write_buffering=False) as file:
+        monkeypatch.setattr(dummy_fs._client, method, write_with_error)
+        with pytest.raises(error_type) as caught:
+            file.write(b"new")
+        assert caught.value is failure
+        if state == "not_attempted":
+            assert file.write(b"new") == 3
+        else:
+            with pytest.raises(ConnectionError, match="write handle is unusable"):
+                file.write(b"new")
+            assert calls == [b"new"]
+    if mode == "ab":
+        expected = b"original" + (b"new" if state == "not_attempted" else b"ne")
+    else:
+        expected = b"newginal" if state == "not_attempted" else b"neiginal"
+    assert dummy_fs.cat_file(path) == expected
+    assert not dummy_fs._client._fds

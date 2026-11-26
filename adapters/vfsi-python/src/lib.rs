@@ -448,14 +448,14 @@ fn to_py_indexed(error: IndexedError, path: Option<&Path>) -> PyErr {
 }
 
 /// Project the existing Rust operation error, retaining completion knowledge.
-fn operation_exception(
+fn to_py_op_err(
     py: Python<'_>,
-    index: usize,
+    index: Option<usize>,
     error: vfsi_core::OpError,
-) -> PyResult<Py<PyAny>> {
+) -> PyResult<PyErr> {
     use vfsi_core::{FailureState, IoProgress};
     let (cause, state, progress) = error.into_parts();
-    let error = to_py_err(cause, None, Some(index));
+    let error = to_py_err(cause, None, index);
     let value = error.value(py);
     value.setattr(
         "failure_state",
@@ -479,7 +479,17 @@ fn operation_exception(
             IoProgress::Stream { next_offset } => value.setattr("next_offset", next_offset)?,
         }
     }
-    Ok(value.clone().unbind().into_any())
+    Ok(error)
+}
+
+fn operation_exception(
+    py: Python<'_>,
+    index: usize,
+    error: vfsi_core::OpError,
+) -> PyResult<Py<PyAny>> {
+    Ok(to_py_op_err(py, Some(index), error)?
+        .into_value(py)
+        .into_any())
 }
 
 fn contract_error(operation: &str, detail: impl std::fmt::Display) -> PyErr {
@@ -555,14 +565,36 @@ fn validate_read_results(
 fn one_write_result(
     operation: &str,
     op: &WriteOp,
-    results: Vec<WriteOutput>,
+    outcomes: vfsi_core::VecResult<WriteOutput>,
     append: bool,
 ) -> PyResult<WriteOutput> {
-    let mut results =
-        validate_write_results(operation, std::slice::from_ref(op), results, |_| append)?;
-    results
-        .pop()
-        .ok_or_else(|| contract_error(operation, "result disappeared after validation"))
+    let outcomes = outcomes.map_err(|cause| to_py_err(cause, None, None))?;
+    let [outcome] = <[_; 1]>::try_from(outcomes).map_err(|outcomes| {
+        contract_error(
+            operation,
+            format!("expected 1 result, received {}", outcomes.len()),
+        )
+    })?;
+    match outcome {
+        Ok(result) => {
+            validate_write_result(operation, 0, op, &result, append)?;
+            Ok(result)
+        }
+        Err(error) if valid_write_failure(&error, op.data().len()) => {
+            Python::attach(|py| Err(to_py_op_err(py, None, error)?))
+        }
+        Err(_) => Err(contract_error(operation, "invalid write failure progress")),
+    }
+}
+
+fn valid_write_failure(error: &vfsi_core::OpError, requested: usize) -> bool {
+    match error.progress() {
+        None => true,
+        Some(vfsi_core::IoProgress::Write { bytes_written }) => {
+            error.state() != vfsi_core::FailureState::NotAttempted && *bytes_written <= requested
+        }
+        _ => false,
+    }
 }
 
 fn validate_write_result(
@@ -1182,15 +1214,7 @@ impl NfsClient {
                         Ok(Ok(write))
                     }
                     Err(error) => {
-                        let valid = match error.progress() {
-                            None => true,
-                            Some(vfsi_core::IoProgress::Write { bytes_written }) => {
-                                error.state() != vfsi_core::FailureState::NotAttempted
-                                    && *bytes_written <= ops[index].data().len()
-                            }
-                            _ => false,
-                        };
-                        if !valid {
+                        if !valid_write_failure(&error, ops[index].data().len()) {
                             return Ok(Err(vfsi_core::OpError::unknown(
                                 vfsi_core::internal::errors::invalid_reply(
                                     "invalid write failure progress",
@@ -1583,12 +1607,7 @@ impl NfsClient {
     fn write(&self, py: Python<'_>, fd: i64, data: Vec<u8>) -> PyResult<usize> {
         self.with_fs(py, move |fs| {
             let op = WriteOp::new(file_operand_from_fd(fd)?, VfOffset::Cur, data);
-            let w = vfsi_core::internal::collect_vec_result(
-                fs.vwrite_impl(std::slice::from_ref(&op.borrowed())),
-                1,
-            )
-            .map_err(IndexedError::into_cause)
-            .map_err(|e| to_py_err(e, None, None))?;
+            let w = fs.vwrite_impl(std::slice::from_ref(&op.borrowed()));
             Ok(one_write_result("write", &op, w, false)?.bytes_written)
         })
     }
@@ -1600,12 +1619,7 @@ impl NfsClient {
     fn write_positioned(&self, py: Python<'_>, fd: i64, data: Vec<u8>) -> PyResult<(usize, u64)> {
         self.with_fs(py, move |fs| {
             let op = WriteOp::new(file_operand_from_fd(fd)?, VfOffset::Cur, data);
-            let w = vfsi_core::internal::collect_vec_result(
-                fs.vwrite_impl(std::slice::from_ref(&op.borrowed())),
-                1,
-            )
-            .map_err(IndexedError::into_cause)
-            .map_err(|e| to_py_err(e, None, None))?;
+            let w = fs.vwrite_impl(std::slice::from_ref(&op.borrowed()));
             let w = one_write_result("write_positioned", &op, w, false)?;
             let position = w
                 .offset
@@ -1633,12 +1647,7 @@ impl NfsClient {
     fn pwrite(&self, py: Python<'_>, fd: i64, data: Vec<u8>, offset: u64) -> PyResult<usize> {
         self.with_fs(py, move |fs| {
             let op = WriteOp::new(file_operand_from_fd(fd)?, VfOffset::At(offset), data);
-            let w = vfsi_core::internal::collect_vec_result(
-                fs.vwrite_impl(std::slice::from_ref(&op.borrowed())),
-                1,
-            )
-            .map_err(IndexedError::into_cause)
-            .map_err(|e| to_py_err(e, None, None))?;
+            let w = fs.vwrite_impl(std::slice::from_ref(&op.borrowed()));
             let append = self.append_fds.lock().map_err(lock_err)?.contains(&fd);
             Ok(one_write_result("pwrite", &op, w, append)?.bytes_written)
         })
@@ -3431,22 +3440,40 @@ mod tests {
     #[test]
     fn scalar_write_result_contract_is_validated() {
         Python::initialize();
-        let op = WriteOp::at(FileOperand::from_fd(7), 11, vec![1, 2, 3]);
-        assert!(one_write_result("pwrite", &op, Vec::new(), false).is_err());
-        assert!(
-            one_write_result(
-                "pwrite",
-                &op,
-                vec![WriteOutput {
-                    file: FileOperand::from_fd(7),
-                    offset: 11,
-                    bytes_written: 4,
-                    stable: true,
-                }],
-                false,
-            )
-            .is_err()
-        );
+        use vfsi_core::{IoProgress, OpError};
+        Python::attach(|py| {
+            let op = WriteOp::at(FileOperand::from_fd(7), 11, vec![1, 2, 3]);
+            assert!(one_write_result("pwrite", &op, Ok(Vec::new()), false).is_err());
+            assert!(
+                one_write_result(
+                    "pwrite",
+                    &op,
+                    Ok(vec![Ok(WriteOutput {
+                        file: FileOperand::from_fd(7),
+                        offset: 11,
+                        bytes_written: 4,
+                        stable: true,
+                    })]),
+                    false,
+                )
+                .is_err()
+            );
+            let error = OpError::failed(
+                std::io::Error::from_raw_os_error(libc::EIO),
+                Some(IoProgress::Write { bytes_written: 4 }),
+            );
+            let error = one_write_result("pwrite", &op, Ok(vec![Err(error)]), false).unwrap_err();
+            assert_eq!(
+                error
+                    .value(py)
+                    .getattr("transport_kind")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "invalid_reply"
+            );
+            assert!(!error.value(py).hasattr("bytes_written").unwrap());
+        });
     }
 
     #[test]
