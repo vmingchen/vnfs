@@ -252,30 +252,27 @@ unsafe fn cursor_snapshot<const IDS: bool>(
                 .clamp(1, VFSI_DIRECTORY_COHORT_MAX as usize);
             let mut rows = Vec::new();
             let mut budget = ListingBudget::new(options);
+            let mut indices = Vec::with_capacity(width.min(count));
+            let mut refs = Vec::with_capacity(width.min(count));
             while let Some(&(_, _, follow)) = pending.front() {
-                let mut wave = Vec::new();
-                while wave.len() < width && pending.front().is_some_and(|(_, _, p)| *p == follow) {
-                    wave.push(pending.pop_front().expect("pending front exists"));
+                indices.clear();
+                refs.clear();
+                let mut states = Vec::with_capacity(width.min(pending.len()));
+                while states.len() < width && pending.front().is_some_and(|(_, _, p)| *p == follow)
+                {
+                    let (index, state, _) = pending.pop_front().expect("pending front exists");
+                    indices.push(index);
+                    refs.push(paths[index].as_path());
+                    states.push(state);
                 }
-                let indices: Vec<_> = wave.iter().map(|(index, _, _)| *index).collect();
-                let refs: Vec<_> = indices
-                    .iter()
-                    .map(|&index| paths[index].as_path())
-                    .collect();
                 let probe = budget.probe();
                 let page_size = probe.clamp(1, 256);
-                let states = wave.into_iter().map(|(_, state, _)| state).collect();
                 let pages = vfsi_sync::internal::collect_vec_result(
                     backend.vlistdir_pages_impl(&refs, fields, states, page_size, probe, follow),
                     refs.len(),
                 )
                 .map_err(vfsi_core::IndexedError::into_cause)?;
-                if pages.len() != indices.len() {
-                    return Err(vfsi_core::internal::errors::invalid_reply(
-                        "invalid cohort directory page count",
-                    ));
-                }
-                for (index, (attrs, next, children)) in indices.into_iter().zip(pages) {
+                for (&index, (attrs, next, children)) in indices.iter().zip(pages) {
                     if children.len() != attrs.len()
                         || attrs.len() > page_size
                         || (attrs.is_empty() && next.is_some())
