@@ -6031,6 +6031,68 @@ fn vsetattrs_many_nfs_files() {
     fs.remove_dir_all(&directory).unwrap();
 }
 
+#[test]
+fn nfs_setattrs_size_requires_a_writable_handle() {
+    use vnfs::Vfsi;
+    use vnfs::directory::{Permissions, SetAttrsOp};
+    use vnfs::files::{OpenFlags, OpenOp, Target};
+    let directory = setup_dir("setattrs-readonly-handle");
+    let path = format!("{directory}/file");
+    let other = format!("{directory}/sibling");
+    let fs = Nfs::builder(test_host())
+        .version(
+            vnfs::nfs::NfsVersion::try_from(
+                std::env::var("VNFS_TEST_MINOR")
+                    .ok()
+                    .map(|minor| minor.parse().unwrap()),
+            )
+            .unwrap(),
+        )
+        .connect()
+        .unwrap();
+    fs.write(path.as_str(), b"original").unwrap();
+    fs.write(other.as_str(), b"sibling").unwrap();
+    let read_only = fs.open(path.as_str()).unwrap();
+    let writable = fs.open_with(OpenOp::new(&other, OpenFlags::WRITE)).unwrap();
+
+    for ownership in [false, true] {
+        let change = |file, size| {
+            let update = SetAttrsOp::file(file).len(size);
+            if ownership {
+                update.gid(unsafe { libc::getegid() })
+            } else {
+                update
+            }
+        };
+        let results = fs
+            .vsetattrs(&[change(&read_only, 1), change(&writable, 2)])
+            .unwrap();
+        let error = results[0].as_ref().unwrap_err();
+        assert_eq!(error.state(), vfsi_core::FailureState::NotAttempted);
+        assert_eq!(
+            vfsi_core::native_status(error.cause()),
+            Some(vfsi_core::StatusCode::Errno(libc::EBADF as u32))
+        );
+        assert!(results[1].is_ok());
+        assert_eq!(fs.attrs(Target::file(&read_only)).unwrap().len(), Some(8));
+        assert_eq!(fs.attrs(Target::file(&writable)).unwrap().len(), Some(2));
+    }
+
+    fs.chmod(Target::file(&read_only), Permissions::from_mode(0o640))
+        .unwrap();
+    assert_eq!(
+        fs.attrs(Target::file(&read_only))
+            .unwrap()
+            .permissions()
+            .unwrap()
+            .mode()
+            & 0o7777,
+        0o640
+    );
+    fs.close_files(vec![read_only, writable]).unwrap();
+    fs.remove_dir_all(&directory).unwrap();
+}
+
 #[path = "support/links.rs"]
 mod links_support;
 

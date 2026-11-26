@@ -372,7 +372,32 @@ pub(super) fn nofollow_symlink_setattr_is_unsupported(
     !follow && ftype == nfs_ftype4_NF4LNK && masks.intersects(AttrMask::MODE | AttrMask::SIZE)
 }
 
+const SETTABLE: AttrMask = AttrMask::MODE
+    .union(AttrMask::SIZE)
+    .union(AttrMask::ATIME)
+    .union(AttrMask::MTIME)
+    .union(AttrMask::UID)
+    .union(AttrMask::GID);
+
 impl NfsVecFs {
+    fn setattr_handle(&self, fd: i32, masks: AttrMask) -> VfResult<&NfsOpenState> {
+        let open = self
+            .open_files
+            .get(&fd)
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EBADF))?;
+        // SETATTR by filehandle does not carry the application OPEN's access
+        // mode. Enforce it before using the handle for a size change.
+        if masks.contains(AttrMask::SIZE)
+            && open
+                .reopen
+                .as_ref()
+                .is_some_and(|recipe| recipe.flags & libc::O_ACCMODE == libc::O_RDONLY)
+        {
+            return Err(std::io::Error::from_raw_os_error(libc::EBADF));
+        }
+        Ok(open)
+    }
+
     /// Preserve independent updates while ownership-dependent resolution
     /// remains a separate phase. Ordinary updates retain their merged path.
     pub(super) fn vsetattrs_nfs(
@@ -418,12 +443,6 @@ impl NfsVecFs {
         follow: bool,
     ) -> vfsi_core::VecResult<()> {
         use vfsi_core::OpError;
-        const SETTABLE: AttrMask = AttrMask::MODE
-            .union(AttrMask::SIZE)
-            .union(AttrMask::ATIME)
-            .union(AttrMask::MTIME)
-            .union(AttrMask::UID)
-            .union(AttrMask::GID);
         let mut slots = (0..attrs.len()).map(|_| None).collect::<Vec<_>>();
         let mut ops = Vec::with_capacity(attrs.len());
         let mut indices = Vec::with_capacity(attrs.len());
@@ -432,10 +451,8 @@ impl NfsVecFs {
             let file = if !attr.masks.difference(SETTABLE).is_empty() {
                 Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
             } else if let Some(fd) = attr.file.fd() {
-                self.open_files
-                    .get(&fd)
+                self.setattr_handle(fd, attr.masks)
                     .map(|open| crate::client::FileRef::Handle(open.fh.clone()))
-                    .ok_or_else(|| std::io::Error::from_raw_os_error((ERR_EBADF) as i32))
             } else {
                 self.server_vf_path(&attr.file)
                     .map(|path| crate::client::FileRef::Path(path_bytes(&path).to_vec()))
@@ -553,12 +570,6 @@ impl NfsVecFs {
         follow: bool,
     ) -> vfsi_core::VecResult<()> {
         use vfsi_core::OpError;
-        const SETTABLE: AttrMask = AttrMask::MODE
-            .union(AttrMask::SIZE)
-            .union(AttrMask::ATIME)
-            .union(AttrMask::MTIME)
-            .union(AttrMask::UID)
-            .union(AttrMask::GID);
         let mut slots = (0..attrs.len()).map(|_| None).collect::<Vec<_>>();
         let mut candidates = Vec::with_capacity(attrs.len());
         let mut refs = Vec::with_capacity(attrs.len());
@@ -567,6 +578,11 @@ impl NfsVecFs {
                 slots[index] = Some(Err(OpError::not_attempted(std::io::Error::from(
                     std::io::ErrorKind::Unsupported,
                 ))));
+            } else if attr.masks.contains(AttrMask::SIZE)
+                && let Some(fd) = attr.file.fd()
+                && let Err(cause) = self.setattr_handle(fd, attr.masks)
+            {
+                slots[index] = Some(Err(OpError::not_attempted(cause)));
             } else {
                 candidates.push(index);
                 refs.push(&attr.file);

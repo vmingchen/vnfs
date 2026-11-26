@@ -161,6 +161,7 @@ pub trait Vfsi {
     /// identifies the input, not completion order or a committed prefix.
     /// A failed operation may have changed some attributes; Unknown means its
     /// effects cannot be confirmed. No rollback or automatic replay is promised.
+    /// Handle-targeted size changes require a handle opened for writing.
     /// Empty vectors succeed without I/O. Use VfsiExt::setattrs_all for strict
     /// first-error selection after the entire vector has executed.
     ///
