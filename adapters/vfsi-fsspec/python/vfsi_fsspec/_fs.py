@@ -4691,7 +4691,7 @@ class VfsiFileSystem(AbstractFileSystem):
                     continue
                 if j in eerrs and _errno(eerrs[j]) != errno.ENOENT:
                     raise _oserror(eerrs[j], p, index=i)
-                raise FileExistsError(errno.EEXIST, f"File exists: {p!r}")
+                raise _oserror(errno.EEXIST, p, index=i)
         if missing:
             try:
                 self._ensure_dirs(missing, verify_existing=True)
@@ -4717,7 +4717,7 @@ class VfsiFileSystem(AbstractFileSystem):
         )
         if errors:
             index = min(errors)
-            raise _oserror(errors[index], internals[index])
+            raise _oserror(errors[index], internals[index], index=index)
         return [
             _info_dict(self._fullpath(path), stat)
             for path, stat in zip(internals, stats)

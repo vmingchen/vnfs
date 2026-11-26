@@ -13,6 +13,32 @@ def _open_files(fs, paths):
     )
 
 
+def test_grouped_metadata_error_rebases_legacy_errno_map(
+    dummy_fs, tmp_path, monkeypatch
+):
+    dummy_fs.pipe({"/cached": b"cached", "/present": b"present"})
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=dummy_fs,
+        cache_storage=str(tmp_path / "cache"),
+        check_files=False,
+    )
+    with cached.open("/cached", "rb") as file:
+        assert file.read() == b"cached"
+    stat_many = dummy_fs._client.stat_many
+
+    def legacy_stat_many(paths):
+        stats, errors = stat_many(paths)
+        return stats, {index: error.errno for index, error in errors.items()}
+
+    monkeypatch.setattr(dummy_fs._client, "stat_many", legacy_stat_many)
+    with pytest.raises(FileNotFoundError) as caught:
+        cached.open_many(_open_files(cached, ["/cached", "/present", "/missing"]))
+    assert caught.value.index == 2
+    assert caught.value.filename == "/missing"
+    assert not dummy_fs._client._fds
+
+
 @pytest.mark.parametrize("operation", ["cat", "cat_ranges"])
 @pytest.mark.parametrize("native_index", [0, None, -1, 99, True])
 def test_raised_read_errors_keep_public_positions(
@@ -342,6 +368,44 @@ def test_invalid_scalar_write_reply_poisons_handle_without_replay(
         file.close()
     assert dummy_fs.cat_file("/uncertain") == b"abc"
     assert not dummy_fs._client._fds
+
+
+@pytest.mark.parametrize("operation", ["put", "copy"])
+@pytest.mark.parametrize("occupied_kind", ["file", "dangling_link"])
+def test_directory_destination_collision_reports_public_index(
+    dummy_fs, tmp_path, operation, occupied_kind
+):
+    fs = dummy_fs
+    if occupied_kind == "file":
+        fs.pipe_file("/occupied", b"keep")
+    else:
+        fs.symlink("missing-target", "/occupied")
+    fs.mkdir("/existing-dir")
+    if operation == "put":
+        sources = [tmp_path / name for name in ["file", "first-dir", "second-dir"]]
+        sources[0].write_bytes(b"upload")
+        for source in sources[1:]:
+            source.mkdir()
+        transfer = fs.put
+        options = {}
+    else:
+        sources = ["/source-file", "/first-dir", "/second-dir"]
+        fs.pipe_file(sources[0], b"copy")
+        for source in sources[1:]:
+            fs.mkdir(source)
+        transfer = fs.copy
+        options = {"symlinks": True}
+
+    with pytest.raises(FileExistsError) as caught:
+        transfer(sources, ["/new-file", "/existing-dir", "/occupied"], **options)
+
+    assert caught.value.index == 2
+    assert caught.value.filename == "/occupied"
+    assert not fs.exists("/new-file")
+    if occupied_kind == "file":
+        assert fs.cat_file("/occupied") == b"keep"
+    else:
+        assert fs.readlink("/occupied") == "missing-target"
 
 
 @pytest.mark.parametrize("duplicate_dest", [False, True])
