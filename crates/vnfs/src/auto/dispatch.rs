@@ -95,7 +95,6 @@ impl Auto {
             return Ok(Vec::new());
         }
         let mut slots: Vec<_> = (0..dirs.len()).map(|_| None).collect();
-        let mut resolved = Vec::with_capacity(dirs.len());
         for (index, dir) in dirs.iter().enumerate() {
             let cause = if !Arc::ptr_eq(&self.owner, &dir.owner) || dir.is_closed() {
                 Some(vfsi_core::internal::errors::with_context(
@@ -116,14 +115,10 @@ impl Auto {
             if let Some(cause) = cause {
                 slots[index] = Some(Err(OpError::not_attempted(cause)));
             }
-            resolved.push(Resolved {
-                route: dir.route.clone(),
-                path: dir.path.clone(),
-            });
         }
         let mut start = 0;
-        while start < dirs.len() {
-            let end = cohort_end(&resolved, start);
+        for cohort in dirs.chunk_by(|left, right| left.route.same_backend(&right.route)) {
+            let end = start + cohort.len();
             let indices: Vec<_> = (start..end)
                 .filter(|&index| slots[index].is_none())
                 .collect();
@@ -141,7 +136,7 @@ impl Auto {
             let result = if indices.is_empty() {
                 Ok(Vec::new())
             } else {
-                match &resolved[start].route {
+                match &cohort[0].route {
                     Route::Posix => self.mounted.vremove_dir_contents(&batch!(Posix), options),
                     Route::Nfs(connection) => connection
                         .client
