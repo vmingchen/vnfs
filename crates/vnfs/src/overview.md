@@ -36,8 +36,9 @@ assert_eq!(results[1].as_ref().unwrap().data(), Some(b"world".as_slice()));
 
 Both whole-file reads share batched OPEN, READ, and CLOSE phases. Retained
 handles keep each read on the same file through EOF. `write_files` batches
-OPEN, complete WRITE, and CLOSE. Larger batches split at server limits, and
-successful results retain input order. See [the runnable examples](files/index.html)
+OPEN, complete WRITE, and CLOSE for destinations that resolve to distinct files.
+Larger batches split at server limits, and successful results retain input order.
+See [the runnable examples](files/index.html)
 for complete workflows.
 
 Paths are relative to the configured remote namespace: `/file-1` above names

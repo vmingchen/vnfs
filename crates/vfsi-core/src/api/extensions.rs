@@ -571,8 +571,10 @@ pub trait VfsiExt: Vfsi {
     /// Replace files in vector phases. Success completes payloads; errors may
     /// follow create/truncate/write effects and never authorize blind replay.
     ///
-    /// Parents must exist. Payloads are completed via vector open/write/close
-    /// phases, not a scalar write loop or necessarily a single RPC. No atomic
+    /// Parents must exist. Each destination must resolve to a distinct file,
+    /// including when hard links or symlinks are present. To replace the same
+    /// file through several paths, call [`Self::write`] in the desired order.
+    /// Payloads are completed via vector open/write/close phases. No atomic
     /// replacement, cross-file transaction, or durability guarantee is provided.
     ///
     /// ```no_run
