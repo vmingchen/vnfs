@@ -3384,6 +3384,18 @@ class _DeferredWriteFile:
 class _VfsiTransaction(Transaction):
     """Stage writes, then publish ordered rename batches and exclusive links."""
 
+    _started = False
+
+    def start(self):
+        if self.fs is None:
+            raise RuntimeError("transaction has already completed")
+        # Enrollment ends during preparation, but the transaction remains
+        # active until publication and cleanup finish.
+        if self._started or self.fs._intrans:
+            raise RuntimeError("a transaction is already active")
+        super().start()
+        self._started = True
+
     def __exit__(self, exc_type, exc_value, traceback):
         try:
             return super().__exit__(exc_type, exc_value, traceback)
@@ -3750,6 +3762,12 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def __exit__(self, exc_type, exc_value, traceback):
         _close_reader_on_exit(self, exc_type, exc_value, traceback)
+
+    def start_transaction(self):
+        """Begin a write transaction outside a context manager."""
+        transaction = self.transaction
+        transaction.start()
+        return transaction
 
     def open(
         self,
