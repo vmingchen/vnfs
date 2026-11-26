@@ -114,22 +114,35 @@ def metrics(before, after):
     if (before is None) != (after is None):
         raise RuntimeError('only one command produced a structured operation report')
     if before is None:
-        return {}
-    if before['environment']['fixture_objects'] != after['environment']['fixture_objects']:
+        return {}, None
+    fixture = before['environment']['fixture_objects']
+    if fixture != after['environment']['fixture_objects']:
         raise RuntimeError('benchmark fixture objects differ between commands')
     keyed = lambda report: {(c['backend'], c['case']): c for c in report['cases']}
     a, b = keyed(before), keyed(after)
     if a.keys() != b.keys() or len(a) != len(before['cases']) or len(b) != len(after['cases']):
         raise RuntimeError('structured report case sets differ or contain duplicates')
-    result = {}
+    geometry = {}
+    ratios = {}
+    fields = ('rounds', 'bytes_per_call', 'requests_per_call', 'request_bytes',
+              'files', 'cache', 'allocation')
+    optional_fields = ('min_request_bytes', 'max_request_bytes', 'warmups',
+                       'directory_entries_per_call', 'path_open_close_timing')
+
+    def shape(case):
+        return tuple(case[field] for field in fields) + tuple(
+            case.get(field) for field in optional_fields
+        )
+
     for key in a:
-        for field in ('rounds', 'bytes_per_call', 'requests_per_call', 'request_bytes', 'files', 'cache', 'allocation'):
-            if a[key][field] != b[key][field]:
+        geometry[key] = shape(a[key])
+        for field, expected, observed in zip(fields + optional_fields, geometry[key], shape(b[key])):
+            if expected != observed:
                 raise RuntimeError(f'case geometry differs: {key}/{field}')
         if min(a[key]['p50_ns'], b[key]['p50_ns']) <= 0:
             raise RuntimeError('invalid operation timing')
-        result['/'.join(key)] = a[key]['p50_ns'] / b[key]['p50_ns']
-    return result
+        ratios['/'.join(key)] = a[key]['p50_ns'] / b[key]['p50_ns']
+    return ratios, (fixture, geometry)
 
 
 def main(argv=None):
@@ -194,6 +207,7 @@ def perform(args):
         raise RuntimeError('prepare must create the fixture, or supply an existing fixture')
     objects = fixture_objects(args.fixture)
     records, comparisons, output_hash = [], {}, None
+    expected_workload = None
     for pair in range(args.pairs):
         samples = {}
         # AB / BA / AB / BA => ABBA across adjacent pairs.
@@ -219,7 +233,11 @@ def perform(args):
             sample['report'] = evidence(stem.with_suffix('.json'))
             samples[label] = sample
             records.append({'pair': pair, 'label': label, **sample})
-        ratios = metrics(samples['baseline']['report'], samples['candidate']['report'])
+        ratios, workload = metrics(samples['baseline']['report'], samples['candidate']['report'])
+        if pair == 0:
+            expected_workload = workload
+        elif workload != expected_workload:
+            raise RuntimeError(f'structured workload changed between pairs at pair {pair + 1}')
         ratios['command_end_to_end'] = samples['baseline']['elapsed_ns'] / samples['candidate']['elapsed_ns']
         for name, ratio in ratios.items():
             comparisons.setdefault(name, []).append(ratio)

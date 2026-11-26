@@ -1250,6 +1250,51 @@ class PairedBenchmarkTests(unittest.TestCase):
             setup = self.output / f"{sample['pair']:03}-{sample['label']}-setup.json"
             self.assertEqual(setup.read_bytes(), setup_report.read_bytes())
 
+    def test_structured_workloads_must_match_across_pairs(self):
+        driver = self.root / 'driver.py'
+        driver.write_text("""
+import json
+from pathlib import Path
+import sys
+kind, output = sys.argv[1:]
+path = Path(output)
+pair = int(path.name.split("-", 1)[0])
+if kind != "missing" or pair == 0:
+    case = {
+        "backend": "posix", "case": "read", "rounds": 20, "bytes_per_call": 8,
+        "requests_per_call": 2, "request_bytes": 4, "files": 2, "cache": "warm",
+        "allocation": "owned", "p50_ns": 100 + pair,
+    }
+    if kind == "request-bounds":
+        case.update(request_bytes=None, min_request_bytes=1, max_request_bytes=7)
+    fixture = [1]
+    if pair > 0:
+        if kind == "cases":
+            case["case"] = "other"
+        elif kind == "geometry":
+            case["bytes_per_call"] = 16
+        elif kind == "request-bounds":
+            case.update(min_request_bytes=3, max_request_bytes=5)
+        elif kind == "fixture":
+            fixture = [2]
+    path.write_text(json.dumps({"environment": {"fixture_objects": fixture}, "cases": [case]}))
+""")
+        for kind in ('stable', 'missing', 'cases', 'geometry', 'request-bounds', 'fixture'):
+            with self.subTest(kind=kind):
+                self.output = self.root / kind
+                self.base[self.base.index('--output') + 1] = str(self.output)
+                command = f'{shlex.quote(sys.executable)} {shlex.quote(str(driver))} {kind} {{report}}'
+                result = self.run_cli(command, command)
+                report = self.output / 'comparison.json'
+                if kind == 'stable':
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    samples = json.loads(report.read_text())['comparisons']['posix/read']
+                    self.assertEqual(samples['paired_speedups'], [1, 1, 1])
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('structured workload changed between pairs', result.stderr)
+                    self.assertFalse(report.exists())
+
     def test_structured_comparisons_require_matching_objects_and_geometry(self):
         case = {'backend': 'uring', 'case': 'read', 'rounds': 20, 'bytes_per_call': 8,
                 'requests_per_call': 2, 'request_bytes': 4, 'files': 2, 'cache': 'warm',
@@ -1257,7 +1302,8 @@ class PairedBenchmarkTests(unittest.TestCase):
         before = {'environment': {'fixture_objects': [1]}, 'cases': [case]}
         after = json.loads(json.dumps(before))
         after['cases'][0]['p50_ns'] = 50
-        self.assertEqual(self.paired.metrics(before, after), {'uring/read': 2})
+        ratios, _ = self.paired.metrics(before, after)
+        self.assertEqual(ratios, {'uring/read': 2})
         after['cases'][0]['rounds'] = 19
         with self.assertRaisesRegex(RuntimeError, 'geometry'):
             self.paired.metrics(before, after)

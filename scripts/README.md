@@ -15,8 +15,9 @@ python3 scripts/benchmark-paired.py --pairs 9 --cache-state advisory-evicted \
   --candidate '/path/candidate 100 target uring cold-small-read --cold-rounds 100 --fixture {fixture} --json {report}'
 ```
 
-Structured comparisons use inner-operation p50 and check equal geometry and
-fixture identities; process startup/setup is reported separately. Queue/window
+Structured comparisons use inner-operation p50 and require the same cases,
+reported request geometry, and fixture identities in both commands across all
+pairs. Process startup and setup are reported separately. Queue/window
 settings may differ for tuning. Read-only preparation should report zero writes
 after initialization. A fixture lock excludes overlapping comparisons. Process
 groups have deadlines; failures retain logs.
