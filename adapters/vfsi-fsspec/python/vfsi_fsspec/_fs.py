@@ -1126,8 +1126,12 @@ class _ClientPool:
 
         def open_one(index):
             owner = owners[index]
-            client = self._clients[owner]
             with self._client_locks[owner]:
+                # Shutdown replaces the list before retiring each session.
+                clients = self._clients
+                if not clients:
+                    raise ValueError("filesystem is closed")
+                client = clients[owner]
                 native_fd = client.open(paths[index], modes[index])
                 try:
                     with self._lock:

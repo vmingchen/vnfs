@@ -204,6 +204,33 @@ def test_interrupted_executor_shutdown_defers_late_open_success(
         pool.shutdown()
 
 
+def test_shutdown_before_parallel_open_worker_reports_closed_pool(monkeypatch):
+    import vfsi_fsspec._fs as module
+
+    class Native:
+        def open(self, path, mode):
+            pytest.fail("worker opened a file after shutdown")
+
+        def shutdown(self):
+            pass
+
+    pool = _ClientPool(SimpleNamespace(NfsClient=Native), (), size=1)
+
+    class ShutdownBeforeSubmit(ThreadPoolExecutor):
+        def submit(self, fn, *args, **kwargs):
+            pool.shutdown()
+            return super().submit(fn, *args, **kwargs)
+
+    monkeypatch.setattr(module, "ThreadPoolExecutor", ShutdownBeforeSubmit)
+    try:
+        with pytest.raises(ValueError, match="filesystem is closed"):
+            pool.open_many_independent(["/file"], ["rb"])
+        assert not pool._fds
+        assert not pool._deferred_close
+    finally:
+        pool.shutdown()
+
+
 @pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit])
 @pytest.mark.parametrize("operation", ["open", "open_many", "open_many_independent"])
 @pytest.mark.parametrize("boundary", ["close", "reconnect"])
