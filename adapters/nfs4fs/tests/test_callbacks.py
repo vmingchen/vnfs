@@ -298,3 +298,21 @@ def test_cat_real_read_errors_keep_per_file_policy(dummy_fs, large, on_error):
     finally:
         dummy_fs._client.chmod(native_path, 0o600)
     assert not dummy_fs._client._fds
+
+
+@pytest.mark.parametrize("occupied", [False, True])
+def test_put_counts_directories_only_after_creation(dummy_fs, tmp_path, occupied):
+    source = tmp_path / "directory"
+    source.mkdir()
+    callback = RecordingCallback()
+    if occupied:
+        dummy_fs.pipe_file("/target", b"original")
+        with pytest.raises(FileExistsError):
+            dummy_fs.put([source], ["/target"], callback=callback)
+        assert callback.size == 1
+        assert callback.value == 0
+        assert dummy_fs.cat_file("/target") == b"original"
+    else:
+        dummy_fs.put([source], ["/target"], callback=callback)
+        _assert_complete(callback, 1)
+        assert dummy_fs.isdir("/target")

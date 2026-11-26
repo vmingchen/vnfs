@@ -96,6 +96,55 @@ def test_put_file_directory_remains_a_directory_operation(dummy_fs, tmp_path):
         dummy_fs.put_file(str(source), "/parent/directory", mode="create")
 
 
+@pytest.mark.parametrize("collision", [False, True])
+def test_put_file_exclusively_creates_directory(
+    dummy_fs, tmp_path, monkeypatch, collision
+):
+    source = tmp_path / "directory"
+    source.mkdir()
+    target = "/parent/target"
+    ensure_dirs = dummy_fs._ensure_dirs
+
+    def create_competing_directory(paths, **kwargs):
+        if collision:
+            dummy_fs._client.ensure_dir("/parent", 0o755)
+            dummy_fs._client.mkdir(target, 0o700)
+        return ensure_dirs(paths, **kwargs)
+
+    monkeypatch.setattr(dummy_fs, "_ensure_dirs", create_competing_directory)
+    if collision:
+        with pytest.raises(FileExistsError):
+            dummy_fs.put_file(source, target, mode="create")
+        assert dummy_fs.info(target)["mode"] & 0o777 == 0o700
+    else:
+        dummy_fs.put_file(source, target, mode="create")
+        assert dummy_fs.isdir(target)
+
+
+@pytest.mark.parametrize("root", ["", "missing/root"])
+def test_put_file_exclusive_directory_at_filesystem_root(tmp_path, root):
+    source = tmp_path / "directory"
+    source.mkdir()
+    with fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "backend"),
+        root=root,
+        skip_instance_cache=True,
+    ) as fs:
+        if root:
+            fs.put_file(source, "/", mode="create")
+            assert fs.isdir("/")
+        with pytest.raises(FileExistsError):
+            fs.put_file(source, "/", mode="create")
+
+
+def test_put_file_exclusive_root_rejects_closed_filesystem(dummy_fs, tmp_path):
+    dummy_fs.close()
+    with pytest.raises(ValueError, match="filesystem is closed"):
+        dummy_fs.put_file(tmp_path, "/", mode="create")
+
+
 @pytest.mark.parametrize("commit", [False, True])
 def test_put_file_respects_transaction_publication(dummy_fs, tmp_path, commit):
     source = tmp_path / "source"

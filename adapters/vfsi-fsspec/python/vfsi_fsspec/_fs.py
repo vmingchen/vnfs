@@ -4508,7 +4508,9 @@ class VfsiFileSystem(AbstractFileSystem):
             else:
                 del error.index
 
-    def _ensure_dirs(self, paths, mode=None, *, verify_existing=False):
+    def _ensure_dirs(
+        self, paths, mode=None, *, verify_existing=False, parents_only=False
+    ):
         """``mkdir -p`` a set of internal paths with as few compounds as
         possible: one batched existence probe, then one mkdirv batch per
         missing depth level."""
@@ -4519,9 +4521,13 @@ class VfsiFileSystem(AbstractFileSystem):
         native_paths = [self._native_path(p) for p in paths]
         prefixes = set()
         for native in native_paths:
+            if parents_only:
+                native = posixpath.dirname(native)
             comps = [c for c in native.split("/") if c]
             prefixes.update("/" + "/".join(comps[:i]) for i in range(1, len(comps) + 1))
         ordered = sorted(prefixes, key=lambda p: (p.count("/"), p))
+        if not ordered:
+            return
         try:
             exists = self._client.exists_many(list(ordered))
         except Exception as error:
@@ -5835,9 +5841,14 @@ class VfsiFileSystem(AbstractFileSystem):
                 raise NotImplementedError(
                     "transactional directory uploads are unsupported"
                 )
-            if mode == "create" and self.exists(internal):
-                raise FileExistsError(errno.EEXIST, "File exists", internal)
-            self.makedirs(internal, exist_ok=True)
+            if mode == "create":
+                if internal == "/" and not self._root:
+                    self._client.ensure_ready()
+                    raise FileExistsError(errno.EEXIST, "File exists", internal)
+                self._ensure_dirs([internal], parents_only=True)
+                self.mkdir(internal, create_parents=False)
+            else:
+                self.makedirs(internal, exist_ok=True)
             return
         self._upload_file_streamed(
             lpath, internal, mode, callback, create_parents=True, **kwargs
@@ -5929,7 +5940,6 @@ class VfsiFileSystem(AbstractFileSystem):
             if os.path.isdir(local_path):
                 remote_dirs.append(remote_path)
                 directory_indices.append(public_index)
-                callback.relative_update()
             else:
                 pairs.append((local_path, remote_path, public_index))
         if remote_dirs:
@@ -5945,6 +5955,8 @@ class VfsiFileSystem(AbstractFileSystem):
                     positions.setdefault(self._checked_strip_protocol(directory), index)
                 _rebase_error(error, list(positions.values()), list(positions))
                 raise
+            for _ in remote_dirs:
+                callback.relative_update()
         if not pairs:
             return
         sizes = [os.path.getsize(local_path) for local_path, _, _ in pairs]
