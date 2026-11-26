@@ -1298,6 +1298,7 @@ impl NfsClient {
         // Each protocol extension enables only its own backend. Keep the
         // stable constructor ABI shared while allowing cfg-disabled arguments.
         let _ = (
+            host,
             &root,
             compound_size_limit,
             minor_version,
@@ -1310,8 +1311,8 @@ impl NfsClient {
             &mount_config,
             auto_reconnect,
         );
-        let fs: Box<dyn BindingBackend + Send> = py.detach(|| {
-            Ok(match backend {
+        let fs = py.detach(|| -> PyResult<Box<dyn BindingBackend + Send>> {
+            match backend {
                 #[cfg(feature = "nfs")]
                 "nfs" => {
                     let auth = auth.ok_or_else(|| {
@@ -1384,7 +1385,7 @@ impl NfsClient {
                             nfs.resolved_mount().expect("mount connection is resolved")
                         });
                     }
-                    Box::new(nfs) as Box<dyn BindingBackend + Send>
+                    Ok(Box::new(nfs))
                 }
                 #[cfg(feature = "smb")]
                 "smb" => {
@@ -1400,12 +1401,12 @@ impl NfsClient {
                         SmbConnectOptions::default().with_auto_reconnect(auto_reconnect);
                     options.connect_timeout = connect_timeout;
                     options.request_timeout = request_timeout;
-                    Box::new(
+                    Ok(Box::new(
                         SmbVecFs::connect_with_options(
                             host, share, username, password, domain, options,
                         )
                         .map_err(|e| to_py_err(e, Some(Path::new(host)), None))?,
-                    ) as Box<dyn BindingBackend + Send>
+                    ))
                 }
                 #[cfg(feature = "dummy")]
                 "dummy" => {
@@ -1428,18 +1429,13 @@ impl NfsClient {
                     }
                     std::fs::create_dir_all(&root_path)
                         .map_err(|e| PyOSError::new_err(format!("create dummy root: {}", e)))?;
-                    Box::new(
+                    Ok(Box::new(
                         vfsi_posix::backend(root_path)
                             .map_err(|error| PyOSError::new_err(error.to_string()))?,
-                    ) as Box<dyn BindingBackend + Send>
+                    ))
                 }
-                other => {
-                    return Err(PyValueError::new_err(format!(
-                        "unknown backend: {:?}",
-                        other
-                    )));
-                }
-            })
+                other => Err(PyValueError::new_err(format!("unknown backend: {other:?}"))),
+            }
         })?;
         Ok(NfsClient {
             fs: Mutex::new(Some(fs)),
