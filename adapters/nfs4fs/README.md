@@ -462,6 +462,10 @@ visible when the TTL expires or when the caller requests a refresh. Use
   Outside a transaction, a later write or callback failure can leave an empty
   or partially written file. Cleanup closes the descriptor but does not unlink
   the destination, which may have been replaced by another writer.
+- Use `fs.open(..., compression=...)` for scalar codec opens. This method
+  and `fs.open_many` reject compressed update modes such as `r+b` before
+  opening any files. A standalone `fsspec.OpenFile` applies its codec after
+  opening the underlying file.
 - A file handle rejects further writes after a write error that reports a
   committed prefix or uncertain completion. Close the handle and check the
   file's contents before reopening it.

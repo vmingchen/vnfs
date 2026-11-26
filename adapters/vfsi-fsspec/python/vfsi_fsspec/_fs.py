@@ -49,7 +49,7 @@ def _path_string(path):
     return os.fsdecode(path) if isinstance(path, os.PathLike) else path
 
 
-def _normalize_mode(mode):
+def _normalize_mode(mode, *, compression=None):
     """Collapse 'b'/'t' characters: 'rt'/'r'/'rb' -> 'r', 'wb+' -> 'w+', ..."""
     if not isinstance(mode, str):
         raise TypeError("mode must be a string")
@@ -65,6 +65,8 @@ def _normalize_mode(mode):
         "x+",
     ):
         raise ValueError(f"unsupported mode: {mode!r}")
+    if compression is not None and base.endswith("+"):
+        raise NotImplementedError("compressed update modes are unsupported")
     return base
 
 
@@ -620,7 +622,8 @@ def _validate_text_options(options):
 
 def _open_with_wrappers(fs, opener, path, mode="rb", compression=None, **kwargs):
     """Construct text/codecs with one owner and shared failure cleanup."""
-    base_mode = _normalize_mode(mode)
+    codec = get_compression(path, compression) if compression is not None else None
+    base_mode = _normalize_mode(mode, compression=codec)
     text = "b" not in mode
     text_kwargs = {
         key: kwargs.pop(key)
@@ -628,7 +631,6 @@ def _open_with_wrappers(fs, opener, path, mode="rb", compression=None, **kwargs)
         if text and key in kwargs
     }
     binary_mode = mode.replace("t", "") + "b" if text else mode
-    codec = get_compression(path, compression) if compression is not None else None
     if text_kwargs and base_mode != "r":
         _validate_text_options(text_kwargs)
     file = None
@@ -6276,7 +6278,9 @@ class VfsiFileSystem(AbstractFileSystem):
         location can back one buffered reader.
         """
         paths = [self._checked_strip_protocol(f.path) for f in open_files]
-        modes = [_normalize_mode(f.mode) + "b" for f in open_files]
+        modes = [
+            _normalize_mode(f.mode, compression=f.compression) + "b" for f in open_files
+        ]
         effective_block_size, effective_cache_type, effective_cache_options = (
             self._file_options(
                 block_size, cache_type, cache_options, reading="rb" in modes

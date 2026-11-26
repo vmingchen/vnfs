@@ -5,6 +5,7 @@ import errno
 import gzip
 import os
 
+import fsspec
 import pytest
 from fsspec.core import OpenFile, OpenFiles
 
@@ -71,6 +72,44 @@ def test_grouped_wrappers_preserve_formats_and_batch_opens(
     assert len(batches) == 2
     assert all(reader.closed for reader in readers)
     assert not fs._client._fds
+
+
+@pytest.mark.parametrize("entry_point", ["scalar", "grouped", "cached"])
+@pytest.mark.parametrize("mode", ["r+b", "w+b"])
+def test_compressed_update_rejected_before_opening_writers(
+    fs, tmp_path, entry_point, mode
+):
+    fs.pipe({"/ordinary": b"keep ordinary", "/compressed": b"keep compressed"})
+    with pytest.raises(NotImplementedError, match="compressed update modes"):
+        if entry_point == "scalar":
+            with fs.open("/compressed", mode, compression="gzip"):
+                pass
+        else:
+            target = (
+                fsspec.filesystem(
+                    "blockcache", fs=fs, cache_storage=str(tmp_path / "cache")
+                )
+                if entry_point == "cached"
+                else fs
+            )
+            sibling_mode = "rb" if entry_point == "cached" and mode == "r+b" else "wb"
+            entries = [
+                OpenFile(target, "/ordinary", mode=sibling_mode),
+                OpenFile(target, "/compressed", mode=mode, compression="gzip"),
+            ]
+            with OpenFiles(entries, mode=mode, fs=target):
+                pass
+    assert fs.cat_file("/ordinary") == b"keep ordinary"
+    assert fs.cat_file("/compressed") == b"keep compressed"
+    assert not fs._client._fds
+
+
+def test_inferred_compression_without_codec_retains_update_mode(fs):
+    fs.pipe_file("/ordinary", b"original")
+    with fs.open("/ordinary", "r+b", compression="infer") as file:
+        assert file.read(3) == b"ori"
+        assert file.write(b"test") == 4
+    assert fs.cat_file("/ordinary") == b"oritestl"
 
 
 def test_group_wrapper_setup_failure_closes_every_native_handle(fs):
