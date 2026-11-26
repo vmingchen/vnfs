@@ -119,7 +119,7 @@ impl SmbVecFs {
         Ok(())
     }
 
-    pub(super) fn filetime_value(seconds: i64, nanoseconds: u32, _index: usize) -> VfResult<u64> {
+    pub(super) fn filetime_value(seconds: i64, nanoseconds: u32) -> VfResult<u64> {
         if nanoseconds >= 1_000_000_000 {
             return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
@@ -137,22 +137,14 @@ impl SmbVecFs {
     pub(super) fn set_times_handle(
         &mut self,
         file_id: FileId,
-        atime: Option<(i64, u32)>,
-        mtime: Option<(i64, u32)>,
+        atime: u64,
+        mtime: u64,
         index: usize,
     ) -> VfResult<()> {
-        let access = match atime {
-            Some((seconds, nanoseconds)) => Self::filetime_value(seconds, nanoseconds, index)?,
-            None => 0,
-        };
-        let modified = match mtime {
-            Some((seconds, nanoseconds)) => Self::filetime_value(seconds, nanoseconds, index)?,
-            None => 0,
-        };
         let mut buffer = Vec::with_capacity(40);
         buffer.extend_from_slice(&0u64.to_le_bytes()); // creation: unchanged
-        buffer.extend_from_slice(&access.to_le_bytes());
-        buffer.extend_from_slice(&modified.to_le_bytes());
+        buffer.extend_from_slice(&atime.to_le_bytes());
+        buffer.extend_from_slice(&mtime.to_le_bytes());
         buffer.extend_from_slice(&0u64.to_le_bytes()); // change: unchanged
         buffer.extend_from_slice(&0u32.to_le_bytes()); // attributes: unchanged
         buffer.extend_from_slice(&0u32.to_le_bytes()); // reserved
@@ -178,8 +170,8 @@ impl SmbVecFs {
     pub(super) fn set_times_path(
         &mut self,
         path: &str,
-        atime: Option<(i64, u32)>,
-        mtime: Option<(i64, u32)>,
+        atime: u64,
+        mtime: u64,
         index: usize,
     ) -> VfResult<()> {
         let is_directory = self.client_stat(path)?.is_directory;

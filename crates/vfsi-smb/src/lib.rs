@@ -122,7 +122,7 @@ fn check_share_routing(is_dfs: bool, share: &str) -> VfRes {
     Ok(())
 }
 
-fn checked_offset(base: u64, delta: u64, _index: usize) -> VfResult<u64> {
+fn checked_offset(base: u64, delta: u64) -> VfResult<u64> {
     base.checked_add(delta)
         .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))
 }

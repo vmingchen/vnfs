@@ -49,7 +49,7 @@ impl SmbVecFs {
         let length_u64 = u64::try_from(length).map_err(|_| {
             OpError::not_attempted(std::io::Error::from_raw_os_error(libc::EOVERFLOW))
         })?;
-        checked_offset(offset, length_u64, 0).map_err(OpError::not_attempted)?;
+        checked_offset(offset, length_u64).map_err(OpError::not_attempted)?;
         let max_read = self
             .client
             .params()
@@ -129,7 +129,7 @@ impl SmbVecFs {
         let length = u64::try_from(data.len()).map_err(|_| {
             OpError::not_attempted(std::io::Error::from_raw_os_error(libc::EOVERFLOW))
         })?;
-        checked_offset(offset, length, 0).map_err(OpError::not_attempted)?;
+        checked_offset(offset, length).map_err(OpError::not_attempted)?;
         if self.client.is_disconnected() {
             return Err(OpError::not_attempted(
                 vfsi_core::internal::errors::transport(
@@ -237,7 +237,7 @@ impl SmbVecFs {
         if length == 0 {
             return Ok(Vec::new());
         }
-        checked_offset(offset, length as u64, 0).map_err(OpError::not_attempted)?;
+        checked_offset(offset, length as u64).map_err(OpError::not_attempted)?;
         let max_read = self
             .client
             .params()
@@ -293,7 +293,7 @@ impl SmbVecFs {
         flags: i32,
         create_collision: Option<&mut bool>,
     ) -> OpResult<usize> {
-        checked_offset(offset, data.len() as u64, 0).map_err(OpError::not_attempted)?;
+        checked_offset(offset, data.len() as u64).map_err(OpError::not_attempted)?;
         let max_write = self
             .client
             .params()
@@ -406,7 +406,7 @@ impl SmbVecFs {
             )));
         }
         if let VfOffset::At(offset) = op.offset {
-            checked_offset(offset, op.length as u64, 0).map_err(OpError::not_attempted)?;
+            checked_offset(offset, op.length as u64).map_err(OpError::not_attempted)?;
         }
         let Some(fd) = op.file.fd() else {
             if matches!(op.file, FileOperand::Saved) {

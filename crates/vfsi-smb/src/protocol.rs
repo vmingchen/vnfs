@@ -741,7 +741,7 @@ pub(super) async fn concurrent_compound_write_inner(
     create_collision: Option<&mut bool>,
 ) -> OpResult<usize> {
     let tree_id = tree.tree_id;
-    checked_offset(offset, data.len() as u64, 0).map_err(OpError::not_attempted)?;
+    checked_offset(offset, data.len() as u64).map_err(OpError::not_attempted)?;
     let write = WriteRequest {
         data_offset: 0x70,
         offset,

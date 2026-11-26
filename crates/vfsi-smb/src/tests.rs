@@ -193,9 +193,8 @@ proptest! {
     fn checked_offsets_match_u64_arithmetic_at_signed_and_unsigned_boundaries(
         base in offset_boundary(),
         delta in 0u64..=4096,
-        index in 0usize..32,
     ) {
-        match (base.checked_add(delta), checked_offset(base, delta, index)) {
+        match (base.checked_add(delta), checked_offset(base, delta)) {
             (Some(expected), Ok(actual)) => prop_assert_eq!(actual, expected),
             (None, Err(error)) => {
 
@@ -307,18 +306,18 @@ fn vectorized_compound_close_failure_returns_handle_for_deferred_cleanup() {
 fn timestamp_updates_reject_protocol_controls_and_negative_filetimes() {
     for ticks in [0, u64::MAX, u64::MAX - 1, i64::MAX as u64 + 1] {
         let (seconds, nanos) = filetime_parts(FileTime(ticks));
-        let error = SmbVecFs::filetime_value(seconds, nanos, 3).unwrap_err();
+        let error = SmbVecFs::filetime_value(seconds, nanos).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
     for ticks in [1, 116_444_736_000_000_000, i64::MAX as u64] {
         let (seconds, nanos) = filetime_parts(FileTime(ticks));
-        assert_eq!(SmbVecFs::filetime_value(seconds, nanos, 3).unwrap(), ticks);
+        assert_eq!(SmbVecFs::filetime_value(seconds, nanos).unwrap(), ticks);
     }
 }
 
 #[test]
 fn pre_epoch_fractional_filetimes_round_trip() {
-    let ticks = SmbVecFs::filetime_value(-1, 500_000_000, 0).unwrap();
+    let ticks = SmbVecFs::filetime_value(-1, 500_000_000).unwrap();
     assert_eq!(filetime_parts(FileTime(ticks)), (-1, 500_000_000));
 }
 
@@ -501,7 +500,7 @@ fn credit_charge_rounds_up_and_never_returns_zero() {
 
 #[test]
 fn checked_offsets_report_native_overflow() {
-    let error = checked_offset(u64::MAX, 1, 7).unwrap_err();
+    let error = checked_offset(u64::MAX, 1).unwrap_err();
 
     assert_eq!(test_native_code(&(error)), libc::EOVERFLOW as u32);
 }
@@ -2068,6 +2067,56 @@ fn live_setattrs_size_and_times_use_one_retained_object() {
     assert_eq!(saved_data, b"or");
     assert_eq!(saved_modified, modified);
     assert_ne!(source_modified, modified);
+}
+
+#[test]
+fn live_setattrs_preserves_unrequested_timestamps() {
+    let Some(mut fs) = sync_test_backend() else {
+        eprintln!("skipping SMB integration test: VFSI_SMB_SERVER/SHARE not set");
+        return;
+    };
+    let path = PathBuf::from(format!("/setattrs-timestamps-{}", std::process::id()));
+    let file = fs
+        .open_raw_impl(&path, libc::O_RDWR | libc::O_CREAT | libc::O_EXCL, 0o666)
+        .unwrap();
+    fs.write_raw_impl(&file, 0, b"keep").unwrap();
+    fs.close_impl(&file).unwrap();
+
+    let update = |masks, atime_sec, mtime_sec| VfAttrs {
+        file: FileOperand::from_os_path(&path),
+        masks,
+        atime_sec,
+        mtime_sec,
+        ..Default::default()
+    };
+    for (attrs, expected) in [
+        (
+            update(
+                AttrMask::ATIME | AttrMask::MTIME,
+                1_600_000_001,
+                1_600_000_002,
+            ),
+            (1_600_000_001, 1_600_000_002),
+        ),
+        (
+            update(AttrMask::ATIME, 1_600_000_003, 0),
+            (1_600_000_003, 1_600_000_002),
+        ),
+        (
+            update(AttrMask::MTIME, 0, 1_600_000_004),
+            (1_600_000_003, 1_600_000_004),
+        ),
+    ] {
+        assert!(fs.vsetattrs_raw_impl(&[attrs]).unwrap()[0].is_ok());
+        let queried = AttrMask::ATIME | AttrMask::MTIME | AttrMask::SIZE;
+        let mut observed = [update(queried, 0, 0)];
+        assert!(fs.vgetattrs_impl(&mut observed).unwrap()[0].is_ok());
+        let [observed] = observed;
+        assert!(observed.returned.contains(queried));
+        assert_eq!((observed.atime_sec, observed.mtime_sec), expected);
+        assert_eq!(observed.size, 4);
+    }
+    fs.unlink_impl(&path).unwrap();
 }
 
 #[cfg(feature = "test-faults")]

@@ -460,35 +460,31 @@ impl VectorBackend for SmbVecFs {
                 if attrs.masks.contains(AttrMask::SIZE) {
                     Self::file_end_of_file(attrs.size).map_err(OpError::not_attempted)?;
                 }
-                // Validate both timestamp fields before SIZE can mutate the file.
-                for (mask, seconds, nanos) in [
-                    (AttrMask::ATIME, attrs.atime_sec, attrs.atime_nsec),
-                    (AttrMask::MTIME, attrs.mtime_sec, attrs.mtime_nsec),
-                ] {
-                    if attrs.masks.contains(mask) {
-                        Self::filetime_value(seconds, nanos, index)
-                            .map_err(OpError::not_attempted)?;
-                    }
-                }
+                // Convert both timestamps before SIZE can mutate the file.
+                // Zero leaves the corresponding SMB timestamp unchanged.
+                let atime = if attrs.masks.contains(AttrMask::ATIME) {
+                    Self::filetime_value(attrs.atime_sec, attrs.atime_nsec)
+                        .map_err(OpError::not_attempted)?
+                } else {
+                    0
+                };
+                let mtime = if attrs.masks.contains(AttrMask::MTIME) {
+                    Self::filetime_value(attrs.mtime_sec, attrs.mtime_nsec)
+                        .map_err(OpError::not_attempted)?
+                } else {
+                    0
+                };
                 if let Some(cause) = &unavailable {
                     return Err(OpError::not_attempted(
                         vfsi_core::internal::errors::from_shared(cause),
                     ));
                 }
                 let size = attrs.masks.contains(AttrMask::SIZE).then_some(attrs.size);
-                let atime = attrs
-                    .masks
-                    .contains(AttrMask::ATIME)
-                    .then_some((attrs.atime_sec, attrs.atime_nsec));
-                let mtime = attrs
-                    .masks
-                    .contains(AttrMask::MTIME)
-                    .then_some((attrs.mtime_sec, attrs.mtime_nsec));
                 let update_handle = |backend: &mut Self, id| {
                     if let Some(size) = size {
                         backend.set_size_handle(id, size)?;
                     }
-                    if atime.is_some() || mtime.is_some() {
+                    if atime != 0 || mtime != 0 {
                         backend.set_times_handle(id, atime, mtime, index)?;
                     }
                     Ok(())
@@ -1057,12 +1053,12 @@ impl SmbVecFs {
         // Keep queued jobs and their per-request credit waits bounded, even
         // when the caller supplies a large vector of small ranges.
         let concurrency = usize::from(connection.credits() / charge).clamp(1, 32);
-        let jobs = reads.iter().enumerate().map(|(index, read)| {
+        let jobs = reads.iter().map(|read| {
             let prepared = (|| {
                 let VfOffset::At(offset) = read.offset else {
                     unreachable!("eligible positional read");
                 };
-                checked_offset(offset, read.length as u64, index)?;
+                checked_offset(offset, read.length as u64)?;
                 let fd = read.file.fd().expect("eligible descriptor read");
                 let open = self.live_file(fd)?;
                 if !open.readable {
@@ -1145,7 +1141,7 @@ impl SmbVecFs {
                 let VfOffset::At(offset) = read.offset else {
                     unreachable!()
                 };
-                checked_offset(offset, read.length as u64, index)?;
+                checked_offset(offset, read.length as u64)?;
                 let path = self.path_string(&self.file_path(&read.file)?)?;
                 self.open_request(&path, libc::O_RDONLY)
             })();
@@ -1260,7 +1256,7 @@ impl SmbVecFs {
                     let VfOffset::At(offset) = write.offset() else {
                         unreachable!("concurrent eligibility checked")
                     };
-                    checked_offset(offset, write.data().len() as u64, index)?;
+                    checked_offset(offset, write.data().len() as u64)?;
                     let path = self.path_string(&self.file_path(write.file())?)?;
                     let create = self.open_request(&path, libc::O_WRONLY)?;
                     let mut identity_create = self.open_request(&path, libc::O_RDONLY)?;

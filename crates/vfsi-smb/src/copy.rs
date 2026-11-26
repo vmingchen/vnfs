@@ -520,8 +520,7 @@ impl SmbVecFs {
         let available = src_size.saturating_sub(pair.src_offset);
         let length = pair.length.unwrap_or(available).min(available);
         // Validate the effective range before creating the destination.
-        if let Err(error) =
-            checked_offset(pair.dst_offset, length, 0).and_then(Self::file_end_of_file)
+        if let Err(error) = checked_offset(pair.dst_offset, length).and_then(Self::file_end_of_file)
         {
             let _ = self.copy_close_handle(src_id, false);
             return Err(error);
@@ -563,7 +562,7 @@ impl SmbVecFs {
                     self.copy_client_range(src_id, dst_id, pair, length)?
                 }
             };
-            self.set_size_handle(dst_id, checked_offset(pair.dst_offset, copied, 0)?)?;
+            self.set_size_handle(dst_id, checked_offset(pair.dst_offset, copied)?)?;
             self.raw_flush(dst_id)?;
             Ok(Some(copied))
         })();
@@ -598,14 +597,14 @@ impl SmbVecFs {
         while copied < length {
             let wanted = (length - copied).min(1 << 20) as usize;
             let data = self
-                .raw_read(src_id, checked_offset(pair.src_offset, copied, 0)?, wanted)
+                .raw_read(src_id, checked_offset(pair.src_offset, copied)?, wanted)
                 .map_err(vfsi_core::OpError::into_cause)?;
             if data.is_empty() {
                 break;
             }
-            self.raw_write(dst_id, checked_offset(pair.dst_offset, copied, 0)?, &data)
+            self.raw_write(dst_id, checked_offset(pair.dst_offset, copied)?, &data)
                 .map_err(vfsi_core::OpError::into_cause)?;
-            copied = checked_offset(copied, data.len() as u64, 0)?;
+            copied = checked_offset(copied, data.len() as u64)?;
         }
         Ok(copied)
     }
