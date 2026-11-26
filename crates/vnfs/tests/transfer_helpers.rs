@@ -2054,8 +2054,21 @@ fn standard_io_adapter_uses_vectors_and_has_an_independent_retained_cursor() {
     assert!(bad_io.read(&mut prefix).is_err());
     assert_eq!(bad_io.stream_position().unwrap(), 0);
     fs.fault.set(Fault::BadWrite);
-    assert!(bad_io.write_all(b"x").is_err());
-    assert_eq!(bad_io.stream_position().unwrap(), 0);
+    assert_eq!(
+        vfsi_core::transport_kind(&bad_io.write_all(b"x").unwrap_err()),
+        Some(TransportKind::InvalidReply)
+    );
+    let writes = fs.calls.borrow().writes;
+    fs.fault.set(Fault::None);
+    assert!(bad_io.stream_position().is_err());
+    assert!(bad_io.write_all(b"y").is_err());
+    assert_eq!(fs.calls.borrow().writes, writes);
+
+    bad_io.seek(SeekFrom::Start(0)).unwrap();
+    bad_io.write_all(b"z").unwrap();
+    assert_eq!(fs.calls.borrow().writes, writes + 1);
+    assert_eq!(fs.fs.read("/retained").unwrap(), b"zbcdXY");
+    assert_eq!(fs.fs.read("/io").unwrap(), b"replacement");
 }
 #[test]
 fn standard_io_requires_a_seek_after_an_uncertain_write_without_progress() {

@@ -642,8 +642,9 @@ pub trait VfsiExt: Vfsi {
     /// Nonempty write_all also reports a failure after a fully acknowledged payload.
     /// The cursor is then unresolved: progress does not contain an actual append
     /// offset. After observing the error, an explicit absolute/end-based seek
-    /// re-establishes it. An uncertain write also leaves the cursor unresolved
-    /// if no bytes could be confirmed. Whole-call rejections retain std::io::Error.
+    /// re-establishes it. An uncertain write with no confirmed bytes or a
+    /// malformed write reply also leaves the cursor unresolved. Whole-call
+    /// rejections retain std::io::Error.
     /// Uncertain writes and errors after acknowledged bytes are never retryable Interrupted.
     fn std_io<'a>(
         &'a self,

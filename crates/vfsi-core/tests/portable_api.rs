@@ -31,6 +31,7 @@ impl FileHandle for TestFile {
 struct PortableFs {
     reads: Cell<usize>,
     streams: Cell<usize>,
+    writes: Cell<usize>,
     stream_index_shift: Cell<usize>,
     listings: Cell<usize>,
     shape: Cell<u8>,
@@ -158,7 +159,15 @@ impl Vfsi for PortableFs {
         requests: &[WriteOp<'a, TestFile>],
         _: WriteOptions,
     ) -> vfsi_core::VecResult<WriteOutput> {
+        self.writes.set(self.writes.get() + 1);
         let (offset, bytes_written) = match self.shape.get() {
+            21 => return Ok(Vec::new()),
+            22 => {
+                return Ok(vec![Err(OpError::failed(
+                    std::io::Error::from(ErrorKind::Interrupted),
+                    Some(IoProgress::Write { bytes_written: 2 }),
+                ))]);
+            }
             17 => (5, 1),
             18 => (5, 3),
             19 => (u64::MAX, 1),
@@ -393,6 +402,34 @@ fn tree_fs() -> PortableFs {
     PortableFs {
         tree: Cell::new(true),
         ..Default::default()
+    }
+}
+
+#[test]
+fn malformed_std_io_write_replies_require_cursor_recovery() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let fs = PortableFs::default();
+    let file = TestFile;
+    for shape in [18, 19, 21, 22] {
+        let mut io = fs.std_io(&file);
+        io.seek(SeekFrom::Start(5)).unwrap();
+        fs.shape.set(shape);
+        assert_eq!(
+            vfsi_core::transport_kind(&io.write(b"x").unwrap_err()),
+            Some(vfsi_core::TransportKind::InvalidReply),
+        );
+
+        let calls = fs.writes.get();
+        fs.shape.set(17);
+        assert!(io.stream_position().is_err(), "shape {shape}");
+        assert!(io.write(b"y").is_err(), "shape {shape}");
+        assert_eq!(fs.writes.get(), calls);
+
+        io.seek(SeekFrom::Start(5)).unwrap();
+        assert_eq!(io.write(b"z").unwrap(), 1);
+        assert_eq!(io.stream_position().unwrap(), 6);
+        assert_eq!(fs.writes.get(), calls + 1);
     }
 }
 

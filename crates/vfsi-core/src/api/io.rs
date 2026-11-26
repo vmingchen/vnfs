@@ -27,8 +27,9 @@ pub enum SyncMode {
 /// reported before further I/O, on flush, or on seek. Re-establish that unresolved
 /// cursor with an explicit seek after observing the error. Nonempty write_all
 /// reports its saved failure even when the entire payload was acknowledged.
-/// An uncertain write without a confirmed prefix also leaves the cursor
-/// unresolved. Reconcile the file and seek explicitly before resuming I/O.
+/// An uncertain write without a confirmed prefix or a malformed write reply
+/// also leaves the cursor unresolved. Reconcile the file and seek explicitly
+/// before resuming I/O.
 pub(super) struct StdIo<'a, C: Vfsi + ?Sized> {
     client: &'a C,
     file: &'a C::File,
@@ -142,6 +143,11 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
             }
         }
     }
+    fn invalid_write_reply(&mut self, message: &'static str) -> Error {
+        self.cursor = Cursor::Unresolved(None);
+        invalid(message)
+    }
+
     fn write_at(&mut self, buffer: &[u8]) -> io::Result<usize> {
         self.report_pending_error()?;
         let position = self.known_position()?;
@@ -152,7 +158,7 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
             WriteOptions::new(),
         )?;
         if values.len() != 1 {
-            return Err(invalid("invalid write count"));
+            return Err(self.invalid_write_reply("invalid write count"));
         }
         let value = match values.pop().expect("one write outcome") {
             Ok(value) => value,
@@ -166,7 +172,7 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
                     Some(crate::IoProgress::Read(_) | crate::IoProgress::Stream { .. }) => false,
                 };
                 if !valid {
-                    return Err(invalid("invalid write failure progress"));
+                    return Err(self.invalid_write_reply("invalid write failure progress"));
                 }
                 // The standard write_all implementation retries Interrupted.
                 // Never let that replay an uncertain or acknowledged prefix.
@@ -197,15 +203,14 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
             }
         };
         if value.bytes_written > buffer.len() {
-            return Err(invalid("invalid write progress"));
+            return Err(self.invalid_write_reply("invalid write progress"));
         }
         // Append descriptors report the actual position selected by the backend.
-        self.cursor = Cursor::at(
-            value
-                .offset
-                .checked_add(value.bytes_written as u64)
-                .ok_or_else(|| invalid("write offset overflow"))?,
-        );
+        let end = value
+            .offset
+            .checked_add(value.bytes_written as u64)
+            .ok_or_else(|| self.invalid_write_reply("write offset overflow"))?;
+        self.cursor = Cursor::at(end);
         Ok(value.bytes_written)
     }
 }
