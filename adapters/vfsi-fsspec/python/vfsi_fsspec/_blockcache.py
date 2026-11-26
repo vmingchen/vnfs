@@ -37,6 +37,7 @@ from ._fs import (
     _oserror,
     _OwnedStream,
     _rebase_error,
+    _require_size,
     _stale_handle_error,
 )
 
@@ -320,7 +321,7 @@ def _reset_stale_generation(cache_fs, path):
         {
             "fn": f"vfsi-{uuid.uuid4().hex}",
             "blocks": set(),
-            "size": info["size"],
+            "size": _require_size(info, path),
             "time": time.time(),
             "uid": cache_fs.fs._ukey_from_info(info),
             "identity": _handle_identity(info),
@@ -721,12 +722,11 @@ def _prepare_cache_records(cache_fs, paths):
         for index, info in zip(info_indices, infos):
             records[index]["info"] = info
 
-    replacements = []
+    replacements = {}
     prepared = {}
     writable_cache = cache_fs._metadata.cached_files[-1]
-    previous = writable_cache.copy()
     now = time.time()
-    for path, record in zip(paths, records):
+    for index, (path, record) in enumerate(zip(paths, records)):
         if path in prepared:
             record.update(prepared[path])
             continue
@@ -756,7 +756,7 @@ def _prepare_cache_records(cache_fs, paths):
             {
                 "fn": f"vfsi-{uuid.uuid4().hex}",
                 "blocks": set(),
-                "size": info["size"],
+                "size": _require_size(info, path, index=index),
                 "time": now,
                 "uid": cache_fs.fs._ukey_from_info(info),
                 "identity": _handle_identity(info),
@@ -764,13 +764,15 @@ def _prepare_cache_records(cache_fs, paths):
             }
         )
         replacement.pop("blocksize", None)
-        writable_cache[path] = replacement
         record["detail"] = replacement
         record["filename"] = _backing_path(cache_fs, replacement)
-        replacements.append(record)
+        replacements[path] = record
 
     if replacements:
-        _publish_generations(cache_fs, replacements, previous)
+        previous = writable_cache.copy()
+        for path, record in replacements.items():
+            writable_cache[path] = record["detail"]
+        _publish_generations(cache_fs, replacements.values(), previous)
     return records
 
 

@@ -127,6 +127,59 @@ def test_retired_cache_files_are_unlinked_and_duplicate_paths_share_a_generation
             previous = filename
 
 
+@pytest.mark.parametrize("grouped", [False, True])
+def test_blockcache_reports_missing_size_before_replacing_generations(
+    tmp_path, monkeypatch, grouped
+):
+    with _filesystem(tmp_path / "remote") as fs:
+        storage = tmp_path / "cache"
+        cached = fsspec.filesystem(
+            "blockcache",
+            fs=fs,
+            cache_storage=str(storage),
+            skip_instance_cache=True,
+        )
+        fs.pipe({"/good": b"good", "/bad": b"old"})
+        with cached.open("/bad", "rb") as file:
+            assert file.read() == b"old"
+        fs.pipe_file("/bad", b"new")
+        contents = set(storage.iterdir())
+        stat_many = fs._client.stat_many
+
+        def stat_without_size(paths):
+            stats, errors = stat_many(paths)
+            return [
+                (
+                    {key: value for key, value in attrs.items() if key != "size"}
+                    if attrs is not None and name == "/bad"
+                    else attrs
+                )
+                for name, attrs in zip(paths, stats)
+            ], errors
+
+        with monkeypatch.context() as patch:
+            patch.setattr(fs._client, "stat_many", stat_without_size)
+            with pytest.raises(OSError, match="size metadata is unavailable") as caught:
+                if grouped:
+                    cached.open_many(
+                        [
+                            OpenFile(cached, name, mode="rb")
+                            for name in ["/good", "/bad"]
+                        ]
+                    )
+                else:
+                    cached.open("/bad", "rb")
+
+        assert caught.value.errno == errno.EIO
+        assert caught.value.filename == "/bad"
+        assert getattr(caught.value, "index", None) == (1 if grouped else None)
+        assert set(cached._metadata.cached_files[-1]) == {"/bad"}
+        assert set(storage.iterdir()) == contents
+        assert not fs._client._fds
+        with cached.open("/bad", "rb") as file:
+            assert file.read() == b"new"
+
+
 @pytest.mark.parametrize("operation", ["pipe", "put", "transaction"])
 @pytest.mark.parametrize("progress", [2, 0])
 def test_streamed_uploads_complete_short_writes_or_reject_zero_progress(
