@@ -6283,7 +6283,8 @@ class VfsiFileSystem(AbstractFileSystem):
         """
         paths = [self._checked_strip_protocol(f.path) for f in open_files]
         modes = [
-            _normalize_mode(f.mode, compression=f.compression) + "b" for f in open_files
+            _normalize_mode(f.mode, compression=getattr(f, "compression", None)) + "b"
+            for f in open_files
         ]
         effective_block_size, effective_cache_type, effective_cache_options = (
             self._file_options(

@@ -793,7 +793,9 @@ def _open_many_with_cache(cache_fs, open_files):
     if not _is_compatible_backend(cache_fs):
         return _delegate_open_many(cache_fs, open_files)
     for open_file in open_files:
-        _normalize_mode(open_file.mode, compression=open_file.compression)
+        _normalize_mode(
+            open_file.mode, compression=getattr(open_file, "compression", None)
+        )
     _register_cache(cache_fs)
     if not all(_is_plain_read(open_file) for open_file in open_files):
         if all("r" in open_file.mode for open_file in open_files):

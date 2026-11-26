@@ -320,16 +320,28 @@ def test_hardlink_retires_cached_source_alias(cached_fs, source_kind):
     assert fs.ls("/alias")[0]["nlink"] == 3
 
 
-def test_partial_writable_open_many_failure_invalidates_created_prefix(cached_fs):
+@pytest.mark.parametrize("blockcache", [False, True])
+def test_partial_writable_open_many_failure_invalidates_created_prefix(
+    cached_fs, tmp_path_factory, blockcache
+):
     fs = cached_fs
     assert fs.ls("/") == []
+    target = (
+        fsspec.filesystem(
+            "blockcache",
+            fs=fs,
+            cache_storage=str(tmp_path_factory.mktemp("blockcache")),
+        )
+        if blockcache
+        else fs
+    )
     open_files = [
         SimpleNamespace(path="/created", mode="xb"),
         SimpleNamespace(path="/missing/fails", mode="xb"),
     ]
 
     with pytest.raises(FileNotFoundError):
-        fs.open_many(open_files)
+        target.open_many(open_files)
 
     assert fs.exists("/created")
     assert fs.ls("/", detail=False) == ["nfs4:///created"]
