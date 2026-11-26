@@ -23,6 +23,32 @@ fn auto_empty_batches_do_not_read_mounts() {
 }
 
 #[test]
+fn auto_public_continuation_does_not_rediscover_mounts() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("first"), b"first").unwrap();
+    std::fs::write(root.path().join("second"), b"second").unwrap();
+    let client = Auto::new(root.path()).unwrap();
+    let options = ListDirOptions::new();
+    let size = std::num::NonZeroUsize::MIN;
+    let mut first = client
+        .vlistdir_pages(&["/"], vec![None], options, size)
+        .unwrap()
+        .remove(0)
+        .unwrap();
+    let first_entry = first.listing.entries.remove(0);
+    let continuation = first.continuation.take().unwrap();
+    let before = routing::MOUNT_INFO_READS.get();
+    let second = client
+        .vlistdir_pages(&["/"], vec![Some(continuation)], options, size)
+        .unwrap()
+        .remove(0)
+        .unwrap();
+    assert_eq!(second.listing.entries.len(), 1);
+    assert_ne!(second.listing.entries[0].path(), first_entry.path());
+    assert_eq!(routing::MOUNT_INFO_READS.get(), before);
+}
+
+#[test]
 fn auto_metadata_routes_only_admitted_path_operands() {
     use crate::{AttrsOptions, SetAttrsOp, Target, VfsiExt};
     use vfsi_core::FailureState;

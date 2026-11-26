@@ -23,6 +23,10 @@ impl NativeDirectoryCursor {
         self.0.is::<T>()
     }
 
+    pub fn state<T: std::any::Any + Send>(&self) -> Option<&T> {
+        self.0.downcast_ref()
+    }
+
     pub fn into_state<T: std::any::Any + Send>(self) -> VfResult<T> {
         self.0
             .downcast::<T>()
@@ -87,7 +91,7 @@ pub fn native_directory_pages<P: AsRef<Path>>(
     cursors: Vec<Option<DirectoryCursor>>,
     options: ListDirOptions,
     page_size: NonZeroUsize,
-    mut capacity: impl FnMut(&[&Path]) -> Result<usize>,
+    mut capacity: impl FnMut(&[(&Path, Option<&NativeDirectoryCursor>)]) -> Result<usize>,
     mut fetch: impl FnMut(
         &[&Path],
         Vec<Option<NativeDirectoryCursor>>,
@@ -133,7 +137,10 @@ pub fn native_directory_pages<P: AsRef<Path>>(
     let mut remaining_entries = options.max_entries_or(super::DEFAULT_DIRECTORY_MAX_ENTRIES);
     let mut remaining_bytes = options.max_path_bytes_or(super::DEFAULT_DIRECTORY_MAX_PATH_BYTES);
     while !pending.is_empty() {
-        let candidates: Vec<_> = pending.iter().map(|(index, _)| paths[*index]).collect();
+        let candidates: Vec<_> = pending
+            .iter()
+            .map(|(index, state)| (paths[*index], state.as_ref()))
+            .collect();
         let width = match capacity(&candidates) {
             Ok(width) => width.clamp(1, 32).min(pending.len()),
             Err(cause) => {
@@ -599,8 +606,12 @@ mod tests {
                 vec![None, Some(cursor)],
                 ListDirOptions::new(),
                 NonZeroUsize::new(1).unwrap(),
-                |paths| {
-                    assert_eq!(paths, &[Path::new("/missing")]);
+                |candidates| {
+                    let [(path, cursor)] = candidates else {
+                        panic!("expected one candidate")
+                    };
+                    assert_eq!(*path, Path::new("/missing"));
+                    assert!(cursor.is_none());
                     Ok(32)
                 },
                 |paths, cursors, _, _| {
@@ -670,8 +681,12 @@ mod tests {
             vec![a.continuation, a.children.into_iter().next()],
             ListDirOptions::new().with_fields(Attributes::SIZE | Attributes::FILEID),
             page_size,
-            |paths| {
-                assert_eq!(paths, [Path::new("/a/child")]);
+            |candidates| {
+                let [(path, cursor)] = candidates else {
+                    panic!("expected one candidate")
+                };
+                assert_eq!(*path, Path::new("/a/child"));
+                assert!(cursor.is_some());
                 Ok(32)
             },
             |paths, cursors, _, _| {

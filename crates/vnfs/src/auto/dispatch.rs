@@ -821,19 +821,33 @@ impl Auto {
     }
 
     pub(crate) fn directory_page_batch_size(&self, paths: &[&Path]) -> VfResult<usize> {
-        let Some((first, rest)) = paths.split_first() else {
+        self.directory_page_capacity(paths.iter().map(|&path| (path, None)))
+    }
+
+    fn directory_page_capacity<'a>(
+        &self,
+        mut candidates: impl Iterator<Item = (&'a Path, Option<&'a vfsi_sync::DirPageCursor>)>,
+    ) -> VfResult<usize> {
+        let Some((path, cursor)) = candidates.next() else {
             return Ok(1);
         };
-        let mounts = read_mounts(false);
-        let first = self.resolve(first, &mounts).route;
+        let mut mounts = None;
+        let mut route = |path, cursor: Option<&vfsi_sync::DirPageCursor>| {
+            if let Some(saved) = cursor.and_then(|state| state.state::<RoutedDirectoryCursor>()) {
+                return saved.route.clone();
+            }
+            // Fresh pages and child seeds still resolve the current route.
+            self.resolve(path, mounts.get_or_insert_with(|| read_mounts(false)))
+                .route
+        };
+        let first = route(path, cursor);
         let Route::Nfs(connection) = &first else {
             return Ok(1);
         };
         let limit = connection.client.directory_page_batch_size()?;
-        let siblings = rest
-            .iter()
+        let siblings = candidates
             .take(limit - 1)
-            .take_while(|path| first.same_backend(&self.resolve(path, &mounts).route))
+            .take_while(|&(path, cursor)| first.same_backend(&route(path, cursor)))
             .count();
         Ok(1 + siblings)
     }
@@ -1638,7 +1652,7 @@ impl super::Auto {
             cursors,
             options,
             page_size,
-            |paths| self.directory_page_batch_size(paths),
+            |candidates| self.directory_page_capacity(candidates.iter().copied()),
             |paths, states, size, probe| {
                 self.read_dir_pages_with_fields(
                     paths,
