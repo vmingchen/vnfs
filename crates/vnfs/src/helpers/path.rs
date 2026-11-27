@@ -116,7 +116,9 @@ impl PathMapper {
         paths: &[P],
         policy: ResolvePath,
     ) -> std::result::Result<Vec<PathBuf>, IndexedError> {
-        let mut parents = std::collections::HashMap::new();
+        // A cohort of siblings needs one canonical parent and no hash table.
+        let mut first_parent = None;
+        let mut other_parents = std::collections::HashMap::new();
         paths
             .iter()
             .enumerate()
@@ -127,11 +129,14 @@ impl PathMapper {
                         return self.map(path, policy);
                     }
                     let (parent, name) = terminal(path)?;
-                    let resolved = match parents.entry(parent) {
-                        Entry::Occupied(entry) => entry.into_mut(),
-                        Entry::Vacant(entry) => entry.insert(
-                            std::fs::canonicalize(parent).map_err(|e| io_error(parent, e))?,
-                        ),
+                    let resolve = || std::fs::canonicalize(parent).map_err(|e| io_error(parent, e));
+                    let resolved = match &first_parent {
+                        None => &first_parent.insert((parent, resolve()?)).1,
+                        Some((first, resolved)) if *first == parent => resolved,
+                        Some(_) => match other_parents.entry(parent) {
+                            Entry::Occupied(entry) => entry.into_mut(),
+                            Entry::Vacant(entry) => entry.insert(resolve()?),
+                        },
                     };
                     self.map_terminal(resolved, name)
                 })();
