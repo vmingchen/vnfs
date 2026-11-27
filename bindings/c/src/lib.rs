@@ -728,7 +728,13 @@ unsafe fn cstr_utf8(value: *const c_char) -> Option<String> {
 
 fn path_for(fs: &vfsi_fs, path: &Path) -> Option<PathBuf> {
     let rel = path.strip_prefix(&fs.mountpoint).ok()?;
-    let mut mapped = fs.backend_root.clone();
+    if rel.as_os_str().is_empty() {
+        return Some(fs.backend_root.clone());
+    }
+    // Reserve the mapped path once, including room to join the root and suffix.
+    let mut mapped =
+        PathBuf::with_capacity(fs.backend_root.as_os_str().len() + rel.as_os_str().len() + 1);
+    mapped.push(&fs.backend_root);
     for component in rel.components() {
         match component {
             Component::Normal(part) => mapped.push(part),
