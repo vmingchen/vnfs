@@ -102,18 +102,22 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
         let value = match values.into_iter().next().expect("validated read count") {
             Ok(value) => value,
             Err(error) => {
-                let (cause, _, progress) = error.into_parts();
+                let (cause, state, progress) = error.into_parts();
                 match progress {
+                    None => return Err(cause),
                     Some(crate::IoProgress::Read(prefix))
-                        if prefix.is_buffered()
+                        if state != crate::FailureState::NotAttempted
+                            && prefix.is_buffered()
                             && prefix.offset() == position
-                            && prefix.bytes_read() > 0
                             && prefix.bytes_read() <= length =>
                     {
+                        if prefix.bytes_read() == 0 {
+                            return Err(cause);
+                        }
                         pending = Some(crate::internal::errors::suppress_interrupted(cause));
                         prefix
                     }
-                    _ => return Err(cause),
+                    Some(_) => return Err(invalid("invalid read failure progress")),
                 }
             }
         };

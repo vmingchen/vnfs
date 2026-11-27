@@ -121,6 +121,20 @@ impl Vfsi for PortableFs {
                 "rejected before dispatch",
             ));
         }
+        if matches!(self.shape.get(), 23 | 24) {
+            if self.reads.get() > 1 {
+                return Ok(vec![Ok(ReadOutput::buffered(0, 0, true))]);
+            }
+            let progress = if self.shape.get() == 23 {
+                IoProgress::Read(ReadOutput::buffered(1, 1, false))
+            } else {
+                IoProgress::Write { bytes_written: 1 }
+            };
+            return Ok(vec![Err(OpError::unknown(
+                std::io::Error::from(ErrorKind::Interrupted),
+                Some(progress),
+            ))]);
+        }
         let mut results: Vec<_> = ops
             .into_iter()
             .take(if matches!(self.shape.get(), 7 | 20) {
@@ -402,6 +416,29 @@ fn tree_fs() -> PortableFs {
     PortableFs {
         tree: Cell::new(true),
         ..Default::default()
+    }
+}
+
+#[test]
+fn std_io_collectors_reject_malformed_read_failures_without_retry() {
+    use std::io::{Read, Seek};
+
+    let file = TestFile;
+    for shape in [23, 24] {
+        let fs = PortableFs {
+            shape: Cell::new(shape),
+            ..Default::default()
+        };
+        let mut io = fs.std_io(&file);
+        let mut output = b"existing".to_vec();
+        let error = io.read_to_end(&mut output).unwrap_err();
+        assert_eq!(
+            vfsi_core::transport_kind(&error),
+            Some(vfsi_core::TransportKind::InvalidReply),
+        );
+        assert_eq!(output, b"existing");
+        assert_eq!(io.stream_position().unwrap(), 0);
+        assert_eq!(fs.reads.get(), 1);
     }
 }
 
