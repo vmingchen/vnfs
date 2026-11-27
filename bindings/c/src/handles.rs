@@ -50,7 +50,7 @@ fn insert_c_file(
     fs: &vfsi_fs,
     files: &mut std::collections::HashMap<i32, CFile>,
     file: CFile,
-) -> Result<i32, std::io::Error> {
+) -> Result<i32, (std::io::Error, CFile)> {
     for _ in 0..i32::MAX {
         let fd = loop {
             let current = fs.next_fd.load(Ordering::Relaxed);
@@ -68,7 +68,7 @@ fn insert_c_file(
             return Ok(fd);
         }
     }
-    Err(std::io::Error::from_raw_os_error(libc::EMFILE))
+    Err((std::io::Error::from_raw_os_error(libc::EMFILE), file))
 }
 
 fn open_impl(
@@ -78,16 +78,21 @@ fn open_impl(
     mode: u32,
 ) -> Result<i32, std::io::Error> {
     let vpath = vpath_for(fs, path)?;
-    let file = lock_or_io(&fs.fs)?.open_raw_impl(&vpath, flags, mode)?;
-    let mut files = lock_or_io(&fs.files)?;
-    insert_c_file(
-        fs,
-        &mut files,
-        CFile {
-            file,
-            append: flags & libc::O_APPEND != 0,
+    let file = CFile {
+        file: lock_or_io(&fs.fs)?.open_raw_impl(&vpath, flags, mode)?,
+        append: flags & libc::O_APPEND != 0,
+    };
+    let (error, unregistered) = match lock_or_io(&fs.files) {
+        Ok(mut files) => match insert_c_file(fs, &mut files, file) {
+            Ok(fd) => return Ok(fd),
+            Err(failure) => failure,
         },
-    )
+        Err(error) => (error, file),
+    };
+    if let Ok(mut backend) = lock_or_io(&fs.fs) {
+        let _ = backend.close_impl(&unregistered.file);
+    }
+    Err(error)
 }
 
 /// Open a file and return a vfsi descriptor (`>= 0`), or a negative errno.
@@ -251,7 +256,7 @@ pub unsafe extern "C" fn vfsi_openv(
                         append: op.flags & libc::O_APPEND != 0,
                     },
                 )
-                .map_err(|error| vfsi_core::IndexedError::at(index, error))?;
+                .map_err(|(error, _)| vfsi_core::IndexedError::at(index, error))?;
                 op.fd = fd;
                 registered.push(fd);
             }

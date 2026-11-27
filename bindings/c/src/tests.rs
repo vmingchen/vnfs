@@ -2952,6 +2952,36 @@ fn poisoned_backend_mutex_returns_eio() {
     unsafe { vfsi_free(fs) };
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn scalar_open_closes_backend_handle_on_descriptor_registration_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("file");
+    std::fs::write(&file, b"data").unwrap();
+    let file = file.canonicalize().unwrap();
+    let fs = make_fs(
+        Box::new(vfsi_posix::backend(root.path()).unwrap()),
+        PathBuf::from("/"),
+        PathBuf::from("/"),
+    );
+    let handle = unsafe { &*fs };
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = handle.files.lock().unwrap();
+        panic!("poison C descriptor table");
+    }));
+
+    let path = CString::new("/file").unwrap();
+    let result = unsafe { vfsi_open(fs, path.as_ptr(), libc::O_RDONLY, 0) };
+    let leaked = std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.path().read_link().ok())
+        .any(|target| target == file);
+    unsafe { vfsi_free(fs) };
+    assert_eq!(result, -libc::EIO);
+    assert!(!leaked, "failed registration retained the backend file");
+}
+
 #[test]
 fn dummy_open_mount_accepts_kernel_paths() {
     let (_root, root) = temp_root();
