@@ -25,15 +25,13 @@ pub enum TransportKind {
 /// Callers can inspect [`status`](RpcError::status) directly instead of
 /// parsing error strings.
 ///
-/// `op_index` is the index of the failing operation in the caller's request
-/// slice: the batched compound helpers (`vread_native`, `vwrite_native`, `getattr_many`,
-/// ...) translate compound positions to caller-relative indices before
-/// returning. For single-operation helpers it is the position within the
-/// compound (typically 2: `SEQUENCE`, `PUTFH`, op). Transport failures always
-/// report `op_index == 0`.
+/// For a single compound, `op_index` identifies a position in the compound.
+/// Batch helpers such as `getattr_many` can translate that position to the
+/// index in the caller's input slice. A new transport error uses zero as a
+/// placeholder. A helper that knows the affected input can attach its index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RpcError {
-    /// Index of the failing operation within the compound.
+    /// Zero-based position in the compound or the caller's input slice.
     pub op_index: usize,
     /// The failing op's NFS4ERR_* status, or [`STATUS_TRANSPORT`].
     pub status: u32,
