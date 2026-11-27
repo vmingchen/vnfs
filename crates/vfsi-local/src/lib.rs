@@ -2093,8 +2093,12 @@ impl LocalBackend {
             .collect())
     }
 
-    fn copy_extent(&mut self, p: &ExtentPair) -> VfResult<u64> {
-        let sp = self.real_path(&self.resolve(&p.src_path))?;
+    fn copy_extent(&self, p: &ExtentPair) -> VfResult<u64> {
+        let source = self.real_path(&self.resolve(&p.src_path))?;
+        self.copy_extent_from(&source, p)
+    }
+
+    fn copy_extent_from(&self, source: &AnchoredPath, p: &ExtentPair) -> VfResult<u64> {
         let dp = self.real_path(&self.resolve(&p.dst_path))?;
         // A FIFO must not stall the whole copy vector waiting for a peer.
         let open_flags = |path: &AnchoredPath| {
@@ -2107,8 +2111,8 @@ impl LocalBackend {
         };
         let src = OpenOptions::new()
             .read(true)
-            .custom_flags(open_flags(&sp))
-            .open(&sp)?;
+            .custom_flags(open_flags(source))
+            .open(source)?;
         let src_metadata = src.metadata()?;
         if !src_metadata.is_file() {
             let errno = if src_metadata.is_dir() {
@@ -3090,23 +3094,28 @@ impl VectorBackend for LocalBackend {
         if options.follow_source_symlinks() {
             return self.vcopy_data_impl(pairs);
         }
-        Ok(pairs
-            .iter()
-            .map(|p| {
-                (|| {
-                    let source = self.no_follow_path(&self.resolve(&p.src_path))?;
-                    let metadata = std::fs::symlink_metadata(&source)?;
-                    if metadata.file_type().is_symlink() {
-                        let target = std::fs::read_link(&source)?;
-                        let destination = self.no_follow_path(&self.resolve(&p.dst_path))?;
-                        symlink(&target, destination)
-                    } else {
-                        self.copy_extent(p).map(|_| ())
-                    }
-                })()
-                .map_err(|cause| vfsi_core::OpError::failed(cause, None))
-            })
-            .collect())
+        let mut outcomes = Vec::with_capacity(pairs.len());
+        for pair in pairs {
+            let result = (|| {
+                let source = self.no_follow_path(&self.resolve(&pair.src_path))?;
+                let metadata = std::fs::symlink_metadata(&source)?;
+                #[cfg(feature = "test-faults")]
+                self.inject_open_fault(OpenFaultPoint::AfterCopySourceAttrs {
+                    index: outcomes.len(),
+                })?;
+                if metadata.file_type().is_symlink() {
+                    let target = std::fs::read_link(&source)?;
+                    let destination = self.no_follow_path(&self.resolve(&pair.dst_path))?;
+                    symlink(&target, destination)
+                } else {
+                    // Keep the observed parent and refuse a replacement
+                    // final symlink when opening the source.
+                    self.copy_extent_from(&source, pair).map(|_| ())
+                }
+            })();
+            outcomes.push(result.map_err(|cause| vfsi_core::OpError::failed(cause, None)));
+        }
+        Ok(outcomes)
     }
 
     fn copy_tree_impl(

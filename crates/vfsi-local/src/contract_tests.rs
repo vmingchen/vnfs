@@ -3085,6 +3085,44 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "test-faults")]
+    #[test]
+    fn nofollow_copy_rejects_a_source_replaced_by_a_symlink_after_stat() {
+        use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
+
+        struct ReplaceSource(PathBuf);
+        impl FaultInjector for ReplaceSource {
+            fn check(&self, point: &OpenFaultPoint) -> VfResult<()> {
+                if matches!(point, OpenFaultPoint::AfterCopySourceAttrs { index: 0 }) {
+                    std::fs::remove_file(&self.0)?;
+                    std::os::unix::fs::symlink("target", &self.0)?;
+                }
+                Ok(())
+            }
+        }
+
+        let (root, mut backend) = fs("nofollow-copy-replaced-source");
+        write(&mut backend, "/source", b"original");
+        write(&mut backend, "/target", b"replacement");
+        write(&mut backend, "/destination", b"unchanged");
+        backend.set_fault_injector(std::sync::Arc::new(ReplaceSource(root.0.join("source"))));
+
+        let outcomes = backend
+            .vcopy_impl(
+                &[ExtentPair::new("/source", 0, "/destination", 0, None)],
+                CopyOptions::new().with_follow_source_symlinks(false),
+            )
+            .unwrap();
+        assert_eq!(
+            outcomes[0].as_ref().unwrap_err().cause().raw_os_error(),
+            Some(libc::ELOOP),
+        );
+        assert_eq!(
+            std::fs::read(root.0.join("destination")).unwrap(),
+            b"unchanged"
+        );
+    }
+
     #[test]
     fn copy_options_handle_mixed_dangling_links_and_original_error_indices() {
         let (_root, mut fs) = fs("copy-options-mixed");
