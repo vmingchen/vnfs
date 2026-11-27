@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate VFSI registry metadata and coordinated dependency floors."""
 
+import re
 import sys
 from pathlib import Path
 
@@ -39,6 +40,12 @@ PYTHON_PACKAGES = (
 def load(relative_path: str) -> dict:
     with (ROOT / relative_path).open("rb") as manifest:
         return tomllib.load(manifest)
+
+
+def dependency_name(requirement: str) -> str:
+    # PEP 508 puts the distribution name before extras and version constraints.
+    name = re.split(r"[^a-zA-Z0-9_.-]", requirement.lstrip(), maxsplit=1)[0]
+    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 def main() -> int:
@@ -84,8 +91,10 @@ def main() -> int:
             )
         native_artifacts[artifact] = relative_path
 
+    projects = {}
     for relative_path in PYTHON_PACKAGES:
         project = load(relative_path)["project"]
+        projects[Path(relative_path).parent.name] = project
         for name, url in project.get('urls', {}).items():
             if name.lower() in {'repository', 'source', 'issues', 'changelog'}:
                 if url != CANONICAL and not url.startswith(CANONICAL + '/'):
@@ -94,19 +103,24 @@ def main() -> int:
         if "vfsi" not in keywords:
             errors.append(f"{relative_path}: [project].keywords must include 'vfsi'")
 
-    nfs4fs = load("adapters/nfs4fs/pyproject.toml")["project"]
-    engine = load("adapters/vfsi-fsspec/pyproject.toml")["project"]
-    nfs4fs_native = load("adapters/nfs4fs/Cargo.toml")["package"]
-    if nfs4fs["version"] != nfs4fs_native["version"]:
-        errors.append("nfs4fs: Python and native package versions must match")
-    engine_requirements = [
-        dependency
-        for dependency in nfs4fs["dependencies"]
-        if dependency.startswith("vfsi-fsspec>=")
-    ]
-    expected = f"vfsi-fsspec>={engine['version']},<0.2"
-    if engine_requirements != [expected]:
-        errors.append(f"nfs4fs: require the current shared engine with {expected!r}")
+    for package in ("nfs4fs", "vsmb"):
+        native = load(f"adapters/{package}/Cargo.toml")["package"]
+        if projects[package]["version"] != native["version"]:
+            errors.append(f"{package}: Python and native package versions must match")
+
+    for adapter, dependencies in (
+        ("nfs4fs", ("vfsi-fsspec",)),
+        ("vsmbfs", ("vfsi-fsspec", "vsmb")),
+    ):
+        for dependency in dependencies:
+            requirements = [
+                requirement
+                for requirement in projects[adapter]["dependencies"]
+                if dependency_name(requirement) == dependency
+            ]
+            expected = f"{dependency}>={projects[dependency]['version']},<0.2"
+            if requirements != [expected]:
+                errors.append(f"{adapter}: require the current {dependency} with {expected!r}")
 
     vnfs = load("crates/vnfs/Cargo.toml")
     package = vnfs["package"]

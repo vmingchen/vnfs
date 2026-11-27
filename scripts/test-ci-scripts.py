@@ -1316,6 +1316,61 @@ if kind != "missing" or pair == 0:
         self.assertEqual(self.paired.comparison([2, 2, 2])['bootstrap_95_percent_interval'], [2, 2])
 
 
+class PythonPackageMetadataTests(unittest.TestCase):
+    def check_with_override(self, relative_path, section, key, change):
+        import contextlib
+        import runpy
+        from unittest.mock import patch
+
+        script = Path(__file__).resolve().parents[1] / "ci/check-package-metadata.py"
+        check = runpy.run_path(str(script))["main"]
+        load = check.__globals__["load"]
+
+        def load_changed(path):
+            manifest = load(path)
+            if path == relative_path:
+                table = manifest[section]
+                table[key] = change(table[key])
+            return manifest
+
+        errors = io.StringIO()
+        with patch.dict(check.__globals__, load=load_changed), contextlib.redirect_stderr(errors):
+            self.assertEqual(check(), 1)
+        return errors.getvalue()
+
+    def test_rejects_mismatched_smb_native_version(self):
+        errors = self.check_with_override(
+            "adapters/vsmb/Cargo.toml", "package", "version", lambda _: "0.0.1",
+        )
+        self.assertIn("vsmb: Python and native package versions must match", errors)
+
+    def test_rejects_stale_smb_facade_dependency_floors(self):
+        for dependency in ("vfsi-fsspec", "vsmb"):
+            with self.subTest(dependency=dependency):
+                prefix = dependency + ">="
+                errors = self.check_with_override(
+                    "adapters/vsmbfs/pyproject.toml", "project", "dependencies",
+                    lambda dependencies: [
+                        prefix + "0.0.1,<0.2" if value.startswith(prefix) else value
+                        for value in dependencies
+                    ],
+                )
+                self.assertIn(f"vsmbfs: require the current {dependency}", errors)
+
+
+    def test_rejects_conflicting_coordinated_requirements(self):
+        for requirement, dependency in (
+            ("vsmb < 0.1.14", "vsmb"),
+            ("VFSI_FSSPEC < 0.1.19", "vfsi-fsspec"),
+        ):
+            with self.subTest(requirement=requirement):
+                errors = self.check_with_override(
+                    "adapters/vsmbfs/pyproject.toml", "project", "dependencies",
+                    lambda dependencies: [*dependencies, requirement],
+                )
+                self.assertIn(f"vsmbfs: require the current {dependency}", errors)
+
+
 class EcosystemBaselineTests(unittest.TestCase):
     def setUp(self):
         import importlib.util
