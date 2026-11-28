@@ -1641,7 +1641,7 @@ impl super::Auto {
         page_size: std::num::NonZeroUsize,
     ) -> vfsi_core::VecResult<vfsi_core::api::DirectoryPage> {
         let options = options.resolve(self.limits);
-        vfsi_core::api::internal::native_directory_pages(
+        vfsi_core::api::internal::native_directory_pages_with_cursors(
             &self.owner,
             paths,
             cursors,

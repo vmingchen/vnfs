@@ -87,7 +87,10 @@ pub enum RemoveMode {
 /// Unstable dispatch projections for workspace backend implementations.
 #[doc(hidden)]
 pub mod internal {
-    pub use super::paging::{NativeDirectoryCursor, NativeDirectoryPage, native_directory_pages};
+    pub use super::paging::{
+        NativeDirectoryCursor, NativeDirectoryPage, native_directory_pages,
+        native_directory_pages_with_cursors,
+    };
     pub use super::read::{ReadRequest, consume_ops, read_batch};
     pub use super::support::FsReadResult as OwnedReadResult;
 }

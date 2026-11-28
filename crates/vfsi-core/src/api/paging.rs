@@ -82,10 +82,44 @@ pub type NativeDirectoryPage = (
     Vec<(PathBuf, NativeDirectoryCursor)>,
 );
 
-/// Attach connection ownership while retaining one independent page outcome
-/// per input. Invalid cursors are isolated before any native input dispatch.
+const MAX_OWNED_PAGE_INPUTS: usize = 32;
+
+/// Owned paging with a capacity query over valid input paths.
 #[doc(hidden)]
 pub fn native_directory_pages<P: AsRef<Path>>(
+    owner: &Arc<()>,
+    paths: &[P],
+    cursors: Vec<Option<DirectoryCursor>>,
+    options: ListDirOptions,
+    page_size: NonZeroUsize,
+    mut capacity: impl FnMut(&[&Path]) -> Result<usize>,
+    fetch: impl FnMut(
+        &[&Path],
+        Vec<Option<NativeDirectoryCursor>>,
+        usize,
+        usize,
+    ) -> crate::VecResult<NativeDirectoryPage>,
+) -> crate::VecResult<DirectoryPage> {
+    native_directory_pages_with_cursors(
+        owner,
+        paths,
+        cursors,
+        options,
+        page_size,
+        |candidates| {
+            let mut paths = [Path::new(""); MAX_OWNED_PAGE_INPUTS];
+            for (path, (candidate, _)) in paths.iter_mut().zip(candidates) {
+                *path = candidate;
+            }
+            capacity(&paths[..candidates.len()])
+        },
+        fetch,
+    )
+}
+
+/// Owned paging with a capacity query that can reuse retained cursor state.
+#[doc(hidden)]
+pub fn native_directory_pages_with_cursors<P: AsRef<Path>>(
     owner: &Arc<()>,
     paths: &[P],
     cursors: Vec<Option<DirectoryCursor>>,
@@ -100,7 +134,7 @@ pub fn native_directory_pages<P: AsRef<Path>>(
     ) -> crate::VecResult<NativeDirectoryPage>,
 ) -> crate::VecResult<DirectoryPage> {
     use crate::{OpError, internal::vec_result_slots};
-    if paths.len() > 32 || paths.len() != cursors.len() {
+    if paths.len() > MAX_OWNED_PAGE_INPUTS || paths.len() != cursors.len() {
         return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
     }
     if paths.is_empty() {
@@ -142,7 +176,7 @@ pub fn native_directory_pages<P: AsRef<Path>>(
             .map(|(index, state)| (paths[*index], state.as_ref()))
             .collect();
         let width = match capacity(&candidates) {
-            Ok(width) => width.clamp(1, 32).min(pending.len()),
+            Ok(width) => width.clamp(1, MAX_OWNED_PAGE_INPUTS).min(pending.len()),
             Err(cause) => {
                 // Capacity is a preflight policy query. Reject its first input
                 // without blocking a different route behind that input.
@@ -498,7 +532,10 @@ mod tests {
                 .with_max_entries(0)
                 .with_max_path_bytes(0),
             NonZeroUsize::new(128).unwrap(),
-            |_| Ok(2),
+            |pending: &[&Path]| {
+                assert_eq!(pending.last(), Some(&Path::new("/e")));
+                Ok(2)
+            },
             |paths, _, size, probe| {
                 assert_eq!((size, probe), (1, 1));
                 waves.push(paths.len());
@@ -600,7 +637,7 @@ mod tests {
                 owner: owner.clone(),
                 fields: None,
             };
-            let results = native_directory_pages(
+            let results = native_directory_pages_with_cursors(
                 actual_owner,
                 &[Path::new("/missing"), Path::new(path)],
                 vec![None, Some(cursor)],
@@ -675,7 +712,7 @@ mod tests {
         .into_iter();
         let a = first.next().unwrap().unwrap();
         let b = first.next().unwrap().unwrap();
-        let results = native_directory_pages(
+        let results = native_directory_pages_with_cursors(
             &owner,
             &["/a", "/a/child"],
             vec![a.continuation, a.children.into_iter().next()],
