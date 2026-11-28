@@ -5,36 +5,36 @@ schema_version = 1
 [platform]
 canonical = "https://github.com/vmingchen/vnfs"
 mirror = "https://github.com/vfsi/vfsi"
-code_revision = "180614d948a5b7dd018be0974a2f446f13421ef2"
+code_revision = "53de68c022df77977731f0914b2dbf7fb4ef362d"
 
 [rust]
 nfsv41-sys = { version = "0.1.17", revision = "e39cbbcde72749000ab03f71a78f7ed2cdcb1fdc" }
-vfsi-core = { version = "0.5.1", revision = "180614d948a5b7dd018be0974a2f446f13421ef2" }
-vfsi-local = { version = "0.5.1", revision = "180614d948a5b7dd018be0974a2f446f13421ef2" }
-vfsi-nfs = { version = "0.5.1", revision = "180614d948a5b7dd018be0974a2f446f13421ef2" }
-vfsi-posix = { version = "0.5.1", revision = "180614d948a5b7dd018be0974a2f446f13421ef2" }
-vfsi-smb = { version = "0.5.1", revision = "180614d948a5b7dd018be0974a2f446f13421ef2" }
-vfsi-sync = { version = "0.5.1", revision = "180614d948a5b7dd018be0974a2f446f13421ef2" }
-vfsi-uring = { version = "0.5.1", revision = "180614d948a5b7dd018be0974a2f446f13421ef2" }
-vnfs = { version = "0.0.40", revision = "180614d948a5b7dd018be0974a2f446f13421ef2" }
+vfsi-core = { version = "0.5.3", revision = "c58d6c7375c44fa3c744b458a14a85fb82669f81" }
+vfsi-local = { version = "0.5.3", revision = "c58d6c7375c44fa3c744b458a14a85fb82669f81" }
+vfsi-nfs = { version = "0.5.3", revision = "c58d6c7375c44fa3c744b458a14a85fb82669f81" }
+vfsi-posix = { version = "0.5.3", revision = "c58d6c7375c44fa3c744b458a14a85fb82669f81" }
+vfsi-smb = { version = "0.5.3", revision = "c58d6c7375c44fa3c744b458a14a85fb82669f81" }
+vfsi-sync = { version = "0.5.3", revision = "c58d6c7375c44fa3c744b458a14a85fb82669f81" }
+vfsi-uring = { version = "0.5.3", revision = "c58d6c7375c44fa3c744b458a14a85fb82669f81" }
+vnfs = { version = "0.0.42", revision = "c58d6c7375c44fa3c744b458a14a85fb82669f81" }
 
 [c]
 package = "vfsi-c"
-version = "0.3.24"
+version = "0.3.26"
 abi = 3
-revision = "180614d948a5b7dd018be0974a2f446f13421ef2"
+revision = "c58d6c7375c44fa3c744b458a14a85fb82669f81"
 # First implementation commit; shipped in vfsi-c 0.3.11 while preserving ABI v3.
 scoped_identity_revision = "037759665d9857e216702b6a92d53e37ff8f4fb5"
 scoped_identity_published = true
 
 [python]
-nfs4fs = { version = "0.3.19", revision = "180614d948a5b7dd018be0974a2f446f13421ef2" }
-vfsi-fsspec = { version = "0.1.18", revision = "180614d948a5b7dd018be0974a2f446f13421ef2" }
-vsmb = { version = "0.1.13", revision = "180614d948a5b7dd018be0974a2f446f13421ef2" }
-vsmbfs = { version = "0.1.12", revision = "180614d948a5b7dd018be0974a2f446f13421ef2" }
+nfs4fs = { version = "0.3.21", revision = "c58d6c7375c44fa3c744b458a14a85fb82669f81" }
+vfsi-fsspec = { version = "0.1.20", revision = "c58d6c7375c44fa3c744b458a14a85fb82669f81" }
+vsmb = { version = "0.1.15", revision = "c58d6c7375c44fa3c744b458a14a85fb82669f81" }
+vsmbfs = { version = "0.1.14", revision = "c58d6c7375c44fa3c744b458a14a85fb82669f81" }
 
 [ports]
-coreutils = "4f24fabf405010b681d8b53cfdb9d6a11ddf9dbb"
-findutils = "f5eb3cfee4bb44f1ce97f7a404577ed0815dd4d9"
-git = "95591ee6f45e6a905b8cf9c073884796dc098671"
-rsync = "0a37094d380ad56e06a78c1627f1dce52a0839d6"
+coreutils = "cd08d18ac303240786d7b61ecdd412f78ddb677b"
+findutils = "9338fb3826f45237d949536b0e0fc37cb139f9f4"
+git = "65d44a79b1da76f12776e6126f31e6491f9c6d7e"
+rsync = "e156fd0fd8ae9a3a340ba22e3ec10981d91e9ad5"
