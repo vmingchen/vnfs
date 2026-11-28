@@ -284,6 +284,9 @@ pub mod faults {
         AfterCopySourceAttrs {
             index: usize,
         },
+        AfterNoFollowCopySourceCheck {
+            index: usize,
+        },
         BeforeCopyCompound {
             first: usize,
         },

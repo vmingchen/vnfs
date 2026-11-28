@@ -2335,6 +2335,83 @@ fn live_server_copy_attribute_failure_reports_original_sparse_input() {
     }
 }
 
+#[cfg(feature = "test-faults")]
+#[test]
+fn live_nofollow_copy_rejects_source_replaced_by_symlink_after_stat() {
+    use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
+
+    struct ReplaceSource {
+        server: String,
+        minor: u32,
+        source: PathBuf,
+    }
+    impl FaultInjector for ReplaceSource {
+        fn check(&self, point: &OpenFaultPoint) -> VfResult<()> {
+            if matches!(
+                point,
+                OpenFaultPoint::AfterNoFollowCopySourceCheck { index: 0 }
+            ) {
+                let mut control = NfsVecFs::connect_minor(&self.server, self.minor)?;
+                control.unlink_impl(&self.source)?;
+                control.symlink_impl(Path::new("target"), &self.source)?;
+            }
+            Ok(())
+        }
+    }
+
+    let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+        assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+        return;
+    };
+    for minor in [1, 2] {
+        let mut fs = NfsVecFs::connect_minor(&server, minor).unwrap();
+        let root = PathBuf::from(format!(
+            "/vfsi-nofollow-copy-race-{}-{minor}",
+            std::process::id()
+        ));
+        let _ = fs.remove_impl(&root, true);
+        fs.ensure_dir_impl(&root, 0o755).unwrap();
+        let source = root.join("source");
+        let target = root.join("target");
+        let destination = root.join("destination");
+        for (path, data) in [
+            (&source, b"original".as_slice()),
+            (&target, b"replacement".as_slice()),
+            (&destination, b"unchanged".as_slice()),
+        ] {
+            let file = fs
+                .open_raw_impl(path, libc::O_CREAT | libc::O_TRUNC | libc::O_RDWR, 0o600)
+                .unwrap();
+            fs.write_raw_impl(&file, 0, data).unwrap();
+            fs.close_impl(&file).unwrap();
+        }
+        fs.set_fault_injector(Arc::new(ReplaceSource {
+            server: server.clone(),
+            minor,
+            source: source.clone(),
+        }));
+
+        let pairs = [ExtentPair::from_os_paths(&source, 0, &destination, 0, None)];
+        let results = fs
+            .vcopy_impl(
+                &pairs,
+                CopyOptions::new().with_follow_source_symlinks(false),
+            )
+            .unwrap();
+        let error = results[0].as_ref().unwrap_err();
+        assert_eq!(error.state(), vfsi_core::FailureState::Failed);
+        assert_eq!(error.cause().raw_os_error(), Some(libc::ELOOP));
+        assert_eq!(
+            fs.read_raw_impl(&FileOperand::from_os_path(&destination), 0, 32)
+                .unwrap(),
+            b"unchanged",
+            "the destination must not be opened after the source was replaced"
+        );
+        assert_eq!(fs.lstat_impl(&source).unwrap().ftype, VfType::Symlink);
+        fs.remove_impl(&root, true).unwrap();
+    }
+}
+
 #[cfg(all(feature = "test-faults", feature = "server-copy"))]
 #[test]
 fn live_server_copy_lost_reply_never_replays_or_forgets_temporary_owners() {

@@ -956,7 +956,7 @@ impl VectorBackend for NfsVecFs {
     }
 
     fn vcopy_data_impl(&mut self, pairs: &[ExtentPair]) -> vfsi_core::VecResult<()> {
-        self.copy_data_client_side(pairs).map(|results| {
+        self.copy_data_client_side(pairs, false).map(|results| {
             results
                 .into_iter()
                 .map(|result| result.map(|_| ()))
@@ -986,6 +986,15 @@ impl VectorBackend for NfsVecFs {
             .collect();
         let mut results =
             super::copy::copy_slots(self.vgetattrs_nofollow_impl(&mut attrs), pairs.len());
+        #[cfg(feature = "test-faults")]
+        for index in 0..results.len() {
+            if results[index].is_ok()
+                && let Err(cause) =
+                    self.inject_open_fault(OpenFaultPoint::AfterNoFollowCopySourceCheck { index })
+            {
+                results[index] = Err(super::copy::copy_error(cause));
+            }
+        }
         let mut start = 0;
         while start < pairs.len() {
             if results[start].is_err() {
@@ -1029,8 +1038,10 @@ impl VectorBackend for NfsVecFs {
                     results[index] = result;
                 }
             } else {
-                let batch =
-                    super::copy::copy_slots(self.vcopy_data_nfs(&pairs[start..end]), end - start);
+                let batch = super::copy::copy_slots(
+                    self.vcopy_data_nfs_with_follow(&pairs[start..end], false),
+                    end - start,
+                );
                 for (slot, result) in results[start..end].iter_mut().zip(batch) {
                     *slot = result;
                 }

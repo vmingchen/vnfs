@@ -2,7 +2,7 @@
 
 use super::*;
 
-fn copy_error(cause: std::io::Error) -> vfsi_core::OpError {
+pub(super) fn copy_error(cause: std::io::Error) -> vfsi_core::OpError {
     if crate::client::uncertain_completion(&cause) {
         vfsi_core::OpError::unknown(cause, None)
     } else {
@@ -19,6 +19,22 @@ fn copy_after_effect(error: vfsi_core::OpError) -> vfsi_core::OpError {
     } else {
         vfsi_core::OpError::failed(cause, None)
     }
+}
+
+// A no-follow copy must keep the source object observed before OPEN anchored
+// through that OPEN. NFS OPEN follows a final symlink, so compare the opened
+// handle with the handle resolved without following the final component.
+fn pinned_source_handle(result: vfsi_core::OpResult<(NfsFh, u32)>) -> vfsi_core::OpResult<NfsFh> {
+    result.and_then(|(fh, ftype)| {
+        if ftype == nfs_ftype4_NF4LNK {
+            Err(vfsi_core::OpError::failed(
+                std::io::Error::from_raw_os_error(libc::ELOOP),
+                None,
+            ))
+        } else {
+            Ok(fh)
+        }
+    })
 }
 
 pub(super) fn copy_slots<T>(
@@ -181,12 +197,56 @@ fn copy_extent_data<C>(
 }
 
 impl NfsVecFs {
+    fn pinned_source_handles(&mut self, paths: &[&Path]) -> Vec<vfsi_core::OpResult<NfsFh>> {
+        let files: Vec<_> = paths
+            .iter()
+            .map(|path| FileOperand::from_os_path(path))
+            .collect();
+        let refs: Vec<_> = files.iter().collect();
+        copy_slots(self.resolve_files_nfs(&refs, false), paths.len())
+            .into_iter()
+            .map(pinned_source_handle)
+            .collect()
+    }
+
+    fn pinned_source_rejection(
+        &self,
+        pinned: Option<vfsi_core::OpResult<NfsFh>>,
+        file: &FileOperand,
+    ) -> Option<vfsi_core::OpError> {
+        match pinned? {
+            Ok(expected) => {
+                let opened = file.fd().and_then(|fd| self.open_files.get(&fd));
+                (!opened.is_some_and(|open| open.fh == expected)).then_some(
+                    vfsi_core::OpError::failed(
+                        std::io::Error::from_raw_os_error(libc::ELOOP),
+                        None,
+                    ),
+                )
+            }
+            Err(error) => Some(error),
+        }
+    }
+
     pub(super) fn copy_extent(
         &mut self,
         src_root_rel: &Path,
         dst_root_rel: &Path,
         p: &ExtentPair,
+        no_follow_source: bool,
     ) -> VfResult<u64> {
+        let pinned = if no_follow_source {
+            match self
+                .pinned_source_handles(&[src_root_rel])
+                .pop()
+                .expect("one pinned source")
+            {
+                Ok(fh) => Some(fh),
+                Err(error) => return Err(error.into_cause()),
+            }
+        } else {
+            None
+        };
         let (sdir, sname) = split_path_bytes(path_bytes(src_root_rel))
             .map_err(|_| std::io::Error::from_raw_os_error((ERR_NOENT) as i32))?;
         let (ddir, dname) = split_path_bytes(path_bytes(dst_root_rel))
@@ -202,6 +262,13 @@ impl NfsVecFs {
                 crate::client::OpenCreate::NoCreate,
             )
             .map_err(vfsi_core::internal::errors::from_rpc)?;
+        if pinned.as_ref().is_some_and(|expected| &sfh != expected) {
+            // A final symlink replaced the source after the no-follow stat.
+            // Do not open or modify the destination.
+            let _ = self.nfs.close_temporary_path(&sfh, &ssid);
+            return Err(std::io::Error::from_raw_os_error(libc::ELOOP));
+        }
+
         // Kernel nfsd rejects CREATE_GUARDED on an existing file, so open the
         // destination without create and fall back to create only on NOENT.
         // Any failed destination open must release the already-open source.
@@ -287,6 +354,7 @@ impl NfsVecFs {
     pub(super) fn copy_data_client_side(
         &mut self,
         pairs: &[ExtentPair],
+        no_follow_source: bool,
     ) -> vfsi_core::VecResult<u64> {
         self.ensure_writable(pairs.len())?;
         let mut fatal: Option<std::sync::Arc<std::io::Error>> = None;
@@ -299,9 +367,13 @@ impl NfsVecFs {
                     ));
                 }
                 let result = (|| {
-                    let source = self.follow_target_path(&self.server_path(&pair.src_path))?;
+                    let source = if no_follow_source {
+                        self.server_path(&pair.src_path)
+                    } else {
+                        self.follow_target_path(&self.server_path(&pair.src_path))?
+                    };
                     let destination = self.follow_target_path(&self.server_path(&pair.dst_path))?;
-                    self.copy_extent(&source, &destination, pair)
+                    self.copy_extent(&source, &destination, pair, no_follow_source)
                 })();
                 result.map_err(|mut cause| {
                     if crate::client::uncertain_completion(&cause) {
@@ -315,9 +387,21 @@ impl NfsVecFs {
             .collect())
     }
 
-    fn copy_extents_server_side(&mut self, pairs: &[ExtentPair]) -> Vec<vfsi_core::OpResult<u64>> {
+    fn copy_extents_server_side(
+        &mut self,
+        pairs: &[ExtentPair],
+        no_follow_source: bool,
+    ) -> Vec<vfsi_core::OpResult<u64>> {
         use vfsi_core::{OpError, OpResult};
         let sources: Vec<_> = pairs.iter().map(|pair| pair.src_path.as_path()).collect();
+        let mut pinned: Vec<Option<OpResult<NfsFh>>> = if no_follow_source {
+            self.pinned_source_handles(&sources)
+                .into_iter()
+                .map(Some)
+                .collect()
+        } else {
+            (0..pairs.len()).map(|_| None).collect()
+        };
         let opened = copy_slots(
             self.vopen_raw_impl(
                 &sources,
@@ -338,8 +422,12 @@ impl NfsVecFs {
         for (index, result) in opened.into_iter().enumerate() {
             match result {
                 Ok(file) => {
+                    let rejected = self.pinned_source_rejection(pinned[index].take(), &file);
                     src[index] = Some(file);
-                    active.push(index);
+                    match rejected {
+                        Some(error) => output[index] = Some(Err(error)),
+                        None => active.push(index),
+                    }
                 }
                 Err(error) => {
                     if !active.is_empty() && source_missing(&error) {
@@ -406,6 +494,11 @@ impl NfsVecFs {
                     .as_ref()
                     .and_then(|result| result.as_ref().err())
                     .is_some_and(source_missing);
+                // A no-follow source rejected after OPEN keeps its temporary
+                // owner only for cleanup; never re-admit it below.
+                if !retry_source && output[index].is_some() {
+                    continue;
+                }
                 let blocker = if retry_source || src[index].is_some() {
                     uncertain.as_ref()
                 } else {
@@ -419,7 +512,13 @@ impl NfsVecFs {
                     );
                     match copy_slots(opened, 1).pop().expect("one source slot") {
                         Ok(file) => {
+                            let rejected =
+                                self.pinned_source_rejection(pinned[index].take(), &file);
                             src[index] = Some(file);
+                            if let Some(error) = rejected {
+                                output[index] = Some(Err(error));
+                                continue;
+                            }
                             output[index] = None;
                         }
                         Err(error) => output[index] = Some(Err(error)),
@@ -758,26 +857,46 @@ impl NfsVecFs {
     }
 
     pub(super) fn vcopy_data_nfs(&mut self, pairs: &[ExtentPair]) -> vfsi_core::VecResult<()> {
-        self.copy_data_with_counts(pairs).map(|results| {
-            results
-                .into_iter()
-                .map(|result| result.map(|_| ()))
-                .collect()
-        })
+        self.vcopy_data_nfs_with_follow(pairs, true)
+    }
+
+    pub(super) fn vcopy_data_nfs_with_follow(
+        &mut self,
+        pairs: &[ExtentPair],
+        follow_source_symlinks: bool,
+    ) -> vfsi_core::VecResult<()> {
+        self.copy_data_with_counts_mode(pairs, follow_source_symlinks)
+            .map(|results| {
+                results
+                    .into_iter()
+                    .map(|result| result.map(|_| ()))
+                    .collect()
+            })
     }
 
     /// Copy extents with the acknowledged byte count, including EOF-short copies.
     #[doc(hidden)]
     pub fn copy_data_with_counts(&mut self, pairs: &[ExtentPair]) -> vfsi_core::VecResult<u64> {
+        self.copy_data_with_counts_mode(pairs, true)
+    }
+
+    fn copy_data_with_counts_mode(
+        &mut self,
+        pairs: &[ExtentPair],
+        follow_source_symlinks: bool,
+    ) -> vfsi_core::VecResult<u64> {
         self.ensure_writable(pairs.len())?;
         let mut output = Vec::with_capacity(pairs.len());
         // Admission recovery is scoped to an OPEN batch. Use separate calls
         // for dependencies that require completion of an earlier copy.
         for batch in pairs.chunks(8) {
             if self.server_copy_enabled {
-                output.extend(self.copy_extents_server_side(batch));
+                output.extend(self.copy_extents_server_side(batch, !follow_source_symlinks));
             } else {
-                output.extend(copy_slots(self.copy_data_client_side(batch), batch.len()));
+                output.extend(copy_slots(
+                    self.copy_data_client_side(batch, !follow_source_symlinks),
+                    batch.len(),
+                ));
             }
         }
         Ok(output)
