@@ -3,6 +3,20 @@
 This project follows [Semantic Versioning](https://semver.org/) for the
 `nfs4fs` package. Rust crate and C ABI versions are tracked independently.
 
+## 2026-11-27 — copy safety and Python I/O contracts
+
+Rust releases include vnfs 0.0.42, the VFSI backend and core crates 0.5.3,
+and vfsi-c 0.3.26. Python releases include nfs4fs 0.3.21, vfsi-fsspec
+0.1.20, vsmb 0.1.15, and vsmbfs 0.1.14. The C ABI remains v3.
+
+- Keep no-follow copies anchored through source OPEN. Require writable NFS
+  handles for size changes, and preserve SMB timestamps outside the update.
+- Preserve indeterminate write outcomes without replay and report confirmed
+  copy lengths, including short copies at EOF.
+- Bound Python whole-file reads and streamed downloads, validate block-cache
+  sizes before replacing generations, and preserve transaction writers on
+  rejected nested transactions.
+
 ## 2026-11-22 — metadata acknowledgements and cache recovery
 
 Rust releases: vnfs 0.0.41, vfsi-core and the sync, local, POSIX, io_uring,
