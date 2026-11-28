@@ -6,6 +6,16 @@ pub(super) fn non_destructive_reopen_flags(flags: i32) -> i32 {
     flags & !(libc::O_CREAT | libc::O_EXCL | libc::O_TRUNC)
 }
 
+pub(super) fn nofollow_open_error(error: std::io::Error) -> std::io::Error {
+    if vfsi_core::native_status(&error)
+        == Some(vfsi_core::StatusCode::Nfs(nfsstat4_NFS4ERR_SYMLINK))
+    {
+        std::io::Error::from_raw_os_error(libc::ELOOP)
+    } else {
+        error
+    }
+}
+
 pub(super) fn open_flags_mutate(flags: i32) -> bool {
     flags & libc::O_ACCMODE != libc::O_RDONLY
         || flags & (libc::O_CREAT | libc::O_TRUNC | libc::O_APPEND) != 0

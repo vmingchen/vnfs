@@ -987,12 +987,12 @@ impl VectorBackend for NfsVecFs {
         let mut results =
             super::copy::copy_slots(self.vgetattrs_nofollow_impl(&mut attrs), pairs.len());
         #[cfg(feature = "test-faults")]
-        for index in 0..results.len() {
-            if results[index].is_ok()
+        for (index, result) in results.iter_mut().enumerate() {
+            if result.is_ok()
                 && let Err(cause) =
                     self.inject_open_fault(OpenFaultPoint::AfterNoFollowCopySourceCheck { index })
             {
-                results[index] = Err(super::copy::copy_error(cause));
+                *result = Err(super::copy::copy_error(cause));
             }
         }
         let mut start = 0;

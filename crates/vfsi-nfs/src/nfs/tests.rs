@@ -2335,6 +2335,87 @@ fn live_server_copy_attribute_failure_reports_original_sparse_input() {
     }
 }
 
+#[test]
+fn live_nofollow_copy_from_configured_root_and_cwd() {
+    let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+        assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+        return;
+    };
+    for minor in [1, 2] {
+        let root = PathBuf::from(format!(
+            "/vfsi-nofollow-copy-root-{}-{minor}",
+            std::process::id()
+        ));
+        let mut admin = NfsVecFs::connect_minor(&server, minor).unwrap();
+        admin
+            .ensure_dir_impl(&root.join("work/actual"), 0o755)
+            .unwrap();
+        let mut fs = NfsVecFs::builder(&server)
+            .root(&root)
+            .minor_version(Some(minor))
+            .connect()
+            .unwrap();
+        let can_server_copy = fs.server_copy_enabled();
+        fs.chdir(Path::new("/work")).unwrap();
+        fs.symlink_impl(Path::new("actual"), Path::new("alias"))
+            .unwrap();
+        let file = fs
+            .open_raw_impl(
+                Path::new("actual/source"),
+                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                0o600,
+            )
+            .unwrap();
+        let payload = b"root-relative source";
+        fs.write_raw_impl(&file, 0, payload).unwrap();
+        fs.close_impl(&file).unwrap();
+
+        let mut outcomes = Vec::new();
+        for server_copy in [false, true] {
+            if server_copy && !can_server_copy {
+                continue;
+            }
+            fs.server_copy_enabled = server_copy;
+            let path = if server_copy {
+                "/server-copy"
+            } else {
+                "/client-copy"
+            };
+            let destination = Path::new(path);
+            let pairs = [ExtentPair::from_os_paths(
+                Path::new("alias/source"),
+                0,
+                destination,
+                0,
+                None,
+            )];
+            let result = fs
+                .vcopy_impl(
+                    &pairs,
+                    CopyOptions::new().with_follow_source_symlinks(false),
+                )
+                .unwrap()
+                .pop()
+                .unwrap();
+            outcomes.push((
+                server_copy,
+                result.map(|()| {
+                    fs.read_raw_impl(&FileOperand::from_os_path(destination), 0, 64)
+                        .unwrap()
+                }),
+            ));
+        }
+        admin.remove_impl(&root, true).unwrap();
+        for (server_copy, copied) in outcomes {
+            assert_eq!(
+                copied.unwrap(),
+                payload,
+                "NFSv4.{minor} server_copy={server_copy}"
+            );
+        }
+    }
+}
+
 #[cfg(feature = "test-faults")]
 #[test]
 fn live_nofollow_copy_rejects_source_replaced_by_symlink_after_stat() {
@@ -2410,6 +2491,71 @@ fn live_nofollow_copy_rejects_source_replaced_by_symlink_after_stat() {
         assert_eq!(fs.lstat_impl(&source).unwrap().ftype, VfType::Symlink);
         fs.remove_impl(&root, true).unwrap();
     }
+}
+
+#[cfg(all(feature = "test-faults", feature = "server-copy"))]
+#[test]
+fn live_nofollow_copy_rejects_symlink_to_pinned_source_at_open() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
+
+    struct MoveSource {
+        server: String,
+        source: PathBuf,
+        moved: AtomicBool,
+    }
+    impl FaultInjector for MoveSource {
+        fn check(&self, point: &OpenFaultPoint) -> VfResult<()> {
+            if matches!(point, OpenFaultPoint::BeforeDispatch { chunk: 0 })
+                && !self.moved.swap(true, Ordering::Relaxed)
+            {
+                let mut control = NfsVecFs::connect_minor(&self.server, 2)?;
+                control.rename_impl(&self.source, &self.source.with_file_name("moved"))?;
+                control.symlink_impl(Path::new("moved"), &self.source)?;
+            }
+            Ok(())
+        }
+    }
+
+    let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
+        assert_ne!(std::env::var("VFSI_NFS_REQUIRED").as_deref(), Ok("1"));
+        return;
+    };
+    let mut fs = NfsVecFs::connect_minor(&server, 2).unwrap();
+    assert!(fs.server_copy_enabled());
+    let root = PathBuf::from(format!("/vfsi-nofollow-copy-alias-{}", std::process::id()));
+    fs.ensure_dir_impl(&root, 0o755).unwrap();
+    let source = root.join("source");
+    let destination = root.join("destination");
+    let file = fs
+        .open_raw_impl(&source, libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o600)
+        .unwrap();
+    fs.write_raw_impl(&file, 0, b"original").unwrap();
+    fs.close_impl(&file).unwrap();
+    let fault = Arc::new(MoveSource {
+        server,
+        source: source.clone(),
+        moved: AtomicBool::new(false),
+    });
+    fs.set_fault_injector(fault.clone());
+    let pairs = [ExtentPair::from_os_paths(&source, 0, &destination, 0, None)];
+    let outcome = fs
+        .vcopy_impl(
+            &pairs,
+            CopyOptions::new().with_follow_source_symlinks(false),
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+    let destination_exists = fs.exists_impl(&destination).unwrap();
+    fs.remove_impl(&root, true).unwrap();
+    assert!(fault.moved.load(Ordering::Relaxed));
+    assert_eq!(
+        outcome.unwrap_err().cause().raw_os_error(),
+        Some(libc::ELOOP)
+    );
+    assert!(!destination_exists);
+    assert!(fs.open_files.is_empty());
 }
 
 #[cfg(all(feature = "test-faults", feature = "server-copy"))]

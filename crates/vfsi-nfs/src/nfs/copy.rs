@@ -236,8 +236,9 @@ impl NfsVecFs {
         no_follow_source: bool,
     ) -> VfResult<u64> {
         let pinned = if no_follow_source {
+            // Resolve from the caller's namespace before comparing server handles.
             match self
-                .pinned_source_handles(&[src_root_rel])
+                .pinned_source_handles(&[p.src_path.as_path()])
                 .pop()
                 .expect("one pinned source")
             {
@@ -261,10 +262,16 @@ impl NfsVecFs {
                 OPEN4_SHARE_ACCESS_READ,
                 crate::client::OpenCreate::NoCreate,
             )
-            .map_err(vfsi_core::internal::errors::from_rpc)?;
+            .map_err(|error| {
+                let error = vfsi_core::internal::errors::from_rpc(error);
+                if no_follow_source {
+                    super::open::nofollow_open_error(error)
+                } else {
+                    error
+                }
+            })?;
         if pinned.as_ref().is_some_and(|expected| &sfh != expected) {
-            // A final symlink replaced the source after the no-follow stat.
-            // Do not open or modify the destination.
+            // The source changed between lookup and OPEN. Do not open the destination.
             let _ = self.nfs.close_temporary_path(&sfh, &ssid);
             return Err(std::io::Error::from_raw_os_error(libc::ELOOP));
         }
@@ -402,10 +409,15 @@ impl NfsVecFs {
         } else {
             (0..pairs.len()).map(|_| None).collect()
         };
+        let source_flags = if no_follow_source {
+            libc::O_RDONLY | libc::O_NOFOLLOW
+        } else {
+            libc::O_RDONLY
+        };
         let opened = copy_slots(
             self.vopen_raw_impl(
                 &sources,
-                &vec![libc::O_RDONLY; pairs.len()],
+                &vec![source_flags; pairs.len()],
                 &vec![0; pairs.len()],
             ),
             pairs.len(),
@@ -507,7 +519,7 @@ impl NfsVecFs {
                 if blocker.is_none() && retry_source {
                     let opened = self.vopen_raw_impl(
                         &[pairs[index].src_path.as_path()],
-                        &[libc::O_RDONLY],
+                        &[source_flags],
                         &[0],
                     );
                     match copy_slots(opened, 1).pop().expect("one source slot") {

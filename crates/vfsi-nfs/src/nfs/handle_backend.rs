@@ -323,10 +323,10 @@ impl HandleBackend for NfsVecFs {
         let full = PathBuf::from(OsString::from_vec(normalize_bytes(path_bytes(&full))));
         let create = flags & O_CREAT != 0;
         let excl = flags & O_EXCL != 0;
-        // Exclusive creation tests the directory entry itself, including a
-        // dangling or looping symlink. Let the server's exclusive OPEN reject
-        // that existing leaf atomically; ordinary opens follow its target.
-        let full = if create && excl {
+        // Exclusive creation and no-follow opens act on the directory entry.
+        // Let OPEN reject an existing final symlink without following it.
+        let nofollow = flags & libc::O_NOFOLLOW != 0;
+        let full = if nofollow || (create && excl) {
             full
         } else {
             self.follow_target_path(&full)?
@@ -353,15 +353,20 @@ impl HandleBackend for NfsVecFs {
         // rejects CREATE_GUARDED on existing files with NFS4ERR_EXIST). If a
         // non-exclusive create loses the probe/OPEN race, retry as NoCreate;
         // that also keeps creation-only mode changes off the winning file.
+        let mut open_leaf = |create, exclusive| {
+            self.open_impl(&path_from_bytes(dir), name, access, create, exclusive, mode)
+                .map_err(|error| {
+                    if nofollow {
+                        super::open::nofollow_open_error(error)
+                    } else {
+                        error
+                    }
+                })
+        };
         let (opened, created) = if created {
-            open_after_create_probe(excl, |create, exclusive| {
-                self.open_impl(&path_from_bytes(dir), name, access, create, exclusive, mode)
-            })?
+            open_after_create_probe(excl, open_leaf)?
         } else {
-            (
-                self.open_impl(&path_from_bytes(dir), name, access, false, false, mode)?,
-                false,
-            )
+            (open_leaf(false, false)?, false)
         };
         let (fh, stateid) = opened;
         let setup = (|| {
